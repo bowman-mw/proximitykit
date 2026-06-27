@@ -1,0 +1,156 @@
+import Foundation
+import Observation
+import FernletDomainModel
+
+@MainActor
+@Observable
+public final class ProximityTrustVault: ProximityTrustPolicy {
+    public private(set) var trustedPeers: [ProximityTrustedPeerRecord] = []
+    public private(set) var auditEvents: [TrainerAuditEvent] = []
+
+    // Mutable so FernletStore can wire it after all stored properties are initialized.
+    @ObservationIgnored public var onChange: () -> Void = {}
+
+    public init(
+        initialPeers: [ProximityTrustedPeerRecord] = [],
+        initialAudit: [TrainerAuditEvent] = [],
+        onChange: @escaping () -> Void = {}
+    ) {
+        self.trustedPeers = Self.normalized(initialPeers)
+        self.auditEvents = initialAudit
+        self.onChange = onChange
+    }
+
+    // MARK: - Reads
+
+    public func peer(signingPublicKey: Data) -> ProximityTrustedPeerRecord? {
+        trustedPeers.first { $0.signingPublicKey == signingPublicKey }
+    }
+
+    public func peer(displayName: String) -> ProximityTrustedPeerRecord? {
+        trustedPeers
+            .filter { $0.displayName == displayName }
+            .sorted { $0.lastSeenAt > $1.lastSeenAt }
+            .first
+    }
+
+    public func isTrustedProximityPeer(signingPublicKey: Data) -> Bool {
+        return trustedPeers.contains {
+            $0.signingPublicKey == signingPublicKey && $0.revokedAt == nil
+        }
+    }
+
+    public func isRevokedProximitySigningKey(_ publicKey: Data) -> Bool {
+        trustedPeers.contains { $0.signingPublicKey == publicKey && $0.revokedAt != nil }
+    }
+
+    public func isBlockedProximitySigningKey(_ publicKey: Data) -> Bool {
+        trustedPeers.contains { $0.signingPublicKey == publicKey && $0.blockedAt != nil }
+    }
+
+    public func isBlockedFingerprint(_ fingerprint: String) -> Bool {
+        trustedPeers.contains {
+            IdentityService.fingerprintsMatch($0.fingerprint, fingerprint) && $0.blockedAt != nil
+        }
+    }
+
+    // MARK: - Writes
+
+    public func trust(_ peer: ProximityCoordinator.PeerIdentity, mode: ProximityCoordinator.Mode) {
+        let fingerprint = IdentityService.fingerprint(of: peer.signingPublicKey)
+        if let index = trustedPeers.firstIndex(where: { $0.signingPublicKey == peer.signingPublicKey }) {
+            trustedPeers[index].displayName = peer.displayName
+            trustedPeers[index].fingerprint = fingerprint
+            trustedPeers[index].keyAgreementPublicKey = peer.keyAgreementPublicKey
+            trustedPeers[index].mode = mode
+            trustedPeers[index].lastSeenAt = Date()
+            trustedPeers[index].revokedAt = nil
+            trustedPeers[index].blockedAt = nil
+        } else {
+            trustedPeers.append(ProximityTrustedPeerRecord(
+                displayName: peer.displayName,
+                fingerprint: fingerprint,
+                signingPublicKey: peer.signingPublicKey,
+                keyAgreementPublicKey: peer.keyAgreementPublicKey,
+                mode: mode
+            ))
+        }
+        onChange()
+    }
+
+    public func block(signingPublicKey: Data) {
+        let now = Date()
+        guard let index = trustedPeers.firstIndex(where: { $0.signingPublicKey == signingPublicKey }) else {
+            let fingerprint = IdentityService.fingerprint(of: signingPublicKey)
+            trustedPeers.append(ProximityTrustedPeerRecord(
+                displayName: fingerprint,
+                fingerprint: fingerprint,
+                signingPublicKey: signingPublicKey,
+                keyAgreementPublicKey: Data(),
+                mode: .friend,
+                firstAcceptedAt: now,
+                lastSeenAt: now,
+                revokedAt: now,
+                blockedAt: now
+            ))
+            onChange()
+            return
+        }
+        trustedPeers[index].blockedAt = now
+        trustedPeers[index].revokedAt = now
+        recordAuditWithoutSaving(TrainerAuditEvent(
+            kind: .revokedPeerBlocked,
+            peerFingerprint: trustedPeers[index].fingerprint,
+            peerDisplayName: trustedPeers[index].displayName,
+            message: "Blocked \(trustedPeers[index].displayName)"
+        ))
+        onChange()
+    }
+
+    public func unblock(signingPublicKey: Data) {
+        guard let index = trustedPeers.firstIndex(where: { $0.signingPublicKey == signingPublicKey }) else { return }
+        trustedPeers[index].blockedAt = nil
+        // Do not touch revokedAt: block and revoke are independent states.
+        onChange()
+    }
+
+    public func revoke(signingPublicKey: Data) {
+        guard let index = trustedPeers.firstIndex(where: { $0.signingPublicKey == signingPublicKey }) else { return }
+        trustedPeers[index].revokedAt = Date()
+        recordAuditWithoutSaving(TrainerAuditEvent(
+            kind: .trainerRevoked,
+            peerFingerprint: trustedPeers[index].fingerprint,
+            peerDisplayName: trustedPeers[index].displayName,
+            message: "Revoked \(trustedPeers[index].displayName)"
+        ))
+        onChange()
+    }
+
+    public func recordTrainerAudit(_ event: TrainerAuditEvent) {
+        recordAuditWithoutSaving(event)
+        onChange()
+    }
+
+    // MARK: - Snapshot
+
+    public func apply(peers: [ProximityTrustedPeerRecord], audit: [TrainerAuditEvent]) {
+        trustedPeers = Self.normalized(peers)
+        auditEvents = audit
+    }
+
+    private static func normalized(_ peers: [ProximityTrustedPeerRecord]) -> [ProximityTrustedPeerRecord] {
+        peers.map { peer in
+            guard !peer.signingPublicKey.isEmpty,
+                  peer.fingerprint.count == 8,
+                  peer.fingerprint.allSatisfy(\.isHexDigit) else { return peer }
+            var normalizedPeer = peer
+            normalizedPeer.fingerprint = IdentityService.fingerprint(of: peer.signingPublicKey)
+            return normalizedPeer
+        }
+    }
+
+    private func recordAuditWithoutSaving(_ event: TrainerAuditEvent) {
+        auditEvents.insert(event, at: 0)
+        auditEvents = Array(auditEvents.prefix(500))
+    }
+}
