@@ -83,10 +83,16 @@ public final class NIRangingSession: NSObject, RangingProvider {
 
 extension NIRangingSession: NISessionDelegate {
     nonisolated public func session(_ session: NISession, didUpdate nearbyObjects: [NINearbyObject]) {
+        // Extract the Sendable values BEFORE the @MainActor hop: [NINearbyObject] is
+        // non-Sendable, so capturing it into the Task is a Swift 6 `sending` error.
+        // distance (Float?) and direction (simd_float3?) are both Sendable.
+        guard let first = nearbyObjects.first else { return }
+        let distance = first.distance
+        let direction = first.direction
         Task { @MainActor [weak self] in
-            guard let self, let first = nearbyObjects.first else { return }
-            if let dist = first.distance {
-                self.distanceSubject.send(.meters(max(0, Double(dist)), direction: first.direction))
+            guard let self else { return }
+            if let distance {
+                self.distanceSubject.send(.meters(max(0, Double(distance)), direction: direction))
             } else {
                 self.distanceSubject.send(.unknown)
             }
@@ -94,11 +100,18 @@ extension NIRangingSession: NISessionDelegate {
     }
 
     nonisolated public func session(_ session: NISession, didInvalidateWith error: Error) {
+        // Capture the session identity (ObjectIdentifier is Sendable) and the reason
+        // string BEFORE the @MainActor hop: NISession is non-Sendable, so capturing it
+        // into the Task is a Swift 6 `sending` error. The identity check is equivalent
+        // to the prior `self?.niSession === session`.
+        let invalidatedSession = ObjectIdentifier(session)
+        let reason = error.localizedDescription
         Task { @MainActor [weak self] in
-            if self?.niSession === session {
-                self?.niSession = nil
+            guard let self else { return }
+            if let current = self.niSession, ObjectIdentifier(current) == invalidatedSession {
+                self.niSession = nil
             }
-            self?.stateSubject.send(.invalidated(reason: error.localizedDescription))
+            self.stateSubject.send(.invalidated(reason: reason))
         }
     }
 

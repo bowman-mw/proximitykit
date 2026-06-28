@@ -214,6 +214,12 @@ final class MeshMultipeerSession: NSObject {
 
 extension MeshMultipeerSession: MCSessionDelegate {
     nonisolated func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
+        // MCPeerID is non-Sendable, so capturing it into the @MainActor `Task` hop is a
+        // Swift 6 `sending` data-race error. Transfer it via a nonisolated(unsafe) local:
+        // MCPeerID is an immutable value object that is only read on the MainActor after
+        // the hop, so this is data-race-free and behaviour-identical to the prior Swift 5
+        // language mode (which performed the same capture implicitly). Same pattern below.
+        nonisolated(unsafe) let peerID = peerID
         Task { @MainActor [weak self] in
             guard let self else { return }
             let peer = self.peer(for: peerID)
@@ -252,6 +258,7 @@ extension MeshMultipeerSession: MCSessionDelegate {
     }
 
     nonisolated func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
+        nonisolated(unsafe) let peerID = peerID  // non-Sendable MCPeerID across the @MainActor hop
         Task { @MainActor [weak self] in
             guard let self, let channel = self.channels[peerID] else { return }
             channel.receive(data)
@@ -272,6 +279,10 @@ extension MeshMultipeerSession: MCNearbyServiceAdvertiserDelegate {
         withContext context: Data?,
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
+        nonisolated(unsafe) let peerID = peerID  // non-Sendable MCPeerID across the @MainActor hop
+        // invitationHandler is a non-Sendable closure; it is invoked exactly once on the
+        // MainActor after the hop, so the unsafe transfer is behaviour-preserving.
+        nonisolated(unsafe) let invitationHandler = invitationHandler
         Task { @MainActor [weak self] in
             guard let self else { invitationHandler(false, nil); return }
             let peer = self.peer(for: peerID)
@@ -297,6 +308,7 @@ extension MeshMultipeerSession: MCNearbyServiceAdvertiserDelegate {
 
 extension MeshMultipeerSession: MCNearbyServiceBrowserDelegate {
     nonisolated func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
+        nonisolated(unsafe) let peerID = peerID  // non-Sendable MCPeerID across the @MainActor hop
         Task { @MainActor [weak self] in
             guard let self else { return }
             if let info { self.peerInfoCache[peerID] = info }
@@ -306,6 +318,7 @@ extension MeshMultipeerSession: MCNearbyServiceBrowserDelegate {
     }
 
     nonisolated func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
+        nonisolated(unsafe) let peerID = peerID  // non-Sendable MCPeerID across the @MainActor hop
         Task { @MainActor [weak self] in
             guard let self else { return }
             let peer = self.peer(for: peerID)

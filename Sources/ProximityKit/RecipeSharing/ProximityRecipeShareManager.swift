@@ -12,12 +12,17 @@ private struct RecipeShareConnection: Identifiable {
     var verifiedKeyAgreementPublicKey: Data?
 }
 
+// Pure diagnostics value type + a stateless ring-buffer helper — explicitly
+// `nonisolated` so they are NOT swept into the target's `defaultIsolation(MainActor.self)`.
+// They hold no main-actor state, so keeping them nonisolated preserves their off-main
+// usability under Swift 6 mode (behaviour-identical to the prior Swift 5 language mode).
+// Mirrors WI-9's nonisolated wire types; the @MainActor manager below still uses them freely.
 public struct ProximityRecipeShareDiagnosticEvent: Identifiable, Equatable {
-    public let id: UUID
-    public let timestamp: Date
-    public let message: String
+    public nonisolated let id: UUID
+    public nonisolated let timestamp: Date
+    public nonisolated let message: String
 
-    public init(id: UUID = UUID(), timestamp: Date = Date(), message: String) {
+    public nonisolated init(id: UUID = UUID(), timestamp: Date = Date(), message: String) {
         self.id = id
         self.timestamp = timestamp
         self.message = message
@@ -25,9 +30,9 @@ public struct ProximityRecipeShareDiagnosticEvent: Identifiable, Equatable {
 }
 
 public enum ProximityRecipeShareDiagnostics {
-    public static let maxEvents = 40
+    public nonisolated static let maxEvents = 40
 
-    public static func appending(
+    public nonisolated static func appending(
         _ event: ProximityRecipeShareDiagnosticEvent,
         to events: [ProximityRecipeShareDiagnosticEvent],
         maxCount: Int = maxEvents

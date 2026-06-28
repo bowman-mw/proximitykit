@@ -27,27 +27,34 @@ public struct MultipeerPeer: Hashable, Identifiable {
     public func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
+// Pure persistence contract — explicitly `nonisolated` so it is NOT swept into the
+// target's `defaultIsolation(MainActor.self)`. The store holds no main-actor state
+// (FileMCPeerIDStore is plain file I/O), so keeping it nonisolated preserves its
+// off-main callability under Swift 6 mode — behaviour-identical to the prior Swift 5
+// language mode, where `defaultIsolation` did not surface as a hard cross-module
+// constraint. (Both MeshMultipeerSession.init and the unit tests use it off-main.)
+// Mirrors WI-9's nonisolated wire types.
 public protocol MCPeerIDStoring {
-    func load() -> MCPeerID?
-    func save(_ peerID: MCPeerID)
+    nonisolated func load() -> MCPeerID?
+    nonisolated func save(_ peerID: MCPeerID)
 }
 
 public struct FileMCPeerIDStore: MCPeerIDStoring {
-    public let fileURL: URL
+    public nonisolated let fileURL: URL
 
-    public init(fileURL: URL? = nil) {
+    public nonisolated init(fileURL: URL? = nil) {
         self.fileURL = fileURL ?? {
             let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             return support.appendingPathComponent("FernletPeerID.archive")
         }()
     }
 
-    public func load() -> MCPeerID? {
+    public nonisolated func load() -> MCPeerID? {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         return try? NSKeyedUnarchiver.unarchivedObject(ofClass: MCPeerID.self, from: data)
     }
 
-    public func save(_ peerID: MCPeerID) {
+    public nonisolated func save(_ peerID: MCPeerID) {
         guard let data = try? NSKeyedArchiver.archivedData(withRootObject: peerID, requiringSecureCoding: true) else { return }
         try? data.write(to: fileURL, options: .atomic)
     }

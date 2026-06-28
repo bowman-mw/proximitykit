@@ -82,7 +82,12 @@ final class ActivityKitProximityForegroundAnchor: ProximityForegroundAnchoring {
             ),
             staleDate: Date().addingTimeInterval(90)
         )
-        await activity.update(content)
+        // Activity<…> is a non-Sendable class and update(_:) is nonisolated async; transfer
+        // the MainActor-held reference across the call via nonisolated(unsafe). Behaviour-
+        // identical to the prior Swift 5 language mode — ActivityKit manages the object's own
+        // thread safety, and the reference is not used elsewhere during the await.
+        nonisolated(unsafe) let liveActivity = activity
+        await liveActivity.update(content)
     }
 
     func stop() async {
@@ -98,7 +103,9 @@ final class ActivityKitProximityForegroundAnchor: ProximityForegroundAnchoring {
             ),
             staleDate: nil
         )
-        await activity.end(content, dismissalPolicy: .immediate)
+        // non-Sendable Activity across nonisolated async end(_:); see update(_:) note above.
+        nonisolated(unsafe) let liveActivity = activity
+        await liveActivity.end(content, dismissalPolicy: .immediate)
         self.activity = nil
         isActive = false
     }
