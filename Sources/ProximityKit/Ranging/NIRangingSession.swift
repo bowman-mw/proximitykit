@@ -100,15 +100,18 @@ extension NIRangingSession: NISessionDelegate {
     }
 
     nonisolated public func session(_ session: NISession, didInvalidateWith error: Error) {
-        // Capture the session identity (ObjectIdentifier is Sendable) and the reason
-        // string BEFORE the @MainActor hop: NISession is non-Sendable, so capturing it
-        // into the Task is a Swift 6 `sending` error. The identity check is equivalent
-        // to the prior `self?.niSession === session`.
-        let invalidatedSession = ObjectIdentifier(session)
+        // Transfer the NISession itself across the @MainActor hop via nonisolated(unsafe) and compare
+        // by identity (===) after the hop — the established ProximityKit pattern for non-Sendable
+        // framework objects (see MeshMultipeerSession). Capturing the OBJECT (not just an
+        // ObjectIdentifier) keeps it ALIVE until the comparison runs, closing the address-reuse window:
+        // with only the identifier captured, the invalidated session could deallocate and a freshly
+        // created session be allocated at the same address before the Task runs, aliasing the
+        // identifiers and nulling the LIVE `niSession`.
+        nonisolated(unsafe) let invalidatedSession = session
         let reason = error.localizedDescription
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if let current = self.niSession, ObjectIdentifier(current) == invalidatedSession {
+            if self.niSession === invalidatedSession {
                 self.niSession = nil
             }
             self.stateSubject.send(.invalidated(reason: reason))

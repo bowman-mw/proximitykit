@@ -82,10 +82,12 @@ final class ActivityKitProximityForegroundAnchor: ProximityForegroundAnchoring {
             ),
             staleDate: Date().addingTimeInterval(90)
         )
-        // Activity<…> is a non-Sendable class and update(_:) is nonisolated async; transfer
-        // the MainActor-held reference across the call via nonisolated(unsafe). Behaviour-
-        // identical to the prior Swift 5 language mode — ActivityKit manages the object's own
-        // thread safety, and the reference is not used elsewhere during the await.
+        // Activity<…> is a non-Sendable class and update(_:) is nonisolated async; transfer the
+        // MainActor-held reference across the call via nonisolated(unsafe). The `guard let activity`
+        // above ensures we only update a live activity, and stop() clears `self.activity` BEFORE it
+        // ends the activity, so an update() scheduled after a stop() bails at that guard rather than
+        // resurrecting an ended activity. (A narrow residual race remains only if an update() is
+        // already suspended at this await when stop() runs; that content auto-stales in 90s.)
         nonisolated(unsafe) let liveActivity = activity
         await liveActivity.update(content)
     }
@@ -95,6 +97,12 @@ final class ActivityKitProximityForegroundAnchor: ProximityForegroundAnchoring {
             isActive = false
             return
         }
+        // Claim ownership synchronously BEFORE the await: a concurrently-scheduled update() that begins
+        // during end()'s suspension then sees `self.activity == nil` at its guard and skips, instead of
+        // pushing a "Connected" update onto the activity we are ending (resurrecting it). The local
+        // `activity` binding keeps the object alive for the end() call below.
+        self.activity = nil
+        isActive = false
         let content = ActivityContent(
             state: ProximityConnectionActivityAttributes.ContentState(
                 bytesSent: 0,
@@ -106,8 +114,6 @@ final class ActivityKitProximityForegroundAnchor: ProximityForegroundAnchoring {
         // non-Sendable Activity across nonisolated async end(_:); see update(_:) note above.
         nonisolated(unsafe) let liveActivity = activity
         await liveActivity.end(content, dismissalPolicy: .immediate)
-        self.activity = nil
-        isActive = false
     }
 }
 #endif

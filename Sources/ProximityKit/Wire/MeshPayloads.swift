@@ -365,8 +365,15 @@ extension MeshAdmissionToken {
         // Admission tokens carry no schema-version field, so accept EITHER the new cross-platform
         // canonical bytes (WI-6 v2) or the legacy `.sortedKeys`/`.iso8601` bytes. Each alternative
         // still requires a valid Ed25519 signature by the admitter's key, so dual acceptance only
-        // broadens the legitimate formats — it does not weaken the check. New tokens are signed v2;
-        // tokens minted by not-yet-updated in-field peers verify via the legacy path.
+        // broadens the legitimate formats — it does not weaken the check. New tokens are signed v2
+        // (tried first); tokens minted by not-yet-updated in-field peers verify via the legacy path.
+        //
+        // ACCEPTED TRADE-OFF (review F8): unlike the envelope path (which is version-gated and selects
+        // ONE encoder), this dual-verify is permanent for the current wire format — there is no signed
+        // discriminator to gate on, so the cross-platform-fragile legacy encoder cannot be retired and a
+        // legacy/forged token pays two serializations + two Ed25519 verifies. Adding an UNSIGNED version
+        // field would be a downgrade-confusion vector; the only clean retirement is a future
+        // wire-breaking, schema-versioned token format. Left as-is deliberately (no security impact).
         let signatureValid =
             IdentityService.verify(admitterSignature, of: canonicalBytes(for: self), by: admitterSigningPublicKey)
             || IdentityService.verify(admitterSignature, of: legacyCanonicalBytes(for: self), by: admitterSigningPublicKey)
