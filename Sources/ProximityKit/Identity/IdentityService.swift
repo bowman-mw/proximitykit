@@ -77,7 +77,10 @@ public final class IdentityService {
         )
     }
 
-    public static func verify(_ signature: Data, of data: Data, by publicKeyData: Data) -> Bool {
+    // WI-9: the three pure crypto statics below are `nonisolated` — they read no instance/actor state
+    // (only their parameters + CryptoKit), so signature verification and fingerprinting can run off the
+    // main actor. Required by the `nonisolated` `MeshAdmissionToken.verify` and the off-main verify path.
+    public nonisolated static func verify(_ signature: Data, of data: Data, by publicKeyData: Data) -> Bool {
         guard let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData) else { return false }
         return publicKey.isValidSignature(signature, for: data)
     }
@@ -326,7 +329,7 @@ public final class IdentityService {
     }
 
     /// 16-char lowercase hex prefix of SHA-256(publicKey). Suitable for user-facing display.
-    public static func fingerprint(of publicKey: Data) -> String {
+    public nonisolated static func fingerprint(of publicKey: Data) -> String {
         let hash = SHA256.hash(data: publicKey)
         let hex = hash.compactMap { String(format: "%02x", $0) }.joined()
         return String(hex.prefix(16))
@@ -334,7 +337,7 @@ public final class IdentityService {
 
     /// Matches canonical 16-char fingerprints and legacy 8-char values stored by older builds.
     /// Fingerprints remain display and routing metadata only; authorization uses full key bytes.
-    public static func fingerprintsMatch(_ first: String, _ second: String) -> Bool {
+    public nonisolated static func fingerprintsMatch(_ first: String, _ second: String) -> Bool {
         let lhs = first.lowercased()
         let rhs = second.lowercased()
         guard [8, 16].contains(lhs.count), [8, 16].contains(rhs.count) else { return false }

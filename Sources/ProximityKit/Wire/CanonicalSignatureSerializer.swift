@@ -41,11 +41,17 @@
 import Foundation
 import FernletDomainModel
 
+// WI-9: every declaration in this file is `nonisolated`. ProximityKit sets
+// `.defaultIsolation(MainActor.self)`, which would otherwise MainActor-isolate this pure signing-byte
+// serializer. The canonical bytes are derived from value-type fields with no actor state, so signing
+// and signature verification must be runnable from any isolation domain — `MeshAdmissionToken.verify`
+// is `nonisolated` and calls straight into `canonicalBytes`/`legacyCanonicalBytes` below.
+
 // MARK: - Canonical byte writer
 
 /// Append-only binary writer for canonical signing bytes. The format is positional and
 /// length-prefixed: the field order in the `canonicalBytes(for:)` functions below IS the schema.
-struct CanonicalByteWriter {
+nonisolated struct CanonicalByteWriter {
     private(set) var bytes = Data()
 
     mutating func appendByte(_ value: UInt8) {
@@ -120,7 +126,7 @@ struct CanonicalByteWriter {
 
 /// Orders two strings by their raw UTF-8 bytes. Deterministic and identical across stacks — unlike
 /// Foundation's `.sortedKeys`, which orders by UTF-16 code units (different for non-BMP scalars).
-func canonicalUTF8Ordered(_ lhs: String, _ rhs: String) -> Bool {
+nonisolated func canonicalUTF8Ordered(_ lhs: String, _ rhs: String) -> Bool {
     let a = Array(lhs.utf8)
     let b = Array(rhs.utf8)
     let shared = min(a.count, b.count)
@@ -135,14 +141,14 @@ func canonicalUTF8Ordered(_ lhs: String, _ rhs: String) -> Bool {
 // MARK: - Domain tags
 
 // Distinct per signed type so a signature over one type cannot validate over the other.
-private let canonicalEnvelopeDomain = Data("fernlet.canonical.identity-envelope.v2".utf8)
-private let canonicalAdmissionTokenDomain = Data("fernlet.canonical.mesh-admission-token.v2".utf8)
+private nonisolated let canonicalEnvelopeDomain = Data("fernlet.canonical.identity-envelope.v2".utf8)
+private nonisolated let canonicalAdmissionTokenDomain = Data("fernlet.canonical.mesh-admission-token.v2".utf8)
 
 // MARK: - Identity envelope
 
 /// Canonical signing bytes for a `FernletIdentityEnvelope` (schema v2+). The `signature` field is
 /// excluded entirely (it is the output of signing these bytes).
-public func canonicalBytes(for envelope: FernletIdentityEnvelope) -> Data {
+public nonisolated func canonicalBytes(for envelope: FernletIdentityEnvelope) -> Data {
     var writer = CanonicalByteWriter()
     writer.appendLengthPrefixed(canonicalEnvelopeDomain)
     writer.appendInt64(Int64(envelope.schemaVersion))
@@ -161,7 +167,7 @@ public func canonicalBytes(for envelope: FernletIdentityEnvelope) -> Data {
     return writer.bytes
 }
 
-private func appendCanonical(_ writer: inout CanonicalByteWriter, _ encryption: PayloadEncryption) {
+private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ encryption: PayloadEncryption) {
     switch encryption {
     case .none:
         writer.appendByte(0)
@@ -171,7 +177,7 @@ private func appendCanonical(_ writer: inout CanonicalByteWriter, _ encryption: 
     }
 }
 
-private func appendCanonical(_ writer: inout CanonicalByteWriter, _ summary: PayloadSummary) {
+private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ summary: PayloadSummary) {
     writer.appendString(summary.title)
     writer.appendOptional(summary.subtitle)
     writer.appendInt64(Int64(summary.itemCount))
@@ -194,7 +200,7 @@ private func appendCanonical(_ writer: inout CanonicalByteWriter, _ summary: Pay
 
 /// Canonical signing bytes for a `MeshAdmissionToken` (canonical v2). The `admitterSignature` field
 /// is excluded entirely (it is the output of signing these bytes).
-public func canonicalBytes(for token: MeshAdmissionToken) -> Data {
+public nonisolated func canonicalBytes(for token: MeshAdmissionToken) -> Data {
     var writer = CanonicalByteWriter()
     writer.appendLengthPrefixed(canonicalAdmissionTokenDomain)
     writer.appendUUID(token.meshID)
@@ -216,7 +222,7 @@ public func canonicalBytes(for token: MeshAdmissionToken) -> Data {
 
 /// The exact Foundation encoder configuration used before WI-6. Do not change — its byte output is a
 /// compatibility contract with already-signed, in-field data.
-private func makeLegacyCanonicalSignatureEncoder() -> JSONEncoder {
+private nonisolated func makeLegacyCanonicalSignatureEncoder() -> JSONEncoder {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     encoder.dateEncodingStrategy = .iso8601
@@ -225,14 +231,14 @@ private func makeLegacyCanonicalSignatureEncoder() -> JSONEncoder {
 
 /// Legacy (schema v1) canonical bytes for an envelope. `try?`/`?? Data()` keeps the untrusted
 /// verify path non-throwing; an empty result simply fails the signature check.
-public func legacyCanonicalBytes(for envelope: FernletIdentityEnvelope) -> Data {
+public nonisolated func legacyCanonicalBytes(for envelope: FernletIdentityEnvelope) -> Data {
     var copy = envelope
     copy.signature = Data()
     return (try? makeLegacyCanonicalSignatureEncoder().encode(copy)) ?? Data()
 }
 
 /// Legacy (pre-WI-6) canonical bytes for an admission token.
-public func legacyCanonicalBytes(for token: MeshAdmissionToken) -> Data {
+public nonisolated func legacyCanonicalBytes(for token: MeshAdmissionToken) -> Data {
     var copy = token
     copy.admitterSignature = Data()
     return (try? makeLegacyCanonicalSignatureEncoder().encode(copy)) ?? Data()

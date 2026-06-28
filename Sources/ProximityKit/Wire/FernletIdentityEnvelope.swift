@@ -9,7 +9,15 @@ import FernletDomainModel
 
 // MARK: - Envelope
 
-public struct FernletIdentityEnvelope: Codable, Equatable {
+// `nonisolated` + `Sendable` (WI-9): ProximityKit sets `.defaultIsolation(MainActor.self)`, which
+// would otherwise make this wire value type — and its synthesized `Codable` conformance —
+// MainActor-isolated. A MainActor-isolated `init(from:)`/`encode(to:)` can only satisfy the
+// `nonisolated` Decodable/Encodable requirements under the `.v5` language-mode escape hatch; under
+// Swift 6 it would forbid decoding these untrusted MCSession bytes off the main actor. Marking the
+// type `nonisolated, Sendable` (matching the FernletDomainModel wire types — PayloadType/PayloadSummary)
+// makes decode + signature verification safe from any isolation domain. The two members that touch
+// the `@MainActor` IdentityService/ReplayCache (`verify`, `signed`) stay `@MainActor` explicitly.
+public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable {
     public let schemaVersion: Int                 // 1
     public let envelopeID: UUID                   // for replay protection + Inspector log correlation
     public let senderSigningPublicKey: Data       // Ed25519 raw, 32 B
@@ -92,6 +100,10 @@ extension FernletIdentityEnvelope {
     private static let sealingRequiredTypes: Set<PayloadType> = [.friendPhoto, .recipeShare]
 
     /// Verifies the envelope signature, recipient, expiry, and replay status; returns the plaintext payload.
+    /// `@MainActor`: reads the `@MainActor` IdentityService key state (`open`, `localFingerprint`) and the
+    /// `@MainActor` ReplayCache. The signature math itself (`IdentityService.verify` + `canonicalBytes`) is
+    /// `nonisolated` and could run off-main, but recipient/replay/decrypt need the actor's state.
+    @MainActor
     public func verify(identityService: IdentityService, replayCache: ReplayCache) throws -> Data {
         guard Self.supportedSchemaVersions.contains(schemaVersion) else {
             throw VerifyError.schemaVersionUnsupported
@@ -134,7 +146,9 @@ extension FernletIdentityEnvelope {
 // MARK: - Signed factory
 
 extension FernletIdentityEnvelope {
-    /// Creates a signed envelope. `signature` is computed over the canonical JSON of all other fields.
+    /// Creates a signed envelope. `signature` is computed over the canonical bytes of all other fields.
+    /// `@MainActor`: signs with the `@MainActor` IdentityService private key state.
+    @MainActor
     public static func signed(
         identityService: IdentityService,
         envelopeID: UUID = UUID(),

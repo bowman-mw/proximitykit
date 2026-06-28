@@ -1,7 +1,10 @@
 import Foundation
 import FernletDomainModel
 
-public struct ProximityRecipeSharePayload: Codable, Equatable, Identifiable {
+// WI-9: wire recipe-share payloads marked `nonisolated, Sendable` — see the note in MeshPayloads.swift.
+// ProximityKit's `.defaultIsolation(MainActor.self)` would otherwise MainActor-isolate these value
+// types and their synthesized `Codable` conformances, blocking off-main decode under Swift 6.
+public nonisolated struct ProximityRecipeSharePayload: Codable, Equatable, Identifiable, Sendable {
     public var format = "fernlet.proximity.recipe"
     public var version = 1
     public var id = UUID()
@@ -49,12 +52,12 @@ public struct ProximityRecipeSharePayload: Codable, Equatable, Identifiable {
     }
 }
 
-public enum ProximitySharedRecipeKind: String, Codable, Equatable {
+public nonisolated enum ProximitySharedRecipeKind: String, Codable, Equatable, Sendable {
     case local
     case saved
 }
 
-public struct ProximitySharedRecipe: Codable, Equatable {
+public nonisolated struct ProximitySharedRecipe: Codable, Equatable, Sendable {
     public var kind: ProximitySharedRecipeKind
     public var local: SharedRecipePayload?
     public var saved: SharedSavedRecipePayload?
@@ -97,7 +100,7 @@ public struct ProximitySharedRecipe: Codable, Equatable {
     }
 }
 
-public struct SharedSavedRecipePayload: Codable, Equatable {
+public nonisolated struct SharedSavedRecipePayload: Codable, Equatable, Sendable {
     public var name: String
     public var sourceURLString: String
     public var ingredients: [String]

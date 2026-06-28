@@ -50,13 +50,15 @@ public final class ProximityInspectorEventRecorder: ProximityInspectorRecording 
     }
 }
 
-private struct IdentityRangingPayload: Codable {
+// WI-9: mesh wire payloads decoded from peer plaintext — `nonisolated, Sendable` so the decode is
+// not pinned to the MainActor by ProximityKit's `.defaultIsolation(MainActor.self)` (see MeshPayloads.swift).
+private nonisolated struct IdentityRangingPayload: Codable, Sendable {
     let rangingMode: String
     let discoveryToken: Data?
 }
 
-private struct SessionHeartbeatPayload: Codable {
-    enum Kind: String, Codable {
+private nonisolated struct SessionHeartbeatPayload: Codable, Sendable {
+    enum Kind: String, Codable, Sendable {
         case ping
         case ack
     }
