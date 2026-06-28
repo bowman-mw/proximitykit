@@ -293,11 +293,8 @@ public struct EncryptedMetadataInner: Codable {
     }
 }
 
-public func canonicalBytes(for token: MeshAdmissionToken) -> Data {
-    var copy = token
-    copy.admitterSignature = Data()
-    return try! makeCanonicalSignatureEncoder().encode(copy)
-}
+// Canonical signing bytes for MeshAdmissionToken live in CanonicalSignatureSerializer.swift
+// (`canonicalBytes(for:)` = new cross-platform v2, `legacyCanonicalBytes(for:)` = pre-WI-6).
 
 extension MeshAdmissionToken {
     public enum VerifyError: Error, Equatable {
@@ -352,7 +349,15 @@ extension MeshAdmissionToken {
         ) else {
             throw VerifyError.fingerprintMismatch
         }
-        guard IdentityService.verify(admitterSignature, of: canonicalBytes(for: self), by: admitterSigningPublicKey) else {
+        // Admission tokens carry no schema-version field, so accept EITHER the new cross-platform
+        // canonical bytes (WI-6 v2) or the legacy `.sortedKeys`/`.iso8601` bytes. Each alternative
+        // still requires a valid Ed25519 signature by the admitter's key, so dual acceptance only
+        // broadens the legitimate formats — it does not weaken the check. New tokens are signed v2;
+        // tokens minted by not-yet-updated in-field peers verify via the legacy path.
+        let signatureValid =
+            IdentityService.verify(admitterSignature, of: canonicalBytes(for: self), by: admitterSigningPublicKey)
+            || IdentityService.verify(admitterSignature, of: legacyCanonicalBytes(for: self), by: admitterSigningPublicKey)
+        guard signatureValid else {
             throw VerifyError.signatureInvalid
         }
     }
