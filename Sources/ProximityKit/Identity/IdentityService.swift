@@ -216,11 +216,18 @@ public final class IdentityService {
 
     /// Bootstrap on first launch. Idempotent — returns the existing identity if already provisioned.
     ///
-    /// Key separation: the proximity KA key is ThisDeviceOnly (never syncs); the backup escrow key
-    /// is synchronizable so it can be recovered on another device. On existing installs the KA key
-    /// is migrated to device-only and a fresh backup escrow key is generated if absent.
+    /// Key separation: the proximity KA key is ThisDeviceOnly (never syncs); the backup escrow key is
+    /// synchronizable so it can be recovered on another device.
+    ///
+    /// WS-1 (escrow-race fix): provisioning generates ONLY the signing + proximity KA keys. The backup
+    /// escrow key is NEVER minted here — it is adopted if one is already present (synced in via iCloud
+    /// Keychain, or promoted on a prior launch) and otherwise left absent, to be minted lazily the first
+    /// time the user actually enables a sealed backup (`provisionBackupEscrowKeyForSealing`). This kills
+    /// the original race where a fresh second device, opened before the genuine escrow key had synced,
+    /// minted a DIVERGENT synchronizable key — stranding cross-device restore and risking a key conflict.
+    /// The open/restore path must never mint (see `loadBackupEscrowKeyForOpen`).
     public func ensureProvisioned() throws {
-        if signingKey != nil && keyAgreementKey != nil && backupEscrowKey != nil { return }
+        if signingKey != nil && keyAgreementKey != nil { return }
 
         let deviceOnly = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as CFString
 
@@ -233,19 +240,9 @@ public final class IdentityService {
             signingKey      = loadedSigning
             keyAgreementKey = loadedKA
 
-            // Ensure backup escrow key exists (generated on first run post-migration).
-            if let escrowData = KeychainItem.load(account: IdentityKeychainKey.backupEscrowPrivateKey.rawValue, service: keychainService),
-               let loadedEscrow = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: escrowData) {
-                backupEscrowKey = loadedEscrow
-            } else {
-                let newEscrow = Curve25519.KeyAgreement.PrivateKey()
-                KeychainItem.store(newEscrow.rawRepresentation,
-                                   account: IdentityKeychainKey.backupEscrowPrivateKey.rawValue,
-                                   service: keychainService,
-                                   accessibility: kSecAttrAccessibleAfterFirstUnlock,
-                                   synchronizable: true)
-                backupEscrowKey = newEscrow
-            }
+            // Adopt an existing backup escrow key if one is present (synced preferred). Do NOT mint one
+            // here — escrow generation is deferred to sealed-backup-enable time (WS-1).
+            backupEscrowKey = loadExistingEscrowKey()
 
             // Migrate proximity KA key to device-only (removes synchronizable flag if set).
             KeychainItem.store(loadedKA.rawRepresentation,
@@ -257,15 +254,11 @@ public final class IdentityService {
         }
 
         // Case 2: Backup escrow key synced from iCloud (new device install, post-migration).
-        // Generate fresh signing + proximity KA keys; adopt the synced backup escrow key.
-        //
-        // KNOWN RESIDUAL (not fixed here): the cross-device restore enabled by escrow-binding SILENTLY
-        // DEPENDS on the synchronizable escrow key having already synced via iCloud Keychain before a
-        // fresh device first provisions. If provisioning races ahead of the sync, this Case-2 load misses
-        // and Case-1's "generate if absent" branch mints a DIVERGENT escrow key — which strands restore
-        // (backups were sealed under the other key) and can later conflict with the incoming synced key.
-        if let escrowData = KeychainItem.load(account: IdentityKeychainKey.backupEscrowPrivateKey.rawValue, service: keychainService),
-           let loadedEscrow = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: escrowData) {
+        // Generate fresh signing + proximity KA keys; adopt the synced backup escrow key. With WS-1's
+        // deferral the previous "race mints a divergent key" residual is gone: a fresh device that opens
+        // before the escrow key syncs simply has no escrow key (Case 4) until enable time, and the
+        // open/restore path treats absence as "not synced yet" rather than fabricating a new key.
+        if let loadedEscrow = loadExistingEscrowKey() {
             let newSigning = Curve25519.Signing.PrivateKey()
             let newKA      = Curve25519.KeyAgreement.PrivateKey()
             KeychainItem.store(newSigning.rawRepresentation,
@@ -287,7 +280,8 @@ public final class IdentityService {
         }
 
         // Case 3: Legacy synced KA key present (pre-migration second-device path).
-        // Promote the old KA key to backup escrow role; generate fresh device-only identity.
+        // Promote the old (already-synced) KA key to backup escrow role; generate fresh device-only
+        // identity. This reuses an existing synced key, not a fresh mint, so there is no divergence risk.
         if let kaData = KeychainItem.load(account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue, service: keychainService),
            let loadedKA = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: kaData) {
             let newSigning = Curve25519.Signing.PrivateKey()
@@ -315,21 +309,16 @@ public final class IdentityService {
             return
         }
 
-        // Case 4: No keys at all — generate a complete fresh identity.
+        // Case 4: No keys at all — generate signing + proximity KA only. The escrow key is deferred to
+        // enable time (WS-1), so a fresh device never publishes a divergent synchronizable escrow key.
         let newSigning = Curve25519.Signing.PrivateKey()
         let newKA      = Curve25519.KeyAgreement.PrivateKey()
-        let newEscrow  = Curve25519.KeyAgreement.PrivateKey()
         KeychainItem.store(newSigning.rawRepresentation,
                            account: IdentityKeychainKey.signingPrivateKey.rawValue,
                            service: keychainService, accessibility: deviceOnly)
         KeychainItem.store(newKA.rawRepresentation,
                            account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue,
                            service: keychainService, accessibility: deviceOnly)
-        KeychainItem.store(newEscrow.rawRepresentation,
-                           account: IdentityKeychainKey.backupEscrowPrivateKey.rawValue,
-                           service: keychainService,
-                           accessibility: kSecAttrAccessibleAfterFirstUnlock,
-                           synchronizable: true)
         KeychainItem.store(newSigning.publicKey.rawRepresentation,
                            account: IdentityKeychainKey.signingPublicKeyCache.rawValue,
                            service: keychainService, accessibility: deviceOnly)
@@ -338,7 +327,151 @@ public final class IdentityService {
                            service: keychainService, accessibility: deviceOnly)
         signingKey      = newSigning
         keyAgreementKey = newKA
-        backupEscrowKey = newEscrow
+        backupEscrowKey = nil
+    }
+
+    // MARK: - Backup escrow key lifecycle (WS-1/WS-2/WS-3)
+
+    /// Outcome of `reconcileBackupEscrowKey`. Each case is a NON-SILENT, audited resolution of the states
+    /// that deferred (WS-1) / ThisDeviceOnly (WS-2) escrow minting can leave across a user's devices.
+    public enum BackupEscrowReconcileOutcome: Equatable {
+        /// No escrow material anywhere — sealed backup was never enabled on any synced device yet.
+        case noEscrow
+        /// A synced (authoritative) key is present and adopted.
+        case usingSynced
+        /// A device-only minted key was published (promoted) to `synchronizable` for cross-device restore.
+        case promotedLocal
+        /// A synced key DIFFERS from this device's local minted key — a real conflict. Not auto-resolved;
+        /// the caller must surface a user choice (WS-3).
+        case conflict
+    }
+
+    /// Loads the backup-escrow private key already present in the keychain, preferring the iCloud-synced
+    /// item over a device-only one. Returns nil if no escrow key exists. NEVER mints — the open/restore
+    /// path relies on this so a missing key surfaces as "not synced yet", never a divergent new identity.
+    private func loadExistingEscrowKey() -> Curve25519.KeyAgreement.PrivateKey? {
+        let account = IdentityKeychainKey.backupEscrowPrivateKey.rawValue
+        if let data = KeychainItem.load(account: account, service: keychainService, synchronizable: .synced),
+           let key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: data) {
+            return key
+        }
+        if let data = KeychainItem.load(account: account, service: keychainService, synchronizable: .local),
+           let key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: data) {
+            return key
+        }
+        return nil
+    }
+
+    /// SEAL/enable path. Ensures `backupEscrowKey` is set so a sealed backup can be produced, without
+    /// stranding cross-device restore: re-queries the keychain for a synced (or already-minted local)
+    /// escrow key first and adopts it; only when none exists does it mint one — and that fresh key is
+    /// stored `ThisDeviceOnly` (WS-2), never published as `synchronizable` until a later launch confirms
+    /// no conflicting synced key has appeared (`reconcileBackupEscrowKey`). Returns the escrow public key.
+    @discardableResult
+    public func provisionBackupEscrowKeyForSealing() -> Data {
+        if backupEscrowKey == nil { backupEscrowKey = loadExistingEscrowKey() }
+        if backupEscrowKey == nil {
+            let minted = Curve25519.KeyAgreement.PrivateKey()
+            KeychainItem.store(minted.rawRepresentation,
+                               account: IdentityKeychainKey.backupEscrowPrivateKey.rawValue,
+                               service: keychainService,
+                               accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                               synchronizable: false)
+            backupEscrowKey = minted
+            FernletAuditLog.log("identity.escrow.mintedLocal")
+        }
+        return backupEscrowKey?.publicKey.rawRepresentation ?? Data()
+    }
+
+    /// OPEN/restore path. Loads an existing escrow key (synced preferred) into memory; NEVER mints.
+    /// Returns whether a key is present — `false` means "not synced yet", which the restore flow surfaces
+    /// as a retryable state (WS-4) rather than fabricating a new identity.
+    @discardableResult
+    public func loadBackupEscrowKeyForOpen() -> Bool {
+        if backupEscrowKey == nil { backupEscrowKey = loadExistingEscrowKey() }
+        return backupEscrowKey != nil
+    }
+
+    /// Launch-time reconciliation of the backup-escrow key across iCloud Keychain (WS-3). Resolves, NON-
+    /// SILENTLY, the states that deferred/ThisDeviceOnly minting can leave behind:
+    /// - a synced key present → adopt it (authoritative); tidy a redundant identical local copy.
+    /// - only a local minted key present → publish (promote) it to `synchronizable` so a future device
+    ///   can restore. This runs at launch, necessarily a DIFFERENT launch than the one that minted the
+    ///   key (the user enables a backup mid-session, after this has already run), honoring WS-2's
+    ///   "promote only on a later launch once no conflicting synced key has appeared".
+    /// - a synced key that DIFFERS from the local minted key → a genuine cross-device conflict. Do NOT
+    ///   overwrite either side; return `.conflict` so the caller can surface a user choice and let the
+    ///   user adopt the authoritative key + re-upload. Every branch is audited.
+    ///
+    /// MECHANISM (now confirmed from Apple's open-source `SecItemDataSource.c` conflict resolver +
+    /// patents US9077759B2 / US9479583B2): two `synchronizable` items sharing service+account are ONE
+    /// logical slot account-wide, and iCloud Keychain resolves a divergence by **newest
+    /// `kSecAttrModificationDate` wins** (deterministic SHA-1-digest tiebreak only on an exact date tie).
+    /// There is no coexistence of two values and no app-visible merge callback. IMPLICATION + RESIDUAL:
+    /// because the genuine key is the OLDER write, withholding+promoting a fresh key (WS-2) *reduces* the
+    /// chance a divergent key ever reaches the synced slot — on the common path the genuine key has synced
+    /// in by the next launch and we adopt it here instead of promoting — but it does NOT *guarantee* the
+    /// genuine key survives: if the genuine key is still in flight when a divergent local key is promoted,
+    /// the divergent (newer) key wins and overwrites it cross-device. The real safety net is therefore the
+    /// NON-SILENT `.conflict` surface here + WS-4's visible/retryable restore, not the timing of promotion.
+    /// (Self-inflicted single-user race, mostly recoverable from the origin device; an attacker able to
+    /// write this slot already holds the user's iCloud Keychain. Stronger-but-costlier fixes —
+    /// content-derived/versioned slot, or a signed escrow envelope verified on read — are a tracked
+    /// follow-up; they complicate the zero-config cross-device recovery this key exists to provide.)
+    @discardableResult
+    public func reconcileBackupEscrowKey() -> BackupEscrowReconcileOutcome {
+        let account = IdentityKeychainKey.backupEscrowPrivateKey.rawValue
+        let syncedData = KeychainItem.load(account: account, service: keychainService, synchronizable: .synced)
+        let localData  = KeychainItem.load(account: account, service: keychainService, synchronizable: .local)
+
+        switch (syncedData, localData) {
+        case (nil, nil):
+            return .noEscrow
+        case let (synced?, local?):
+            if synced == local {
+                // Same key in both rows (e.g. we promoted earlier and the device-only copy lingers):
+                // drop the redundant device-only copy and use the synced one.
+                KeychainItem.delete(account: account, service: keychainService, synchronizable: .local)
+                backupEscrowKey = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: synced)
+                return .usingSynced
+            }
+            // Divergent keys — the worst case WS-2 guards against. Surface; never auto-resolve.
+            FernletAuditLog.log("identity.escrow.conflictDetected")
+            return .conflict
+        case let (synced?, nil):
+            backupEscrowKey = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: synced)
+            return .usingSynced
+        case let (nil, local?):
+            // Promote our device-only key to synchronizable. Remove ONLY the local row (`replacing:
+            // .local`) so a genuine key that syncs in between the check above and this store is not
+            // clobbered by the implicit pre-delete.
+            KeychainItem.store(local,
+                               account: account,
+                               service: keychainService,
+                               accessibility: kSecAttrAccessibleAfterFirstUnlock,
+                               synchronizable: true,
+                               replacing: .local)
+            backupEscrowKey = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: local)
+            FernletAuditLog.log("identity.escrow.promotedLocal")
+            return .promotedLocal
+        }
+    }
+
+    /// WS-3 user-confirmed resolution of an escrow `.conflict`: adopt the synced (other-device) key as
+    /// authoritative and discard this device's divergent local key. The caller MUST warn the user first
+    /// and re-upload any device-local backups under the adopted key. Returns the adopted escrow public
+    /// key, or nil if no synced key is present.
+    @discardableResult
+    public func adoptSyncedBackupEscrowKey() -> Data? {
+        let account = IdentityKeychainKey.backupEscrowPrivateKey.rawValue
+        guard let syncedData = KeychainItem.load(account: account, service: keychainService, synchronizable: .synced),
+              let synced = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: syncedData) else {
+            return nil
+        }
+        KeychainItem.delete(account: account, service: keychainService, synchronizable: .local)
+        backupEscrowKey = synced
+        FernletAuditLog.log("identity.escrow.adoptedSynced")
+        return synced.publicKey.rawRepresentation
     }
 
     /// Wipes identity. Breaks every existing trust relationship.
