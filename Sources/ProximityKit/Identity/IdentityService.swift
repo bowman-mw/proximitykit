@@ -62,11 +62,26 @@ public final class IdentityService {
         keyAgreementKey?.publicKey.rawRepresentation ?? Data()
     }
 
+    /// The PUBLIC half of the backup-escrow key. Unlike the proximity key-agreement public key, the
+    /// escrow key is synchronized via iCloud Keychain, so this value is STABLE across a user's devices.
+    /// That is what lets a sealed-backup record sealed on one device be recognized as "mine" and
+    /// restored on another (the proximity KA key is regenerated per device and must NOT bind backups).
+    public var localBackupEscrowPublicKey: Data {
+        backupEscrowKey?.publicKey.rawRepresentation ?? Data()
+    }
+
     public func sign(_ data: Data) throws -> Data {
         guard let key = signingKey else { throw IdentityError.notProvisioned }
         return try key.signature(for: data)
     }
 
+    /// Sealed-backup key derivation. ACCEPTED TRADE-OFF (explicit): backups are AES-GCM'd under a
+    /// STATIC key — HKDF-SHA256(backupEscrowPrivateKey) with empty salt and fixed info, no ECDH and no
+    /// ephemeral material — so there is NO forward secrecy. A single escrow-key compromise decrypts ALL
+    /// past and future backups. This is intentional for a single-user, private-DB, recoverable-by-design
+    /// backup: the escrow key itself is protected by iCloud Keychain end-to-end encryption, and a stable
+    /// (non-ephemeral) key is what makes cross-device restore possible. Optional future hardening: mix a
+    /// random per-generation salt (stored in the head chunk) into the HKDF to bound blast radius per backup.
     public func sealedBackupKey() throws -> SymmetricKey {
         guard let backupEscrowKey else { throw IdentityError.notProvisioned }
         return HKDF<SHA256>.deriveKey(
@@ -243,6 +258,12 @@ public final class IdentityService {
 
         // Case 2: Backup escrow key synced from iCloud (new device install, post-migration).
         // Generate fresh signing + proximity KA keys; adopt the synced backup escrow key.
+        //
+        // KNOWN RESIDUAL (not fixed here): the cross-device restore enabled by escrow-binding SILENTLY
+        // DEPENDS on the synchronizable escrow key having already synced via iCloud Keychain before a
+        // fresh device first provisions. If provisioning races ahead of the sync, this Case-2 load misses
+        // and Case-1's "generate if absent" branch mints a DIVERGENT escrow key — which strands restore
+        // (backups were sealed under the other key) and can later conflict with the incoming synced key.
         if let escrowData = KeychainItem.load(account: IdentityKeychainKey.backupEscrowPrivateKey.rawValue, service: keychainService),
            let loadedEscrow = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: escrowData) {
             let newSigning = Curve25519.Signing.PrivateKey()

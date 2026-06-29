@@ -101,6 +101,12 @@ final class ActivityKitProximityForegroundAnchor: ProximityForegroundAnchoring {
         // during end()'s suspension then sees `self.activity == nil` at its guard and skips, instead of
         // pushing a "Connected" update onto the activity we are ending (resurrecting it). The local
         // `activity` binding keeps the object alive for the end() call below.
+        //
+        // A symmetric start() that interleaves at end()'s suspension also sees `self.activity == nil` and
+        // may request a FRESH Live Activity while this one is still ending. That window is benign: both
+        // methods are @MainActor (so they interleave only at awaits, never truly concurrently), start()'s
+        // catch resets `isActive = false` on a rejected request, and the worst case is a brief duplicate
+        // anchor that auto-stales — the same accepted trade-off the update() race above documents.
         self.activity = nil
         isActive = false
         let content = ActivityContent(
