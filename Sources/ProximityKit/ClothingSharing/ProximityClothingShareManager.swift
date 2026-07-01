@@ -130,9 +130,12 @@ public final class ProximityClothingShareManager: ProximityPayloadHandling {
         }
         lastAcceptedBySender[senderKey] = now
 
-        // Never trust the wire: clamp every item (texture dims/indices, price, name) before holding it.
+        // Never trust the wire: bound the item count to the shop maximum FIRST (the send side caps at the
+        // same limit, so a larger array is a protocol violation / hostile amplification — decoding, mapping,
+        // storing, and re-sorting an unbounded array on the main actor would be a remote DoS), then clamp
+        // every kept item (texture dims/indices/palette, price, name) before holding it.
         var sanitized = payload
-        sanitized.items = payload.items.map { ClothingShopLimits.sanitizedForShop($0) }
+        sanitized.items = payload.items.prefix(ClothingShopLimits.maxListedItems).map { ClothingShopLimits.sanitizedForShop($0) }
 
         let catalog = ProximityClothingCatalog(
             senderDisplayName: envelope.senderDisplayName,
