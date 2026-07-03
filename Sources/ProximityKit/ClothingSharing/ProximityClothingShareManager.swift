@@ -9,6 +9,10 @@ private struct ClothingShareConnection: Identifiable {
     let channel: PeerChannelTransport
     let coordinator: ProximityCoordinator
     var fingerprint: String?
+    /// The peer's verified identity display name (== `envelope.senderDisplayName`), captured once the
+    /// coordinator connects. A catalog delivered before the fingerprint is set is keyed by this display
+    /// name, so `clearCatalog(for:)` needs it to evict such a catalog on disconnect.
+    var identityDisplayName: String?
     var verifiedKeyAgreementPublicKey: Data?
     /// Whether this device has already auto-sent its shop catalog to this peer (sent once on connect).
     var sentCatalog: Bool
@@ -232,6 +236,7 @@ public final class ProximityClothingShareManager: ProximityPayloadHandling {
             channel: channel,
             coordinator: coordinator,
             fingerprint: nil,
+            identityDisplayName: nil,
             verifiedKeyAgreementPublicKey: nil,
             sentCatalog: false
         )
@@ -285,6 +290,9 @@ public final class ProximityClothingShareManager: ProximityPayloadHandling {
 
             if case .connected(let peerIdentity) = connections[index].coordinator.state {
                 let fingerprint = peerIdentity.fingerprint
+                // Always keep the verified identity display name in sync so `clearCatalog(for:)` can evict
+                // a catalog that was keyed by display name (fingerprint still nil when it landed).
+                connections[index].identityDisplayName = peerIdentity.displayName
                 if connections[index].fingerprint != fingerprint {
                     connections[index].fingerprint = fingerprint
                     connections[index].verifiedKeyAgreementPublicKey = peerIdentity.keyAgreementPublicKey
@@ -326,9 +334,31 @@ public final class ProximityClothingShareManager: ProximityPayloadHandling {
     }
 
     /// Drop the peer's broadcast catalog the moment we lose them — the catalog is session-scoped (§2.3).
+    ///
+    /// A catalog's id is `senderFingerprint ?? senderDisplayName` (`ProximityClothingCatalog.id`), so a
+    /// catalog that arrived before the peer's identity was verified is keyed by DISPLAY NAME, not
+    /// fingerprint. Bailing on a nil fingerprint (the old behaviour) left such a catalog browsable/buyable
+    /// after the peer left. So we clear any catalog matching ANY identifier this connection could have keyed
+    /// under: its fingerprint, its verified identity display name (== the `senderDisplayName` used for the
+    /// fallback key), or its transport display name. Every identifier is peer-specific, so this never touches
+    /// a still-connected peer's catalog.
     private func clearCatalog(for connection: ClothingShareConnection) {
-        guard let fingerprint = connection.fingerprint else { return }
-        peerCatalogs.removeAll { $0.id == fingerprint }
+        clearCatalogs(
+            fingerprint: connection.fingerprint,
+            identityDisplayName: connection.identityDisplayName,
+            transportDisplayName: connection.peer.displayName
+        )
+    }
+
+    /// Remove any session catalog keyed under one of a disconnecting peer's identifiers. Split out from
+    /// `clearCatalog(for:)` (which cannot be reached in a unit test — the disconnect path is driven by a
+    /// live `MCSession`) so the eviction rule can be exercised directly. Every identifier is peer-specific,
+    /// so this never touches a still-connected peer's catalog.
+    func clearCatalogs(fingerprint: String?, identityDisplayName: String?, transportDisplayName: String) {
+        var identifiers: Set<String> = [transportDisplayName]
+        if let fingerprint { identifiers.insert(fingerprint) }
+        if let identityDisplayName { identifiers.insert(identityDisplayName) }
+        peerCatalogs.removeAll { identifiers.contains($0.id) }
     }
 
     private func ensureShopPeer(for connection: ClothingShareConnection, identity peerIdentity: ProximityCoordinator.PeerIdentity) {
