@@ -141,6 +141,15 @@ public final class ProximityHeartLedger {
             .max() ?? 0
     }
 
+    /// Wipes all received-heart records and rate-limit keys and removes the on-disk sidecar. Wired
+    /// from `FernletStore.resetAll` so "Reset everything" doesn't leave a friend's name, fingerprint,
+    /// or glow behind after the relationships they refer to (the trust vault) are cleared.
+    public func clearAll() {
+        receivedHearts = []
+        rateLimitKeys = []
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
     // MARK: - Persistence
 
     private func todayKey() -> String {

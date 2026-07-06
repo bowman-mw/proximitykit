@@ -10,6 +10,11 @@
 //   2. The manager auto-connects to discovered heart peers (deterministic single-sided invite via
 //      the session-id tie-break) instead of inviting only on send, so "reachable" means an
 //      identity-verified live connection and the FriendListView heart button can light up honestly.
+//      Because the wire discovery info carries no fingerprint, the handshake must run to verification
+//      to learn who the peer is; once verified, a peer whose signing key is NOT a still-trusted,
+//      unblocked friend in the vault is torn down immediately (never recorded reachable, never left
+//      occupying a slot). Only trusted friends stay connected — strangers are neither retained nor
+//      harvested, and their teardown frees a slot for a real friend arriving later.
 //   3. The per-friend-per-day rate limit persists across relaunch via ProximityHeartLedger
 //      (the recipe manager's in-memory 3-second limiter would forget on restart; the daily ledger
 //      subsumes it on the receive side too, since only the first heart per friend per day lands).
@@ -29,6 +34,10 @@ private struct HeartShareConnection: Identifiable {
     let peer: MultipeerPeer
     let channel: PeerChannelTransport
     let coordinator: ProximityCoordinator
+    /// Retained for the connection's lifetime so the coordinator's `weak` trustPolicy stays alive —
+    /// otherwise the revoked/blocked-key envelope rejection + audit calls silently no-op (finding [11]).
+    /// Mirrors MeshNetworkManager's `slotTrustPolicies`.
+    let trustPolicy: FriendSessionTrustPolicy
     var fingerprint: String?
     var verifiedKeyAgreementPublicKey: Data?
 }
@@ -288,6 +297,7 @@ public final class ProximityHeartManager: ProximityPayloadHandling {
             peer: channel.peer,
             channel: channel,
             coordinator: coordinator,
+            trustPolicy: trustPolicy,
             fingerprint: nil,
             verifiedKeyAgreementPublicKey: nil
         )
@@ -329,6 +339,12 @@ public final class ProximityHeartManager: ProximityPayloadHandling {
     }
 
     private func checkCoordinatorStates() {
+        // Connections whose verified peer is NOT a trusted friend are torn down here (findings [7]/[12]):
+        // we let the handshake run to `.connected` so we learn the peer's signing key + fingerprint,
+        // then — if the vault doesn't know them as a still-trusted, unblocked friend — cancel the
+        // coordinator and drop the connection so no stranger's identity is retained and no slot is held.
+        var strangerConnectionIDs: [UUID] = []
+
         for index in connections.indices {
             switch connections[index].coordinator.state {
             case .awaitingManualCommit, .awaitingProximityCommit:
@@ -341,12 +357,21 @@ public final class ProximityHeartManager: ProximityPayloadHandling {
             if case .connected(let peerIdentity) = connections[index].coordinator.state {
                 let fingerprint = peerIdentity.fingerprint
                 if connections[index].fingerprint != fingerprint {
-                    connections[index].fingerprint = fingerprint
-                    connections[index].verifiedKeyAgreementPublicKey = peerIdentity.keyAgreementPublicKey
-                    recordDiagnostic("Verified \(peerIdentity.displayName).")
+                    if isTrustedFriend(peerIdentity) {
+                        connections[index].fingerprint = fingerprint
+                        connections[index].verifiedKeyAgreementPublicKey = peerIdentity.keyAgreementPublicKey
+                        recordDiagnostic("Verified \(peerIdentity.displayName).")
+                    } else {
+                        // Verified stranger (or a blocked/revoked prior friend): do not record the
+                        // fingerprint (so they never become reachable) and mark for teardown.
+                        strangerConnectionIDs.append(connections[index].id)
+                        recordDiagnostic("Disconnected a verified non-friend heart peer.")
+                    }
                 }
             }
         }
+
+        for id in strangerConnectionIDs { tearDownConnection(id: id) }
 
         let stale = connections.filter { connection in
             switch connection.coordinator.state {
@@ -355,10 +380,40 @@ public final class ProximityHeartManager: ProximityPayloadHandling {
             }
         }
         for connection in stale { connections.removeAll { $0.id == connection.id } }
-        if !stale.isEmpty {
+        if !stale.isEmpty || !strangerConnectionIDs.isEmpty {
             connectionObservationRevision += 1
         }
         refreshReachability()
+    }
+
+    /// A verified peer is heart-eligible only when the trust vault knows their signing key as a
+    /// still-trusted, unblocked friend — the SAME check the send/receive path already applies
+    /// (`isTrustedProximityPeer` + `isBlockedProximitySigningKey` + `isBlockedFingerprint`).
+    private func isTrustedFriend(_ peerIdentity: ProximityCoordinator.PeerIdentity) -> Bool {
+        Self.isHeartEligibleFriend(peerIdentity, in: store)
+    }
+
+    /// Pure form of the friend gate (no connection state), so the exact accept/reject decision is
+    /// unit-testable without driving a live handshake to `.connected`.
+    static func isHeartEligibleFriend(_ peerIdentity: ProximityCoordinator.PeerIdentity, in host: any ProximityHost) -> Bool {
+        let vault = host.proximityTrustVault
+        return vault.isTrustedProximityPeer(signingPublicKey: peerIdentity.signingPublicKey)
+            && !vault.isBlockedProximitySigningKey(peerIdentity.signingPublicKey)
+            && !host.isBlockedFingerprint(peerIdentity.fingerprint)
+    }
+
+    /// Test seam: the pure friend gate keyed by a host (findings [7]/[12]). `internal` for `@testable`.
+    static func isHeartEligibleFriendForTesting(_ peerIdentity: ProximityCoordinator.PeerIdentity, in host: any ProximityHost) -> Bool {
+        isHeartEligibleFriend(peerIdentity, in: host)
+    }
+
+    /// Cancel the coordinator (which disconnects the transport) and drop the connection, freeing the
+    /// slot so a real friend arriving later can still connect.
+    private func tearDownConnection(id: UUID) {
+        guard let connection = connections.first(where: { $0.id == id }) else { return }
+        let coordinator = connection.coordinator
+        Task { await coordinator.cancel() }
+        connections.removeAll { $0.id == id }
     }
 
     private func removeConnections(matching peer: MultipeerPeer) {
@@ -393,5 +448,35 @@ public final class ProximityHeartManager: ProximityPayloadHandling {
             ProximityRecipeShareDiagnosticEvent(message: message),
             to: diagnosticEvents
         )
+    }
+
+    // MARK: - Test seam
+
+    /// Registers a live coordinator (already driven to `.connected` by the caller) as a heart
+    /// connection and runs the real trust gate (`checkCoordinatorStates`). Exposed `internal` for
+    /// `@testable` unit tests only — the production connection path is driven by a live `MeshMultipeerSession`
+    /// that a unit test cannot fake, mirroring `ProximityClothingShareManager.clearCatalogs(...)`.
+    ///
+    /// Returns `true` iff the peer ended up reachable (i.e. was accepted as a trusted friend); a
+    /// non-friend is torn down and the connection dropped, so it returns `false`.
+    @discardableResult
+    func evaluateConnectedCoordinatorForTesting(
+        _ coordinator: ProximityCoordinator,
+        peer: MultipeerPeer,
+        trustPolicy: FriendSessionTrustPolicy
+    ) -> Bool {
+        let connection = HeartShareConnection(
+            id: peer.id,
+            peer: peer,
+            channel: PeerChannelTransport(peer: peer, session: session),
+            coordinator: coordinator,
+            trustPolicy: trustPolicy,
+            fingerprint: nil,
+            verifiedKeyAgreementPublicKey: nil
+        )
+        connections.append(connection)
+        connectionObservationRevision += 1
+        checkCoordinatorStates()
+        return connections.contains { $0.peer.id == peer.id && $0.fingerprint != nil }
     }
 }
