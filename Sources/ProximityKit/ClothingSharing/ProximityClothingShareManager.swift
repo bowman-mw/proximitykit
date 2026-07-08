@@ -8,6 +8,12 @@ private struct ClothingShareConnection: Identifiable {
     let peer: MultipeerPeer
     let channel: PeerChannelTransport
     let coordinator: ProximityCoordinator
+    /// Retained for the connection's lifetime so the coordinator's `weak` trustPolicy stays alive —
+    /// otherwise the revoked/blocked-key envelope rejection + audit calls silently no-op (they would
+    /// evaluate `nil?.isRevokedProximitySigningKey(...) == true` → false, and every recordTrainerAudit
+    /// becomes a no-op). Mirrors MeshNetworkManager's `slotTrustPolicies` and the heart manager's
+    /// HeartShareConnection.
+    let trustPolicy: FriendSessionTrustPolicy
     var fingerprint: String?
     /// The peer's verified identity display name (== `envelope.senderDisplayName`), captured once the
     /// coordinator connects. A catalog delivered before the fingerprint is set is keyed by this display
@@ -235,6 +241,7 @@ public final class ProximityClothingShareManager: ProximityPayloadHandling {
             peer: channel.peer,
             channel: channel,
             coordinator: coordinator,
+            trustPolicy: trustPolicy,
             fingerprint: nil,
             identityDisplayName: nil,
             verifiedKeyAgreementPublicKey: nil,
@@ -394,5 +401,49 @@ public final class ProximityClothingShareManager: ProximityPayloadHandling {
             ProximityRecipeShareDiagnosticEvent(message: message),
             to: diagnosticEvents
         )
+    }
+
+    // MARK: - Test seam
+
+    /// Builds AND retains a connection exactly as `handleChannelReady` does — creating the
+    /// FriendSessionTrustPolicy from the store's vault and holding it on the connection struct so the
+    /// coordinator's `weak` trustPolicy survives past this method's scope — but over an injected transport
+    /// so a unit test can drive a revoked/blocked-key envelope through the coordinator. Returns the
+    /// connection's coordinator. `internal` for `@testable` unit tests only: the production connection path
+    /// is driven by a live `MeshMultipeerSession` a unit test cannot fake (mirrors `clearCatalogs(...)` and
+    /// the heart manager's `evaluateConnectedCoordinatorForTesting(...)`). If the retention regresses (policy
+    /// no longer stored on the connection), the coordinator's weak ref goes nil once this returns and the
+    /// revoked-key drop this drives silently stops firing.
+    func makeRetainedConnectionCoordinatorForTesting(
+        peer: MultipeerPeer,
+        transport: any MultipeerTransport,
+        ranging: any RangingProvider
+    ) -> ProximityCoordinator {
+        let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
+        let coordinator = ProximityCoordinator(
+            identity: identity,
+            transport: transport,
+            ranging: ranging,
+            payloadHandler: self,
+            trustPolicy: trustPolicy,
+            replayCache: replayCache,
+            foregroundAnchor: NoopProximityForegroundAnchor(),
+            displayName: displayName,
+            timeoutSeconds: 0
+        )
+        let connection = ClothingShareConnection(
+            id: peer.id,
+            peer: peer,
+            channel: PeerChannelTransport(peer: peer, session: session),
+            coordinator: coordinator,
+            trustPolicy: trustPolicy,
+            fingerprint: nil,
+            identityDisplayName: nil,
+            verifiedKeyAgreementPublicKey: nil,
+            sentCatalog: false
+        )
+        connections.append(connection)
+        connectionObservationRevision += 1
+        return coordinator
     }
 }
