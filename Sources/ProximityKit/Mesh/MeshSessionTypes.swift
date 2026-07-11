@@ -23,10 +23,22 @@ public struct PeerSlot: Identifiable {
     // Handshake-verified X25519 key agreement public key used for group key wrapping.
     // Set from ProximityCoordinator.PeerIdentity after identity exchange, never descriptor gossip.
     var verifiedKeyAgreementPublicKey: Data?
+    /// Raw capability tokens the peer advertised in its identity intro/ack (Phase 1), captured at slot
+    /// commit from `ProximityCoordinator.PeerIdentity`. `nil` = a legacy peer whose intro predates
+    /// capability advertisement (treated as photos-only). Lets a room broadcast (e.g. temp messages)
+    /// skip slots whose peer can't use the payload, without re-plumbing the PeerIdentity to the sender.
+    var peerCapabilities: [String]? = nil
     var joinedEpoch: Int = 0
     var distanceSamples: [MeshDistanceSample] = []
     var stableDistanceMeters: Double?
     var isOverflowCandidate = false
+
+    /// Phase 1 capability gate for room broadcasts, mirroring `ProximityCoordinator.PeerIdentity.supports`:
+    /// a legacy peer with no advertised capabilities is photos-only.
+    func supports(_ capability: ProximityCapability) -> Bool {
+        guard let peerCapabilities else { return capability == .photos }
+        return peerCapabilities.contains(capability.rawValue)
+    }
 }
 
 /// In-memory symmetric group key for the current mesh session.

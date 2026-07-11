@@ -90,6 +90,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// survives it, the shop window closes. Search starts (startJoin/startNewMesh — which fire on every
     /// Social-tab entry and scene reactivation) touch NEITHER.
     public let clothingShop = MeshClothingShop()
+    /// The live-session temporary-message store (Phase 5): the current session's chat transcript.
+    /// Registered on the payload registry in `init`. Memory-only and deliberately NOT Codable — it can
+    /// never enter a snapshot. Cleared at EVERY session-end path (the same last-committed-slot-gone
+    /// moment that promotes `pendingFriendReview` / opens the shop window) and on the next session
+    /// formation. Unlike the shop's 1-hour window, messages do NOT outlive the session — they vanish.
+    public let sessionMessages = SessionMessageStore()
     public var isSearching = false
     public var meshError: String?
 
@@ -142,6 +148,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// task drains inside the test's lifetime (the manager's `unowned store` must not be reached
     /// after the test's store deallocates).
     @ObservationIgnored var onShopCatalogRequestSendForTesting: ((UUID) -> Void)?
+    /// Test seam: fires with the slot ID whenever a temp message is dispatched to a slot (Phase 5) —
+    /// unit tests can't observe the real sealed channel. Lets the capability-gated-send test assert a
+    /// legacy peer was skipped.
+    @ObservationIgnored var onTempMessageSendForTesting: ((UUID) -> Void)?
     @ObservationIgnored private var removedMemberFingerprints: Set<String> = []
     @ObservationIgnored private var approvedRemovalProposalIDs: Set<UUID> = []
     @ObservationIgnored private var sessionID = UUID().uuidString
@@ -203,6 +213,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         meshPhotos = photoCacheStore.load()
         setupMeshSession()
         registerClothingShopHandler()
+        registerSessionMessageHandler()
     }
 
     /// Phase 3a: the shop rides the friend mesh as registered feature payloads. The dispatch default's
@@ -230,6 +241,35 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             }
             guard !self.store.isBlockedFingerprint(fingerprint) else { return }
             self.respondToShopCatalogRequest(fromVerifiedFingerprint: fingerprint, identity: peer)
+        }
+    }
+
+    /// Phase 5: live-session temporary messages ride the friend mesh as registered feature payloads.
+    /// The dispatch default's committed-slot gate has already run; the remaining guards mirror
+    /// `.friendPhoto`/`.clothingCatalog`: a transport-VERIFIED fingerprint is required and blocked
+    /// fingerprints drop silently. `.tempMessage` is in `sealingRequiredTypes`, so an unsealed message
+    /// was already rejected at `verify()` — this handler only ever sees a decrypted, sealed payload.
+    /// Dedup / per-sender rate limit / sanitize + cap all live in `SessionMessageStore.receiveIncoming`.
+    private func registerSessionMessageHandler() {
+        registerPayloadHandler(for: .tempMessage) { [weak self] envelope, plaintext, peer in
+            guard let self else { return }
+            guard let peerIdentity = peer else {
+                FernletAuditLog.log("mesh.tempMessage.droppedUnverifiedSender")
+                return
+            }
+            let fingerprint = peerIdentity.fingerprint
+            guard !self.store.isBlockedFingerprint(fingerprint) else { return }
+            guard let payload = try? JSONDecoder().decode(TempMessagePayload.self, from: plaintext) else { return }
+            // Display name comes from the handshake-verified identity (peerIdentity.displayName),
+            // NOT envelope.senderDisplayName — the latter is a per-message wire claim a committed
+            // member could set to another member's name to impersonate them in the transcript.
+            self.sessionMessages.receiveIncoming(
+                id: payload.id,
+                senderFingerprint: fingerprint,
+                senderDisplayName: peerIdentity.displayName,
+                text: payload.text,
+                sentAt: payload.sentAt
+            )
         }
     }
 
@@ -923,6 +963,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if clothingShop.isSharingEnabled {
             capabilities.append(ProximityCapability.shop.rawValue)
         }
+        // Phase 5: temporary messages are a core in-session feature with no separate v1 opt-out —
+        // session membership (the UWB dwell + admission) IS the consent gate, so `messages` is
+        // advertised whenever we join a friend session. (Owner may override with a `messages` setting
+        // later, mirroring the `shop` gate above; see design_choices.)
+        capabilities.append(ProximityCapability.messages.rawValue)
         return capabilities
     }
 
@@ -1004,6 +1049,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // any held shop catalogs open the post-session shop window (Phase 3a).
         promoteRosterToPendingReviewIfSessionEnded()
         openShopWindowIfSessionEnded()
+        clearSessionMessagesIfSessionEnded()
     }
 
     public func currentDiscoveryInfo() -> [String: String] {
@@ -1098,6 +1144,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         rerankSlots()
         promoteRosterToPendingReviewIfSessionEnded()
         openShopWindowIfSessionEnded()
+        clearSessionMessagesIfSessionEnded()
     }
 
     private func disconnectSlot(_ slot: PeerSlot) {
@@ -1111,6 +1158,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         rerankSlots()
         promoteRosterToPendingReviewIfSessionEnded()
         openShopWindowIfSessionEnded()
+        clearSessionMessagesIfSessionEnded()
     }
 
     /// Slot eviction prunes the shop send-tracking so a REJOINING friend re-exchanges catalogs: the
@@ -1732,6 +1780,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if !hasFormedShopSession {
             hasFormedShopSession = true
             clothingShop.beginNewSession()
+            // Phase 5: a NEW session forms with an empty transcript. Messages already cleared at the
+            // prior session end; this is belt-and-braces and covers the transient-drop → re-commit case.
+            sessionMessages.clear()
             sentShopCatalogSlotIDs.removeAll()
             shopCatalogRequestResponseAt.removeAll()
         }
@@ -1786,6 +1837,42 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard !isInSession else { return }
         hasFormedShopSession = false
         clothingShop.openWindowAtSessionEnd()
+    }
+
+    // MARK: - Temporary messages (Phase 5)
+
+    /// Send a live-session chat message to everyone in the room. Sanitizes + length-caps the text
+    /// (`SessionMessageStore.sanitize`, 500-char cap), appends the local echo, then room-broadcasts it
+    /// SEALED per slot to every ACTIVE committed slot advertising the `messages` capability — legacy /
+    /// opted-out peers are skipped (they'd park-and-drop it anyway). No offline queue: a message only
+    /// reaches peers currently in the session, and it vanishes at session end (`sessionMessages.clear`).
+    public func sendTempMessage(_ rawText: String) {
+        let text = SessionMessageStore.sanitize(rawText)
+        guard !text.isEmpty else { return }
+        let id = UUID()
+        let now = Date()
+        sessionMessages.appendOutgoing(
+            id: id,
+            senderFingerprint: identity.localFingerprint,
+            senderDisplayName: displayName,
+            text: text,
+            sentAt: now
+        )
+        let payload = TempMessagePayload(id: id, text: text, sentAt: now)
+        for slot in activeSlots where slot.fingerprint != nil && slot.supports(.messages) {
+            onTempMessageSendForTesting?(slot.id)
+            Task { [weak self] in
+                await self?.sendEnvelope(.tempMessage, encodable: payload, via: slot, sealed: true)
+            }
+        }
+    }
+
+    /// Phase 5: messages VANISH at session end. Called at the same last-committed-slot-gone moment that
+    /// promotes `pendingFriendReview` / opens the shop window — but where the shop KEEPS catalogs through
+    /// a 1-hour window, the transcript is dropped immediately. Nothing to retain, nothing to sync.
+    private func clearSessionMessagesIfSessionEnded() {
+        guard !isInSession else { return }
+        sessionMessages.clear()
     }
 
     // MARK: - Envelope sending
@@ -2172,6 +2259,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                     slots[index].verifiedSigningPublicKey = peerIdentity.signingPublicKey
                     // Store the handshake-verified KA key; used for group key wrapping (Phase 3).
                     slots[index].verifiedKeyAgreementPublicKey = peerIdentity.keyAgreementPublicKey
+                    // Phase 5: capture advertised capabilities so a room broadcast (temp messages) can
+                    // skip peers that can't use the payload without re-plumbing the PeerIdentity.
+                    slots[index].peerCapabilities = peerIdentity.capabilities
                     onSlotConnected(at: index, identity: peerIdentity)
                 }
             }
@@ -2196,7 +2286,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         coordinator: ProximityCoordinator,
         peer: MultipeerPeer,
         fingerprint: String?,
-        verifiedKeyAgreementPublicKey: Data? = nil
+        verifiedKeyAgreementPublicKey: Data? = nil,
+        peerCapabilities: [String]? = nil
     ) {
         var slot = PeerSlot(
             id: peer.id,
@@ -2207,6 +2298,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             fingerprint: fingerprint
         )
         slot.verifiedKeyAgreementPublicKey = verifiedKeyAgreementPublicKey
+        slot.peerCapabilities = peerCapabilities
         slots.append(slot)
     }
 
