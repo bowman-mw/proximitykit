@@ -8,8 +8,13 @@ public final class FriendSessionTrustPolicy: ProximityTrustPolicy {
         self.vault = vault
     }
 
+    // Friend lifecycle semantics (Phase 2, Docs/Proximity-Mesh-Redesign-2026-07-10.md): the
+    // friend-mode transport ban is for BLOCKED keys only. A revoked-only ("Removed") peer is an
+    // unfriend, not a ban — they may handshake again in person and be re-offered by the keep
+    // prompt after a fresh verified session, so the coordinator's hard-fail on this check must
+    // not fire for them. Blocked stays a silent transport drop via isBlockedProximitySigningKey.
     public func isRevokedProximitySigningKey(_ publicKey: Data) -> Bool {
-        vault.isRevokedProximitySigningKey(publicKey)
+        vault.isBlockedProximitySigningKey(publicKey)
     }
 
     public func isBlockedProximitySigningKey(_ publicKey: Data) -> Bool {
