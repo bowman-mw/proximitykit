@@ -86,7 +86,11 @@ final class MeshMultipeerSession: NSObject {
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
     private var activeServiceType: String = MeshMultipeerSession.friendServiceType
+    private var activeDiscoveryInfo: [String: String] = [:]
     private var pendingConnectionPeers: [MCPeerID: UUID] = [:]
+    /// True while the radio is "closed": advertising + browsing stopped but the MCSession (and
+    /// any live connections) kept alive. See `pauseDiscovery()`/`resumeDiscovery()`.
+    private(set) var isDiscoveryPaused = false
 
     var onPeerDiscovered: ((MultipeerPeer) -> Void)?
     var onPeerLost: ((MultipeerPeer) -> Void)?
@@ -112,14 +116,67 @@ final class MeshMultipeerSession: NSObject {
 
     func start(serviceType: String = MeshMultipeerSession.friendServiceType, discoveryInfo: [String: String] = [:]) {
         activeServiceType = serviceType
+        activeDiscoveryInfo = discoveryInfo
+        isDiscoveryPaused = false
         ensureSession()
         startAdvertiser(info: discoveryInfo)
         startBrowser()
     }
 
     func updateDiscoveryInfo(_ info: [String: String]) {
+        activeDiscoveryInfo = info
+        // While paused, only remember the info — resumeDiscovery() applies it. Restarting the
+        // advertiser here would silently un-pause a closed radio.
+        guard !isDiscoveryPaused else { return }
         advertiser?.stopAdvertisingPeer()
         startAdvertiser(info: info)
+    }
+
+    /// "Closes" the radio: stops advertising AND browsing while KEEPING the advertiser/browser
+    /// instances and the live MCSession — established connections keep flowing; the radio just
+    /// goes quiet to new peers (hard 2-device recipe cap, mesh redesign Phase 3b).
+    ///
+    /// CONTRACT: `resumeDiscovery()` MUST precede any further `invite(_:)` — calling
+    /// `invitePeer` while browsing is stopped is undocumented MultipeerConnectivity behavior
+    /// and must never be relied on (`invite(_:)` drops the call and logs if violated).
+    func pauseDiscovery() {
+        guard !isDiscoveryPaused else { return }
+        isDiscoveryPaused = true
+        advertiser?.stopAdvertisingPeer()
+        browser?.stopBrowsingForPeers()
+    }
+
+    /// Reopens a paused radio. Recreates the advertiser and browser rather than restarting the
+    /// stopped instances — the same stop-and-recreate pattern `updateDiscoveryInfo` uses, which
+    /// is the reliable way to bring an MCNearbyService* object back up. No-op unless paused.
+    func resumeDiscovery() {
+        guard isDiscoveryPaused else { return }
+        isDiscoveryPaused = false
+        guard mcSession != nil else { return }  // never started — nothing to resume
+        advertiser?.stopAdvertisingPeer()
+        startAdvertiser(info: activeDiscoveryInfo)
+        browser?.stopBrowsingForPeers()
+        startBrowser()
+    }
+
+    /// Number of peers in the "connecting window" — invited (or invitation accepted) but not
+    /// yet MC-connected. Acceptance gates consult this to close the connecting-window race.
+    var pendingConnectionCount: Int { pendingConnectionPeers.count }
+
+    /// True when a connection attempt is in flight to any peer OTHER than `peer` — the
+    /// same-peer carve-out lets a retrying peer through its own pending window.
+    func hasPendingConnections(besides peer: MultipeerPeer?) -> Bool {
+        pendingConnectionPeers.keys.contains { $0 != peer?.underlying }
+    }
+
+    /// Best-effort targeted disconnect. `MCSession.cancelConnectPeer` is documented only for
+    /// peers still in the connecting window; for already-connected peers it acts as a de-facto
+    /// kick on current iOS but is NOT documented to — callers must treat this as
+    /// belt-and-braces and never depend on it alone (manager-level record eviction is what
+    /// actually drives teardown/reopen decisions).
+    func disconnectPeer(_ peer: MultipeerPeer) {
+        pendingConnectionPeers.removeValue(forKey: peer.underlying)
+        mcSession?.cancelConnectPeer(peer.underlying)
     }
 
     func stop() {
@@ -133,12 +190,19 @@ final class MeshMultipeerSession: NSObject {
         peerInfoCache.removeAll()
         peerMap.removeAll()
         pendingConnectionPeers.removeAll()
+        isDiscoveryPaused = false
     }
 
     func invite(_ peer: MultipeerPeer) {
         guard let session = mcSession, let browser else { return }
         guard !session.connectedPeers.contains(peer.underlying) else { return }
         guard pendingConnectionPeers[peer.underlying] == nil else { return }
+        // CONTRACT (see pauseDiscovery): inviting on a stopped browser is undocumented — drop
+        // loudly instead of relying on it. Callers must resumeDiscovery() first.
+        guard !isDiscoveryPaused else {
+            Self.logger.error("invite(_:) while discovery is paused — dropped; resumeDiscovery() must precede invites")
+            return
+        }
         let inviteID = UUID()
         pendingConnectionPeers[peer.underlying] = inviteID
         Task { @MainActor [weak self] in
@@ -217,6 +281,15 @@ final class MeshMultipeerSession: NSObject {
         peerMap[mcPeerID] = p
         if let discoveryInfo { peerInfoCache[mcPeerID] = discoveryInfo }
         return p
+    }
+
+    // MARK: - Test seam
+
+    /// Registers a synthetic connecting-window entry so unit tests can exercise the
+    /// pending-connection acceptance/cap gates without starting real radios (the production
+    /// writers are `invite(_:)` and the MC delegate paths, all of which need live transport).
+    func registerPendingConnectionForTesting(_ peer: MultipeerPeer) {
+        pendingConnectionPeers[peer.underlying] = UUID()
     }
 }
 

@@ -456,7 +456,7 @@ public final class ProximityHeartManager: ProximityPayloadHandling {
     /// Registers a live coordinator (already driven to `.connected` by the caller) as a heart
     /// connection and runs the real trust gate (`checkCoordinatorStates`). Exposed `internal` for
     /// `@testable` unit tests only — the production connection path is driven by a live `MeshMultipeerSession`
-    /// that a unit test cannot fake, mirroring `ProximityClothingShareManager.clearCatalogs(...)`.
+    /// that a unit test cannot fake, mirroring `MeshNetworkManager.addSlotForTesting(...)`.
     ///
     /// Returns `true` iff the peer ended up reachable (i.e. was accepted as a trusted friend); a
     /// non-friend is torn down and the connection dropped, so it returns `false`.

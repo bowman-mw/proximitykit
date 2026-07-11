@@ -14,8 +14,8 @@ import FernletDomainModel
 
 /// A peer's current shop: the (capped, deterministically ordered) items they are offering, plus their
 /// anonymous designer id and display name so the buyer can resolve "designed by <friend>" and learn the
-/// id→name mapping in person. Ephemeral — held in memory only for the session (see
-/// `ProximityClothingShareManager`); only items the buyer actually purchases persist.
+/// id→name mapping in person. Ephemeral — held in memory only from receipt through the post-session
+/// shop window (see `MeshClothingShop`); only items the buyer actually purchases persist.
 public nonisolated struct ClothingCatalogPayload: Codable, Equatable, Identifiable, Sendable {
     public var format = "fernlet.proximity.clothing.catalog"
     public var version = 1
@@ -48,23 +48,12 @@ public nonisolated struct ClothingCatalogPayload: Codable, Equatable, Identifiab
     }
 }
 
-/// A nearby peer whose shop can be browsed during a live session (mirrors `ProximityRecipeShareRecipient`).
-public struct ProximityClothingShopPeer: Identifiable, Equatable {
-    public var id: UUID
-    public var displayName: String
-    public var fingerprint: String?  // nil until identity introduction completes
-
-    public init(id: UUID, displayName: String, fingerprint: String?) {
-        self.id = id
-        self.displayName = displayName
-        self.fingerprint = fingerprint
-    }
-}
-
-/// A peer's catalog held in memory for the current session. The shop is the inverse of recipe-share: the
-/// BUYER holds the SELLER's broadcast catalog, and it is cleared the moment the peer disconnects
-/// (decision §2.3). Keyed by sender fingerprint (falling back to display name) so a re-broadcast replaces
-/// the prior catalog rather than stacking.
+/// A peer's catalog held in memory from receipt (during the friend-mesh session) through the 1-hour
+/// post-session shop window (`MeshClothingShop`). The shop is the inverse of recipe-share: the BUYER
+/// holds the SELLER's broadcast catalog. Keyed by the transport-VERIFIED sender fingerprint (the mesh
+/// accepts catalogs from committed slots only, so the fingerprint is always present in production; the
+/// display-name fallback in `id` is retained for the legacy initializer shape) so a re-broadcast
+/// replaces the prior catalog rather than stacking.
 public struct ProximityClothingCatalog: Identifiable, Equatable {
     public var id: String { senderFingerprint ?? senderDisplayName }
     public var senderDisplayName: String

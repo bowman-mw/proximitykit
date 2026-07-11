@@ -63,6 +63,10 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     public private(set) var sendState: SendState = .idle
     public private(set) var diagnosticEvents: [ProximityRecipeShareDiagnosticEvent] = []
     public var pendingRecipeShares: [PendingProximityRecipeShare] = []
+    /// The recipient this manager is currently engaged with — connecting to, sending to, or
+    /// holding the (hard-capped, one-at-a-time) verified connection with. The share sheet
+    /// disables every other recipient row while this is set; nil when idle.
+    public private(set) var engagedRecipientID: UUID?
 
     @ObservationIgnored private unowned let store: any ProximityHost
     @ObservationIgnored private let session = MeshMultipeerSession()
@@ -72,6 +76,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     @ObservationIgnored private var discoveredPeers: [UUID: MultipeerPeer] = [:]
     @ObservationIgnored private var observationTask: Task<Void, Never>?
     @ObservationIgnored private var clearStatusTask: Task<Void, Never>?
+    @ObservationIgnored private var connectTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored private var parkedSweepTask: Task<Void, Never>?
+    @ObservationIgnored private var parkedSince: [UUID: Date] = [:]
     @ObservationIgnored private var pendingOutgoing: (payload: ProximityRecipeSharePayload, recipient: ProximityRecipeShareRecipient)?
     @ObservationIgnored private var isRunning = false
     private var connectionObservationRevision = 0
@@ -80,6 +87,21 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     private static let serviceType = "fernlet-recipe"
     private static let maxPendingShares = 8
     private static let perSenderRateLimitSeconds: TimeInterval = 3
+    /// How long a coordinator may sit in a pre-verification state (.idle/.starting/
+    /// .discovering/.peerInRange) before its connection record is force-evicted. The
+    /// coordinator's own handshake timeout is 25 s; this is that plus slack, so the parked
+    /// sweep only ever catches records the coordinator's timeout can no longer convert to
+    /// .ended (the friend-mode auto-reconnect path re-parks in .discovering).
+    private static let parkedConnectionTimeoutSeconds: TimeInterval = 30
+    private static let parkedSweepIntervalSeconds: TimeInterval = 5
+    /// Sender-side connect timeout (mesh redesign Phase 3b): under a hard 2-device cap,
+    /// "the other Fernlet is already paired and ignoring invites" is the COMMON failure, and
+    /// without this it looked like an eternal "Connecting…". Scoped to the PRE-CONNECT stage
+    /// only — it is cancelled the moment the connection record exists (`registerConnection`,
+    /// fired by handleChannelReady): from there the coordinator's own 25 s handshake budget
+    /// governs, and letting this shorter timer keep running would best-effort kick a pairing
+    /// that is still progressing. Internal (not private) so tests can shorten it.
+    @ObservationIgnored var connectTimeoutSeconds: TimeInterval = 12
     @ObservationIgnored private var lastAcceptedBySender: [String: Date] = [:]
 
     public init(store: any ProximityHost) {
@@ -107,24 +129,46 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         observationTask = nil
         clearStatusTask?.cancel()
         clearStatusTask = nil
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+        parkedSweepTask?.cancel()
+        parkedSweepTask = nil
+        parkedSince.removeAll()
         session.stop()
         nearbyRecipients.removeAll()
         pendingOutgoing = nil
         discoveredPeers.removeAll()
         connections.removeAll()
+        engagedRecipientID = nil
         sendState = .idle
     }
 
     public func refreshDiscovery() {
+        // Hard 2-device cap: refreshing must NEVER tear down a live pairing — the old
+        // stop-and-restart body would have dropped the verified connection mid-share. Refuse
+        // visibly instead; discovery reopens on its own when the connection record is evicted.
+        if let connection = connections.first {
+            let name = displayName(for: connection)
+            recordDiagnostic("Search skipped — already paired with \(name).")
+            sendState = .failed(message: "Connected to \(name) — recipe sharing links two Fernlets at a time.")
+            scheduleStatusClear()
+            return
+        }
         let shouldRestart = isRunning
         recordDiagnostic("Recipe share discovery refreshed.")
         observationTask?.cancel()
         observationTask = nil
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+        parkedSweepTask?.cancel()
+        parkedSweepTask = nil
+        parkedSince.removeAll()
         session.stop()
         nearbyRecipients.removeAll()
         pendingOutgoing = nil
         discoveredPeers.removeAll()
         connections.removeAll()
+        engagedRecipientID = nil
         sendState = .idle
         isRunning = false
         if shouldRestart {
@@ -133,9 +177,23 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     public func sendRecipeShare(_ payload: ProximityRecipeSharePayload, to recipient: ProximityRecipeShareRecipient) {
+        connectTimeoutTask?.cancel()
+
+        // Hard 2-device cap (outbound): refuse — visibly, never silently — while a connection
+        // to a DIFFERENT peer exists. The radio is paused while paired, so an invite could not
+        // go out anyway (see MeshMultipeerSession.pauseDiscovery contract).
+        if let connection = connections.first, connection.id != recipient.id {
+            let name = displayName(for: connection)
+            sendState = .failed(message: "Still sharing with \(name) — recipe sharing links two Fernlets at a time.")
+            recordDiagnostic("Refused share to \(recipient.displayName): already paired with \(name).")
+            scheduleStatusClear()
+            return
+        }
+
         start()
         pendingOutgoing = (payload, recipient)
         sendState = .connecting(recipientName: recipient.displayName)
+        engagedRecipientID = recipient.id
         recordDiagnostic("Connecting to \(recipient.displayName).")
 
         if let connection = connections.first(where: { $0.id == recipient.id }),
@@ -145,12 +203,25 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         }
 
         guard let peer = peer(for: recipient) else {
+            pendingOutgoing = nil
             sendState = .failed(message: "That nearby Fernlet is no longer available.")
             recordDiagnostic("Recipe share failed: \(recipient.displayName) is no longer available.")
+            updateEngagedRecipient()
+            scheduleStatusClear()
+            return
+        }
+        // Hard 2-device cap (connecting window): an attempt to a different peer is already in
+        // flight — inviting a second one could race two connections past the cap.
+        if session.hasPendingConnections(besides: peer) {
+            pendingOutgoing = nil
+            sendState = .failed(message: "Still connecting to another Fernlet — recipe sharing links two Fernlets at a time.")
+            recordDiagnostic("Refused share to \(recipient.displayName): another connection attempt is in flight.")
+            updateEngagedRecipient()
             scheduleStatusClear()
             return
         }
         session.invite(peer)
+        armConnectTimeout(for: recipient)
     }
 
     public func dismissRecipeShare(_ share: PendingProximityRecipeShare) {
@@ -218,10 +289,29 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         session.shouldAcceptInvitation = { [weak self] peer in
             guard let self else { return false }
             // Blocklist is enforced at identity-introduction time by the coordinator.
-            return self.connections.count < 1 || self.connections.contains(where: { $0.peer.id == peer.id })
+            // Hard 2-device cap (inbound): accept only when we hold no connection AND no
+            // connecting-window pending peer — checking `connections` alone leaves a race
+            // where a second inviter slips in while the first is still MC-connecting. The
+            // SAME peer re-inviting (retry of a dropped attempt) is always let through.
+            if self.connections.contains(where: { $0.peer.id == peer.id || $0.peer.underlying == peer.underlying }) {
+                return true
+            }
+            guard self.connections.isEmpty else { return false }
+            return !self.session.hasPendingConnections(besides: peer)
         }
         session.onTransportError = { [weak self] message in
-            self?.recordDiagnostic(message)
+            guard let self else { return }
+            self.recordDiagnostic(message)
+            // Discovery failed to (re)start (advertiser/browser didNotStart — e.g. the Bonjour
+            // restart after a record eviction's resumeDiscovery): with `isRunning` left true,
+            // ContentView's idempotent start() no-ops forever and passive listening stays dark.
+            // Stop fully so the next gate event (tab/scene/lock change) or sheet restart genuinely
+            // restarts the radio. didNotStart* only fires from start attempts — and resume runs
+            // only with no connection held — but guard on an empty connection list anyway so an
+            // unexpected error can never tear down a live pairing.
+            guard self.connections.isEmpty, self.isRunning else { return }
+            self.stop()
+            self.recordDiagnostic("Recipe share radio failed to start — listening will retry on the next app event.")
         }
     }
 
@@ -261,8 +351,23 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         recordDiagnostic("\(displayName) is no longer nearby.")
     }
 
+    /// Belt-and-braces admission check for a just-connected MC channel (hard 2-device cap):
+    /// true only when no connection exists or the peer already holds it. A third peer can
+    /// still slip past both invitation gates in the connecting window; this is the last line.
+    func shouldAdmitChannel(for peer: MultipeerPeer) -> Bool {
+        connections.isEmpty || connections.contains { $0.peer.id == peer.id || $0.peer.underlying == peer.underlying }
+    }
+
     private func handleChannelReady(_ channel: PeerChannelTransport) {
         guard !connections.contains(where: { $0.peer.id == channel.peer.id }) else { return }
+        // Hard 2-device cap, belt-and-braces: a third peer that won the connecting-window race
+        // anyway is never admitted — best-effort kick it (see disconnectPeer's caveats) and
+        // leave the existing pairing untouched.
+        guard shouldAdmitChannel(for: channel.peer) else {
+            recordDiagnostic("Turned away \(channel.peer.displayName) — recipe sharing links two Fernlets at a time.")
+            session.disconnectPeer(channel.peer)
+            return
+        }
         recordDiagnostic("Secure recipe-share channel opened with \(channel.peer.displayName).")
         let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
         let coordinator = ProximityCoordinator(
@@ -284,14 +389,34 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             fingerprint: nil,
             verifiedKeyAgreementPublicKey: nil
         )
-        connections.append(connection)
-        connectionObservationRevision += 1
+        registerConnection(connection)
 
         Task { [weak self] in
             await coordinator.begin(role: .browser, mode: .friend)
             channel.notifyConnected()
             self?.checkCoordinatorStates()
         }
+    }
+
+    /// Single add-path for connection records. Pauses discovery the moment a connection is
+    /// established — this runs for BOTH roles (handleChannelReady fires on inviter and invitee
+    /// alike), which is the owner's "the mesh closes once two devices connect": the recipient's
+    /// radio goes quiet while paired too. `resumeDiscovery` is keyed on record eviction in
+    /// `finalizeConnectionRemovals`.
+    private func registerConnection(_ connection: RecipeShareConnection) {
+        connections.append(connection)
+        connectionObservationRevision += 1
+        // The connect stage for the engaged recipient is over: from here the coordinator's own
+        // 25 s handshake budget (plus the parked sweep) governs — the shorter pre-connect timer
+        // must not fire and best-effort kick a pairing that is progressing.
+        if pendingOutgoing?.recipient.id == connection.id {
+            connectTimeoutTask?.cancel()
+            connectTimeoutTask = nil
+        }
+        session.pauseDiscovery()
+        recordDiagnostic("Recipe sharing closed to others while paired with \(connection.peer.displayName).")
+        updateEngagedRecipient()
+        startParkedSweepIfNeeded()
     }
 
     private func startObserving() {
@@ -353,20 +478,137 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             default: return false
             }
         }
-        for connection in stale { connections.removeAll { $0.id == connection.id } }
-        if !stale.isEmpty {
-            connectionObservationRevision += 1
+        let before = connections.count
+        for connection in stale {
+            // A coordinator can fail/end without MC ever reporting a disconnect (a failed
+            // handshake never fires one) — best-effort kick so the MC link doesn't linger as
+            // a zombie while the record eviction below reopens discovery.
+            session.disconnectPeer(connection.peer)
+            parkedSince.removeValue(forKey: connection.id)
+            connections.removeAll { $0.id == connection.id }
         }
+        finalizeConnectionRemovals(previousCount: before)
     }
 
     private func removeConnections(matching peer: MultipeerPeer) {
         let before = connections.count
         connections.removeAll { connection in
-            connection.peer.id == peer.id || connection.peer.underlying == peer.underlying
+            let matches = connection.peer.id == peer.id || connection.peer.underlying == peer.underlying
+            if matches { parkedSince.removeValue(forKey: connection.id) }
+            return matches
         }
-        if connections.count != before {
-            connectionObservationRevision += 1
+        finalizeConnectionRemovals(previousCount: before)
+    }
+
+    /// Every connection-record removal funnels through here. Reopening the radio is keyed on
+    /// MANAGER-LEVEL record eviction, deliberately NOT on MC disconnect events: a failed
+    /// handshake never fires an MC disconnect, so waiting for one would leave the radio paused
+    /// forever with no connection — the deadlock class the redesign closes. Covered removal
+    /// paths: `onPeerDisconnected` (via removeConnections), the stale-coordinator sweep
+    /// (.ended/.failed) in checkCoordinatorStates, and the parked-.discovering sweep.
+    private func finalizeConnectionRemovals(previousCount: Int) {
+        guard connections.count != previousCount else { return }
+        connectionObservationRevision += 1
+        updateEngagedRecipient()
+        guard connections.isEmpty else { return }
+        parkedSweepTask?.cancel()
+        parkedSweepTask = nil
+        parkedSince.removeAll()
+        if isRunning, session.isDiscoveryPaused {
+            session.resumeDiscovery()
+            recordDiagnostic("Recipe sharing reopened to nearby Fernlets.")
         }
+    }
+
+    /// Derived observable: connection first (it outlives the send), pending outgoing second.
+    private func updateEngagedRecipient() {
+        engagedRecipientID = connections.first?.id ?? pendingOutgoing?.recipient.id
+    }
+
+    private func displayName(for connection: RecipeShareConnection) -> String {
+        nearbyRecipients.first { $0.id == connection.id }?.displayName ?? connection.peer.displayName
+    }
+
+    /// Arms the sender-side connect timeout for the PRE-CONNECT stage only. Under the hard
+    /// 2-device cap the peer being busy (paired with someone else, silently rejecting invites)
+    /// is the common case — surface it as a distinct visible failure instead of an eternal
+    /// "Connecting…". `registerConnection` cancels this the moment the MC channel comes up;
+    /// past that point the coordinator's 25 s handshake budget owns failure.
+    private func armConnectTimeout(for recipient: ProximityRecipeShareRecipient) {
+        connectTimeoutTask?.cancel()
+        let timeout = connectTimeoutSeconds
+        connectTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(timeout))
+            guard !Task.isCancelled, let self else { return }
+            guard let outgoing = self.pendingOutgoing, outgoing.recipient.id == recipient.id else { return }
+            // Belt-and-braces stage check (registerConnection already cancels this task): a
+            // connection record means the connect stage succeeded — never fail or kick a
+            // handshake in progress from here.
+            guard !self.connections.contains(where: { $0.id == recipient.id }) else { return }
+            self.pendingOutgoing = nil
+            self.sendState = .failed(message: "No answer from \(recipient.displayName) — that Fernlet may be busy sharing with someone else.")
+            self.recordDiagnostic("Connect timeout: \(recipient.displayName) did not answer.")
+            // Best-effort cancel of the half-open attempt so it doesn't linger in the
+            // connecting window and block the next accept/invite.
+            if let peer = self.peer(for: recipient) {
+                self.session.disconnectPeer(peer)
+            }
+            self.updateEngagedRecipient()
+            self.scheduleStatusClear()
+        }
+    }
+
+    // MARK: - Parked-connection sweep
+
+    private func startParkedSweepIfNeeded() {
+        guard parkedSweepTask == nil else { return }
+        parkedSweepTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.parkedSweepIntervalSeconds))
+                guard !Task.isCancelled, let self else { return }
+                self.sweepParkedConnections(now: Date())
+                if self.connections.isEmpty {
+                    self.parkedSweepTask = nil
+                    return
+                }
+            }
+        }
+    }
+
+    /// Evicts connection records whose coordinator has parked in a pre-verification state
+    /// (.idle/.starting/.discovering/.peerInRange) past `parkedConnectionTimeoutSeconds`. The
+    /// .ended/.failed sweep in checkCoordinatorStates can never catch these: a transport that
+    /// dies pre-verification fires no MC disconnect, and the friend-mode auto-reconnect path
+    /// parks a once-connected coordinator back in .discovering — with the radio paused, such a
+    /// record would hold the 2-device cap closed forever. Internal so tests can drive it with
+    /// synthetic dates; production calls it from the periodic sweep task.
+    func sweepParkedConnections(now: Date) {
+        var evicted: [RecipeShareConnection] = []
+        for connection in connections {
+            switch connection.coordinator.state {
+            case .idle, .starting, .discovering, .peerInRange:
+                if let since = parkedSince[connection.id] {
+                    if now.timeIntervalSince(since) >= Self.parkedConnectionTimeoutSeconds {
+                        evicted.append(connection)
+                    }
+                } else {
+                    parkedSince[connection.id] = now
+                }
+            default:
+                parkedSince.removeValue(forKey: connection.id)
+            }
+        }
+        guard !evicted.isEmpty else { return }
+        let before = connections.count
+        for connection in evicted {
+            // Same zombie caveat as the stale sweep: the MC link may still be up even though
+            // the coordinator stalled — kick it best-effort.
+            session.disconnectPeer(connection.peer)
+            parkedSince.removeValue(forKey: connection.id)
+            recordDiagnostic("Dropped stalled connection to \(connection.peer.displayName).")
+            connections.removeAll { $0.id == connection.id }
+        }
+        finalizeConnectionRemovals(previousCount: before)
     }
 
     private func ensureRecipient(for connection: RecipeShareConnection, identity peerIdentity: ProximityCoordinator.PeerIdentity) {
@@ -383,7 +625,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     private func sendPendingPayload(via connection: RecipeShareConnection) async {
         guard let outgoing = pendingOutgoing,
               outgoing.recipient.id == connection.id else { return }
+        connectTimeoutTask?.cancel()  // connected + verified — the connect phase is over
         pendingOutgoing = nil
+        updateEngagedRecipient()
         sendState = .sending(recipientName: outgoing.recipient.displayName)
         recordDiagnostic("Sending \(outgoing.payload.recipe.title) to \(outgoing.recipient.displayName).")
         do {
@@ -469,8 +713,39 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             fingerprint: nil,
             verifiedKeyAgreementPublicKey: nil
         )
-        connections.append(connection)
-        connectionObservationRevision += 1
+        // Routed through the production add-path so cap tests exercise the real
+        // pause-on-connect behavior (and the retention noted above still holds).
+        registerConnection(connection)
         return coordinator
+    }
+
+    /// The private MeshMultipeerSession, exposed for cap tests only: they assert the
+    /// pause/resume flag and drive the manager's own session callbacks (onPeerDisconnected,
+    /// shouldAcceptInvitation) — the production writers need live radios a unit test must
+    /// never start.
+    var multipeerSessionForTesting: MeshMultipeerSession { session }
+
+    var connectionCountForTesting: Int { connections.count }
+
+    /// The run flag, exposed so the transport-error recovery tests can pin that a failed
+    /// discovery (re)start flips it false — the property `start()`'s idempotence gate reads.
+    var isRunningForTesting: Bool { isRunning }
+
+    /// Marks the manager running WITHOUT starting the radio — `start()` would bring up a real
+    /// advertiser/browser, which unit tests must never do. The resume-on-eviction gate checks
+    /// `isRunning`, so cap tests need this to observe reopen behavior.
+    func markRunningForTesting() {
+        isRunning = true
+    }
+
+    /// Drives the production inbound-invitation gate closure exactly as the transport would.
+    func shouldAcceptInvitationForTesting(_ peer: MultipeerPeer) -> Bool {
+        session.shouldAcceptInvitation?(peer) ?? false
+    }
+
+    /// Runs the stale-coordinator sweep deterministically (production runs it from the
+    /// observation loop, which only spins after a real `start()`).
+    func checkCoordinatorStatesForTesting() {
+        checkCoordinatorStates()
     }
 }
