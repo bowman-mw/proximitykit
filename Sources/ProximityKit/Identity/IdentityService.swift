@@ -167,6 +167,60 @@ public final class IdentityService {
         }
     }
 
+    // MARK: - Presence tags (mesh redesign Phase 4a)
+
+    /// Presence epoch length in seconds. Presence tags rotate every epoch; matchers accept ±1
+    /// epoch to span clock skew and the advertiser-restart flap.
+    public nonisolated static let presenceEpochSeconds: TimeInterval = 900
+
+    /// Bytes kept from the truncated presence-tag HMAC (base64 → 12 chars on the wire, which is
+    /// what keeps a 24-tag roster inside the ~400 B Bonjour TXT budget).
+    public nonisolated static let presenceTagByteCount = 8
+
+    /// The presence epoch counter for a moment in time: `floor(unixTime / 900)`.
+    public nonisolated static func presenceEpoch(at date: Date) -> UInt64 {
+        UInt64(max(0, date.timeIntervalSince1970) / presenceEpochSeconds)
+    }
+
+    /// STATIC-STATIC X25519 DH pair secret for presence tags:
+    /// `HKDF-SHA256(DH(myKA_priv, friendKA_pub))`, domain-separated from the sealing derivation
+    /// (`fernlet.proximity.v1`) and the group-key wrap (`fernlet.mesh.groupkey.v1`) by its own salt,
+    /// so presence material can never collide with message keys.
+    ///
+    /// SYMMETRIC BY CONSTRUCTION — the mutual-recognition property: `DH(aPriv, bPub) ==
+    /// DH(bPriv, aPub)`, the salt is a constant, and `sharedInfo` is deliberately EMPTY (any
+    /// ordering-dependent info such as sender‖recipient key bytes would give the two sides of the
+    /// pair different secrets and break mutual tag derivation). Pairwise-DH is also why blocking a
+    /// friend removes their tag: only someone holding one of the two private keys can derive it —
+    /// a past handshake partner holding just our public keys cannot (unlike public-key-hash tags).
+    public func presencePairSecret(with friendKeyAgreementPublicKey: Data) throws -> SymmetricKey {
+        guard let myKey = keyAgreementKey else { throw IdentityError.notProvisioned }
+        guard let friendKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: friendKeyAgreementPublicKey) else {
+            throw IdentityError.invalidKeyData
+        }
+        let sharedSecret = try myKey.sharedSecretFromKeyAgreement(with: friendKey)
+        return sharedSecret.hkdfDerivedSymmetricKey(
+            using: SHA256.self,
+            salt: Data("fernlet.presence.tag.v1".utf8),
+            sharedInfo: Data(),
+            outputByteCount: 32
+        )
+    }
+
+    /// The rotating presence tag for one friend pair at one epoch:
+    /// `HMAC-SHA256("fernlet.presence.epoch.v1" ‖ epoch_be64, pairSecret)` truncated to
+    /// `presenceTagByteCount`. Both members of the pair derive the SAME tag for the same epoch
+    /// (see `presencePairSecret`); different pairs derive independent tags. Observer-opaque:
+    /// without a pair private key the tag is an unlinkable pseudorandom value that rotates every
+    /// 15 minutes.
+    public func presenceTag(for friendKeyAgreementPublicKey: Data, epoch: UInt64) throws -> Data {
+        let secret = try presencePairSecret(with: friendKeyAgreementPublicKey)
+        var message = Data("fernlet.presence.epoch.v1".utf8)
+        withUnsafeBytes(of: epoch.bigEndian) { message.append(contentsOf: $0) }
+        let mac = HMAC<SHA256>.authenticationCode(for: message, using: secret)
+        return Data(Data(mac).prefix(Self.presenceTagByteCount))
+    }
+
     // MARK: - Group key distribution (Phase 3)
 
     /// Wraps a 32-byte group key for one recipient using ephemeral X25519 ECDH → HKDF-SHA256 → AES-256-GCM.

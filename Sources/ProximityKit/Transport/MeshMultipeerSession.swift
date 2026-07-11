@@ -102,7 +102,17 @@ final class MeshMultipeerSession: NSObject {
     /// diagnostic surface; the failure is os_log'd here regardless.
     var onTransportError: ((String) -> Void)?
 
-    init(peerIDStore: (any MCPeerIDStoring)? = nil) {
+    /// `usesEphemeralPeerID: true` (presence radio, Phase 4a): a fresh RANDOM MCPeerID per
+    /// instance, NEVER persisted — identifier hygiene for the standing presence advertiser
+    /// (cross-launch unlinkable; the random display name carries no user info). It MUST NOT
+    /// write through the shared `FileMCPeerIDStore`: the other radios rely on that archived
+    /// ID staying stable, and clobbering it would break their peer identity continuity.
+    init(peerIDStore: (any MCPeerIDStoring)? = nil, usesEphemeralPeerID: Bool = false) {
+        if usesEphemeralPeerID {
+            self.localPeerID = MCPeerID(displayName: Self.randomEphemeralDisplayName())
+            super.init()
+            return
+        }
         let store: any MCPeerIDStoring = peerIDStore ?? FileMCPeerIDStore()
         if let existing = store.load() {
             self.localPeerID = existing
@@ -112,6 +122,14 @@ final class MeshMultipeerSession: NSObject {
             store.save(new)
         }
         super.init()
+    }
+
+    /// Random per-instance display name for ephemeral peer IDs. Deliberately NOT the device
+    /// name: a per-start random token is exactly as linkable as the per-start random MCPeerID
+    /// itself (nothing), and it lets the owner recognize its own previous-start ghost
+    /// advertisements (presence self-exclusion).
+    nonisolated static func randomEphemeralDisplayName() -> String {
+        String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12)).lowercased()
     }
 
     func start(serviceType: String = MeshMultipeerSession.friendServiceType, discoveryInfo: [String: String] = [:]) {

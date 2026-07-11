@@ -2,11 +2,18 @@
 // ProximityKit/HeartSharing
 //
 // Device-local persistence for the hearts feature: received hearts (for the Home bubble and
-// the 24h health-bar glow) plus the one-heart-per-friend-per-day rate limit, enforced in BOTH
-// directions. Stored as a small JSON sidecar in Application Support (the same home as
-// MeshPhotoCache.json / MeshPhotoWallPreferences.json) — deliberately NEVER in the snapshot,
-// so heart activity (who, when) stays off every synced store. Ephemeral social warmth should
-// not follow the user into iCloud.
+// the 24h health-bar glow) plus the per-friend rate limit, enforced in BOTH directions.
+// Stored as a small JSON sidecar in Application Support (the same home as MeshPhotoCache.json /
+// MeshPhotoWallPreferences.json) — deliberately NEVER in the snapshot, so heart activity
+// (who, when) stays off every synced store. Ephemeral social warmth should not follow the user
+// into iCloud.
+//
+// Rate model (mesh redesign Phase 4b, owner decision): NO daily limit for in-person hearts —
+// instead a rolling 1-heart-per-friend-per-5-minutes rate limit, mirrored on receive (accept at
+// most one heart per sender per 5 minutes). The wire `HeartPayload.sentAtDayKey` is now a
+// shape-check only (a hostile peer can't land an oversized string) and no longer a limit key;
+// the ledger keys the limit on the last-send/last-receive timestamp per friend fingerprint.
+// Consume-on-send is retained: `recordHeartSent` runs only after the wire write succeeds.
 
 import Foundation
 import Observation
@@ -14,7 +21,7 @@ import FernletDomainModel
 import FernletFoundation
 
 /// One received heart. `senderDisplayName` is sanitized at the wire boundary before it is
-/// handed to the ledger (see `ProximityHeartManager`), so nothing peer-controlled lands here raw.
+/// handed to the ledger (see `PresenceManager`), so nothing peer-controlled lands here raw.
 public nonisolated struct ReceivedHeartRecord: Codable, Equatable, Identifiable, Sendable {
     /// The wire payload's id — stable across a duplicate delivery, so exact re-sends dedupe.
     public let id: UUID
@@ -46,21 +53,39 @@ public final class ProximityHeartLedger {
     /// Hearts received in the retention window, oldest first. Bounded (`maxStoredHearts`).
     public private(set) var receivedHearts: [ReceivedHeartRecord] = []
 
-    @ObservationIgnored private var rateLimitKeys: Set<String> = []
+    /// Last-send timestamp per friend fingerprint (the send-side rate key).
+    @ObservationIgnored private var lastSentAt: [String: Date] = [:]
+    /// Last-accepted timestamp per sender fingerprint (the receive-side rate mirror).
+    @ObservationIgnored private var lastReceivedAt: [String: Date] = [:]
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored private let now: () -> Date
 
-    /// Received hearts kept beyond their 24h glow (small buffer so a same-day duplicate after
-    /// the glow fades is still recognized), then pruned.
+    /// Received hearts kept beyond their 24h glow (small buffer so a duplicate after the glow
+    /// fades is still recognized), then pruned.
     static let heartRetention: TimeInterval = 48 * 60 * 60
-    /// Rate-limit keys are day-scoped; keep a few days so a timezone hop can't re-open today.
-    static let rateLimitKeyRetentionDays = 3
+    /// The per-friend rate window, each direction: at most one heart per friend per 5 minutes.
+    static let rateLimitInterval: TimeInterval = 5 * 60
     static let maxStoredHearts = 32
 
     private struct PersistedState: Codable {
-        var version: Int = 1
-        var rateLimitKeys: [String] = []
+        var version = 2
+        var lastSentAt: [String: Date] = [:]
+        var lastReceivedAt: [String: Date] = [:]
         var receivedHearts: [ReceivedHeartRecord] = []
+
+        init() {}
+
+        /// Tolerant decode: a v1 blob carried `rateLimitKeys` (day-scoped Set) and no
+        /// timestamp maps. Those day keys no longer gate anything under the 5-minute model, so
+        /// they are simply dropped — the only user-visible effect of the upgrade is that a
+        /// heart may be sendable immediately after the update, which is harmless.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+            lastSentAt = try c.decodeIfPresent([String: Date].self, forKey: .lastSentAt) ?? [:]
+            lastReceivedAt = try c.decodeIfPresent([String: Date].self, forKey: .lastReceivedAt) ?? [:]
+            receivedHearts = try c.decodeIfPresent([ReceivedHeartRecord].self, forKey: .receivedHearts) ?? []
+        }
     }
 
     /// - Parameters:
@@ -73,36 +98,35 @@ public final class ProximityHeartLedger {
         load()
     }
 
-    // MARK: - Rate limit (one heart per friend per day, each direction)
+    // MARK: - Rate limit (one heart per friend per 5 minutes, each direction)
 
-    /// Deterministic day-scoped key, e.g. `heart:sent:a1b2c3d4e5f60718:2026-07-05`.
-    /// The direction segment keeps the send and receive limits independent — sending a friend
-    /// warmth must never consume their heart to you.
-    static func rateLimitKey(direction: String, fingerprint: String, dayKey: String) -> String {
-        "heart:\(direction):\(fingerprint):\(dayKey)"
-    }
-
+    /// True when the last heart sent to `fingerprint` was ≥ 5 minutes ago (or never). A receipt
+    /// timestamp in the future (device clock moved back) reads as "just sent" and gates, so a
+    /// clock hop can never re-open the window early.
     public func canSendHeart(to fingerprint: String) -> Bool {
-        !rateLimitKeys.contains(Self.rateLimitKey(direction: "sent", fingerprint: fingerprint, dayKey: todayKey()))
+        guard let last = lastSentAt[fingerprint] else { return true }
+        return now().timeIntervalSince(last) >= Self.rateLimitInterval
     }
 
-    /// Marks today's heart to `fingerprint` as sent. Called only after the wire send succeeds,
-    /// so a failed send never consumes the day's heart.
+    /// Marks a heart to `fingerprint` as just sent. Called only after the wire send succeeds,
+    /// so a failed send never consumes the window (consume-on-send).
     public func recordHeartSent(to fingerprint: String) {
-        rateLimitKeys.insert(Self.rateLimitKey(direction: "sent", fingerprint: fingerprint, dayKey: todayKey()))
+        lastSentAt[fingerprint] = now()
         pruneAndSave()
     }
 
     /// Records a received heart. Returns `false` (and stores nothing) when this is a duplicate:
     /// either the exact payload re-delivered (same id — true replays are already rejected by the
     /// envelope ReplayCache; this covers a re-send after relaunch) or a second heart from the
-    /// same friend on the same local day. Duplicates are dropped silently by design.
+    /// same friend inside the 5-minute receive window. Duplicates are dropped silently by design.
     @discardableResult
     public func recordReceivedHeart(id: UUID, senderDisplayName: String, senderFingerprint: String) -> Bool {
         guard !receivedHearts.contains(where: { $0.id == id }) else { return false }
-        let key = Self.rateLimitKey(direction: "received", fingerprint: senderFingerprint, dayKey: todayKey())
-        guard !rateLimitKeys.contains(key) else { return false }
-        rateLimitKeys.insert(key)
+        if let last = lastReceivedAt[senderFingerprint],
+           now().timeIntervalSince(last) < Self.rateLimitInterval {
+            return false
+        }
+        lastReceivedAt[senderFingerprint] = now()
         receivedHearts.append(ReceivedHeartRecord(
             id: id,
             senderDisplayName: senderDisplayName,
@@ -146,15 +170,12 @@ public final class ProximityHeartLedger {
     /// or glow behind after the relationships they refer to (the trust vault) are cleared.
     public func clearAll() {
         receivedHearts = []
-        rateLimitKeys = []
+        lastSentAt = [:]
+        lastReceivedAt = [:]
         try? FileManager.default.removeItem(at: fileURL)
     }
 
     // MARK: - Persistence
-
-    private func todayKey() -> String {
-        FernletDate.dayKey(for: now())
-    }
 
     private func prune() {
         let at = now()
@@ -162,13 +183,12 @@ public final class ProximityHeartLedger {
         if receivedHearts.count > Self.maxStoredHearts {
             receivedHearts = Array(receivedHearts.suffix(Self.maxStoredHearts))
         }
-        // Day keys sort lexicographically, so a plain string compare is a date compare.
-        let cutoffDate = at.addingTimeInterval(-TimeInterval(Self.rateLimitKeyRetentionDays) * 24 * 60 * 60)
-        let cutoffKey = FernletDate.dayKey(for: cutoffDate)
-        rateLimitKeys = rateLimitKeys.filter { key in
-            guard let dayKey = key.split(separator: ":").last else { return false }
-            return String(dayKey) >= cutoffKey
-        }
+        // Rate-limit timestamps only gate for `rateLimitInterval`; once elapsed they no longer
+        // affect any decision, so drop them to keep the maps tiny. A future-dated entry (clock
+        // moved back) is kept — it still gates as "just sent".
+        let expired: (Date) -> Bool = { at.timeIntervalSince($0) > Self.rateLimitInterval }
+        lastSentAt = lastSentAt.filter { !expired($0.value) }
+        lastReceivedAt = lastReceivedAt.filter { !expired($0.value) }
     }
 
     private func pruneAndSave() {
@@ -179,16 +199,17 @@ public final class ProximityHeartLedger {
     private func load() {
         guard let data = try? Data(contentsOf: fileURL),
               let state = try? JSONDecoder().decode(PersistedState.self, from: data) else { return }
-        rateLimitKeys = Set(state.rateLimitKeys)
+        lastSentAt = state.lastSentAt
+        lastReceivedAt = state.lastReceivedAt
         receivedHearts = state.receivedHearts.sorted { $0.receivedAt < $1.receivedAt }
         prune()
     }
 
     private func save() {
-        let state = PersistedState(
-            rateLimitKeys: rateLimitKeys.sorted(),
-            receivedHearts: receivedHearts
-        )
+        var state = PersistedState()
+        state.lastSentAt = lastSentAt
+        state.lastReceivedAt = lastReceivedAt
+        state.receivedHearts = receivedHearts
         guard let data = try? JSONEncoder().encode(state) else { return }
         try? FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
