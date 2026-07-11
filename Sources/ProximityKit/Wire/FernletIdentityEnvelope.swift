@@ -24,13 +24,48 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
     public let senderKeyAgreementPublicKey: Data  // X25519 raw, 32 B
     public let senderDisplayName: String
     public let recipientFingerprint: String?      // 16-char SHA-256 prefix; nil = broadcast
-    public let payloadType: PayloadType
+    /// The raw payload-type token exactly as it appears on the wire (the `payloadType` JSON key —
+    /// see `CodingKeys`). Stored as a string, not a `PayloadType`, so an envelope minted by a NEWER
+    /// build — a token this build has no case for — still decodes, re-encodes byte-identically, and
+    /// signature-verifies (both canonical forms sign the raw token). This is the EnumDecodeCompat
+    /// freeze/park pattern adapted to the wire: the unknown token is parked here, surfaced as
+    /// `payloadType == nil` / `isUnknownPayloadType`, and never dispatched to payload handlers.
+    public let payloadTypeToken: String
     public let payloadEncryption: PayloadEncryption
     public let payloadSummary: PayloadSummary
     public let payload: Data
     public let createdAt: Date
     public let expiresAt: Date?
     public var signature: Data                     // Ed25519 over canonical JSON (this field is zeroed during signing)
+
+    /// The payload type this build knows, or `nil` when `payloadTypeToken` came from a newer build
+    /// (parked). Callers MUST gate dispatch on this being non-nil.
+    public var payloadType: PayloadType? { PayloadType(rawValue: payloadTypeToken) }
+
+    /// True when the sender used a payload type this build doesn't know. The envelope still
+    /// verifies (schema/expiry/signature/recipient/replay) but its payload is never decrypted
+    /// or dispatched — fail-closed by non-dispatch.
+    public var isUnknownPayloadType: Bool { payloadType == nil }
+
+    // Wire-compatibility mapping: `payloadTypeToken` occupies the original `payloadType` key. A
+    // known type's token IS its rawValue, so the JSON emitted for every pre-existing envelope is
+    // byte-identical to the previous `PayloadType`-typed encoding (and the legacy v1 canonical
+    // bytes, which re-encode the envelope, are unchanged too).
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case envelopeID
+        case senderSigningPublicKey
+        case senderKeyAgreementPublicKey
+        case senderDisplayName
+        case recipientFingerprint
+        case payloadTypeToken = "payloadType"
+        case payloadEncryption
+        case payloadSummary
+        case payload
+        case createdAt
+        case expiresAt
+        case signature
+    }
 
     public init(
         schemaVersion: Int,
@@ -47,13 +82,48 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
         expiresAt: Date?,
         signature: Data
     ) {
+        self.init(
+            schemaVersion: schemaVersion,
+            envelopeID: envelopeID,
+            senderSigningPublicKey: senderSigningPublicKey,
+            senderKeyAgreementPublicKey: senderKeyAgreementPublicKey,
+            senderDisplayName: senderDisplayName,
+            recipientFingerprint: recipientFingerprint,
+            payloadTypeToken: payloadType.rawValue,
+            payloadEncryption: payloadEncryption,
+            payloadSummary: payloadSummary,
+            payload: payload,
+            createdAt: createdAt,
+            expiresAt: expiresAt,
+            signature: signature
+        )
+    }
+
+    /// Raw-token initializer — the escape hatch for re-signing/tamper fixtures and tests that need
+    /// an envelope whose payload type this build doesn't know. Production signing always goes
+    /// through the typed initializer above (`signed` mints only known types).
+    public init(
+        schemaVersion: Int,
+        envelopeID: UUID,
+        senderSigningPublicKey: Data,
+        senderKeyAgreementPublicKey: Data,
+        senderDisplayName: String,
+        recipientFingerprint: String?,
+        payloadTypeToken: String,
+        payloadEncryption: PayloadEncryption,
+        payloadSummary: PayloadSummary,
+        payload: Data,
+        createdAt: Date,
+        expiresAt: Date?,
+        signature: Data
+    ) {
         self.schemaVersion = schemaVersion
         self.envelopeID = envelopeID
         self.senderSigningPublicKey = senderSigningPublicKey
         self.senderKeyAgreementPublicKey = senderKeyAgreementPublicKey
         self.senderDisplayName = senderDisplayName
         self.recipientFingerprint = recipientFingerprint
-        self.payloadType = payloadType
+        self.payloadTypeToken = payloadTypeToken
         self.payloadEncryption = payloadEncryption
         self.payloadSummary = payloadSummary
         self.payload = payload
@@ -124,11 +194,19 @@ extension FernletIdentityEnvelope {
             throw VerifyError.recipientMismatch
         }
 
-        if Self.sealingRequiredTypes.contains(payloadType), payloadEncryption == .none {
+        if let payloadType, Self.sealingRequiredTypes.contains(payloadType), payloadEncryption == .none {
             throw VerifyError.sealingRequired
         }
 
         try replayCache.recordIfNew(envelopeID: envelopeID, createdAt: createdAt)
+
+        // Unknown (newer-build) payload type: the envelope authenticated and its ID is now
+        // replay-recorded (so unknown-type spam can't bypass replay protection), but the payload
+        // is parked — never decrypted, and the sealing gate above is skipped because this build
+        // has no sealing semantics for the type. Fail-closed by non-dispatch: callers gate
+        // dispatch on `payloadType`, and returning empty bytes keeps the payload unreadable even
+        // if a caller forgets.
+        guard !isUnknownPayloadType else { return Data() }
 
         switch payloadEncryption {
         case .none:

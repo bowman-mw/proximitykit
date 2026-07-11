@@ -527,6 +527,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         pendingAdmissionRequests.removeAll { $0.requesterSigningPublicKey == request.requesterSigningPublicKey }
     }
 
+    // MARK: - Payload handler registry (Phase 1)
+
+    /// A feature-module inbound handler. Receives exactly what the core switch cases consume: the
+    /// verified envelope, the decrypted plaintext, and the transport-verified peer identity.
+    public typealias MeshPayloadHandler = @MainActor (
+        _ envelope: FernletIdentityEnvelope,
+        _ plaintext: Data,
+        _ peer: ProximityCoordinator.PeerIdentity?
+    ) -> Void
+
+    @ObservationIgnored private var registeredPayloadHandlers: [PayloadType: MeshPayloadHandler] = [:]
+
+    /// Registration seam for feature payloads carried on the friend mesh (shop registers in
+    /// Phase 3, temp messages in Phase 5). Dispatch order: the core mesh switch runs first, so a
+    /// registration can never shadow mesh-control handling; the registry is consulted only for
+    /// types the switch leaves unhandled; unregistered known types keep today's silent drop.
+    public func registerPayloadHandler(for type: PayloadType, handler: @escaping MeshPayloadHandler) {
+        registeredPayloadHandlers[type] = handler
+    }
+
     // MARK: - ProximityPayloadHandling
 
     public func proximityCoordinator(
@@ -535,10 +555,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         plaintext: Data,
         from peer: ProximityCoordinator.PeerIdentity?
     ) {
+        // Unknown (newer-build) payload types are parked by the coordinator and never dispatched
+        // here; the guard is belt-and-braces for any future direct caller.
+        guard let payloadType = envelope.payloadType else { return }
         let slot = slots.first { $0.coordinator === coordinator }
         let decoder = JSONDecoder()
 
-        switch envelope.payloadType {
+        switch payloadType {
         case .meshDescriptor:
             if let payload = try? decoder.decode(MeshStateChangePayload.self, from: plaintext) {
                 handleMeshDescriptor(payload.descriptor, from: peer?.fingerprint)
@@ -616,7 +639,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .sessionGoodbye:
             if let slot { removeSlot(slot) }
         default:
-            break
+            // Known type outside the core mesh set: give a registered feature module a chance
+            // (Phase 1 registry); otherwise keep the pre-registry silent drop.
+            registeredPayloadHandlers[payloadType]?(envelope, plaintext, peer)
         }
     }
 
@@ -705,6 +730,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             if self.slots.count < Self.maxTotalSlots { return true }
             return self.canEvaluateOverflowCandidate(peer)
         }
+        meshSession.onTransportError = { [weak self] message in
+            // Discovery failed to start (e.g. a service type missing from NSBonjourServices) —
+            // surface it instead of searching forever in silence.
+            self?.meshError = message
+        }
     }
 
     private func startSearching() {
@@ -787,6 +817,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             trustPolicy: trustPolicy,
             replayCache: replayCache,
             displayName: displayName,
+            // Phase 1: the friend mesh currently offers photos only; shop/messages register their
+            // capability here when they land on the mesh (Phases 3/5).
+            capabilities: [ProximityCapability.photos.rawValue],
             timeoutSeconds: isProximityJoin ? 25 : 60
         )
 

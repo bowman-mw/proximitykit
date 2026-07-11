@@ -2,6 +2,7 @@ import Foundation
 import MultipeerConnectivity
 import Combine
 import UIKit
+import os
 import FernletDomainModel
 
 // MARK: - PeerChannelTransport
@@ -72,6 +73,11 @@ final class MeshMultipeerSession: NSObject {
 
     nonisolated static let friendServiceType   = "fernlet-friend"
 
+    // Discovery-failure surfacing (Phase 1): the empty didNotStart* delegates are how the
+    // missing-NSBonjourServices bug shipped invisibly — a service type absent from Info.plist
+    // fails here on device (iOS 14+ local-network privacy) with no other signal.
+    nonisolated private static let logger = Logger(subsystem: "com.fernlet", category: "proximity.transport")
+
     let localPeerID: MCPeerID
     private(set) var channels: [MCPeerID: PeerChannelTransport] = [:]
     private(set) var peerInfoCache: [MCPeerID: [String: String]] = [:]
@@ -87,6 +93,10 @@ final class MeshMultipeerSession: NSObject {
     var onPeerChannelReady: ((PeerChannelTransport) -> Void)?
     var onPeerDisconnected: ((MultipeerPeer, String) -> Void)?
     var shouldAcceptInvitation: ((MultipeerPeer) -> Bool)?
+    /// Invoked (on the MainActor) with a human-readable message when the advertiser or browser
+    /// fails to start — discovery is silently dead without it. Owners route this into their
+    /// diagnostic surface; the failure is os_log'd here regardless.
+    var onTransportError: ((String) -> Void)?
 
     init(peerIDStore: (any MCPeerIDStoring)? = nil) {
         let store: any MCPeerIDStoring = peerIDStore ?? FileMCPeerIDStore()
@@ -301,7 +311,13 @@ extension MeshMultipeerSession: MCNearbyServiceAdvertiserDelegate {
         }
     }
 
-    nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {}
+    nonisolated func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
+        let message = "Advertising failed to start for service \"\(advertiser.serviceType)\": \(error.localizedDescription)"
+        Self.logger.error("\(message, privacy: .public)")
+        Task { @MainActor [weak self] in
+            self?.onTransportError?(message)
+        }
+    }
 }
 
 // MARK: - MCNearbyServiceBrowserDelegate
@@ -330,5 +346,11 @@ extension MeshMultipeerSession: MCNearbyServiceBrowserDelegate {
         }
     }
 
-    nonisolated func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {}
+    nonisolated func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
+        let message = "Browsing failed to start for service \"\(browser.serviceType)\": \(error.localizedDescription)"
+        Self.logger.error("\(message, privacy: .public)")
+        Task { @MainActor [weak self] in
+            self?.onTransportError?(message)
+        }
+    }
 }

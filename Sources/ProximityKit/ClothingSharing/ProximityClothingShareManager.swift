@@ -234,6 +234,7 @@ public final class ProximityClothingShareManager: ProximityPayloadHandling {
             trustPolicy: trustPolicy,
             replayCache: replayCache,
             displayName: displayName,
+            capabilities: [ProximityCapability.shop.rawValue],
             timeoutSeconds: 25
         )
         let connection = ClothingShareConnection(

@@ -55,6 +55,11 @@ public final class ProximityInspectorEventRecorder: ProximityInspectorRecording 
 private nonisolated struct IdentityRangingPayload: Codable, Sendable {
     let rangingMode: String
     let discoveryToken: Data?
+    /// Phase 1 capability advertisement — an ADDITIVE JSON key: old clients' decoders ignore it,
+    /// and an old client's intro decodes here as `nil` (legacy = photos-only, see
+    /// `PeerIdentity.supports(_:)`). Raw `ProximityCapability` tokens, kept as strings so a newer
+    /// build's capability names survive the round-trip.
+    let capabilities: [String]?
 }
 
 private nonisolated struct SessionHeartbeatPayload: Codable, Sendable {
@@ -90,6 +95,9 @@ public final class ProximityCoordinator {
     @ObservationIgnored private let replayCache: ReplayCache
     @ObservationIgnored private let foregroundAnchor: any ProximityForegroundAnchoring
     @ObservationIgnored private let displayName: String
+    // Capability tokens advertised in this radio's identity intro/ack (Phase 1). Empty = this
+    // radio offers none of the mesh feature payloads (e.g. the recipe radio).
+    @ObservationIgnored private let localCapabilities: [String]
     @ObservationIgnored private let timeoutSeconds: TimeInterval
     @ObservationIgnored private let now: () -> Date
 
@@ -127,6 +135,7 @@ public final class ProximityCoordinator {
         replayCache: ReplayCache,
         foregroundAnchor: (any ProximityForegroundAnchoring)? = nil,
         displayName: String = "Fernlet",
+        capabilities: [String] = [],
         timeoutSeconds: TimeInterval = 30,
         now: @escaping () -> Date = Date.init
     ) {
@@ -147,6 +156,7 @@ public final class ProximityCoordinator {
             #endif
         }
         self.displayName = displayName
+        self.localCapabilities = capabilities
         self.timeoutSeconds = timeoutSeconds
         self.now = now
         self.tapDetector = ProximityCommitDetector(proximityThreshold: 0.05, dwellSeconds: 1.0, minimumSamples: 3)
@@ -302,13 +312,13 @@ public final class ProximityCoordinator {
         recordEnvelope(envelope, direction: .sent, byteCount: data.count, signatureVerified: true)
         bytesSent += data.count
         await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
-        inspector?.recordCoordinatorEvent("envelope sent \(envelope.payloadType.rawValue)")
+        inspector?.recordCoordinatorEvent("envelope sent \(envelope.payloadTypeToken)")
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .envelopeSent,
             peerFingerprint: identity.fingerprint,
             peerDisplayName: identity.displayName,
             payloadType: envelope.payloadType,
-            message: "Sent \(envelope.payloadType.rawValue)"
+            message: "Sent \(envelope.payloadTypeToken)"
         ))
         lastTransferCompletedAt = now()
         transition(to: .connected(peer: identity))
@@ -603,22 +613,31 @@ public final class ProximityCoordinator {
             recordEnvelope(envelope, direction: .received, byteCount: message.bytesReceived, signatureVerified: true)
             bytesReceived += message.bytesReceived
             await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
-            inspector?.recordCoordinatorEvent("envelope received \(envelope.payloadType.rawValue)")
+            inspector?.recordCoordinatorEvent("envelope received \(envelope.payloadTypeToken)")
             trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
                 kind: .envelopeReceived,
                 peerFingerprint: IdentityService.fingerprint(of: envelope.senderSigningPublicKey),
                 peerDisplayName: envelope.senderDisplayName,
                 payloadType: envelope.payloadType,
-                message: "Received \(envelope.payloadType.rawValue)"
+                message: "Received \(envelope.payloadTypeToken)"
             ))
 
-            switch envelope.payloadType {
+            // Phase 1 forward tolerance: a payload type only a NEWER build knows arrived on a live
+            // session. The envelope authenticated (schema/expiry/signature/replay were all enforced
+            // by `verify` above), so this is a well-behaved future peer, not an attack — park it
+            // and keep the session alive. Never dispatched to the payload handler, never `fail()`.
+            guard let payloadType = envelope.payloadType else {
+                inspector?.recordCoordinatorEvent("parked unknown payload type \(envelope.payloadTypeToken)")
+                return
+            }
+
+            switch payloadType {
             case .identityIntroduction, .identityAcknowledge:
                 try await handleIdentityEnvelope(envelope, plaintext: plaintext, from: message.peer)
             case .sessionHeartbeat:
                 await handleHeartbeat(envelope, plaintext: plaintext, from: message.peer)
             default:
-                inspector?.recordCoordinatorEvent("envelope verified \(envelope.payloadType.rawValue)")
+                inspector?.recordCoordinatorEvent("envelope verified \(envelope.payloadTypeToken)")
                 payloadHandler?.proximityCoordinator(self, didReceive: envelope, plaintext: plaintext, from: connectedIdentity ?? pendingPeerIdentity)
             }
         } catch {
@@ -642,7 +661,8 @@ public final class ProximityCoordinator {
         }
         let payload = IdentityRangingPayload(
             rangingMode: ranging.isHardwareSupported ? RangingMode.uwb.rawValue : RangingMode.rssi.rawValue,
-            discoveryToken: token
+            discoveryToken: token,
+            capabilities: localCapabilities
         )
         return try JSONEncoder().encode(payload)
     }
@@ -753,12 +773,12 @@ public final class ProximityCoordinator {
         inspector?.recordEnvelope(ConnectionSessionLog.EnvelopeRecord(
             envelopeID: envelope.envelopeID,
             direction: direction,
-            payloadType: envelope.payloadType.rawValue,
+            payloadType: envelope.payloadTypeToken,
             payloadByteCount: byteCount,
             timestamp: now(),
             signatureVerified: signatureVerified,
             encrypted: encrypted,
-            summary: encrypted ? envelope.payloadType.rawValue : envelope.payloadSummary.title
+            summary: encrypted ? envelope.payloadTypeToken : envelope.payloadSummary.title
         ))
     }
 
@@ -809,7 +829,8 @@ public final class ProximityCoordinator {
             keyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
             fingerprint: fingerprint,
             rangingMode: rangingMode,
-            firstSeenAt: now()
+            firstSeenAt: now(),
+            capabilities: rangingPayload?.capabilities
         )
         updateInspectorPeer(identity: peerIdentity, transportPeer: peer)
 
@@ -1138,6 +1159,9 @@ extension ProximityCoordinator {
         public let fingerprint: String
         public let rangingMode: RangingMode
         public let firstSeenAt: Date
+        /// Raw capability tokens the peer advertised in its identity intro/ack (Phase 1).
+        /// `nil` = a legacy peer whose intro predates capability advertisement.
+        public let capabilities: [String]?
 
         public init(
             id: UUID,
@@ -1146,7 +1170,8 @@ extension ProximityCoordinator {
             keyAgreementPublicKey: Data,
             fingerprint: String,
             rangingMode: RangingMode,
-            firstSeenAt: Date
+            firstSeenAt: Date,
+            capabilities: [String]? = nil
         ) {
             self.id = id
             self.displayName = displayName
@@ -1155,6 +1180,15 @@ extension ProximityCoordinator {
             self.fingerprint = fingerprint
             self.rangingMode = rangingMode
             self.firstSeenAt = firstSeenAt
+            self.capabilities = capabilities
+        }
+
+        /// Phase 1 capability gate: senders skip payload kinds the peer can't use. `nil`
+        /// capabilities = a legacy peer — every pre-capability friend radio could only exchange
+        /// photos, so legacy is treated as photos-only.
+        public func supports(_ capability: ProximityCapability) -> Bool {
+            guard let capabilities else { return capability == .photos }
+            return capabilities.contains(capability.rawValue)
         }
     }
 

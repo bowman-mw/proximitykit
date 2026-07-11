@@ -157,7 +157,10 @@ public nonisolated func canonicalBytes(for envelope: FernletIdentityEnvelope) ->
     writer.appendLengthPrefixed(envelope.senderKeyAgreementPublicKey)
     writer.appendString(envelope.senderDisplayName)
     writer.appendOptional(envelope.recipientFingerprint)
-    writer.appendString(envelope.payloadType.rawValue)
+    // The RAW wire token, not the enum case: canonical bytes must be computable for payload types
+    // this build doesn't know, so signatures on newer-build envelopes still verify (Phase 1
+    // forward tolerance). For known types the token IS the rawValue — bytes unchanged.
+    writer.appendString(envelope.payloadTypeToken)
     appendCanonical(&writer, envelope.payloadEncryption)
     appendCanonical(&writer, envelope.payloadSummary)
     writer.appendLengthPrefixed(envelope.payload)

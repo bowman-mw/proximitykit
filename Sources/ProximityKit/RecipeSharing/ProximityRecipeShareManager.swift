@@ -220,6 +220,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             // Blocklist is enforced at identity-introduction time by the coordinator.
             return self.connections.count < 1 || self.connections.contains(where: { $0.peer.id == peer.id })
         }
+        session.onTransportError = { [weak self] message in
+            self?.recordDiagnostic(message)
+        }
     }
 
     private func discoveryInfo() -> [String: String] {

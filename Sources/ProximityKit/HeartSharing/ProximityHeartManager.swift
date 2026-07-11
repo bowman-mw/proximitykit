@@ -290,6 +290,7 @@ public final class ProximityHeartManager: ProximityPayloadHandling {
             trustPolicy: trustPolicy,
             replayCache: replayCache,
             displayName: displayName,
+            capabilities: [ProximityCapability.hearts.rawValue],
             timeoutSeconds: 25
         )
         let connection = HeartShareConnection(
