@@ -95,6 +95,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// report rows (stored + reconciled by the app).
     @ObservationIgnored public var ownModerationReportsProvider: (() -> [ModerationLedgerEntry])?
     @ObservationIgnored public var onModerationRowsReceived: (([ModerationLedgerEntry]) -> Void)?
+    /// Phase 4 (fuzzy state): whether the user opted into sharing (gates the advertised capability); the
+    /// local fuzzy-state + appearance payload to send; and the sink for a friend's received state.
+    @ObservationIgnored public var friendStateEnabledProvider: (() -> Bool)?
+    @ObservationIgnored public var friendStatePayloadProvider: (() -> FriendStatePayload?)?
+    @ObservationIgnored public var onFriendStateReceived: ((String, FriendStatePayload) -> Void)?
     /// The live-session temporary-message store (Phase 5): the current session's chat transcript.
     /// Registered on the payload registry in `init`. Memory-only and deliberately NOT Codable — it can
     /// never enter a snapshot. Cleared at EVERY session-end path (the same last-committed-slot-gone
@@ -220,6 +225,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         registerClothingShopHandler()
         registerSessionMessageHandler()
         registerModerationReportHandler()
+        registerFriendStateHandler()
     }
 
     /// Phase 3a: the shop rides the friend mesh as registered feature payloads. The dispatch default's
@@ -279,6 +285,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let payload = ModerationReportRelay.buildPayload(ownReports: rows, identity: identity)
         guard !payload.reports.isEmpty else { return }
         await sendEnvelope(.itemReport, encodable: payload, via: slot, sealed: true)
+    }
+
+    /// Phase 4: fuzzy state + appearance exchange rides the friend session. The committed-slot gate has
+    /// run; require a verified, unblocked, vault-trusted sender and a well-formed payload, then hand it to
+    /// the app (which applies its own opt-in + caches). Sealed (in `sealingRequiredTypes`).
+    private func registerFriendStateHandler() {
+        registerPayloadHandler(for: .friendState) { [weak self] _, plaintext, peer in
+            guard let self, let peer else { return }
+            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
+            guard self.store.proximityTrustVault.isTrustedProximityPeer(signingPublicKey: peer.signingPublicKey) else { return }
+            guard let payload = try? JSONDecoder().decode(FriendStatePayload.self, from: plaintext),
+                  payload.isWellFormed else { return }
+            self.onFriendStateReceived?(peer.fingerprint, payload)
+        }
+    }
+
+    /// Sends our fuzzy state + appearance to a committed friend. A nil provider (opt-out) sends nothing.
+    private func sendFriendState(to slot: PeerSlot) async {
+        guard let payload = friendStatePayloadProvider?() else { return }
+        await sendEnvelope(.friendState, encodable: payload, via: slot, sealed: true)
     }
 
     /// Phase 5: live-session temporary messages ride the friend mesh as registered feature payloads.
@@ -1009,6 +1035,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Content-moderation reports are a safety feature with no opt-out — always advertised so a
         // friend's device knows it may hand us the reports it has verified.
         capabilities.append(ProximityCapability.moderation.rawValue)
+        // Phase 4: advertise fuzzy-state exchange only when the user opted in, so a friend sends us their
+        // vibe only if we accept (and share) ours.
+        if friendStateEnabledProvider?() == true {
+            capabilities.append(ProximityCapability.friendState.rawValue)
+        }
         return capabilities
     }
 
@@ -1836,6 +1867,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Phase 3b: hand our own signed moderation reports to this committed friend (one-hop relay).
         if peerIdentity.supports(.moderation) {
             Task { [weak self] in await self?.sendModerationReports(to: slot) }
+        }
+        // Phase 4: share our fuzzy vibe + appearance with this committed friend.
+        if peerIdentity.supports(.friendState) {
+            Task { [weak self] in await self?.sendFriendState(to: slot) }
         }
     }
 
