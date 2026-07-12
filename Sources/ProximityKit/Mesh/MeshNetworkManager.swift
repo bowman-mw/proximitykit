@@ -100,6 +100,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored public var friendStateEnabledProvider: (() -> Bool)?
     @ObservationIgnored public var friendStatePayloadProvider: (() -> FriendStatePayload?)?
     @ObservationIgnored public var onFriendStateReceived: ((String, FriendStatePayload) -> Void)?
+    /// Phase 5: a friend session committed with this fingerprint (an in-person meeting) — feeds closeness.
+    @ObservationIgnored public var onFriendSessionCommitted: ((String) -> Void)?
     /// The live-session temporary-message store (Phase 5): the current session's chat transcript.
     /// Registered on the payload registry in `init`. Memory-only and deliberately NOT Codable — it can
     /// never enter a snapshot. Cleared at EVERY session-end path (the same last-committed-slot-gone
@@ -1849,6 +1851,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Internal seam so unit tests can drive a slot commit without a live handshake.
     func noteSlotCommittedForShop(slot: PeerSlot, identity peerIdentity: ProximityCoordinator.PeerIdentity) {
+        // Phase 5: this committed friend is physically present — feed closeness (day-capped downstream).
+        onFriendSessionCommitted?(peerIdentity.fingerprint)
         if !hasFormedShopSession {
             hasFormedShopSession = true
             clothingShop.beginNewSession()
