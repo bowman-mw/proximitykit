@@ -90,6 +90,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// survives it, the shop window closes. Search starts (startJoin/startNewMesh — which fire on every
     /// Social-tab entry and scene reactivation) touch NEITHER.
     public let clothingShop = MeshClothingShop()
+    /// Phase 6 (Group Activities): the state + host-authoritative roster/token brain. Rides this friend
+    /// mesh (no new radio); constructed + wired in `init`. Memory + a device-local sidecar (NEVER synced).
+    public let activities: ProximityActivityManager
     /// Phase 3b (one-hop moderation relay): the local user's own moderation report rows, supplied by the
     /// app so ProximityKit signs + hands them to a committed friend; and the sink for peers' verified
     /// report rows (stored + reconciled by the app).
@@ -214,6 +217,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let id = IdentityService()
         try? id.ensureProvisioned()
         self.identity = id
+        self.activities = ProximityActivityManager(store: store, identity: id)
         let cacheURL = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!.appendingPathComponent("Fernlet/MeshPhotoCache.json")
@@ -228,6 +232,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         registerSessionMessageHandler()
         registerModerationReportHandler()
         registerFriendStateHandler()
+        registerActivityHandlers()
+        // Phase 6: give the activity manager the two mesh seams it needs — a sealed/unsealed send to a
+        // verified fingerprint's committed slot, and the list of committed peers advertising `.activities`.
+        activities.send = { [weak self] type, payload, fingerprint, sealed in
+            await self?.sendActivityEnvelope(type, payload, toFingerprint: fingerprint, sealed: sealed)
+        }
+        activities.committedActivityPeerFingerprints = { [weak self] in
+            self?.committedActivityPeerFingerprints() ?? []
+        }
     }
 
     /// Phase 3a: the shop rides the friend mesh as registered feature payloads. The dispatch default's
@@ -307,6 +320,67 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func sendFriendState(to slot: PeerSlot) async {
         guard let payload = friendStatePayloadProvider?() else { return }
         await sendEnvelope(.friendState, encodable: payload, via: slot, sealed: true)
+    }
+
+    /// Phase 6: Group Activities ride the friend mesh as registered feature payloads. The dispatch
+    /// default's committed-slot gate has already run; the remaining guard mirrors `.clothingCatalog`
+    /// (a transport-VERIFIED, unblocked sender) — NOT the vault-trust gate the friend-state/moderation
+    /// handlers use. Activities are ad-hoc, in-session interactions; authorization is carried by the
+    /// host-signed, invitee-key-bound `ActivityJoinToken`, not by prior vault friendship (kickoff:
+    /// "authorization is independent of the shared handshake"). `.activityJoinRequest` is UNSEALED
+    /// (identity-only, host re-validates against the verified slot); the other four are sealed.
+    private func registerActivityHandlers() {
+        registerPayloadHandler(for: .activityOffer) { [weak self] _, plaintext, peer in
+            guard let self, let peer else { return }
+            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
+            guard let payload = try? JSONDecoder().decode(ActivityOfferPayload.self, from: plaintext) else { return }
+            self.activities.receiveOffer(payload, fromFingerprint: peer.fingerprint,
+                                         verifiedHostSigningPublicKey: peer.signingPublicKey)
+        }
+        registerPayloadHandler(for: .activityJoinRequest) { [weak self] _, plaintext, peer in
+            guard let self, let peer else { return }
+            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
+            guard let payload = try? JSONDecoder().decode(ActivityJoinRequestPayload.self, from: plaintext) else { return }
+            self.activities.receiveJoinRequest(payload,
+                                               verifiedFingerprint: peer.fingerprint,
+                                               verifiedSigningPublicKey: peer.signingPublicKey,
+                                               verifiedKeyAgreementPublicKey: peer.keyAgreementPublicKey)
+        }
+        registerPayloadHandler(for: .activityJoinGrant) { [weak self] _, plaintext, peer in
+            guard let self, let peer else { return }
+            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
+            guard let payload = try? JSONDecoder().decode(ActivityJoinGrantPayload.self, from: plaintext) else { return }
+            self.activities.receiveGrant(payload, fromFingerprint: peer.fingerprint)
+        }
+        registerPayloadHandler(for: .activityRosterSnapshot) { [weak self] _, plaintext, peer in
+            guard let self, let peer else { return }
+            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
+            guard let payload = try? JSONDecoder().decode(ActivityRosterSnapshotPayload.self, from: plaintext),
+                  payload.isWellFormed else { return }
+            self.activities.receiveSnapshot(payload.snapshot)
+        }
+        registerPayloadHandler(for: .activitySync) { [weak self] _, plaintext, peer in
+            guard let self, let peer else { return }
+            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
+            guard let payload = try? JSONDecoder().decode(ActivitySyncPayload.self, from: plaintext) else { return }
+            self.activities.receiveSync(payload, fromFingerprint: peer.fingerprint)
+        }
+    }
+
+    /// Fingerprints of currently-committed slots that advertise the `.activities` capability — the
+    /// activity manager's "who can I offer/gossip to right now" seam.
+    private func committedActivityPeerFingerprints() -> [String] {
+        slots.compactMap { slot in
+            guard let fingerprint = slot.fingerprint, slot.supports(.activities) else { return nil }
+            return fingerprint
+        }
+    }
+
+    /// Seal + sign + transmit an activity payload to a verified fingerprint's committed slot. Nothing is
+    /// sent if that peer no longer has a committed slot (they left the session).
+    private func sendActivityEnvelope(_ type: PayloadType, _ payload: any Encodable, toFingerprint fingerprint: String, sealed: Bool) async {
+        guard let slot = slots.first(where: { $0.fingerprint == fingerprint }) else { return }
+        await sendEnvelope(type, encodable: payload, via: slot, sealed: sealed)
     }
 
     /// Phase 5: live-session temporary messages ride the friend mesh as registered feature payloads.
@@ -1042,6 +1116,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if friendStateEnabledProvider?() == true {
             capabilities.append(ProximityCapability.friendState.rawValue)
         }
+        // Phase 6: group activities are session-scoped; membership (the UWB dwell + the host's explicit
+        // confirm) is the consent gate, so advertise unconditionally like messages. Offers are only sent
+        // for activities the user chose to host, so there is nothing to opt out of.
+        capabilities.append(ProximityCapability.activities.rawValue)
         return capabilities
     }
 
@@ -1875,6 +1953,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Phase 4: share our fuzzy vibe + appearance with this committed friend.
         if peerIdentity.supports(.friendState) {
             Task { [weak self] in await self?.sendFriendState(to: slot) }
+        }
+        // Phase 6: offer any activities we host to this committed peer + exchange a roster version digest
+        // so the highest verified snapshot converges. The manager sends via its wired `send` closure.
+        if peerIdentity.supports(.activities) {
+            activities.onPeerCommitted(fingerprint: peerIdentity.fingerprint)
         }
     }
 

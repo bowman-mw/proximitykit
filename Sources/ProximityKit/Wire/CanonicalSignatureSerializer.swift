@@ -143,6 +143,11 @@ nonisolated func canonicalUTF8Ordered(_ lhs: String, _ rhs: String) -> Bool {
 // Distinct per signed type so a signature over one type cannot validate over the other.
 private nonisolated let canonicalEnvelopeDomain = Data("fernlet.canonical.identity-envelope.v2".utf8)
 private nonisolated let canonicalAdmissionTokenDomain = Data("fernlet.canonical.mesh-admission-token.v2".utf8)
+// Group Activities (Phase 6). Distinct tags so an activity descriptor hash, a join token, and a roster
+// snapshot can never cross-validate one another (or the mesh types above).
+private nonisolated let canonicalActivityDescriptorDomain = Data("fernlet.canonical.activity-descriptor.v2".utf8)
+private nonisolated let canonicalActivityJoinTokenDomain = Data("fernlet.canonical.activity-join-token.v2".utf8)
+private nonisolated let canonicalActivityRosterSnapshotDomain = Data("fernlet.canonical.activity-roster-snapshot.v2".utf8)
 
 // MARK: - Identity envelope
 
@@ -214,6 +219,71 @@ public nonisolated func canonicalBytes(for token: MeshAdmissionToken) -> Data {
     writer.appendDate(token.expiresAt)
     writer.appendLengthPrefixed(token.admitterSigningPublicKey)
     // admitterSignature: deliberately excluded.
+    return writer.bytes
+}
+
+// MARK: - Group Activities (Phase 6)
+
+// All three include the SIGNED `schemaVersion` (where present), so `verify` uses a SINGLE encoder gated
+// on the version — no permanent dual-verify (contrast the `MeshAdmissionToken` note above). Because
+// these types are new (day one), there is no legacy encoder for them and never will be.
+
+/// Canonical bytes an `ActivityDescriptor` is hashed over to form `activityParamsHash` (SHA-256). The
+/// descriptor is not itself signed; this hash is what the signed token/snapshot bind, so its byte
+/// layout must be as stable as any signing input.
+public nonisolated func canonicalBytes(for descriptor: ActivityDescriptor) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalActivityDescriptorDomain)
+    writer.appendUUID(descriptor.activityID)
+    writer.appendString(descriptor.hostFingerprint)
+    writer.appendLengthPrefixed(descriptor.hostSigningPublicKey)
+    writer.appendString(descriptor.title)
+    writer.appendString(descriptor.activityTypeToken)
+    writer.appendOptional(descriptor.coarseLocation)
+    writer.appendDate(descriptor.createdAt)
+    writer.appendDate(descriptor.expiresAt)
+    return writer.bytes
+}
+
+/// Canonical signing bytes for an `ActivityJoinToken`. The `hostSignature` field is excluded (it is the
+/// output of signing these bytes).
+public nonisolated func canonicalBytes(for token: ActivityJoinToken) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalActivityJoinTokenDomain)
+    writer.appendInt64(Int64(token.schemaVersion))
+    writer.appendUUID(token.activityID)
+    writer.appendLengthPrefixed(token.activityParamsHash)
+    writer.appendString(token.joinerFingerprint)
+    writer.appendLengthPrefixed(token.joinerSigningPublicKey)
+    writer.appendString(token.hostFingerprint)
+    writer.appendLengthPrefixed(token.hostSigningPublicKey)
+    writer.appendDate(token.grantedAt)
+    writer.appendDate(token.expiresAt)
+    writer.appendInt64(Int64(token.rosterVersionAtGrant))
+    // hostSignature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for an `ActivityRosterSnapshot`. The `hostSignature` field is excluded. The
+/// participant array is length-prefixed and serialized in array order (the host's authored order IS the
+/// canonical order), so the same roster always produces the same bytes.
+public nonisolated func canonicalBytes(for snapshot: ActivityRosterSnapshot) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalActivityRosterSnapshotDomain)
+    writer.appendInt64(Int64(snapshot.schemaVersion))
+    writer.appendUUID(snapshot.activityID)
+    writer.appendInt64(Int64(snapshot.version))
+    writer.appendUInt64(UInt64(snapshot.participants.count))
+    for participant in snapshot.participants {
+        writer.appendString(participant.fingerprint)
+        writer.appendString(participant.displayName)
+        writer.appendLengthPrefixed(participant.signingPublicKey)
+        writer.appendLengthPrefixed(participant.keyAgreementPublicKey)
+        writer.appendDate(participant.joinedAt)
+    }
+    writer.appendDate(snapshot.issuedAt)
+    writer.appendLengthPrefixed(snapshot.hostSigningPublicKey)
+    // hostSignature: deliberately excluded.
     return writer.bytes
 }
 
