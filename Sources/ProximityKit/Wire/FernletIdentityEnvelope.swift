@@ -167,7 +167,7 @@ extension FernletIdentityEnvelope {
     // Payload types that must always be delivered sealed to the recipient.
     // A misbehaving sender that omits sealing is rejected at the receiver even if the transport
     // is already encrypted, closing the misbehaving-sender gap for sensitive content.
-    private static let sealingRequiredTypes: Set<PayloadType> = [.friendPhoto, .recipeShare, .clothingCatalog, .friendHeart, .tempMessage, .itemReport, .friendState, .activityOffer, .activityJoinGrant, .activityRosterSnapshot, .activitySync]
+    private static let sealingRequiredTypes: Set<PayloadType> = [.friendPhoto, .recipeShare, .clothingCatalog, .friendHeart, .tempMessage, .itemReport, .friendState, .activityOffer, .activityJoinGrant, .activityRosterSnapshot, .activitySync, .trainerPlan, .trainerPlanDelta, .workoutCompletion, .workoutLiveUpdate]
 
     /// Verifies the envelope signature, recipient, expiry, and replay status; returns the plaintext payload.
     /// `@MainActor`: reads the `@MainActor` IdentityService key state (`open`, `localFingerprint`) and the
