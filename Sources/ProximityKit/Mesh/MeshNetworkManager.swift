@@ -90,6 +90,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// survives it, the shop window closes. Search starts (startJoin/startNewMesh — which fire on every
     /// Social-tab entry and scene reactivation) touch NEITHER.
     public let clothingShop = MeshClothingShop()
+    /// Phase 3b (one-hop moderation relay): the local user's own moderation report rows, supplied by the
+    /// app so ProximityKit signs + hands them to a committed friend; and the sink for peers' verified
+    /// report rows (stored + reconciled by the app).
+    @ObservationIgnored public var ownModerationReportsProvider: (() -> [ModerationLedgerEntry])?
+    @ObservationIgnored public var onModerationRowsReceived: (([ModerationLedgerEntry]) -> Void)?
     /// The live-session temporary-message store (Phase 5): the current session's chat transcript.
     /// Registered on the payload registry in `init`. Memory-only and deliberately NOT Codable — it can
     /// never enter a snapshot. Cleared at EVERY session-end path (the same last-committed-slot-gone
@@ -214,6 +219,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         setupMeshSession()
         registerClothingShopHandler()
         registerSessionMessageHandler()
+        registerModerationReportHandler()
     }
 
     /// Phase 3a: the shop rides the friend mesh as registered feature payloads. The dispatch default's
@@ -242,6 +248,37 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             guard !self.store.isBlockedFingerprint(fingerprint) else { return }
             self.respondToShopCatalogRequest(fromVerifiedFingerprint: fingerprint, identity: peer)
         }
+    }
+
+    /// Phase 3b: one-hop moderation reports ride the friend mesh. The committed-slot gate has already
+    /// run; the remaining guards require a transport-verified, unblocked, vault-TRUSTED sender (reports
+    /// count only from friends accepted in person — the Sybil defense). `.itemReport` is sealed, so an
+    /// unsealed bundle was already rejected at `verify()`; each row's Ed25519 signature is re-checked
+    /// against the sender key inside `verifiedRows`, and rows the sender didn't personally sign drop.
+    private func registerModerationReportHandler() {
+        registerPayloadHandler(for: .itemReport) { [weak self] _, plaintext, peer in
+            guard let self else { return }
+            guard let peer else {
+                FernletAuditLog.log("mesh.itemReport.droppedUnverifiedSender")
+                return
+            }
+            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
+            guard self.store.proximityTrustVault.isTrustedProximityPeer(signingPublicKey: peer.signingPublicKey) else { return }
+            guard let payload = try? JSONDecoder().decode(ModerationReportPayload.self, from: plaintext) else { return }
+            let rows = ModerationReportRelay.verifiedRows(
+                from: payload, senderSigningKey: peer.signingPublicKey, now: Date())
+            guard !rows.isEmpty else { return }
+            self.onModerationRowsReceived?(rows)
+        }
+    }
+
+    /// Hands this device's OWN signed reports to a committed friend (one-hop). No provider, an empty
+    /// set, or no signable rows → sends nothing.
+    private func sendModerationReports(to slot: PeerSlot) async {
+        guard let rows = ownModerationReportsProvider?(), !rows.isEmpty else { return }
+        let payload = ModerationReportRelay.buildPayload(ownReports: rows, identity: identity)
+        guard !payload.reports.isEmpty else { return }
+        await sendEnvelope(.itemReport, encodable: payload, via: slot, sealed: true)
     }
 
     /// Phase 5: live-session temporary messages ride the friend mesh as registered feature payloads.
@@ -969,6 +1006,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // advertised whenever we join a friend session. (Owner may override with a `messages` setting
         // later, mirroring the `shop` gate above; see design_choices.)
         capabilities.append(ProximityCapability.messages.rawValue)
+        // Content-moderation reports are a safety feature with no opt-out — always advertised so a
+        // friend's device knows it may hand us the reports it has verified.
+        capabilities.append(ProximityCapability.moderation.rawValue)
         return capabilities
     }
 
@@ -1792,6 +1832,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 await self?.sendShopCatalog(to: slot)
                 await self?.sendShopCatalogRequest(to: slot)
             }
+        }
+        // Phase 3b: hand our own signed moderation reports to this committed friend (one-hop relay).
+        if peerIdentity.supports(.moderation) {
+            Task { [weak self] in await self?.sendModerationReports(to: slot) }
         }
     }
 

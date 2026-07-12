@@ -66,6 +66,12 @@ public final class ModerationLedger {
         return entry
     }
 
+    /// Stores peers' already-verified report rows (from the one-hop relay). Upsert de-dupes by the
+    /// deterministic id and keeps the higher `reporterSeq`, so re-delivery is idempotent.
+    public func ingestForeign(_ entries: [ModerationLedgerEntry]) {
+        for entry in entries { upsert(entry) }
+    }
+
     // MARK: - Reads
 
     /// True when this device holds a live (non-retracted) local report for the artwork — used to hide

@@ -51,6 +51,13 @@ public final class ModerationBanStore {
     @ObservationIgnored private static let clockSlack: Double = 26 * 3600
     /// Constant device account: identity-independent so wiping/minting a new identity can't clear it.
     @ObservationIgnored private static let selfAccount = "selfBan.device"
+    /// A single reboot may credit at most this much wall time. Caps the "jump the clock far forward,
+    /// then reboot" attack (the monotonic clock resets on reboot, so the shutdown-gap branch runs and
+    /// would otherwise credit the whole forward jump). A device is rarely off longer than this; a
+    /// genuinely long shutdown just serves the ban slightly slower (safe direction). Repeated
+    /// forward-ONLY reboots remain the accepted residual — they need a permanently-ahead clock, which
+    /// breaks every day-keyed feature of the app.
+    @ObservationIgnored private static let maxRebootGapCreditSeconds: Double = 2 * 86_400
 
     public init(
         service: String = "com.fernlet.moderation",
@@ -133,9 +140,12 @@ public final class ModerationBanStore {
             // Same boot: monotonic time (which counts sleep) is the real elapsed credit.
             record.creditedMonotonic += max(0, nowMono - record.lastCheckMonotonic)
         } else {
-            // Reboot: the monotonic clock reset. The unobservable shutdown gap is credited from the
-            // wall clock (bounded, policed by the high-water ratchet below).
-            record.creditedWall += max(0, nowWall - record.lastCheckWall)
+            // Reboot: the monotonic clock reset. Credit the (unobservable) shutdown gap from the wall
+            // clock — but CAP it, so "jump the clock far forward, then reboot" can't instant-serve the
+            // ban in a single reboot. The high-water ratchet below still voids all wall credit if the
+            // clock is later rolled back.
+            let gap = max(0, nowWall - record.lastCheckWall)
+            record.creditedWall += min(gap, Self.maxRebootGapCreditSeconds)
             FernletAuditLog.log("storeBan.rebootFallback", context: ["account": account])
         }
 
