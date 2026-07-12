@@ -292,6 +292,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public var filmRemaining: Int { max(0, Self.maxPhotosPerSenderPerSession - photosAddedThisSession) }
 
     public var localFingerprint: String { identity.localFingerprint }
+    public var localSigningPublicKey: Data { identity.localSigningPublicKey }
 
     public var sessionParticipants: [MeshSessionParticipant] {
         var participants = [

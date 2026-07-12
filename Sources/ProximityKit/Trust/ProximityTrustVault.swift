@@ -34,6 +34,15 @@ public final class ProximityTrustVault: ProximityTrustPolicy {
             .first
     }
 
+    /// The most-recently-seen peer whose fingerprint matches — used to resolve a shop seller's signing
+    /// key from a catalog that only carries the verified fingerprint.
+    public func peer(fingerprint: String) -> ProximityTrustedPeerRecord? {
+        trustedPeers
+            .filter { IdentityService.fingerprintsMatch($0.fingerprint, fingerprint) }
+            .sorted { $0.lastSeenAt > $1.lastSeenAt }
+            .first
+    }
+
     public func isTrustedProximityPeer(signingPublicKey: Data) -> Bool {
         return trustedPeers.contains {
             $0.signingPublicKey == signingPublicKey && $0.revokedAt == nil
@@ -123,6 +132,46 @@ public final class ProximityTrustVault: ProximityTrustPolicy {
             peerDisplayName: trustedPeers[index].displayName,
             message: "Revoked \(trustedPeers[index].displayName)"
         ))
+        onChange()
+    }
+
+    /// Reports a peer for objectionable content. Stamps `reportedAt`/`reportReason`; when `blockAlso`
+    /// (the safe default) also blocks + revokes exactly like `block()`. Creates a blocked+reported stub
+    /// when the key isn't already in the vault (a reported item's seller may not be a kept friend).
+    public func report(signingPublicKey: Data, reason: String, blockAlso: Bool = true) {
+        let now = Date()
+        guard let index = trustedPeers.firstIndex(where: { $0.signingPublicKey == signingPublicKey }) else {
+            let fingerprint = IdentityService.fingerprint(of: signingPublicKey)
+            trustedPeers.append(ProximityTrustedPeerRecord(
+                displayName: fingerprint,
+                fingerprint: fingerprint,
+                signingPublicKey: signingPublicKey,
+                keyAgreementPublicKey: Data(),
+                mode: .friend,
+                firstAcceptedAt: now,
+                lastSeenAt: now,
+                revokedAt: blockAlso ? now : nil,
+                blockedAt: blockAlso ? now : nil,
+                reportedAt: now,
+                reportReason: reason
+            ))
+            recordAuditWithoutSaving(TrainerAuditEvent(
+                kind: .peerReported, peerFingerprint: fingerprint, peerDisplayName: fingerprint,
+                message: "Reported \(fingerprint)"))
+            onChange()
+            return
+        }
+        trustedPeers[index].reportedAt = now
+        trustedPeers[index].reportReason = reason
+        if blockAlso {
+            trustedPeers[index].blockedAt = now
+            trustedPeers[index].revokedAt = now
+        }
+        recordAuditWithoutSaving(TrainerAuditEvent(
+            kind: .peerReported,
+            peerFingerprint: trustedPeers[index].fingerprint,
+            peerDisplayName: trustedPeers[index].displayName,
+            message: "Reported \(trustedPeers[index].displayName)"))
         onChange()
     }
 
