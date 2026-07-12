@@ -148,6 +148,9 @@ private nonisolated let canonicalAdmissionTokenDomain = Data("fernlet.canonical.
 private nonisolated let canonicalActivityDescriptorDomain = Data("fernlet.canonical.activity-descriptor.v2".utf8)
 private nonisolated let canonicalActivityJoinTokenDomain = Data("fernlet.canonical.activity-join-token.v2".utf8)
 private nonisolated let canonicalActivityRosterSnapshotDomain = Data("fernlet.canonical.activity-roster-snapshot.v2".utf8)
+// Moderation report row (Phase 3b). Distinct tag so a report signature can never cross-validate any
+// other signed type.
+private nonisolated let canonicalModerationReportDomain = Data("fernlet.canonical.moderation-report.v2".utf8)
 
 // MARK: - Identity envelope
 
@@ -284,6 +287,29 @@ public nonisolated func canonicalBytes(for snapshot: ActivityRosterSnapshot) -> 
     writer.appendDate(snapshot.issuedAt)
     writer.appendLengthPrefixed(snapshot.hostSigningPublicKey)
     // hostSignature: deliberately excluded.
+    return writer.bytes
+}
+
+// MARK: - Moderation report (Phase 3b)
+
+/// Canonical signing bytes for a `ModerationLedgerEntry` — the deterministic bytes a reporter signs and
+/// a receiver re-derives to verify. Both ends produce identical bytes for the same row. `createdAt` is
+/// bound at whole-second resolution (a hostile future date is part of the signature; the receiver may
+/// then clamp the STORED createdAt for decay without touching verification). Length-prefixing makes the
+/// encoding injective — no value can shift a field boundary — and `appendDate` saturates instead of
+/// trapping on an out-of-range wire date. There is no legacy encoder: this row type never signed before.
+public nonisolated func canonicalBytes(for entry: ModerationLedgerEntry) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalModerationReportDomain)
+    writer.appendString(entry.kind.rawValue)
+    writer.appendLengthPrefixed(entry.reporterSigningPublicKey)
+    writer.appendLengthPrefixed(entry.subjectSigningPublicKey)
+    writer.appendUUID(entry.itemID)
+    writer.appendLengthPrefixed(entry.contentHash)
+    writer.appendString(entry.reasonToken)
+    writer.appendUInt64(entry.reporterSeq)
+    writer.appendDate(entry.createdAt)
+    // signature: lives on `SignedModerationReport`, not the entry — nothing to exclude here.
     return writer.bytes
 }
 

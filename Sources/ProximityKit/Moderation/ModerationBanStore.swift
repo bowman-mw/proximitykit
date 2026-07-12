@@ -36,6 +36,11 @@ nonisolated struct BanRecord: Codable {
     var lastCheckWall: Double
     var maxObservedWall: Double
     var tamperCount: Int
+    /// Hex content hashes of the artworks whose reports have already triggered a ban of this subject
+    /// (cumulative across successive bans). A served ban keeps its record, so this high-water mark lets
+    /// `reconcile` re-arm only on a NEW qualifying artwork — the same still-non-decayed reports can't
+    /// silently re-mint the 30-day ban. Optional so records written before this field decode cleanly.
+    var handledContentHashes: [String]? = nil
 }
 
 @MainActor
@@ -72,14 +77,18 @@ public final class ModerationBanStore {
     // MARK: - Apply
 
     /// Bans this device's store for `durationDays`. No-op if a self-ban is already active (never resets
-    /// or extends an in-flight ban).
-    public func applySelfBan(durationDays: Int = ClothingModerationLimits.banDurationDays) {
-        writeBanIfNotActive(account: Self.selfAccount, subject: "self", durationDays: durationDays)
+    /// or extends an in-flight ban). `handledContentHashes` records the artworks this ban answers for.
+    public func applySelfBan(durationDays: Int = ClothingModerationLimits.banDurationDays,
+                             handledContentHashes: Set<String> = []) {
+        writeBanIfNotActive(account: Self.selfAccount, subject: "self", durationDays: durationDays,
+                            handledContentHashes: handledContentHashes)
     }
 
     /// Bans a peer designer (by fingerprint) locally — this device drops their catalogs for the duration.
-    public func applyPeerBan(fingerprint: String, durationDays: Int = ClothingModerationLimits.banDurationDays) {
-        writeBanIfNotActive(account: Self.peerAccount(fingerprint), subject: "peer:\(fingerprint)", durationDays: durationDays)
+    public func applyPeerBan(fingerprint: String, durationDays: Int = ClothingModerationLimits.banDurationDays,
+                             handledContentHashes: Set<String> = []) {
+        writeBanIfNotActive(account: Self.peerAccount(fingerprint), subject: "peer:\(fingerprint)",
+                            durationDays: durationDays, handledContentHashes: handledContentHashes)
     }
 
     // MARK: - Query (refresh-on-read)
@@ -93,19 +102,37 @@ public final class ModerationBanStore {
 
     // MARK: - Escalation reconcile (fed by the moderation ledger; Phase 3b adds peers' reports)
 
-    /// Applies self/peer bans that the verified report set now warrants. Idempotent.
+    /// Applies self/peer bans that the verified report set now warrants. Idempotent — and a served ban is
+    /// re-armed only by a NEW qualifying artwork, never by the same still-non-decayed reports (so a 30-day
+    /// ban stays 30 days instead of re-minting every reconcile for the reports' full 180-day lifetime).
     public func reconcile(rows: [ModerationLedgerEntry], localSigningKey: Data) {
         let now = date()
-        if !isSelfBanned,
-           ModerationEconomy.shouldBanDesigner(subjectKey: localSigningKey, in: rows, now: now) {
-            applySelfBan()
+        if let hashes = evidenceWarrantingBan(account: Self.selfAccount, subjectKey: localSigningKey, rows: rows, now: now) {
+            applySelfBan(handledContentHashes: hashes)
         }
         let subjects = Set(rows.map { $0.subjectSigningPublicKey }).subtracting([localSigningKey, Data()])
-        for subject in subjects
-        where ModerationEconomy.shouldBanDesigner(subjectKey: subject, in: rows, now: now) {
+        for subject in subjects {
             let fingerprint = IdentityService.fingerprint(of: subject)
-            if !isPeerBanned(fingerprint: fingerprint) { applyPeerBan(fingerprint: fingerprint) }
+            if let hashes = evidenceWarrantingBan(account: Self.peerAccount(fingerprint), subjectKey: subject, rows: rows, now: now) {
+                applyPeerBan(fingerprint: fingerprint, handledContentHashes: hashes)
+            }
         }
+    }
+
+    /// The currently-qualifying artwork hashes to record IF a (re)ban should fire now, else nil. Returns
+    /// nil when a ban is already active, when the designer is below the ban threshold, or when a prior
+    /// (served) ban already covered every currently-qualifying artwork — the last case is what stops a
+    /// served ban from re-minting off unchanged evidence.
+    private func evidenceWarrantingBan(account: String, subjectKey: Data, rows: [ModerationLedgerEntry], now: Date) -> Set<String>? {
+        guard remainingSeconds(account: account) <= 0 else { return nil }
+        guard ModerationEconomy.shouldBanDesigner(subjectKey: subjectKey, in: rows, now: now) else { return nil }
+        let currentHex = Set(ModerationEconomy.unlistableContentHashes(ofDesigner: subjectKey, in: rows, now: now)
+            .map { ModerationLedgerEntry.hex($0) })
+        if let prior = load(account: account)?.handledContentHashes,
+           currentHex.subtracting(Set(prior)).isEmpty {
+            return nil   // a prior ban already answered for all of this; no new offense
+        }
+        return currentHex
     }
 
     /// Deliberately NOT called from "Reset everything": a self-ban must survive a data reset (that is
@@ -118,14 +145,18 @@ public final class ModerationBanStore {
 
     private static func peerAccount(_ fingerprint: String) -> String { "peerBan:\(fingerprint)" }
 
-    private func writeBanIfNotActive(account: String, subject: String, durationDays: Int) {
+    private func writeBanIfNotActive(account: String, subject: String, durationDays: Int,
+                                     handledContentHashes: Set<String>) {
         guard remainingSeconds(account: account) <= 0 else { return }
+        // Carry forward the artworks any prior (served) ban already covered, so the high-water mark only grows.
+        let merged = Set(load(account: account)?.handledContentHashes ?? []).union(handledContentHashes)
         let nowWall = date().timeIntervalSinceReferenceDate
         let record = BanRecord(
             banID: UUID(), subject: subject, durationSeconds: Double(durationDays) * 86_400,
             startedAtWall: nowWall, creditedMonotonic: 0, creditedWall: 0,
             lastCheckMonotonic: clock.seconds, lastCheckWall: nowWall,
-            maxObservedWall: nowWall, tamperCount: 0)
+            maxObservedWall: nowWall, tamperCount: 0,
+            handledContentHashes: merged.isEmpty ? nil : Array(merged))
         save(record, account: account)
         FernletAuditLog.log("storeBan.applied", context: ["subject": subject, "days": "\(durationDays)"])
     }

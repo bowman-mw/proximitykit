@@ -86,6 +86,14 @@ public final class FriendStateCache {
         save()
     }
 
+    /// Wraps a `Decodable` so a single element that fails to decode becomes `nil` instead of throwing and
+    /// taking the whole array down with it (freeze/park convention — one unknown row must not wipe the
+    /// cache; e.g. a future `FriendFuzzyState` case written by a newer build then read after a downgrade).
+    private struct Lenient<T: Decodable>: Decodable {
+        let value: T?
+        init(from decoder: Decoder) throws { value = try? T(from: decoder) }
+    }
+
     private struct PersistedState: Codable {
         var version = 1
         var states: [CachedFriendState] = []
@@ -93,14 +101,16 @@ public final class FriendStateCache {
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
-            states = try c.decodeIfPresent([CachedFriendState].self, forKey: .states) ?? []
+            // Per-row tolerant: skip any undecodable row, keep the rest.
+            states = (try c.decodeIfPresent([Lenient<CachedFriendState>].self, forKey: .states) ?? [])
+                .compactMap(\.value)
         }
     }
 
     private func load() {
         guard let data = try? Data(contentsOf: fileURL),
               let state = try? JSONDecoder().decode(PersistedState.self, from: data) else { return }
-        states = Dictionary(uniqueKeysWithValues: state.states.map { ($0.fingerprint, $0) })
+        states = Dictionary(state.states.map { ($0.fingerprint, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     private func save() {

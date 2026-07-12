@@ -58,17 +58,23 @@ public struct ProximityClothingCatalog: Identifiable, Equatable {
     public var id: String { senderFingerprint ?? senderDisplayName }
     public var senderDisplayName: String
     public var senderFingerprint: String?
+    /// The seller's transport-verified Ed25519 signing key, captured at receipt. Lets a report name the
+    /// real subject key even when the seller is a committed-but-not-kept peer (absent from the trust
+    /// vault), so a cross-device designer ban can actually escalate. In-memory only — never persisted.
+    public var senderSigningPublicKey: Data?
     public var receivedAt: Date
     public var payload: ClothingCatalogPayload
 
     public init(
         senderDisplayName: String,
         senderFingerprint: String?,
+        senderSigningPublicKey: Data? = nil,
         receivedAt: Date,
         payload: ClothingCatalogPayload
     ) {
         self.senderDisplayName = senderDisplayName
         self.senderFingerprint = senderFingerprint
+        self.senderSigningPublicKey = senderSigningPublicKey
         self.receivedAt = receivedAt
         self.payload = payload
     }

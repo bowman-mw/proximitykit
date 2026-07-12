@@ -105,6 +105,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored public var onFriendStateReceived: ((String, FriendStatePayload) -> Void)?
     /// Phase 5: a friend session committed with this fingerprint (an in-person meeting) — feeds closeness.
     @ObservationIgnored public var onFriendSessionCommitted: ((String) -> Void)?
+    /// A photo was exchanged with this friend in the current session (feeds the closeness photo signal).
+    @ObservationIgnored public var onFriendPhotoSession: ((String) -> Void)?
     /// The live-session temporary-message store (Phase 5): the current session's chat transcript.
     /// Registered on the payload registry in `init`. Memory-only and deliberately NOT Codable — it can
     /// never enter a snapshot. Cleared at EVERY session-end path (the same last-committed-slot-gone
@@ -293,9 +295,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// Hands this device's OWN signed reports to a committed friend (one-hop). No provider, an empty
-    /// set, or no signable rows → sends nothing.
-    private func sendModerationReports(to slot: PeerSlot) async {
+    /// Hands this device's OWN signed reports to a committed friend (one-hop). Gated on the recipient
+    /// being a vault-TRUSTED (kept-in-person) peer — symmetric with the receive handler — so your signed,
+    /// non-repudiable reports never leak to a merely-committed stranger you didn't keep as a friend. No
+    /// provider, an empty set, or no signable rows → sends nothing.
+    private func sendModerationReports(to slot: PeerSlot, recipientSigningKey: Data) async {
+        guard store.proximityTrustVault.isTrustedProximityPeer(signingPublicKey: recipientSigningKey) else { return }
         guard let rows = ownModerationReportsProvider?(), !rows.isEmpty else { return }
         let payload = ModerationReportRelay.buildPayload(ownReports: rows, identity: identity)
         guard !payload.reports.isEmpty else { return }
@@ -316,8 +321,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// Sends our fuzzy state + appearance to a committed friend. A nil provider (opt-out) sends nothing.
-    private func sendFriendState(to slot: PeerSlot) async {
+    /// Sends our fuzzy state + appearance to a committed friend. Gated on the recipient being a
+    /// vault-TRUSTED (kept-in-person) peer — symmetric with the receive handler — so the fuzzy wellbeing
+    /// vibe never leaks to a merely-committed stranger. A nil provider (opt-out) also sends nothing.
+    private func sendFriendState(to slot: PeerSlot, recipientSigningKey: Data) async {
+        guard store.proximityTrustVault.isTrustedProximityPeer(signingPublicKey: recipientSigningKey) else { return }
         guard let payload = friendStatePayloadProvider?() else { return }
         await sendEnvelope(.friendState, encodable: payload, via: slot, sealed: true)
     }
@@ -928,15 +936,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             if let payload = try? decoder.decode(FriendPhotoPayload.self, from: plaintext) {
                 if let fp = payload.senderFingerprint, store.isBlockedFingerprint(fp) { return }
                 guard allowIncomingPhoto(payload.id, from: peer?.fingerprint) else { return }
+                let inSession = isPhotoFromCurrentSession(payload)
                 if payload.keyEpoch > 0 {
                     // Encrypted photo: decrypt before caching.
                     guard let key = currentGroupKey, key.epoch == payload.keyEpoch,
                           let ct = payload.encryptedImageData, let nonce = payload.nonce,
                           let decrypted = try? Self.decryptPhoto(ct, nonce: nonce, key: key) else { return }
-                    cachePhoto(payload.withDecryptedImageData(decrypted), includeInSession: isPhotoFromCurrentSession(payload))
+                    cachePhoto(payload.withDecryptedImageData(decrypted), includeInSession: inSession)
                 } else {
-                    cachePhoto(payload, includeInSession: isPhotoFromCurrentSession(payload))   // epoch 0: unencrypted, accept as-is
+                    cachePhoto(payload, includeInSession: inSession)   // epoch 0: unencrypted, accept as-is
                 }
+                // A photo shared with this friend in the current session feeds the closeness photo signal
+                // (day-capped downstream, so multiple photos from one friend count once).
+                if inSession, let fingerprint = peer?.fingerprint { onFriendPhotoSession?(fingerprint) }
             }
         case .friendPhotoManifest:
             if let payload = try? decoder.decode(FriendPhotoManifestPayload.self, from: plaintext),
@@ -1947,12 +1959,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             }
         }
         // Phase 3b: hand our own signed moderation reports to this committed friend (one-hop relay).
+        // The send method additionally requires the recipient be a vault-trusted (kept) friend.
         if peerIdentity.supports(.moderation) {
-            Task { [weak self] in await self?.sendModerationReports(to: slot) }
+            let recipientKey = peerIdentity.signingPublicKey
+            Task { [weak self] in await self?.sendModerationReports(to: slot, recipientSigningKey: recipientKey) }
         }
-        // Phase 4: share our fuzzy vibe + appearance with this committed friend.
+        // Phase 4: share our fuzzy vibe + appearance with this committed friend (kept friends only).
         if peerIdentity.supports(.friendState) {
-            Task { [weak self] in await self?.sendFriendState(to: slot) }
+            let recipientKey = peerIdentity.signingPublicKey
+            Task { [weak self] in await self?.sendFriendState(to: slot, recipientSigningKey: recipientKey) }
         }
         // Phase 6: offer any activities we host to this committed peer + exchange a roster version digest
         // so the highest verified snapshot converges. The manager sends via its wired `send` closure.

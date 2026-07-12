@@ -260,6 +260,28 @@ public final class ProximityActivityManager {
         gossipSnapshot(snapshot)
     }
 
+    /// Re-mints and re-sends a grant to an EXISTING roster member (their key is already in the verified
+    /// roster, so no new participant is admitted and the roster is not mutated). Used to recover an
+    /// orphaned or re-joining member — see `receiveJoinRequest`. The token is freshly signed at the
+    /// current roster version; the current signed snapshot is re-delivered unchanged.
+    private func regrantExistingMember(_ member: ActivityParticipant, hostedIndex: Int) {
+        guard let identity else { return }
+        let hosted = hostedActivities[hostedIndex]
+        guard let token = try? ActivityJoinToken.signed(
+            activityID: hosted.descriptor.activityID,
+            activityParamsHash: ActivityParamsHash.of(hosted.descriptor),
+            joinerFingerprint: member.fingerprint,
+            joinerSigningPublicKey: member.signingPublicKey,
+            hostIdentity: identity,
+            grantedAt: now(),
+            expiresAt: hosted.descriptor.expiresAt,
+            rosterVersionAtGrant: hosted.version
+        ) else { return }
+        let grant = ActivityJoinGrantPayload(token: token, snapshot: hosted.currentSnapshot)
+        let recipient = member.fingerprint
+        Task { [weak self] in await self?.send?(.activityJoinGrant, grant, recipient, true) }
+    }
+
     public func declineJoin(_ pending: PendingActivityJoin) {
         pendingJoinRequests.removeAll { $0.verifiedFingerprint == pending.verifiedFingerprint && $0.activityID == pending.activityID }
     }
@@ -357,8 +379,15 @@ public final class ProximityActivityManager {
         guard let index = hostedActivities.firstIndex(where: { $0.descriptor.activityID == payload.activityID }) else { return }
         let hosted = hostedActivities[index]
         guard !hosted.descriptor.isExpired(at: now()) else { return }
-        // Already a member? Ignore (idempotent).
-        guard !hosted.participants.contains(where: { $0.signingPublicKey == verifiedSigningPublicKey }) else { return }
+        // Already a member? RE-ISSUE their grant rather than dropping the request. This recovers two
+        // dead-ends: a member whose original grant send failed (stranded in the roster with no token), and
+        // a member who left and is re-joining (their local join was deleted but the host still lists them).
+        // The roster is unchanged, so no version bump / re-gossip — we only re-deliver their token + the
+        // current snapshot to the transport-verified requester (whose key already equals a roster member's).
+        if let member = hosted.participants.first(where: { $0.signingPublicKey == verifiedSigningPublicKey }) {
+            regrantExistingMember(member, hostedIndex: index)
+            return
+        }
         // Dedup pending by fingerprint+activity.
         pendingJoinRequests.removeAll { $0.verifiedFingerprint == verifiedFingerprint && $0.activityID == payload.activityID }
         pendingJoinRequests.append(PendingActivityJoin(

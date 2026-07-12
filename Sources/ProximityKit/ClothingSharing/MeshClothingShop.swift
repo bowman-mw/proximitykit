@@ -117,6 +117,7 @@ public final class MeshClothingShop {
         let catalog = ProximityClothingCatalog(
             senderDisplayName: envelope.senderDisplayName,
             senderFingerprint: verifiedFingerprint,
+            senderSigningPublicKey: envelope.senderSigningPublicKey,
             receivedAt: now,
             payload: sanitized
         )

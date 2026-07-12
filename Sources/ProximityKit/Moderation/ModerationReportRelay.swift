@@ -33,14 +33,16 @@ public nonisolated struct ModerationReportPayload: Codable, Equatable, Sendable 
 }
 
 public enum ModerationReportRelay {
-    /// Builds a payload of the local user's OWN report rows (reporter == local key), each signed.
+    /// Builds a payload of the local user's OWN rows (reporter == local key), each signed. Carries both
+    /// reports AND their retractions, so undoing a report propagates to peers who already stored it (a
+    /// retract supersedes its report by a higher `reporterSeq` in `ModerationEconomy.liveReports`).
     public static func buildPayload(ownReports: [ModerationLedgerEntry], identity: IdentityService) -> ModerationReportPayload {
         let localKey = identity.localSigningPublicKey
         let signed: [SignedModerationReport] = ownReports
-            .filter { $0.reporterSigningPublicKey == localKey && $0.kind == .report }
+            .filter { $0.reporterSigningPublicKey == localKey && ($0.kind == .report || $0.kind == .retract) }
             .prefix(ModerationReportPayload.maxReports)
             .compactMap { entry in
-                guard let signature = try? identity.sign(ModerationLedgerEntry.canonicalSignedBytes(entry)) else { return nil }
+                guard let signature = try? identity.sign(canonicalBytes(for: entry)) else { return nil }
                 return SignedModerationReport(entry: entry, signature: signature)
             }
         return ModerationReportPayload(reports: signed)
@@ -48,20 +50,22 @@ public enum ModerationReportRelay {
 
     /// Verifies + filters a received payload to the rows this device may store. Each row must be signed
     /// by the transport-verified SENDER key AND name that same sender as its reporter (one-hop: you may
-    /// deliver only reports you yourself signed). The stored `id` and `reporterSeq` are re-derived from
-    /// the verified sender so a hostile sender can't spoof another reporter's dedup key; a future-dated
-    /// `createdAt` is clamped to `now` (decay uses the stored value, verification used the signed one).
+    /// deliver only rows you yourself signed). Both reports and retractions are carried; the stored `id`
+    /// is re-derived from the verified sender AND the row's own kind so a hostile sender can't spoof
+    /// another reporter's dedup key (and a retract can't masquerade as a report or vice versa). A
+    /// future-dated `createdAt` is clamped to `now` (decay uses the stored value; verification used the
+    /// signed one). `reporterSeq` is preserved so a retract still supersedes its report.
     public static func verifiedRows(from payload: ModerationReportPayload, senderSigningKey: Data, now: Date) -> [ModerationLedgerEntry] {
         let senderFingerprint = IdentityService.fingerprint(of: senderSigningKey)
         return payload.reports.compactMap { signed in
             let entry = signed.entry
             guard entry.reporterSigningPublicKey == senderSigningKey else { return nil }       // one-hop
-            guard entry.kind == .report else { return nil }
+            guard entry.kind == .report || entry.kind == .retract else { return nil }
             guard IdentityService.verify(signed.signature,
-                                         of: ModerationLedgerEntry.canonicalSignedBytes(entry),
+                                         of: canonicalBytes(for: entry),
                                          by: senderSigningKey) else { return nil }
             var row = entry
-            row.id = ModerationLedgerEntry.rowID(kind: .report, reporterFingerprint: senderFingerprint, contentHash: row.contentHash)
+            row.id = ModerationLedgerEntry.rowID(kind: entry.kind, reporterFingerprint: senderFingerprint, contentHash: row.contentHash)
             if row.createdAt > now { row.createdAt = now }
             return row
         }

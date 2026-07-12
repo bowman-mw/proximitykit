@@ -116,6 +116,10 @@ public final class PresenceManager: ProximityPayloadHandling {
     @ObservationIgnored private let identity: IdentityService
     @ObservationIgnored private let ledger: ProximityHeartLedger
     @ObservationIgnored private let replayCache = ReplayCache()
+    /// Fired (with the friend's fingerprint) when a heart is successfully sent / received, so the app can
+    /// feed the closeness signal. Set by the app; nil in tests / when closeness isn't wired.
+    @ObservationIgnored public var onHeartSent: ((String) -> Void)?
+    @ObservationIgnored public var onHeartReceived: ((String) -> Void)?
     @ObservationIgnored private var session: MeshMultipeerSession?
     @ObservationIgnored private(set) var isRunning = false
 
@@ -742,6 +746,7 @@ public final class PresenceManager: ProximityPayloadHandling {
                 sealed: true
             )
             ledger.recordHeartSent(to: friend.fingerprint)
+            onHeartSent?(friend.fingerprint)
             heartSendState = .sent(recipientName: friend.displayName)
             recordDiagnostic("Sent good vibes to a friend.")
         } catch {
@@ -880,6 +885,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         if senderName.isEmpty { senderName = "A friend" }
         // The ledger drops duplicates (same id) and enforces the 5-minute per-sender receive rate.
         if ledger.recordReceivedHeart(id: payload.id, senderDisplayName: senderName, senderFingerprint: peer.fingerprint) {
+            onHeartReceived?(peer.fingerprint)
             recordDiagnostic("Received good vibes from a friend.")
         }
     }

@@ -62,7 +62,10 @@ public final class ClosenessLedger {
     }
 
     public func closenessMap(for fingerprints: [String]) -> [String: Double] {
-        Dictionary(uniqueKeysWithValues: fingerprints.map { ($0, closeness(fingerprint: $0)) })
+        // `uniquingKeysWith` (not the trapping `uniqueKeysWithValues`): a duplicate fingerprint in the
+        // caller's list must not crash the Friends tab. Matches the sibling `firstAcceptedAt` dict built
+        // at the call site.
+        Dictionary(fingerprints.map { ($0, closeness(fingerprint: $0)) }, uniquingKeysWith: { first, _ in first })
     }
 
     /// True when the close slots haven't been evaluated yet today (drives once-per-day evaluation).
@@ -103,11 +106,21 @@ public final class ClosenessLedger {
         return f
     }()
 
+    /// A calendar pinned to the SAME timezone the formatter captured, so day-bucketing (`dayKey`) and
+    /// day-diffing (`daysBetween`) always agree. Using the live `Calendar.current` here would let the two
+    /// disagree by a day after a timezone change / DST boundary, skewing the decay window.
+    private nonisolated static let dayCalendar: Calendar = {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = dayFormatter.timeZone
+        cal.locale = Locale(identifier: "en_US_POSIX")
+        return cal
+    }()
+
     static func dayKey(for date: Date) -> String { dayFormatter.string(from: date) }
 
     static func daysBetween(_ earlierKey: String, and laterKey: String) -> Int? {
         guard let e = dayFormatter.date(from: earlierKey), let l = dayFormatter.date(from: laterKey) else { return nil }
-        return Calendar.current.dateComponents([.day], from: e, to: l).day
+        return dayCalendar.dateComponents([.day], from: e, to: l).day
     }
 
     // MARK: - Persistence
