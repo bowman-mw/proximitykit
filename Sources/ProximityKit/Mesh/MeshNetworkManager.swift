@@ -116,6 +116,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public var isSearching = false
     public var meshError: String?
 
+    /// A radio start-up failure (advertising or browsing failed to begin) during discovery, kept
+    /// SEPARATE from `meshError`. `meshError` is multiplexed across in-session conditions (photo
+    /// quota, key-rotation exclusion) that are surfaced by `DisposableCameraView` — which only
+    /// exists inside a session. A discovery failure happens BEFORE any session, so it had no
+    /// reachable UI and the search spun forever in silence. This drives the Friends-screen
+    /// discovery-failure banner instead. On device the near-certain cause is a declined Local
+    /// Network prompt. Set only by the transport `onTransportError`; cleared on every (re)search.
+    public var discoveryError: String?
+
     @ObservationIgnored private unowned let store: any ProximityHost
     @ObservationIgnored private let meshSession = MeshMultipeerSession()
     @ObservationIgnored private let identity: IdentityService
@@ -1163,8 +1172,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // Without this, a transient socket failure permanently strands the session because
             // the browser won't re-fire onPeerDiscovered for a peer it already found.
             guard self.isProximityJoin, self.isSessionOpen, !wasCommitted else { return }
-            let peerFP = peer.advertisedFingerprint ?? peer.displayName
-            guard self.identity.localFingerprint > peerFP else { return }
+            guard self.shouldInitiateInvite(to: peer) else { return }
             let retryCount = self.peerRetryCount[peer.id, default: 0]
             guard retryCount < Self.maxPeerRetries else { return }
             self.peerRetryCount[peer.id] = retryCount + 1
@@ -1184,14 +1192,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return self.canEvaluateOverflowCandidate(peer)
         }
         meshSession.onTransportError = { [weak self] message in
-            // Discovery failed to start (e.g. a service type missing from NSBonjourServices) —
-            // surface it instead of searching forever in silence.
-            self?.meshError = message
+            // Discovery failed to start (e.g. a declined Local Network prompt, or a service type
+            // missing from NSBonjourServices) — surface it instead of searching forever in
+            // silence. Its own property, not `meshError`: the only `meshError` view lives inside a
+            // session, which by definition does not exist yet at a discovery failure.
+            self?.discoveryError = message
         }
     }
 
     private func startSearching() {
         isSearching = true
+        // Clear any stale discovery failure before re-arming the radios, so a fixed permission
+        // (or a fresh attempt after a transient failure) drops the banner instead of pinning it up
+        // over a search that is now healthy.
+        discoveryError = nil
         meshSession.start(serviceType: MeshMultipeerSession.friendServiceType, discoveryInfo: currentDiscoveryInfo())
         startObserving()
     }
@@ -1200,6 +1214,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         observationTask?.cancel()
         observationTask = nil
         isSearching = false
+        // A discovery failure is meaningful only while we are actively searching; leaving the tab
+        // clears it so it never reappears stale on the next visit.
+        discoveryError = nil
         isProximityJoin = false
         peerRetryCount.removeAll()
         sentShopCatalogSlotIDs.removeAll()
@@ -1234,16 +1251,47 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         meshSession.updateDiscoveryInfo(currentDiscoveryInfo())
     }
 
+    /// Decides which half of a mutually-discovered pair sends the MC invitation.
+    ///
+    /// Both peers browse AND advertise, so both discover each other; without a tie-break both
+    /// invite simultaneously and the NW/MC layer fails the pair with errno 61 ("no clist for
+    /// remoteID"). The comparison must therefore be SYMMETRIC — the same two values compared on
+    /// both devices, so that exactly one side evaluates true.
+    ///
+    /// The previous guard compared OUR fingerprint against THEIR display name, which is not a
+    /// comparison of like with like, and in practice deadlocked the mesh outright:
+    ///   * `advertisedFingerprint` reads `discoveryInfo["fp"]`, but `currentDiscoveryInfo()` has
+    ///     never published an `"fp"` key on this radio — so it is always nil and the fallback to
+    ///     `displayName` always ran;
+    ///   * `displayName` is `UIDevice.current.name`, which iOS 16+ reports as the generic
+    ///     "iPhone" unless the app holds `com.apple.developer.device-information.
+    ///     user-assigned-device-name` (Fernlet.entitlements does not request it);
+    ///   * `localFingerprint` is 16 lowercase hex chars, so its first character is at most "f" —
+    ///     always less than "i". `localFingerprint > "iPhone"` was therefore false on BOTH sides,
+    ///     every time, and `meshSession.invite` was unreachable from either call site.
+    ///
+    /// `sid` is the correct discriminator: a per-launch random UUID that both sides already
+    /// broadcast in `currentDiscoveryInfo()`. It needs no new field on the wire, and — unlike a
+    /// fingerprint — it is not linkable across sessions, so publishing it costs no privacy.
+    /// Internal rather than private so the symmetry property can be asserted directly — the bug
+    /// this replaces was invisible to every existing test because it lived inside a closure that
+    /// needs live radios to reach.
+    func shouldInitiateInvite(to peer: MultipeerPeer) -> Bool {
+        guard let peerSessionID = peer.discoveryInfo?["sid"], !peerSessionID.isEmpty else {
+            // Discovery info absent (peer not yet resolved, or a build predating "sid"). Deadlock
+            // is strictly worse than a redundant invite here: a simultaneous mutual invite fails
+            // one side with errno 61 and the disconnect-retry path recovers it, whereas neither
+            // side inviting strands the pair permanently — which is exactly the bug above.
+            return true
+        }
+        return sessionID > peerSessionID
+    }
+
     private func handlePeerDiscovered(_ peer: MultipeerPeer) {
         // Proximity-join mode: auto-invite every peer silently; no browse list shown.
         if isProximityJoin {
             guard isSessionOpen else { return }
-            // Tie-break: only the peer with the lexicographically higher fingerprint sends
-            // the MC invitation. Both sides browse+advertise so both discover each other;
-            // without this guard, simultaneous mutual invites cause "Connection refused"
-            // errors in the NW/MC layer (errno 61, "no clist for remoteID").
-            let peerFP = peer.advertisedFingerprint ?? peer.displayName
-            guard identity.localFingerprint > peerFP else { return }
+            guard shouldInitiateInvite(to: peer) else { return }
             if slots.count < Self.maxTotalSlots, !slots.contains(where: { $0.peer.id == peer.id }) {
                 meshSession.invite(peer)
             }
