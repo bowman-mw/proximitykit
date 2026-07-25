@@ -132,6 +132,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private let photoCacheStore: PrivateMediaStore
     @ObservationIgnored private let photoWallPreferencesStore: FriendPhotoWallPreferencesStore
     @ObservationIgnored private var photoWallPreferences: FriendPhotoWallPreferences
+    /// Observed proxy for favorite changes. `photoWallPreferences` itself is `@ObservationIgnored`
+    /// because its `photoWallPosts` getter mutates it during view-body evaluation (plainly observing
+    /// it would risk update loops). This counter is bumped ONLY from `toggleFavorite` (a tap handler,
+    /// never during body eval), and touch-read in `favoritePhotoID(for:)` and the `photoWallPosts`
+    /// getter so the viewer heart and the wall cover both re-render when a favorite toggles.
+    private var favoritesRevision = 0
     @ObservationIgnored private var slotTrustPolicies: [UUID: FriendSessionTrustPolicy] = [:]
     @ObservationIgnored private var observationTask: Task<Void, Never>?
     public private(set) var photosAddedThisSession = 0
@@ -1809,6 +1815,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     public func favoritePhotoID(for post: FriendPhotoWallPost) -> UUID? {
+        _ = favoritesRevision  // observe favorite toggles so the heart re-renders (see favoritesRevision)
         guard let sessionID = post.session?.id else { return nil }
         return photoWallPreferences.favoritePhotoIDsBySession[sessionID]
     }
@@ -1820,10 +1827,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } else {
             photoWallPreferences.favoritePhotoIDsBySession[sessionID] = photoID
         }
+        favoritesRevision &+= 1  // notify observers of favoritePhotoID(for:) / photoWallPosts
         persistPhotoWallPreferences()
     }
 
     public var photoWallPosts: [FriendPhotoWallPost] {
+        _ = favoritesRevision  // read-only: re-render the wall cover when a favorite toggles; NEVER bump here
         progressivelyAggregatePhotoSessions()
         return makePhotoWallPosts()
     }
