@@ -25,21 +25,33 @@ public nonisolated struct ProximityRecipeSharePayload: Codable, Equatable, Ident
         self.recipe = recipe
     }
 
+    /// True when this payload carries sender-authored free text the "Include notes" toggle can withhold.
+    /// For a LOCAL (manually authored) recipe that is the notes OR the cooking steps — both are the
+    /// sender's own prose and can carry personal remarks. For a SAVED (web-imported) recipe it is only
+    /// the summary: that recipe's steps are parsed from a public URL, not personal, so they are never
+    /// gated (withholding them would strip the recipe's value with no privacy benefit).
     public var hasShareNotes: Bool {
         switch recipe.kind {
         case .local:
-            !(recipe.local?.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            let hasNotes = !(recipe.local?.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            let hasSteps = !(recipe.local?.steps?.isEmpty ?? true)
+            return hasNotes || hasSteps
         case .saved:
-            !(recipe.saved?.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            return !(recipe.saved?.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         }
     }
 
+    /// Returns a copy with the sender's free text removed. For a LOCAL recipe this clears BOTH `notes`
+    /// and the user-authored `steps` (F5: step text is free-form and can carry the same personal remarks
+    /// the notes toggle exists to withhold). For a SAVED recipe it clears only the `summary` — its steps
+    /// come from a public source, so they ride along even when notes are omitted.
     public func omittingShareNotes() -> ProximityRecipeSharePayload {
         var copy = self
         switch copy.recipe.kind {
         case .local:
             if var local = copy.recipe.local {
                 local.notes = ""
+                local.steps = nil
                 copy.recipe.local = local
             }
         case .saved:
