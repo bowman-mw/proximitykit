@@ -59,8 +59,20 @@ public final class ProximityTrustVault: ProximityTrustPolicy {
 
     public func isBlockedFingerprint(_ fingerprint: String) -> Bool {
         trustedPeers.contains {
-            IdentityService.fingerprintsMatch($0.fingerprint, fingerprint) && $0.blockedAt != nil
+            $0.blockedAt != nil && Self.blockMatches(stored: $0.fingerprint, query: fingerprint)
         }
+    }
+
+    /// Block matching keeps ONE narrow legacy affordance that the strict 16-char
+    /// `fingerprintsMatch` (tightened 2026-07-25) dropped: photo-cache payloads written before
+    /// 2026-06-12 carry 8-char sender fingerprints and have no key bytes to re-derive from, so an
+    /// 8-hex QUERY may prefix-match a (normalized, 16-char) blocked row. This direction is
+    /// hide-only — a grindable 32-bit prefix can only hide MORE cached photos, never grant
+    /// anything — which is why the affordance lives here and nowhere else.
+    private static func blockMatches(stored: String, query: String) -> Bool {
+        if IdentityService.fingerprintsMatch(stored, query) { return true }
+        let short = query.lowercased()
+        return short.count == 8 && short.allSatisfy(\.isHexDigit) && stored.lowercased().hasPrefix(short)
     }
 
     // MARK: - Writes

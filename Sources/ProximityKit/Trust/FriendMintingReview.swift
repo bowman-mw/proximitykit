@@ -43,7 +43,10 @@ public nonisolated enum FriendMintingReview {
                 return false
             }
             // Match on the signing key first (authorization identity) and fall back to the
-            // display/routing fingerprint so legacy 8-char records still apply.
+            // display/routing fingerprint. Legacy 8-char rows are covered upstream: the vault
+            // normalizes them back to 16 chars from the row's signing key on every load, and
+            // `fingerprintsMatch` no longer prefix-accepts short values (32-bit bindings are
+            // grindable — a planted 8-char row must never suppress this sheet).
             let matching = trustedPeers.filter { record in
                 record.signingPublicKey == entry.signingPublicKey
                     || IdentityService.fingerprintsMatch(record.fingerprint, entry.fingerprint)

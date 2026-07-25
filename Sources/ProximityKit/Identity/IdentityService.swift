@@ -732,12 +732,20 @@ public final class IdentityService {
         return String(hex.prefix(16))
     }
 
-    /// Matches canonical 16-char fingerprints and legacy 8-char values stored by older builds.
-    /// Fingerprints remain display and routing metadata only; authorization uses full key bytes.
+    /// Case-insensitive equality of canonical 16-char fingerprints — nothing else matches.
+    ///
+    /// The legacy 8-char prefix acceptance is GONE (bitchat-adoptions follow-up, 2026-07-25):
+    /// an 8-hex-char binding is a 32-bit target, GPU-grindable to collide, which is the same
+    /// weak-identity-binding class as bitchat's 2025 favorites-impersonation flaw. The only
+    /// legitimate 8-char values ever persisted were trust-vault rows kept between 2026-05-26
+    /// and 2026-06-12, and `ProximityTrustVault.normalized` re-derives those back to 16 chars
+    /// from the row's full signing key on every load — so prefix acceptance had no remaining
+    /// honest caller, only downside if an un-normalized source ever appeared. Fingerprints
+    /// remain display and routing metadata; authorization uses full key bytes.
     public nonisolated static func fingerprintsMatch(_ first: String, _ second: String) -> Bool {
         let lhs = first.lowercased()
         let rhs = second.lowercased()
-        guard [8, 16].contains(lhs.count), [8, 16].contains(rhs.count) else { return false }
-        return lhs.hasPrefix(rhs) || rhs.hasPrefix(lhs)
+        guard lhs.count == 16, rhs.count == 16 else { return false }
+        return lhs == rhs
     }
 }
