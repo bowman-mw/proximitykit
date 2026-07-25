@@ -1302,12 +1302,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // confirm) is the consent gate, so advertise unconditionally like messages. Offers are only sent
         // for activities the user chose to host, so there is nothing to opt out of.
         capabilities.append(ProximityCapability.activities.rawValue)
-        // TF b19 item 5: in-session hearts ride the live mesh session. Advertised whenever we join a
-        // friend session — session membership is the reach gate, and the RECEIVER separately enforces
-        // the `allowNearbyHearts` opt-out + the trusted-friend requirement + the block list before
-        // recording anything. Advertising it lets a sender skip peers on an older build (which have no
-        // `.friendHeart` mesh handler and would park-and-drop the payload) and fall back to presence.
-        capabilities.append(ProximityCapability.hearts.rawValue)
+        // TF b19 item 5: in-session hearts ride the live mesh session. Advertise `.hearts` ONLY when this
+        // device has opted in (`allowNearbyHearts`). The receiver enforces that same opt-out (plus the
+        // trusted-friend requirement + block list) before recording anything, so advertising it while
+        // opted out would make an opted-out device look heart-reachable: a sender would send, see a false
+        // "Sent … good vibes", and burn the 5-minute cooldown even though the receiver silently drops it
+        // (`receiveSessionHeart`). Gating the advertisement means opted-out peers never appear reachable,
+        // so the sender's button reflects the true unavailable state. Also lets a sender skip peers on an
+        // older build (no `.friendHeart` mesh handler) and fall back to presence.
+        //
+        // Accepted limitation: capabilities are exchanged once at the session handshake, so toggling this
+        // setting mid-session does not retroactively update peers already connected in the session.
+        if store.allowNearbyHearts {
+            capabilities.append(ProximityCapability.hearts.rawValue)
+        }
         return capabilities
     }
 
