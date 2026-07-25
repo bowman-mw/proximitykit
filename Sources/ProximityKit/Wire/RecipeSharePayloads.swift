@@ -110,6 +110,11 @@ public nonisolated struct SharedSavedRecipePayload: Codable, Equatable, Sendable
     public var carbs: Int
     public var fat: Int
     public var micronutrients: Micronutrients
+    /// Ordered cooking steps (F5) for a web/saved recipe shared over proximity. Optional key, no format
+    /// version bump: an older peer's `SharedSavedRecipePayload` lacks this property and its synthesized
+    /// `Codable` ignores the extra key, so a steps-carrying saved recipe still decodes minus steps on old
+    /// builds (`ProximityRecipeSharePayload.version` stays 1). See the note on `SharedRecipePayload.steps`.
+    public var steps: [RecipeStep]?
 
     public init(
         name: String,
@@ -120,7 +125,8 @@ public nonisolated struct SharedSavedRecipePayload: Codable, Equatable, Sendable
         protein: Int,
         carbs: Int,
         fat: Int,
-        micronutrients: Micronutrients
+        micronutrients: Micronutrients,
+        steps: [RecipeStep]? = nil
     ) {
         self.name = name
         self.sourceURLString = sourceURLString
@@ -131,6 +137,7 @@ public nonisolated struct SharedSavedRecipePayload: Codable, Equatable, Sendable
         self.carbs = carbs
         self.fat = fat
         self.micronutrients = micronutrients
+        self.steps = steps
     }
 }
 
