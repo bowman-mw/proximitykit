@@ -505,6 +505,14 @@ public final class PresenceManager: ProximityPayloadHandling {
             return
         }
         guard isRunning else {
+            // Race window: the row rendered reachable but the radio has since stopped. With away
+            // delivery on, hand the heart to the dead-drop (which consumed the cooldown) instead
+            // of failing — the button's own away path normally catches this before we do.
+            if queueAwayHeart?(friend) == true {
+                heartSendState = .sent(recipientName: friend.displayName)
+                scheduleHeartStatusClear()
+                return
+            }
             failHeart("\(firstName) isn't nearby right now — hearts travel in person for now.")
             return
         }
@@ -515,6 +523,11 @@ public final class PresenceManager: ProximityPayloadHandling {
             return
         }
         guard let peer = discoveredPeer(matchingFriendFingerprint: friend.fingerprint) else {
+            if queueAwayHeart?(friend) == true {
+                heartSendState = .sent(recipientName: friend.displayName)
+                scheduleHeartStatusClear()
+                return
+            }
             failHeart("\(firstName) isn't nearby right now — hearts travel in person for now.")
             return
         }
@@ -619,6 +632,10 @@ public final class PresenceManager: ProximityPayloadHandling {
             sealedIntroductionPeerKeyAgreementKey: expectedFriendKA,
             timeoutSeconds: 25
         )
+        // Away-hearts prekey gossip (Increment 3): the sealed presence intro carries our bundle;
+        // the friend's verified intro hands theirs over.
+        coordinator.heartDropPrekeyBundleProvider = { [weak self] in self?.heartDropBundleProvider?() }
+        coordinator.onHeartDropPrekeyBundle = { [weak self] key, bundle in self?.onPeerPrekeyBundle?(key, bundle) }
         heartConnections.append(PresenceHeartConnection(
             id: channel.peer.id,
             peer: channel.peer,
@@ -997,6 +1014,14 @@ public final class PresenceManager: ProximityPayloadHandling {
     public func wipeIdentityForDeleteAll() throws {
         try identity.wipe()
     }
+
+    /// Away-hearts seams (bitchat adoptions Increment 3), wired by FernletStore: prekey-bundle
+    /// gossip mirrors MeshNetworkManager's, and `queueAwayHeart` is the race-window fallback —
+    /// a live send that discovers the friend just left can hand the heart to the dead-drop
+    /// instead of failing (returns true when queued; the ledger cooldown was consumed there).
+    public var heartDropBundleProvider: (() -> HeartPrekeyStore.Bundle?)?
+    public var onPeerPrekeyBundle: ((Data, HeartPrekeyStore.Bundle) -> Void)?
+    public var queueAwayHeart: ((ProximityTrustedPeerRecord) -> Bool)?
 
     /// Group-4 seam: registers a heart connection for an already-discovered peer (with an injected
     /// ranging provider so no real radio starts), then tears it down — exercising the exact

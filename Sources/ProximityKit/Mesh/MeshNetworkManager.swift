@@ -1280,11 +1280,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Snapshot at coordinator creation (capabilities ride the handshake intro); a mid-session toggle
     /// affects the NEXT session's advertisement, while its send/receive effect is immediate via the
     /// provider gates. Internal seam so tests can pin the gate without a live channel.
+    /// Away-hearts gossip seams (bitchat adoptions Increment 3), wired by FernletStore: the local
+    /// prekey bundle to ride our intros (nil = consent off or feature absent), the sink for
+    /// friends' verified bundles, and the consent flag gating the `heartsAway` advertisement.
+    public var heartDropBundleProvider: (() -> HeartPrekeyStore.Bundle?)?
+    public var onPeerPrekeyBundle: ((Data, HeartPrekeyStore.Bundle) -> Void)?
+    public var heartsAwayEnabledProvider: (() -> Bool)?
+
     func localCapabilities() -> [String] {
         var capabilities = [ProximityCapability.photos.rawValue]
         // wire2 (bitchat adoptions Increment 2): sealed-payload compress+pad framing. A wire
         // format, not a user feature — no opt-out; advertised by every build that ships it.
         capabilities.append(ProximityCapability.wire2.rawValue)
+        // heartsAway (bitchat adoptions Increment 3): advertised only when the user opted into
+        // away delivery — signals our intro carries a prekey bundle and we accept drops.
+        if heartsAwayEnabledProvider?() == true {
+            capabilities.append(ProximityCapability.heartsAway.rawValue)
+        }
         if clothingShop.isSharingEnabled {
             capabilities.append(ProximityCapability.shop.rawValue)
         }
@@ -1507,6 +1519,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             capabilities: localCapabilities(),
             timeoutSeconds: isProximityJoin ? 25 : 60
         )
+        // Away-hearts prekey gossip (Increment 3): ride our intro, ingest verified peers'.
+        coordinator.heartDropPrekeyBundleProvider = { [weak self] in self?.heartDropBundleProvider?() }
+        coordinator.onHeartDropPrekeyBundle = { [weak self] key, bundle in self?.onPeerPrekeyBundle?(key, bundle) }
 
         let slot = PeerSlot(
             id: channel.peer.id,

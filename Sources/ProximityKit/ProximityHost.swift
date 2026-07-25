@@ -23,10 +23,16 @@ public protocol ProximityHost: AnyObject {
     /// non-UI homes of the setting. Presence VISIBILITY is a separate setting, so hearts-off +
     /// presence-on means a friend still sees you nearby but a heart to you is silently dropped.
     var allowNearbyHearts: Bool { get }
+    /// The away-delivery opt-in (bitchat adoptions Increment 3). `PresenceManager` consults it
+    /// only for copy (a race-window failure explains that the heart travels while apart); the
+    /// enforcement homes are `HeartDropService.queueHeart`/`syncNow`.
+    var heartsAwayDeliveryEnabled: Bool { get }
 }
 
 public extension ProximityHost {
     /// Default for hosts that predate the hearts opt-out (e.g. test doubles). The app's
     /// `FernletStore` overrides this with the live setting.
     var allowNearbyHearts: Bool { true }
+    /// Default for hosts that predate away delivery (test doubles). The app overrides it.
+    var heartsAwayDeliveryEnabled: Bool { false }
 }

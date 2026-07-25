@@ -60,6 +60,19 @@ private nonisolated struct IdentityRangingPayload: Codable, Sendable {
     /// `PeerIdentity.supports(_:)`). Raw `ProximityCapability` tokens, kept as strings so a newer
     /// build's capability names survive the round-trip.
     let capabilities: [String]?
+    /// Heart-drop prekey bundle gossip (bitchat adoptions Increment 3) — another additive key old
+    /// decoders ignore. Rides the SIGNED intro envelope, so bundle provenance is the envelope's
+    /// Ed25519 signature; there is no second standalone bundle signature to drift out of sync.
+    /// nil when the sender hasn't opted into away hearts (`heartsAway` capability absent too).
+    let heartDropPrekeyBundle: HeartPrekeyStore.Bundle?
+
+    init(rangingMode: String, discoveryToken: Data?, capabilities: [String]?,
+         heartDropPrekeyBundle: HeartPrekeyStore.Bundle? = nil) {
+        self.rangingMode = rangingMode
+        self.discoveryToken = discoveryToken
+        self.capabilities = capabilities
+        self.heartDropPrekeyBundle = heartDropPrekeyBundle
+    }
 }
 
 private nonisolated struct SessionHeartbeatPayload: Codable, Sendable {
@@ -751,6 +764,13 @@ public final class ProximityCoordinator {
         }
     }
 
+    /// Heart-drop prekey gossip seams (bitchat adoptions Increment 3), set post-init by the
+    /// owning manager — nil provider means no bundle rides our intro (consent off or feature
+    /// absent), nil receiver means received bundles are ignored. The receiver fires ONLY after
+    /// the intro envelope verified, keyed by the sender's full signing key.
+    public var heartDropPrekeyBundleProvider: (() -> HeartPrekeyStore.Bundle?)?
+    public var onHeartDropPrekeyBundle: ((_ senderSigningPublicKey: Data, _ bundle: HeartPrekeyStore.Bundle) -> Void)?
+
     private func makeIdentityRangingPayload() async throws -> Data {
         let token: Data?
         if ranging.isHardwareSupported {
@@ -761,7 +781,8 @@ public final class ProximityCoordinator {
         let payload = IdentityRangingPayload(
             rangingMode: ranging.isHardwareSupported ? RangingMode.uwb.rawValue : RangingMode.rssi.rawValue,
             discoveryToken: token,
-            capabilities: localCapabilities
+            capabilities: localCapabilities,
+            heartDropPrekeyBundle: heartDropPrekeyBundleProvider?()
         )
         return try JSONEncoder().encode(payload)
     }
@@ -949,6 +970,12 @@ public final class ProximityCoordinator {
             capabilities: rangingPayload?.capabilities
         )
         updateInspectorPeer(identity: peerIdentity, transportPeer: peer)
+
+        // Heart-drop prekey gossip (Increment 3): the intro envelope verified above, so the
+        // bundle's provenance is established — hand it to the cache keyed by the FULL signing key.
+        if let bundle = rangingPayload?.heartDropPrekeyBundle {
+            onHeartDropPrekeyBundle?(envelope.senderSigningPublicKey, bundle)
+        }
 
         if envelope.payloadType == .identityAcknowledge {
             if pendingPeerIdentity == nil && connectedPeerIdentity == nil {

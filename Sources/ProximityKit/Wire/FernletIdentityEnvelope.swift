@@ -175,10 +175,13 @@ extension FernletIdentityEnvelope {
     /// `nonisolated` and could run off-main, but recipient/replay/decrypt need the actor's state.
     /// `sealedPayloadFormat`: pass `.wire2` only when the SENDER advertised the `wire2` capability —
     /// sealed bodies are then unframed (tolerantly) after decryption. Unsealed payloads ignore it.
+    /// `replayCache`: nil ONLY for callers with their own durable dedup that must accept envelopes
+    /// older than the cache's 24 h window (the heart dead-drop, whose pickup window is 7 days) —
+    /// every live-radio path keeps passing one.
     @MainActor
     public func verify(
         identityService: IdentityService,
-        replayCache: ReplayCache,
+        replayCache: ReplayCache?,
         sealedPayloadFormat: SealedPayloadFormat = .legacy
     ) throws -> Data {
         guard Self.supportedSchemaVersions.contains(schemaVersion) else {
@@ -204,7 +207,7 @@ extension FernletIdentityEnvelope {
             throw VerifyError.sealingRequired
         }
 
-        try replayCache.recordIfNew(envelopeID: envelopeID, createdAt: createdAt)
+        try replayCache?.recordIfNew(envelopeID: envelopeID, createdAt: createdAt)
 
         // Unknown (newer-build) payload type: the envelope authenticated and its ID is now
         // replay-recorded (so unknown-type spam can't bypass replay protection), but the payload
