@@ -1820,6 +1820,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return photoWallPreferences.favoritePhotoIDsBySession[sessionID]
     }
 
+    /// Every photo the user has hearted (favorited), flattened from the per-session favorite map into one
+    /// global id set. Read-only: the home photowall reads this to weight hearted photos higher in its
+    /// rotation. Touches `favoritesRevision` so an observing surface re-picks when a favorite toggles, but
+    /// NEVER mutates preferences — the `@ObservationIgnored` constraint on `photoWallPreferences` holds.
+    public var allFavoritePhotoIDs: Set<UUID> {
+        _ = favoritesRevision
+        return Set(photoWallPreferences.favoritePhotoIDsBySession.values)
+    }
+
     public func toggleFavorite(photoID: UUID, in post: FriendPhotoWallPost) {
         guard let sessionID = post.session?.id else { return }
         if photoWallPreferences.favoritePhotoIDsBySession[sessionID] == photoID {
