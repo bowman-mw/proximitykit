@@ -1102,6 +1102,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             if let payload = try? decoder.decode(MeshAdmissionGrantPayload.self, from: plaintext) {
                 handleAdmissionGrant(payload)
             }
+        // QR verification ceremony (Increment 4): these run PRE-COMMIT by design — the registry
+        // default's committed-slot gate would drop them — and carry their own binding (sealed +
+        // signed + double-nonce transcript).
+        case .verifyChallenge:
+            handleVerifyChallenge(envelope, plaintext: plaintext, slot: slot)
+        case .verifyResponse:
+            handleVerifyResponse(envelope, plaintext: plaintext, slot: slot)
         case .friendPhoto:
             if let payload = try? decoder.decode(FriendPhotoPayload.self, from: plaintext) {
                 if let fp = payload.senderFingerprint, store.isBlockedFingerprint(fp) { return }
@@ -1704,6 +1711,151 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public func commitManualProximity(slotID: UUID) {
         guard let slot = slots.first(where: { $0.id == slotID }) else { return }
         Task { await slot.coordinator.commitManualProximity() }
+    }
+
+    // MARK: - QR verification ceremony (bitchat adoptions Increment 4)
+
+    /// Nonce of the QR currently displayed on THIS device (single-use — cleared on the first
+    /// honored challenge). Set by `makeLocalVerifyQRURL`.
+    @ObservationIgnored private var activeVerifyQRNonce: Data?
+    /// Scanner-side pending rounds keyed by slot id; entries die with their slots (≤5 total, no
+    /// separate timeout needed — a slot that never answers ends with the session).
+    @ObservationIgnored private var pendingQRVerifications: [UUID: (qrNonce: Data, challengeNonce: Data, expectedSigningKey: Data)] = [:]
+
+    /// The signed QR for a peer to scan (displayer side). Freshness-limited to 5 minutes.
+    public func makeLocalVerifyQRURL() -> URL? {
+        guard let made = try? ProximityVerifyQR.makeURL(identity: identity) else { return nil }
+        activeVerifyQRNonce = made.nonce
+        return made.url
+    }
+
+    private func manualCommitPeer(of slot: PeerSlot) -> ProximityCoordinator.PeerIdentity? {
+        if case .awaitingManualCommit(let peer) = slot.coordinator.state { return peer }
+        return nil
+    }
+
+    /// Scanner side: a `fernlet://verify` QR was scanned. Validates signature + freshness, binds
+    /// it to the awaiting slot presenting the SAME signing key, and opens the sealed challenge
+    /// round. Returns false when the QR is invalid/stale or no awaiting slot matches.
+    @discardableResult
+    public func beginQRVerification(with url: URL) -> Bool {
+        guard let payload = ProximityVerifyQR.parse(url), ProximityVerifyQR.isValid(payload) else {
+            FernletAuditLog.log("mesh.verifyQR.invalidScanned")
+            return false
+        }
+        guard let slot = slots.first(where: { manualCommitPeer(of: $0)?.signingPublicKey == payload.signingPublicKey }),
+              let peer = manualCommitPeer(of: slot) else {
+            FernletAuditLog.log("mesh.verifyQR.noAwaitingSlotMatch")
+            return false
+        }
+        let challengeNonce = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })
+        pendingQRVerifications[slot.id] = (payload.nonce, challengeNonce, payload.signingPublicKey)
+        let challenge = VerifyChallengePayload(qrNonce: payload.nonce, challengeNonce: challengeNonce)
+        Task { await sendVerifyEnvelope(.verifyChallenge, encodable: challenge, to: peer, via: slot) }
+        FernletAuditLog.log("mesh.verifyQR.challengeSent")
+        return true
+    }
+
+    private func handleVerifyChallenge(_ envelope: FernletIdentityEnvelope, plaintext: Data, slot: PeerSlot?) {
+        guard let slot,
+              let payload = try? JSONDecoder().decode(VerifyChallengePayload.self, from: plaintext) else { return }
+        // Only honor a challenge quoting the QR THIS device is displaying right now — a
+        // photographed QR is useless once the sheet closed.
+        guard let displayed = activeVerifyQRNonce, displayed == payload.qrNonce else {
+            FernletAuditLog.log("mesh.verifyQR.staleChallengeDropped")
+            return
+        }
+        let message = ProximityVerifySignature.message(
+            scannerKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
+            challengeNonce: payload.challengeNonce,
+            qrNonce: payload.qrNonce
+        )
+        guard let signature = try? identity.sign(message) else { return }
+        activeVerifyQRNonce = nil // single use
+        let response = VerifyResponsePayload(challengeNonce: payload.challengeNonce, signature: signature)
+        let supportsWire2 = manualCommitPeer(of: slot)?.supports(.wire2) ?? false
+        Task {
+            await sendVerifyEnvelope(
+                .verifyResponse,
+                encodable: response,
+                toKeyAgreementKey: envelope.senderKeyAgreementPublicKey,
+                fingerprint: IdentityService.fingerprint(of: envelope.senderSigningPublicKey),
+                supportsWire2: supportsWire2,
+                via: slot
+            )
+        }
+        // Mutual upgrade: a sealed, signed challenge quoting OUR live display is the scanner's
+        // ceremony proof — commit this side too.
+        if case .awaitingManualCommit = slot.coordinator.state {
+            commitManualProximity(slotID: slot.id)
+            FernletAuditLog.log("mesh.verifyQR.displayerCommitted")
+        }
+    }
+
+    private func handleVerifyResponse(_ envelope: FernletIdentityEnvelope, plaintext: Data, slot: PeerSlot?) {
+        guard let slot,
+              let pending = pendingQRVerifications[slot.id],
+              let payload = try? JSONDecoder().decode(VerifyResponsePayload.self, from: plaintext),
+              payload.challengeNonce == pending.challengeNonce,
+              envelope.senderSigningPublicKey == pending.expectedSigningKey else { return }
+        let message = ProximityVerifySignature.message(
+            scannerKeyAgreementPublicKey: identity.localKeyAgreementPublicKey,
+            challengeNonce: pending.challengeNonce,
+            qrNonce: pending.qrNonce
+        )
+        guard IdentityService.verify(payload.signature, of: message, by: pending.expectedSigningKey) else {
+            pendingQRVerifications[slot.id] = nil
+            FernletAuditLog.log("mesh.verifyQR.badResponseSignature")
+            return
+        }
+        pendingQRVerifications[slot.id] = nil
+        if case .awaitingManualCommit = slot.coordinator.state {
+            commitManualProximity(slotID: slot.id)
+        }
+        FernletAuditLog.log("mesh.verifyQR.scannerCommitted")
+    }
+
+    private func sendVerifyEnvelope(
+        _ type: PayloadType,
+        encodable: some Encodable,
+        to peer: ProximityCoordinator.PeerIdentity,
+        via slot: PeerSlot
+    ) async {
+        await sendVerifyEnvelope(
+            type,
+            encodable: encodable,
+            toKeyAgreementKey: peer.keyAgreementPublicKey,
+            fingerprint: peer.fingerprint,
+            supportsWire2: peer.supports(.wire2),
+            via: slot
+        )
+    }
+
+    /// Pre-commit sealed send: the ceremony runs BEFORE slot commit, so the slot's verified key
+    /// fields aren't populated yet — seal to the identity carried by the gate state / envelope
+    /// instead of `slot.verifiedKeyAgreementPublicKey` (which `sendEnvelope` uses).
+    private func sendVerifyEnvelope(
+        _ type: PayloadType,
+        encodable: some Encodable,
+        toKeyAgreementKey kaKey: Data,
+        fingerprint: String?,
+        supportsWire2: Bool,
+        via slot: PeerSlot
+    ) async {
+        guard !kaKey.isEmpty,
+              let payloadData = try? JSONEncoder().encode(encodable),
+              let ciphertext = try? identity.seal(payloadData, to: kaKey, format: supportsWire2 ? .wire2 : .legacy),
+              let envelope = try? FernletIdentityEnvelope.signed(
+                  identityService: identity,
+                  senderDisplayName: displayName,
+                  recipientFingerprint: fingerprint,
+                  payloadType: type,
+                  payloadEncryption: .sealedTo(recipientKeyAgreementPublicKey: kaKey),
+                  payloadSummary: PayloadSummary(title: type.rawValue),
+                  payload: ciphertext
+              ),
+              let envelopeData = try? JSONEncoder().encode(envelope) else { return }
+        try? await slot.channel.send(envelopeData, to: slot.peer, mode: .reliable)
     }
 
     private func canEvaluateOverflowCandidate(_ peer: MultipeerPeer) -> Bool {

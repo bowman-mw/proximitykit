@@ -1,0 +1,177 @@
+import Foundation
+import CryptoKit
+
+/// QR verification ceremony (bitchat adoptions Increment 4,
+/// Docs/Plan-Bitchat-Adoptions-2026-07-25.md — bitchat's signed verify-QR + in-session
+/// challenge/response, adapted): upgrades a non-UWB `awaitingManualCommit` slot to ceremony
+/// grade. The QR proves "this signing key is on the screen physically in front of you"; the
+/// sealed challenge/response proves the live session peer HOLDS that key — together they bind
+/// the person to the cryptographic identity, which is exactly the binding bitchat's 2025
+/// favorites-impersonation flaw lacked.
+public nonisolated enum ProximityVerifyQR {
+
+    public enum VerifyQRError: Error { case encodingFailed }
+
+    public static let urlScheme = "fernlet"
+    public static let urlHost = "verify"
+    /// Bounds replay of a photographed QR to minutes; both devices are physically together, so
+    /// generous skew tolerance isn't needed.
+    public static let freshnessWindow: TimeInterval = 5 * 60
+    static let signingDomain = Data("fernlet.verify.qr.v1".utf8)
+
+    public struct Payload: Codable, Equatable, Sendable {
+        public let version: Int
+        public let signingPublicKey: Data
+        public let keyAgreementPublicKey: Data
+        /// Unix seconds — an integer on the wire so canonical bytes can't drift on date coding.
+        public let timestamp: UInt64
+        /// 16 B, minted per display; the challenge must quote it, making a lifted QR image
+        /// useless once the sheet is dismissed (the displayer only honors its live nonce).
+        public let nonce: Data
+        public let signature: Data
+
+        public init(
+            version: Int,
+            signingPublicKey: Data,
+            keyAgreementPublicKey: Data,
+            timestamp: UInt64,
+            nonce: Data,
+            signature: Data
+        ) {
+            self.version = version
+            self.signingPublicKey = signingPublicKey
+            self.keyAgreementPublicKey = keyAgreementPublicKey
+            self.timestamp = timestamp
+            self.nonce = nonce
+            self.signature = signature
+        }
+    }
+
+    static func canonicalBytes(
+        version: Int,
+        signingPublicKey: Data,
+        keyAgreementPublicKey: Data,
+        timestamp: UInt64,
+        nonce: Data
+    ) -> Data {
+        var bytes = signingDomain
+        bytes.append(UInt8(clamping: version))
+        bytes.append(signingPublicKey)
+        bytes.append(keyAgreementPublicKey)
+        withUnsafeBytes(of: timestamp.bigEndian) { bytes.append(contentsOf: $0) }
+        bytes.append(nonce)
+        return bytes
+    }
+
+    /// Builds the signed `fernlet://verify?d=…` URL. Returns the nonce too — the caller must
+    /// remember it (single-use display; see `MeshNetworkManager.activeVerifyQRNonce`).
+    @MainActor
+    public static func makeURL(identity: IdentityService, now: Date = Date()) throws -> (url: URL, nonce: Data) {
+        let nonce = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })
+        let timestamp = UInt64(max(0, now.timeIntervalSince1970))
+        let signature = try identity.sign(canonicalBytes(
+            version: 1,
+            signingPublicKey: identity.localSigningPublicKey,
+            keyAgreementPublicKey: identity.localKeyAgreementPublicKey,
+            timestamp: timestamp,
+            nonce: nonce
+        ))
+        let payload = Payload(
+            version: 1,
+            signingPublicKey: identity.localSigningPublicKey,
+            keyAgreementPublicKey: identity.localKeyAgreementPublicKey,
+            timestamp: timestamp,
+            nonce: nonce,
+            signature: signature
+        )
+        guard let json = try? JSONEncoder().encode(payload) else { throw VerifyQRError.encodingFailed }
+        var components = URLComponents()
+        components.scheme = urlScheme
+        components.host = urlHost
+        components.queryItems = [URLQueryItem(name: "d", value: base64URLEncode(json))]
+        guard let url = components.url else { throw VerifyQRError.encodingFailed }
+        return (url, nonce)
+    }
+
+    public static func parse(_ url: URL) -> Payload? {
+        guard url.scheme?.lowercased() == urlScheme,
+              url.host?.lowercased() == urlHost,
+              let encoded = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                  .queryItems?.first(where: { $0.name == "d" })?.value,
+              let data = base64URLDecode(encoded) else { return nil }
+        return try? JSONDecoder().decode(Payload.self, from: data)
+    }
+
+    /// Shape + signature + freshness.
+    public static func isValid(_ payload: Payload, at now: Date = Date()) -> Bool {
+        guard payload.version == 1,
+              payload.nonce.count == 16,
+              !payload.signingPublicKey.isEmpty,
+              !payload.keyAgreementPublicKey.isEmpty else { return false }
+        let age = abs(now.timeIntervalSince1970 - TimeInterval(payload.timestamp))
+        guard age <= freshnessWindow else { return false }
+        return IdentityService.verify(
+            payload.signature,
+            of: canonicalBytes(
+                version: payload.version,
+                signingPublicKey: payload.signingPublicKey,
+                keyAgreementPublicKey: payload.keyAgreementPublicKey,
+                timestamp: payload.timestamp,
+                nonce: payload.nonce
+            ),
+            by: payload.signingPublicKey
+        )
+    }
+
+    // MARK: - base64url
+
+    public static func base64URLEncode(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    public static func base64URLDecode(_ string: String) -> Data? {
+        var padded = string
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while padded.count % 4 != 0 { padded.append("=") }
+        return Data(base64Encoded: padded)
+    }
+}
+
+/// Scanner → displayer, sealed (`sealingRequiredTypes`): quotes the scanned QR's nonce (so only
+/// the live display is honored) plus a fresh challenge nonce.
+public nonisolated struct VerifyChallengePayload: Codable, Equatable, Sendable {
+    public let qrNonce: Data
+    public let challengeNonce: Data
+    public init(qrNonce: Data, challengeNonce: Data) {
+        self.qrNonce = qrNonce
+        self.challengeNonce = challengeNonce
+    }
+}
+
+/// Displayer → scanner, sealed: Ed25519 proof of key possession over the ceremony transcript.
+public nonisolated struct VerifyResponsePayload: Codable, Equatable, Sendable {
+    public let challengeNonce: Data
+    public let signature: Data
+    public init(challengeNonce: Data, signature: Data) {
+        self.challengeNonce = challengeNonce
+        self.signature = signature
+    }
+}
+
+public nonisolated enum ProximityVerifySignature {
+    static let domain = Data("fernlet.verify.response.v1".utf8)
+
+    /// The signed transcript: domain ‖ the SCANNER's KA key (binds the response to who asked) ‖
+    /// both nonces. Signed by the displayer's identity signing key.
+    public static func message(
+        scannerKeyAgreementPublicKey: Data,
+        challengeNonce: Data,
+        qrNonce: Data
+    ) -> Data {
+        domain + scannerKeyAgreementPublicKey + challengeNonce + qrNonce
+    }
+}
