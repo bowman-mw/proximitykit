@@ -354,8 +354,19 @@ public final class ProximityCoordinator {
         guard sealed, let kaKey = connectedIdentity?.keyAgreementPublicKey, !kaKey.isEmpty else {
             return (payload, .none)
         }
-        let ciphertext = try identity.seal(payload, to: kaKey)
+        let ciphertext = try identity.seal(payload, to: kaKey, format: peerSealedPayloadFormat)
         return (ciphertext, .sealedTo(recipientKeyAgreementPublicKey: kaKey))
+    }
+
+    /// wire2 gate (bitchat adoptions Increment 2): frame sealed bodies we SEND only when the peer
+    /// advertised `wire2`; unframe sealed bodies we RECEIVE only when the sender advertised it.
+    /// Both directions key off the same intro exchange, so interpretation is deterministic; the
+    /// tolerant tag check inside `open(format: .wire2)` covers the window where a wire2-capable
+    /// sender hadn't yet learned OUR capabilities and sealed legacy. Intro/ack envelopes evaluate
+    /// before any peer identity exists → `.legacy`, which is exactly right (intros are never
+    /// framed — capabilities are unknown when they're built).
+    private var peerSealedPayloadFormat: SealedPayloadFormat {
+        (connectedIdentity ?? pendingPeerIdentity)?.supports(.wire2) == true ? .wire2 : .legacy
     }
 
     public func cancel() async {
@@ -693,7 +704,11 @@ public final class ProximityCoordinator {
             if trustPolicy?.isBlockedProximitySigningKey(envelope.senderSigningPublicKey) == true {
                 return  // silent drop — no audit entry visible to sender
             }
-            let plaintext = try envelope.verify(identityService: identity, replayCache: replayCache)
+            let plaintext = try envelope.verify(
+                identityService: identity,
+                replayCache: replayCache,
+                sealedPayloadFormat: peerSealedPayloadFormat
+            )
             recordEnvelope(envelope, direction: .received, byteCount: message.bytesReceived, signatureVerified: true)
             bytesReceived += message.bytesReceived
             await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)

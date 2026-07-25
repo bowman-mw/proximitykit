@@ -173,8 +173,14 @@ extension FernletIdentityEnvelope {
     /// `@MainActor`: reads the `@MainActor` IdentityService key state (`open`, `localFingerprint`) and the
     /// `@MainActor` ReplayCache. The signature math itself (`IdentityService.verify` + `canonicalBytes`) is
     /// `nonisolated` and could run off-main, but recipient/replay/decrypt need the actor's state.
+    /// `sealedPayloadFormat`: pass `.wire2` only when the SENDER advertised the `wire2` capability —
+    /// sealed bodies are then unframed (tolerantly) after decryption. Unsealed payloads ignore it.
     @MainActor
-    public func verify(identityService: IdentityService, replayCache: ReplayCache) throws -> Data {
+    public func verify(
+        identityService: IdentityService,
+        replayCache: ReplayCache,
+        sealedPayloadFormat: SealedPayloadFormat = .legacy
+    ) throws -> Data {
         guard Self.supportedSchemaVersions.contains(schemaVersion) else {
             throw VerifyError.schemaVersionUnsupported
         }
@@ -213,7 +219,7 @@ extension FernletIdentityEnvelope {
             return payload
         case .sealedTo:
             do {
-                return try identityService.open(payload, from: senderKeyAgreementPublicKey)
+                return try identityService.open(payload, from: senderKeyAgreementPublicKey, format: sealedPayloadFormat)
             } catch {
                 throw VerifyError.payloadDecryptionFailed
             }

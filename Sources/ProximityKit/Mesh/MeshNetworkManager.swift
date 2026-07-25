@@ -1282,6 +1282,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// provider gates. Internal seam so tests can pin the gate without a live channel.
     func localCapabilities() -> [String] {
         var capabilities = [ProximityCapability.photos.rawValue]
+        // wire2 (bitchat adoptions Increment 2): sealed-payload compress+pad framing. A wire
+        // format, not a user feature — no opt-out; advertised by every build that ships it.
+        capabilities.append(ProximityCapability.wire2.rawValue)
         if clothingShop.isSharingEnabled {
             capabilities.append(ProximityCapability.shop.rawValue)
         }
@@ -2309,7 +2312,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let encryption: PayloadEncryption
         if sealed {
             guard let kaKey = slot.verifiedKeyAgreementPublicKey, !kaKey.isEmpty,
-                  let ciphertext = try? identity.seal(payloadData, to: kaKey) else { return false }
+                  let ciphertext = try? identity.seal(
+                      payloadData,
+                      to: kaKey,
+                      format: slot.supports(.wire2) ? .wire2 : .legacy
+                  ) else { return false }
             finalPayload = ciphertext
             encryption = .sealedTo(recipientKeyAgreementPublicKey: kaKey)
         } else {

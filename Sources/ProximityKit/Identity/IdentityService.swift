@@ -116,10 +116,17 @@ public final class IdentityService {
 
     /// X25519 ECDH → HKDF-SHA256 → ChaCha20-Poly1305 seal with forward secrecy.
     /// Wire form: ephemeralPubKey (32 B) || sealedBox.combined (nonce 12 B || ciphertext || tag 16 B).
-    public func seal(_ plaintext: Data, to peerKeyAgreementPublicKey: Data) throws -> Data {
+    /// `format: .wire2` deflate-compresses + bucket-pads the plaintext before sealing
+    /// (`SealedPayloadFraming`); pass it only when the peer advertised the `wire2` capability.
+    public func seal(_ plaintext: Data, to peerKeyAgreementPublicKey: Data, format: SealedPayloadFormat = .legacy) throws -> Data {
         guard let senderKey = keyAgreementKey else { throw IdentityError.notProvisioned }
         guard let peerPubKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerKeyAgreementPublicKey) else {
             throw IdentityError.sealFailed
+        }
+        let body: Data
+        switch format {
+        case .legacy: body = plaintext
+        case .wire2:  body = SealedPayloadFraming.frame(plaintext)
         }
 
         let ephemeralKey = Curve25519.KeyAgreement.PrivateKey()
@@ -132,7 +139,7 @@ public final class IdentityService {
         )
 
         let sealedBox = try ChaChaPoly.seal(
-            plaintext,
+            body,
             using: symKey,
             authenticating: senderKey.publicKey.rawRepresentation
         )
@@ -140,7 +147,10 @@ public final class IdentityService {
     }
 
     /// Inverse of seal. `peerKeyAgreementPublicKey` is the sender's long-term X25519 public key.
-    public func open(_ ciphertext: Data, from peerKeyAgreementPublicKey: Data) throws -> Data {
+    /// `format: .wire2` unframes tolerantly — a decrypted body without a frame tag passes through
+    /// unchanged, covering the handshake race where a wire2-capable sender sealed legacy before
+    /// it learned our capabilities. Pass `.wire2` only when the SENDER advertised `wire2`.
+    public func open(_ ciphertext: Data, from peerKeyAgreementPublicKey: Data, format: SealedPayloadFormat = .legacy) throws -> Data {
         guard let recipientKey = keyAgreementKey else { throw IdentityError.notProvisioned }
         // Wire format: eskPub (32 B) || combined (nonce 12 B || ciphertext || tag 16 B)
         guard ciphertext.count >= 32 + 12 + 16 else { throw IdentityError.openFailed }
@@ -159,11 +169,19 @@ public final class IdentityService {
             outputByteCount: 32
         )
 
+        let plaintext: Data
         do {
             let sealedBox = try ChaChaPoly.SealedBox(combined: combined)
-            return try ChaChaPoly.open(sealedBox, using: symKey, authenticating: peerKeyAgreementPublicKey)
+            plaintext = try ChaChaPoly.open(sealedBox, using: symKey, authenticating: peerKeyAgreementPublicKey)
         } catch {
             throw IdentityError.openFailed
+        }
+        switch format {
+        case .legacy:
+            return plaintext
+        case .wire2:
+            guard SealedPayloadFraming.hasFrameTag(plaintext) else { return plaintext }
+            return try SealedPayloadFraming.unframe(plaintext)
         }
     }
 
