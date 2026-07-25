@@ -66,6 +66,19 @@ public final class SessionMessageStore {
     /// The current session's messages, oldest-first (append order). Empty outside a session.
     public private(set) var messages: [Message] = []
 
+    /// Count of inbound messages that arrived while the chat panel was NOT on screen (TF b19 item 6).
+    /// Drives the unread dot on the in-session chat button + the receive haptic/notification. Memory-
+    /// only like the transcript itself (the holder is not Codable), so it never enters a snapshot; it
+    /// resets to zero when the panel is opened (`beginViewing` / `markAllRead`) and when the session
+    /// clears. Only inbound messages count — a local echo of an outgoing message is never "unread".
+    public private(set) var unreadCount = 0
+
+    /// True while the chat panel is on screen. While viewing, an inbound message is shown live, so it
+    /// is never counted as unread (and any standing unread is cleared the moment viewing begins).
+    @ObservationIgnored private var isViewing = false
+
+    public var hasUnread: Bool { unreadCount > 0 }
+
     /// Dedup set across incoming AND outgoing ids — a reflected/duplicate id is never appended twice.
     @ObservationIgnored private var seenIDs: Set<UUID> = []
     /// Per-verified-sender token-bucket state for the receive flood guard.
@@ -143,7 +156,31 @@ public final class SessionMessageStore {
             sentAt: sentAt,
             isOutgoing: false
         ))
+        // TF b19 item 6: a message that arrives while the panel is closed is unread. While the panel is
+        // on screen the user is already reading, so it stays at zero.
+        if !isViewing { unreadCount += 1 }
         return true
+    }
+
+    // MARK: - Unread state (TF b19 item 6)
+
+    /// The chat panel appeared: mark the transcript read and suppress unread counting until it leaves.
+    /// Called from `SessionChatPanel.onAppear`.
+    public func beginViewing() {
+        isViewing = true
+        if unreadCount != 0 { unreadCount = 0 }
+    }
+
+    /// The chat panel left the screen: resume unread counting for later inbound messages. Called from
+    /// `SessionChatPanel.onDisappear`.
+    public func endViewing() {
+        isViewing = false
+    }
+
+    /// Clears the unread badge without changing the viewing state. `beginViewing()` already does this;
+    /// exposed separately so a caller can drop the badge without asserting the panel is open.
+    public func markAllRead() {
+        if unreadCount != 0 { unreadCount = 0 }
     }
 
     // MARK: - Session lifecycle
@@ -154,6 +191,10 @@ public final class SessionMessageStore {
         messages.removeAll()
         seenIDs.removeAll()
         rateBucketBySender.removeAll()
+        // Reset the badge, but leave `isViewing` to the panel's own onAppear/onDisappear — a session may
+        // clear (formation / end) while the panel is still on screen, and forcing it false there would
+        // make the next inbound message count as unread even though the user is looking at it.
+        unreadCount = 0
     }
 
     // MARK: - Text sanitizer

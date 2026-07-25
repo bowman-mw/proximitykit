@@ -103,6 +103,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored public var friendStateEnabledProvider: (() -> Bool)?
     @ObservationIgnored public var friendStatePayloadProvider: (() -> FriendStatePayload?)?
     @ObservationIgnored public var onFriendStateReceived: ((String, FriendStatePayload) -> Void)?
+    /// Device-local hearts ledger (received-heart records + the 5-minute per-friend rate limit),
+    /// SHARED with the presence path (TF b19 item 5). In-session hearts ride the live mesh channel
+    /// instead of the fragile on-demand presence connect, but they record through the SAME ledger so
+    /// cooldown + dedup state stay consistent across both transports. Set by the app; `nil` in tests
+    /// that don't exercise hearts (send/receive then no-op).
+    @ObservationIgnored public var heartLedger: ProximityHeartLedger?
+    /// Fired with the friend's fingerprint when an in-session heart is SENT / RECEIVED over the mesh,
+    /// so the app feeds the closeness signal — wired to the SAME closeness hooks the presence path
+    /// uses, so both transports converge (TF b19 item 5).
+    @ObservationIgnored public var onHeartSent: ((String) -> Void)?
+    @ObservationIgnored public var onHeartReceived: ((String) -> Void)?
+    /// Test seam: fires with the slot ID whenever an in-session heart is dispatched to a slot — unit
+    /// tests can't observe the real sealed channel (mirrors `onTempMessageSendForTesting`).
+    @ObservationIgnored var onSessionHeartSendForTesting: ((UUID) -> Void)?
+    @ObservationIgnored private var sessionHeartStateClearTask: Task<Void, Never>?
     /// Phase 5: a friend session committed with this fingerprint (an in-person meeting) — feeds closeness.
     @ObservationIgnored public var onFriendSessionCommitted: ((String) -> Void)?
     /// A photo was exchanged with this friend in the current session (feeds the closeness photo signal).
@@ -113,6 +128,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// moment that promotes `pendingFriendReview` / opens the shop window) and on the next session
     /// formation. Unlike the shop's 1-hour window, messages do NOT outlive the session — they vanish.
     public let sessionMessages = SessionMessageStore()
+    /// In-session heart send feedback (TF b19 item 5). The mesh path is near-instant — one sealed
+    /// envelope over the already-connected, transport-verified session channel — so unlike the
+    /// presence pipeline's multi-second connect it only needs `.sending` briefly, then `.sent` /
+    /// `.failed`, auto-clearing back to `.idle`. Observable so the in-session heart affordance
+    /// surfaces state instead of failing silently. Memory-only.
+    public enum SessionHeartState: Equatable, Sendable {
+        case idle
+        case sending(recipientName: String)
+        case sent(recipientName: String)
+        case failed(message: String)
+    }
+    public private(set) var sessionHeartState: SessionHeartState = .idle
     public var isSearching = false
     public var meshError: String?
 
@@ -247,6 +274,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         setupMeshSession()
         registerClothingShopHandler()
         registerSessionMessageHandler()
+        registerSessionHeartHandler()
         registerModerationReportHandler()
         registerFriendStateHandler()
         registerActivityHandlers()
@@ -432,6 +460,133 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 text: payload.text,
                 sentAt: payload.sentAt
             )
+        }
+    }
+
+    // MARK: - In-session hearts (TF b19 item 5)
+
+    /// In-session hearts ride the live mesh session as a registered `.friendHeart` feature payload
+    /// (TF b19 item 5) instead of the fragile on-demand presence pairwise connect. The dispatch
+    /// default's committed-slot gate has already run; the receiver-side gates below are MANDATORY and
+    /// mirror the presence path exactly (`PresenceManager.proximityCoordinator(_:didReceive:...)`) — a
+    /// past review found an opt-out bypass in a share manager, so the `allowNearbyHearts` opt-out, the
+    /// trusted-friend requirement, and the block list are ALL enforced here on the RECEIVER before
+    /// anything is recorded. `.friendHeart` is in `sealingRequiredTypes`, so an unsealed heart was
+    /// already rejected at `verify()` — this handler only ever sees a decrypted, sealed payload.
+    private func registerSessionHeartHandler() {
+        registerPayloadHandler(for: .friendHeart) { [weak self] _, plaintext, peer in
+            self?.receiveSessionHeart(plaintext: plaintext, from: peer)
+        }
+    }
+
+    private func receiveSessionHeart(plaintext: Data, from peer: ProximityCoordinator.PeerIdentity?) {
+        guard let payload = try? JSONDecoder().decode(HeartPayload.self, from: plaintext),
+              payload.format == "fernlet.proximity.heart",
+              payload.version == 1,
+              HeartPayload.isValidDayKey(payload.sentAtDayKey) else { return }
+        // Receive-side opt-out (mandatory — one of the homes of `allowNearbyHearts`). A heart to a
+        // hearts-off device is silently dropped even though session membership reached us here.
+        guard store.allowNearbyHearts else {
+            FernletAuditLog.log("mesh.friendHeart.droppedHeartsOff")
+            return
+        }
+        // A verified sender is required (the default dispatch already enforced the committed-slot gate).
+        guard let peer else {
+            FernletAuditLog.log("mesh.friendHeart.droppedUnverifiedSender")
+            return
+        }
+        // Trusted-friend requirement + block list (signing-key block AND fingerprint block), reusing
+        // the SAME eligibility gate the presence path applies.
+        guard PresenceManager.isHeartEligibleFriend(peer, in: store) else {
+            FernletAuditLog.log("mesh.friendHeart.droppedNonFriend")
+            return
+        }
+        // Wire boundary: the display name is peer-supplied — sanitize (control/zero-width/bidi scalars
+        // out, length-capped) before it can be persisted by the ledger.
+        var senderName = ItemNameModeration.sanitizedName(peer.displayName)
+        if senderName.isEmpty { senderName = "A friend" }
+        // Route through the SAME device-local ledger the presence path uses: it drops duplicates
+        // (same id) and enforces the 5-minute per-sender receive rate. Then feed closeness identically.
+        if heartLedger?.recordReceivedHeart(id: payload.id, senderDisplayName: senderName, senderFingerprint: peer.fingerprint) ?? false {
+            onHeartReceived?(peer.fingerprint)
+        }
+    }
+
+    /// Whether an in-session heart can ride the mesh to this friend right now: they hold a committed
+    /// slot in the live session that advertises the `hearts` capability. A session peer on an older
+    /// build (no `.hearts` advertisement) returns `false`, and the caller falls back to presence.
+    public func canSendSessionHeart(toFingerprint fingerprint: String) -> Bool {
+        slots.contains { $0.fingerprint == fingerprint && $0.supports(.hearts) }
+    }
+
+    /// Deliver a heart to a live session member over the already-connected, transport-verified mesh
+    /// channel (TF b19 item 5). Honors the SAME send-side opt-out + 5-minute per-friend cooldown as the
+    /// presence path, routed through the shared `heartLedger`, so cooldown/closeness converge across
+    /// both transports. Drives `sessionHeartState` so the affordance surfaces sending → sent/failed.
+    public func sendSessionHeart(to friend: ProximityTrustedPeerRecord) {
+        let firstName = PresenceManager.firstName(of: friend.displayName)
+        // Send-side opt-out gate (belt: the button hides for a hearts-off device, but never send blind).
+        guard store.allowNearbyHearts else {
+            failSessionHeart("Turn on nearby hearts to send \(firstName) some warmth.")
+            return
+        }
+        // Active record only — never send to a blocked or revoked (unfriended) peer.
+        guard friend.blockedAt == nil, friend.revokedAt == nil else { return }
+        guard heartLedger?.canSendHeart(to: friend.fingerprint) ?? true else {
+            failSessionHeart("You just sent \(firstName) some warmth — hearts settle for a few minutes.")
+            return
+        }
+        guard let slot = slots.first(where: { $0.fingerprint == friend.fingerprint && $0.supports(.hearts) }) else {
+            failSessionHeart("\(firstName) left the session — no heart was sent.")
+            return
+        }
+        sessionHeartState = .sending(recipientName: friend.displayName)
+        // Fire the dispatch seam synchronously (mirrors `onTempMessageSendForTesting`) so a unit test
+        // can assert the target slot without a live channel behind the async wire write.
+        onSessionHeartSendForTesting?(slot.id)
+        let payload = HeartPayload(sentAtDayKey: FernletDate.dayKey(for: Date()))
+        let fingerprint = friend.fingerprint
+        let recipientName = friend.displayName
+        Task { [weak self] in
+            await self?.deliverSessionHeart(payload: payload, via: slot, fingerprint: fingerprint, recipientName: recipientName)
+        }
+    }
+
+    private func deliverSessionHeart(
+        payload: HeartPayload,
+        via slot: PeerSlot,
+        fingerprint: String,
+        recipientName: String
+    ) async {
+        // Re-check the cooldown right before the wire write (a racing send may have consumed it).
+        guard heartLedger?.canSendHeart(to: fingerprint) ?? true else {
+            failSessionHeart("You just sent \(PresenceManager.firstName(of: recipientName)) some warmth — hearts settle for a few minutes.")
+            return
+        }
+        // Sealed to the slot's transport-verified KA key (`.friendHeart` is in `sealingRequiredTypes`).
+        let sent = await sendEnvelope(.friendHeart, encodable: payload, via: slot, sealed: true)
+        if sent {
+            // Consume-on-send: only record + feed closeness after the wire write succeeds.
+            heartLedger?.recordHeartSent(to: fingerprint)
+            onHeartSent?(fingerprint)
+            sessionHeartState = .sent(recipientName: recipientName)
+        } else {
+            sessionHeartState = .failed(message: "Could not send that heart just now.")
+        }
+        scheduleSessionHeartStateClear()
+    }
+
+    private func failSessionHeart(_ message: String) {
+        sessionHeartState = .failed(message: message)
+        scheduleSessionHeartStateClear()
+    }
+
+    private func scheduleSessionHeartStateClear() {
+        sessionHeartStateClearTask?.cancel()
+        sessionHeartStateClearTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self?.sessionHeartState = .idle
         }
     }
 
@@ -1147,6 +1302,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // confirm) is the consent gate, so advertise unconditionally like messages. Offers are only sent
         // for activities the user chose to host, so there is nothing to opt out of.
         capabilities.append(ProximityCapability.activities.rawValue)
+        // TF b19 item 5: in-session hearts ride the live mesh session. Advertised whenever we join a
+        // friend session — session membership is the reach gate, and the RECEIVER separately enforces
+        // the `allowNearbyHearts` opt-out + the trusted-friend requirement + the block list before
+        // recording anything. Advertising it lets a sender skip peers on an older build (which have no
+        // `.friendHeart` mesh handler and would park-and-drop the payload) and fall back to presence.
+        capabilities.append(ProximityCapability.hearts.rawValue)
         return capabilities
     }
 
@@ -2121,17 +2282,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func clearSessionMessagesIfSessionEnded() {
         guard !isInSession else { return }
         sessionMessages.clear()
+        // TF b19 item 5: drop any lingering in-session heart feedback so a "Sending…" state can't
+        // outlive the session that produced it.
+        sessionHeartStateClearTask?.cancel()
+        sessionHeartStateClearTask = nil
+        sessionHeartState = .idle
     }
 
     // MARK: - Envelope sending
 
-    private func sendEnvelope(_ type: PayloadType, encodable: some Encodable, via slot: PeerSlot, sealed: Bool = false) async {
-        guard let payloadData = try? JSONEncoder().encode(encodable) else { return }
+    /// Seal (optional) + sign + transmit a payload to a slot. Returns whether the wire write
+    /// succeeded — most callers ignore it (`@discardableResult`), but the in-session heart path
+    /// (TF b19 item 5) uses it for consume-on-send + sent/failed feedback.
+    @discardableResult
+    private func sendEnvelope(_ type: PayloadType, encodable: some Encodable, via slot: PeerSlot, sealed: Bool = false) async -> Bool {
+        guard let payloadData = try? JSONEncoder().encode(encodable) else { return false }
         let finalPayload: Data
         let encryption: PayloadEncryption
         if sealed {
             guard let kaKey = slot.verifiedKeyAgreementPublicKey, !kaKey.isEmpty,
-                  let ciphertext = try? identity.seal(payloadData, to: kaKey) else { return }
+                  let ciphertext = try? identity.seal(payloadData, to: kaKey) else { return false }
             finalPayload = ciphertext
             encryption = .sealedTo(recipientKeyAgreementPublicKey: kaKey)
         } else {
@@ -2146,12 +2316,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             payloadEncryption: encryption,
             payloadSummary: PayloadSummary(title: type.rawValue),
             payload: finalPayload
-        ) else { return }
-        guard let envelopeData = try? JSONEncoder().encode(envelope) else { return }
+        ) else { return false }
+        guard let envelopeData = try? JSONEncoder().encode(envelope) else { return false }
         do {
             try await slot.channel.send(envelopeData, to: slot.peer, mode: .reliable)
+            return true
         } catch {
             FernletAuditLog.log("mesh.sendEnvelope.failed", context: ["type": type.rawValue, "error": error.localizedDescription])
+            return false
         }
     }
 
