@@ -990,6 +990,14 @@ public final class PresenceManager: ProximityPayloadHandling {
         discoveredPeer(matchingFriendFingerprint: fingerprint) != nil
     }
 
+    /// Delete-all seam (Docs/PrivacyWipeCoverage.md): clears THIS instance's in-memory identity
+    /// key cache. The keychain rows are shared with the mesh/recipe-share instances, so the
+    /// underlying `deleteAll` is idempotent across the three calls — what matters here is that
+    /// no live instance keeps the wiped identity usable in RAM until relaunch.
+    public func wipeIdentityForDeleteAll() throws {
+        try identity.wipe()
+    }
+
     /// Group-4 seam: registers a heart connection for an already-discovered peer (with an injected
     /// ranging provider so no real radio starts), then tears it down — exercising the exact
     /// teardown path a completed/failed send runs. Afterward the peer, if still advertising, must

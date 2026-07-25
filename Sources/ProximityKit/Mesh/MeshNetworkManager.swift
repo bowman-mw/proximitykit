@@ -2342,6 +2342,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
+    // MARK: - Delete-all
+
+    /// Delete-all seam (bitchat adoptions Increment 1, Docs/PrivacyWipeCoverage.md): wipes the
+    /// proximity identity keypairs + backup-escrow rows (this manager owns one of the three live
+    /// `IdentityService` caches — presence and recipe share hold the others over the same
+    /// keychain rows) and drops the mesh photo cache's in-memory media key so a post-wipe write
+    /// can't use the orphaned key. Breaks every trust relationship on purpose.
+    public func wipeIdentityForDeleteAll() throws {
+        try identity.wipe()
+        photoCacheStore.invalidateEncryptionKeyCache()
+    }
+
     // MARK: - Phase 3: Static encrypt / decrypt helpers
 
     /// AES-256-GCM encrypt `imageData` using the group key.

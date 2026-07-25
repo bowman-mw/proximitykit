@@ -112,6 +112,12 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         setupSession()
     }
 
+    /// Delete-all seam (Docs/PrivacyWipeCoverage.md): clears THIS instance's in-memory identity
+    /// key cache; keychain rows are shared with the mesh/presence instances (idempotent).
+    public func wipeIdentityForDeleteAll() throws {
+        try identity.wipe()
+    }
+
     public func start() {
         guard !isRunning else { return }
         isRunning = true
