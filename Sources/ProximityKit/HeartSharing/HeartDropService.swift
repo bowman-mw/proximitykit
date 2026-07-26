@@ -430,10 +430,28 @@ public final class HeartDropService {
         }
     }
 
-    /// Clears a surfaced delivery problem once the user has seen it. The underlying condition
-    /// re-raises it on the next sync if it is still true (a sticky data-loss marker is cleared
-    /// here — it is a nudge, not a record).
+    /// Clears the delivery problem the user actually SAW. Selective on purpose: while
+    /// `.storageUnavailable` is surfaced it outranks `.undeliverable`, so a blanket clear here
+    /// would zero an undelivered-hearts count the user was never shown — it must surface once
+    /// storage recovers (review finding, 2026-07-26). The underlying condition re-raises on the
+    /// next sync if it is still true.
     public func acknowledgeDeliveryProblem() {
+        switch deliveryProblem {
+        case .undeliverable:
+            undeliveredCount = 0
+        case .storageUnavailable:
+            // The sticky data-loss marker is a nudge, not a record; seen = done. An actual
+            // still-unavailable sidecar re-raises on the next sync regardless.
+            outbox.acknowledgeDataLoss()
+        case .noAccount, .uploadFailing, nil:
+            break
+        }
+        deliveryProblem = nil
+    }
+
+    /// The purge/consent-off variant: with the feature off, every pending signal is moot, so
+    /// everything clears — the pre-selective behavior both purge paths relied on.
+    private func clearAllDeliveryState() {
         undeliveredCount = 0
         outbox.acknowledgeDataLoss()
         deliveryProblem = nil
@@ -515,10 +533,22 @@ public final class HeartDropService {
             FernletAuditLog.log("heartdrop.rejected", context: ["reason": "createdAt-outside-window"])
             return
         }
-        guard dedup.acceptIfWithinDailyBudget(
+        switch dedup.acceptIfWithinDailyBudget(
             senderFingerprint: sender.fingerprint,
             dayEpoch: IdentityService.heartDropDayEpoch(at: createdAt)
-        ) else { return }
+        ) {
+        case .accepted:
+            break
+        case .budgetExhausted:
+            // By-design discard: the dedup mark stays, so a re-fetch stays discarded.
+            return
+        case .storageUnavailable:
+            // The dedup mark landed but the budget write failed. Without the undo the envelope
+            // id is burned while the heart was never surfaced — lost forever. Un-mark (commit-
+            // on-failure) and leave the record on the server for a later pass.
+            dedup.unrecord(envelopeID: envelope.envelopeID)
+            return
+        }
 
         if ledger.recordReceivedDropHeart(
             id: heart.id,
@@ -570,16 +600,20 @@ public final class HeartDropService {
         // the outbox on resume would silently destroy that heart, and with it the record name of an
         // already-uploaded one, stranding that record on the public database forever.
         //
-        // Nil snapshot = the outbox never loaded, so what is on the public database is UNKNOWN.
+        // Nil snapshot = the outbox never LOADED, so what is on the public database is UNKNOWN.
         // Report failure so the derived retry seam tries again — an unknown answer must never
-        // read as "nothing to purge" (Track A).
-        guard outbox.retryLoad(), let doomed = outbox.snapshot() else { return false }
+        // read as "nothing to purge" (Track A). A dirty-but-loaded outbox (memory is the truth,
+        // a write is owed) DOES purge: the user withdrew consent, so getting the records off the
+        // public database now outranks waiting for the write to recover — the removal commits in
+        // memory and re-persists with the dirty value (review finding, 2026-07-26).
+        _ = outbox.retryLoad()
+        guard outbox.isLoaded, let doomed = outbox.snapshot() else { return false }
         let recordNames = doomed.compactMap(\.recordName)
         guard !recordNames.isEmpty else {
             // No await between the capture and here, so nothing can have raced in.
             outbox.removeUnchanged(doomed)
             outboxRevision += 1
-            acknowledgeDeliveryProblem()
+            clearAllDeliveryState()
             return true
         }
         guard let transport else { return false }
@@ -597,7 +631,7 @@ public final class HeartDropService {
         // has to re-validate: a superseded purge must not clear a delivery problem raised since it
         // started, or the nothing-silent promise breaks on exactly the re-enable path.
         if generation == purgeGeneration, !isEnabled() {
-            acknowledgeDeliveryProblem()
+            clearAllDeliveryState()
         }
         FernletAuditLog.log("heartdrop.purged", context: [
             "records": "\(recordNames.count)", "entries": "\(removed)"

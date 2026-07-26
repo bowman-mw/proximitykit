@@ -129,8 +129,17 @@ public final class HeartDropPeerBundleCache {
                     state = existing
                 } else {
                     // SPK-only gossip from a peer with no cached one-time bundle: the row's
-                    // one-time slot holds the (empty-keys) bundle as carrier metadata.
-                    state = PeerState(bundle: bundle, signedPrekey: spk)
+                    // one-time slot holds a STRIPPED carrier (metadata only, never the incoming
+                    // keys). The `maxBundleKeys` sanity bound lives on the one-time path, so
+                    // storing the raw bundle here would let a crafted over-cap bundle ride the
+                    // SPK branch straight into the sidecar (review finding, 2026-07-26).
+                    let carrier = HeartPrekeyStore.Bundle(
+                        bundleID: bundle.bundleID,
+                        created: bundle.created,
+                        expires: bundle.expires,
+                        keys: []
+                    )
+                    state = PeerState(bundle: carrier, signedPrekey: spk)
                 }
             }
             guard var updated = state else { return }
@@ -200,10 +209,18 @@ public final class HeartDropPeerBundleCache {
         sidecar.wipe()
     }
 
-    /// Drops the least-recently-touched peers past the cap, and any bundle already past its own
-    /// expiry (it can never be sealed to again).
+    /// Drops the least-recently-touched peers past the cap, and any row with nothing sealable
+    /// left: a bundle past its own expiry AND no signed prekey still inside its seal window.
+    /// The SPK term matters — its 14-day window outlives a bundle that expires sooner, and
+    /// evicting on bundle expiry alone silently degraded those friends to the static key
+    /// (review finding, 2026-07-26).
     private static func evictIfOverCap(_ peers: inout [String: PeerState], at currentTime: Date) {
-        peers = peers.filter { $0.value.bundle.expires > currentTime }
+        peers = peers.filter { _, state in
+            state.bundle.expires > currentTime
+                || state.signedPrekey.map {
+                    currentTime.timeIntervalSince($0.created) <= Self.maxSealSignedPrekeyAge
+                } ?? false
+        }
         guard peers.count > Self.maxPeers else { return }
         let survivors = peers
             .sorted { $0.value.lruStamp() > $1.value.lruStamp() }

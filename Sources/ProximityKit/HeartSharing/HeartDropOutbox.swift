@@ -366,6 +366,17 @@ public final class HeartDropDedupStore {
         )
     }
 
+    public enum BudgetOutcome: Equatable, Sendable {
+        case accepted
+        /// The sender's share of this day is spent — a by-design discard; the caller keeps its
+        /// dedup mark so a re-fetch stays discarded.
+        case budgetExhausted
+        /// The mark could not be durably written. The caller must UNDO whatever durable marks it
+        /// already spent on this drop and leave the record on the server for a later pass —
+        /// otherwise the envelope id is burned and the heart is lost (review finding, 2026-07-26).
+        case storageUnavailable
+    }
+
     public var isAvailable: Bool { sidecar.state == .ready }
     @discardableResult
     public func retryLoad() -> Bool { sidecar.retryLoad() }
@@ -380,17 +391,24 @@ public final class HeartDropDedupStore {
         return sidecar.mutateIfPersisted { $0 = state }
     }
 
+    /// Best-effort undo for an envelope-id mark whose downstream accept could not complete.
+    /// Commit-on-failure: the mark leaves memory NOW (so the next fetch can re-deliver) and a
+    /// later successful persist makes the removal durable.
+    public func unrecord(envelopeID: UUID) {
+        sidecar.mutate { $0.seenEnvelopeIDs.removeValue(forKey: envelopeID) }
+    }
+
     /// Whether the sender still has acceptance budget for this UTC day epoch; increments on accept.
     /// `dayEpoch` MUST be receiver-derived (the caller clamps the signed `createdAt` into the
     /// pickup window) — passing a sender-controlled value re-opens the flood hole.
-    public func acceptIfWithinDailyBudget(senderFingerprint: String, dayEpoch: UInt64) -> Bool {
-        guard var state = sidecar.read(), isAvailable else { return false }
+    public func acceptIfWithinDailyBudget(senderFingerprint: String, dayEpoch: UInt64) -> BudgetOutcome {
+        guard var state = sidecar.read(), isAvailable else { return .storageUnavailable }
         prune(&state)
         let key = "\(senderFingerprint)|\(dayEpoch)"
         let count = state.acceptedBySenderDay[key, default: 0]
-        guard count < Self.maxAcceptedPerSenderPerDay else { return false }
+        guard count < Self.maxAcceptedPerSenderPerDay else { return .budgetExhausted }
         state.acceptedBySenderDay[key] = count + 1
-        return sidecar.mutateIfPersisted { $0 = state }
+        return sidecar.mutateIfPersisted { $0 = state } ? .accepted : .storageUnavailable
     }
 
     /// Delete-all seam (Docs/PrivacyWipeCoverage.md).

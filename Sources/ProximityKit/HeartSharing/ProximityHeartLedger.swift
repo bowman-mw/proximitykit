@@ -118,6 +118,14 @@ public final class ProximityHeartLedger {
             readData: readData,
             writeData: writeData
         )
+        // The sidecar can recover through its OWN paths (the unlock notification, an on-access
+        // read from a view body) — the published mirror must follow, or hearts loaded on unlock
+        // stay invisible for the session whenever away-hearts is off and no sync pass runs.
+        // Hopped: on-access recovery fires inside view-body reads (`canSendHeart`), and the
+        // published mirror must not mutate mid-render.
+        sidecar.onRecovery = { [weak self] in
+            Task { @MainActor [weak self] in self?.refreshMirror() }
+        }
         refreshMirror()
     }
 

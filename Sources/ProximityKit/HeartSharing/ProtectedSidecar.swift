@@ -105,6 +105,14 @@ public final class ProtectedSidecar<Value: Codable> {
     /// `acknowledgeDataLoss()` or `wipe()`.
     public private(set) var dataLossOccurred = false
 
+    /// Called after a DEFERRED load recovers — whichever path recovered it (the unlock
+    /// notification, an on-access read, or an explicit `retryLoad()`). Owners that publish a
+    /// derived mirror of the value (`ProximityHeartLedger.receivedHearts`) hook this so the
+    /// mirror can never go stale-empty when the sidecar heals through one of its own internal
+    /// paths — without it, received hearts loaded on unlock stayed invisible for the whole
+    /// session whenever nothing else touched the owner (review finding, 2026-07-26).
+    public var onRecovery: (() -> Void)?
+
     private var storage: Storage = .unloaded
     private let fileURL: URL
     private let quarantineURL: URL
@@ -260,6 +268,7 @@ public final class ProtectedSidecar<Value: Codable> {
             return false
         case .unloaded:
             performLoad()
+            if isLoaded { onRecovery?() }
             return state == .ready
         }
     }
@@ -286,6 +295,7 @@ public final class ProtectedSidecar<Value: Codable> {
             return
         }
         performLoad()
+        if isLoaded { onRecovery?() }
     }
 
     private func performLoad() {
