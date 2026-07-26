@@ -70,8 +70,9 @@ public final class HeartDropService {
 
     /// How far outside the pickup window a drop's signed `createdAt` may sit before the drop is
     /// refused — clock skew tolerance, and the clamp that keeps the receive-side flood budget
-    /// bounded to a handful of day buckets per sender.
-    static let createdAtSkewTolerance: TimeInterval = 24 * 3600
+    /// bounded to a handful of day buckets per sender. Public: a term in the signed-prekey
+    /// retention invariant test.
+    public static let createdAtSkewTolerance: TimeInterval = 24 * 3600
     /// Upload retries on one heart before delivery is reported as failing.
     public static let failingAttemptThreshold = 3
     /// Floor between unforced `syncNow()` passes. Drops are days-scale by nature, so a minute of
@@ -213,18 +214,21 @@ public final class HeartDropService {
             return .failed
         }
 
-        // Forward secrecy when a gossiped prekey is available; static fallback otherwise
-        // (availability over FS — the friend may never have gossiped a bundle to us yet).
-        // Consumed as late as possible, and handed back on every path that fails after it.
+        // Forward secrecy when a gossiped prekey is available — a one-time key first, else the
+        // medium-term signed prekey (Track B); static fallback otherwise (availability over FS —
+        // the friend may never have gossiped a bundle to us yet). Consumed as late as possible,
+        // and handed back on every path that fails after it. Only a ONE-TIME key is returnable:
+        // the signed prekey is reusable, so there is nothing to un-burn (and the cache's
+        // returnPrekey guard would no-op on it only by accident of its consumption check).
         let prekey = peerBundles.consumePrekey(forFriendSigningKey: friend.signingPublicKey)
         func returnPrekey() {
-            guard let prekey else { return }
+            guard let prekey, prekey.isOneTime else { return }
             peerBundles.returnPrekey(id: prekey.id, forFriendSigningKey: friend.signingPublicKey)
         }
 
         guard let wire = try? HeartDropSealer.seal(
             innerEnvelopeJSON: envelopeJSON,
-            toPrekey: prekey,
+            toPrekey: prekey.map { (id: $0.id, publicKey: $0.publicKey) },
             orStaticKey: friend.keyAgreementPublicKey
         ) else {
             returnPrekey()
@@ -256,7 +260,14 @@ public final class HeartDropService {
         }
         outboxRevision += 1
         ledger.recordHeartSent(to: friend.fingerprint) // consume-on-queue keeps the 5-min gate honest
-        FernletAuditLog.log("heartdrop.queued", context: ["prekey": prekey == nil ? "static" : "one-time"])
+        // The fallback mix ("signed" vs "static" especially) is the field telemetry that would
+        // ever justify reopening per-friend prekey sets — keep the three cases distinguishable.
+        let prekeyKind: String
+        switch prekey {
+        case nil: prekeyKind = "static"
+        case .some(let used): prekeyKind = used.isOneTime ? "one-time" : "signed"
+        }
+        FernletAuditLog.log("heartdrop.queued", context: ["prekey": prekeyKind])
         scheduleSync()
         return .queued
     }

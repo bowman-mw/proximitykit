@@ -18,6 +18,11 @@ public final class HeartDropPeerBundleCache {
     private struct PeerState: Codable {
         var bundle: HeartPrekeyStore.Bundle
         var consumedIDs: Set<UUID> = []
+        /// The peer's medium-term signed prekey, in its OWN slot (Track B Increment 6): it has
+        /// its own monotonicity (newer `created` wins) and its own freshness cap, independent of
+        /// the one-time bundle — an SPK-only refresh must never wipe the one-time slot, and a
+        /// leaner bundle must never destroy a cached SPK. Optional so pre-change rows decode.
+        var signedPrekey: HeartPrekeyStore.SignedPrekey?
         /// Last store/consume touch — the LRU eviction key. Optional so a sidecar written before
         /// the cap existed decodes; those rows fall back to the bundle's own `created`.
         var lastUsedAt: Date?
@@ -38,6 +43,11 @@ public final class HeartDropPeerBundleCache {
     /// seal-side cap only — the recipient still retains its private halves to expiry, so drops
     /// already in flight against an older bundle keep opening.
     public static let maxSealBundleAge: TimeInterval = 7 * 24 * 3600
+    /// The signed prekey's own seal window (O2: 14 d seal window → 29 d retention), deliberately
+    /// longer than the one-time window — the SPK exists precisely for friends not seen in a
+    /// while. `HeartPrekeyStore.spkRetention` must exceed this + the outbox lifetime + skew
+    /// (invariant test), or drops sealed near the end of the window silently fail to open.
+    public static let maxSealSignedPrekeyAge: TimeInterval = 14 * 24 * 3600
 
     private let sidecar: ProtectedSidecar<[String: PeerState]>
     private let now: () -> Date
@@ -69,8 +79,13 @@ public final class HeartDropPeerBundleCache {
     @discardableResult
     public func retryLoad() -> Bool { sidecar.retryLoad() }
 
-    /// Stores/refreshes a friend's gossiped bundle. A NEWER bundle id resets consumption marking;
-    /// re-receiving the same bundle keeps it (so a re-intro can't reset one-time semantics).
+    /// Stores/refreshes a friend's gossiped bundle. The two slots update INDEPENDENTLY
+    /// (Track B Increment 6):
+    ///  - One-time slot: a NEWER bundle id resets consumption marking; re-receiving the same
+    ///    bundle keeps it (so a re-intro can't reset one-time semantics); an SPK-only bundle
+    ///    never wipes it.
+    ///  - Signed-prekey slot: newer `created` wins; a bundle WITHOUT an SPK never clears it
+    ///    (the slot ages out via `maxSealSignedPrekeyAge` instead).
     /// No-op while the sidecar is unavailable — the bundle re-gossips at the next verified intro.
     ///
     /// Monotonicity guard: bundles gossip from two coordinators (mesh and presence), so an intro
@@ -78,56 +93,92 @@ public final class HeartDropPeerBundleCache {
     /// never replace a newer one — doing so would also clear `consumedIDs` and re-enable prekeys
     /// we already sealed to, silently degrading forward secrecy toward the static key.
     public func store(bundle: HeartPrekeyStore.Bundle, forFriendSigningKey key: Data) {
-        guard !bundle.keys.isEmpty, bundle.keys.count <= Self.maxBundleKeys,
-              bundle.expires > now() else { return }
+        let currentTime = now()
+        let hasStorableOneTime = !bundle.keys.isEmpty && bundle.keys.count <= Self.maxBundleKeys
+            && bundle.expires > currentTime
+        let storableSPK = bundle.signedPrekey.flatMap { spk in
+            currentTime.timeIntervalSince(spk.created) <= Self.maxSealSignedPrekeyAge ? spk : nil
+        }
+        guard hasStorableOneTime || storableSPK != nil else { return }
         guard sidecar.read() != nil, isAvailable else { return }
         let mapKey = Self.mapKey(key)
-        let currentTime = now()
         sidecar.mutateIfPersisted { peers in
-            if var existing = peers[mapKey] {
-                if existing.bundle.bundleID == bundle.bundleID {
-                    existing.bundle = bundle
-                } else if bundle.created > existing.bundle.created {
-                    existing = PeerState(bundle: bundle)
+            var state = peers[mapKey]
+
+            if hasStorableOneTime {
+                if var existing = state {
+                    if existing.bundle.bundleID == bundle.bundleID {
+                        existing.bundle = bundle
+                        state = existing
+                    } else if bundle.created > existing.bundle.created {
+                        existing.bundle = bundle
+                        existing.consumedIDs = []
+                        state = existing
+                    }
+                    // else: same-age-or-older rival bundle — keep what we have (the LRU touch
+                    // below still counts, so an actively-gossiping peer doesn't age out).
                 } else {
-                    // Same-age-or-older rival bundle: keep what we have, but count the touch so an
-                    // actively-gossiping peer doesn't age out of the LRU.
-                    existing.lastUsedAt = currentTime
-                    peers[mapKey] = existing
-                    return
+                    state = PeerState(bundle: bundle)
                 }
-                existing.lastUsedAt = currentTime
-                peers[mapKey] = existing
-            } else {
-                peers[mapKey] = PeerState(bundle: bundle, lastUsedAt: currentTime)
             }
+            if let spk = storableSPK {
+                if var existing = state {
+                    if existing.signedPrekey.map({ spk.created > $0.created || spk.id == $0.id }) ?? true {
+                        existing.signedPrekey = spk
+                    }
+                    state = existing
+                } else {
+                    // SPK-only gossip from a peer with no cached one-time bundle: the row's
+                    // one-time slot holds the (empty-keys) bundle as carrier metadata.
+                    state = PeerState(bundle: bundle, signedPrekey: spk)
+                }
+            }
+            guard var updated = state else { return }
+            updated.lastUsedAt = currentTime
+            peers[mapKey] = updated
             Self.evictIfOverCap(&peers, at: currentTime)
         }
     }
 
-    /// Picks an unconsumed, unexpired, still-fresh prekey for the friend and marks it consumed
-    /// locally (sender-side one-time semantics — the recipient retains private halves until bundle
-    /// expiry + grace because two senders can race the same broadcast bundle). Nil means "seal to
-    /// the static key instead", never "don't send" — including while the sidecar is unavailable,
-    /// or when the consumption mark cannot be durably persisted (an unpersisted mark would burn
-    /// the same key twice after a reload).
-    public func consumePrekey(forFriendSigningKey key: Data) -> (id: UUID, publicKey: Data)? {
+    /// Picks the best sealing key for the friend: a fresh unconsumed ONE-TIME prekey first
+    /// (best forward secrecy; marked consumed sender-side — the recipient retains private
+    /// halves until bundle expiry + grace because two senders can race the same broadcast
+    /// bundle), else the fresh SIGNED prekey (medium-term, reusable, no consumption marking),
+    /// else nil — which means "seal to the static key instead", never "don't send". Nil also
+    /// while the sidecar is unavailable, or when a one-time consumption mark cannot be durably
+    /// persisted (an unpersisted mark would let the same one-time key be sealed to twice).
+    public func consumePrekey(forFriendSigningKey key: Data) -> (id: UUID, publicKey: Data, isOneTime: Bool)? {
         let mapKey = Self.mapKey(key)
         let currentTime = now()
         guard let peers = sidecar.read(), isAvailable else { return nil }
-        guard let state = peers[mapKey], state.bundle.expires > currentTime,
-              currentTime.timeIntervalSince(state.bundle.created) <= Self.maxSealBundleAge else { return nil }
-        guard let entry = state.bundle.keys.first(where: { !state.consumedIDs.contains($0.id) }) else {
-            return nil
+        guard let state = peers[mapKey] else { return nil }
+
+        if state.bundle.expires > currentTime,
+           currentTime.timeIntervalSince(state.bundle.created) <= Self.maxSealBundleAge,
+           let entry = state.bundle.keys.first(where: { !state.consumedIDs.contains($0.id) }) {
+            let persisted = sidecar.mutateIfPersisted { peers in
+                guard var state = peers[mapKey] else { return }
+                state.consumedIDs.insert(entry.id)
+                state.lastUsedAt = currentTime
+                peers[mapKey] = state
+            }
+            if persisted {
+                return (entry.id, entry.publicKey, true)
+            }
+            // The consumption mark didn't land — fall through to the (markless) signed prekey
+            // rather than straight to static.
         }
-        let persisted = sidecar.mutateIfPersisted { peers in
-            guard var state = peers[mapKey] else { return }
-            state.consumedIDs.insert(entry.id)
-            state.lastUsedAt = currentTime
-            peers[mapKey] = state
+
+        if let spk = state.signedPrekey,
+           currentTime.timeIntervalSince(spk.created) <= Self.maxSealSignedPrekeyAge {
+            sidecar.mutateIfPersisted { peers in
+                guard var state = peers[mapKey] else { return }
+                state.lastUsedAt = currentTime
+                peers[mapKey] = state
+            }
+            return (spk.id, spk.publicKey, false)
         }
-        guard persisted else { return nil }
-        return (entry.id, entry.publicKey)
+        return nil
     }
 
     /// Un-consumes a prekey whose send never made it onto the wire. A one-time key burned without

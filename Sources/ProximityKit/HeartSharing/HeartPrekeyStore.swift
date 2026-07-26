@@ -32,28 +32,67 @@ public final class HeartPrekeyStore {
         }
     }
 
+    /// The X3DH-style medium-term signed prekey (Track B of
+    /// Docs/Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26.md). What it buys: any friend not
+    /// met in person within `HeartDropPeerBundleCache.maxSealBundleAge` used to get
+    /// static-sealed drops forever — one device compromise then retroactively opened every one
+    /// of them. The SPK gives those drops a medium-term key instead. This is a COVERAGE win,
+    /// not a window win: the private half lives `spkRetention` (~4 weeks), slightly longer than
+    /// a one-time key's. "Signed" as in signed-by-the-identity-envelope: like the one-time
+    /// bundle it only ever travels inside the signed identity intro, so provenance is the
+    /// envelope's Ed25519 signature — no second standalone signature to get out of sync.
+    public struct SignedPrekey: Codable, Equatable, Sendable {
+        public let id: UUID
+        public let publicKey: Data
+        public let created: Date
+        /// Rotation deadline, NOT retention deadline: after this the owner gossips a fresh SPK,
+        /// but keeps this one's private half until `created + spkRetention` so in-flight drops
+        /// still open.
+        public let expires: Date
+        public init(id: UUID, publicKey: Data, created: Date, expires: Date) {
+            self.id = id
+            self.publicKey = publicKey
+            self.created = created
+            self.expires = expires
+        }
+    }
+
     /// The gossiped shape — public halves only. Codable so it rides `IdentityRangingPayload`
-    /// as an optional field old decoders ignore.
+    /// as an optional field old decoders ignore. `signedPrekey` is additive-OPTIONAL: old
+    /// peers' bundles decode with nil and keep working; old decoders ignore the extra key.
     public struct Bundle: Codable, Equatable, Sendable {
         public let bundleID: UUID
         public let created: Date
         public let expires: Date
         public let keys: [PrekeyEntry]
-        public init(bundleID: UUID, created: Date, expires: Date, keys: [PrekeyEntry]) {
+        public let signedPrekey: SignedPrekey?
+        public init(bundleID: UUID, created: Date, expires: Date, keys: [PrekeyEntry],
+                    signedPrekey: SignedPrekey? = nil) {
             self.bundleID = bundleID
             self.created = created
             self.expires = expires
             self.keys = keys
+            self.signedPrekey = signedPrekey
         }
     }
 
     static let batchSize = 16
-    static let bundleLifetime: TimeInterval = 30 * 24 * 3600
+    public static let bundleLifetime: TimeInterval = 30 * 24 * 3600
     /// Mint a fresh bundle when the current one has less life than this left.
     static let renewalHorizon: TimeInterval = 7 * 24 * 3600
     /// Keep expired bundles' private halves this much longer — an in-flight drop sealed just
     /// before expiry must still open (mirrors bitchat's consumed-prekey grace window).
-    static let expiryGrace: TimeInterval = 48 * 3600
+    public static let expiryGrace: TimeInterval = 48 * 3600
+
+    /// Signed-prekey constants (O2: 14 d seal window → 29 d retention; the invariants matter
+    /// more than the numbers and are pinned by tests):
+    ///  - `spkRetention ≥ maxSealSignedPrekeyAge + HeartDropOutbox.entryLifetime +
+    ///    createdAtSkewTolerance` — a drop sealed at the end of the seal window can sit the full
+    ///    outbox lifetime (plus skew) and must still open; violating this silently loses hearts.
+    ///  - `spkRetention < bundleLifetime + expiryGrace` — nothing this change introduces is ever
+    ///    the longest-lived key on the device.
+    static let spkRotation: TimeInterval = 7 * 24 * 3600
+    public static let spkRetention: TimeInterval = 29 * 24 * 3600
 
     public static let keychainService = "com.fernlet.heartdrop"
     static let keychainAccount = "prekeyPrivateHalves"
@@ -63,8 +102,18 @@ public final class HeartPrekeyStore {
         /// Raw representations, index-aligned with `bundle.keys`.
         var privateKeys: [Data]
     }
+    private struct StoredSignedPrekey: Codable {
+        var prekey: SignedPrekey
+        var privateKey: Data
+    }
     private struct StoredState: Codable {
         var bundles: [StoredBundle]
+        /// OPTIONAL and must stay so: a non-optional field would make synthesized `Codable`
+        /// throw on every pre-change keychain blob, and `loadState()` classifies an undecodable
+        /// blob as corrupt → empty → mint fresh — stranding the private halves of prekeys
+        /// already gossiped, so every in-flight drop would silently fail to open. Pinned by a
+        /// regression test that decodes a captured pre-change blob.
+        var signedPrekeys: [StoredSignedPrekey]?
     }
 
     private let keychainService: String
@@ -80,32 +129,62 @@ public final class HeartPrekeyStore {
     // MARK: - Local bundle (mint / top-up)
 
     /// The bundle to gossip right now — mints on first use, rotates when inside the renewal
-    /// horizon, and prunes bundles past expiry + grace.
+    /// horizon, and prunes bundles past expiry + grace. The signed prekey is maintained
+    /// alongside (minted on first use, rotated past `spkRotation`, retained `spkRetention`)
+    /// and attached to whichever bundle is returned.
     ///
     /// Fail-closed on keychain trouble: an unreadable keychain returns nil rather than an empty
     /// state, because minting over a state we could not read would strand the private halves of
     /// prekeys we already gossiped — every drop sealed to them would then fail to open. A bundle
-    /// whose private halves did not persist is likewise never gossiped.
+    /// (or SPK) whose private halves did not persist is likewise never gossiped.
     public func currentBundle() -> Bundle? {
         guard var state = loadState() else { return nil }
         let currentTime = now()
         state.bundles.removeAll { $0.bundle.expires.addingTimeInterval(Self.expiryGrace) < currentTime }
+
+        var signedPrekeys = state.signedPrekeys ?? []
+        signedPrekeys.removeAll { $0.prekey.created.addingTimeInterval(Self.spkRetention) < currentTime }
+        var currentSPK = signedPrekeys.max(by: { $0.prekey.created < $1.prekey.created })
+        // The previous still-gossipable SPK, for the fail-closed path: if a freshly minted SPK's
+        // persist fails, this one (already durable) is what may be gossiped instead.
+        let persistedSPK = currentSPK.flatMap { $0.prekey.expires > currentTime ? $0 : nil }
+        var spkMinted = false
+        if currentSPK == nil || currentSPK!.prekey.expires <= currentTime {
+            let fresh = mintSignedPrekey(at: currentTime)
+            signedPrekeys.append(fresh)
+            currentSPK = fresh
+            spkMinted = true
+        }
+        state.signedPrekeys = signedPrekeys
+
         if let newest = state.bundles.max(by: { $0.bundle.expires < $1.bundle.expires }),
            newest.bundle.expires.timeIntervalSince(currentTime) > Self.renewalHorizon {
-            persist(state)
-            return newest.bundle
+            if persist(state) {
+                return attaching(currentSPK?.prekey, to: newest.bundle)
+            }
+            // The prune (and possibly a fresh SPK) didn't land. The bundle itself is already
+            // durable, so keep gossiping it — but only ever with a PERSISTED signed prekey.
+            return attaching(spkMinted ? persistedSPK?.prekey : currentSPK?.prekey, to: newest.bundle)
         }
-        guard let minted = mint(at: currentTime) else {
-            persist(state)
-            return state.bundles.last?.bundle
-        }
+        let minted = mint(at: currentTime)
         state.bundles.append(minted)
         guard persist(state) else { return nil }
-        return minted.bundle
+        return attaching(currentSPK?.prekey, to: minted.bundle)
+    }
+
+    private func attaching(_ signedPrekey: SignedPrekey?, to bundle: Bundle) -> Bundle {
+        Bundle(
+            bundleID: bundle.bundleID,
+            created: bundle.created,
+            expires: bundle.expires,
+            keys: bundle.keys,
+            signedPrekey: signedPrekey
+        )
     }
 
     /// The private half for an incoming drop's prekey id — searches every retained bundle
-    /// (expired-but-in-grace included).
+    /// (expired-but-in-grace included) and every retained signed prekey (rotated-out-but-within-
+    /// retention included).
     public func privateKey(forPrekeyID id: UUID) -> Curve25519.KeyAgreement.PrivateKey? {
         guard let state = loadState() else { return nil }
         for stored in state.bundles {
@@ -113,6 +192,9 @@ public final class HeartPrekeyStore {
                index < stored.privateKeys.count {
                 return try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: stored.privateKeys[index])
             }
+        }
+        for stored in state.signedPrekeys ?? [] where stored.prekey.id == id {
+            return try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: stored.privateKey)
         }
         return nil
     }
@@ -125,7 +207,7 @@ public final class HeartPrekeyStore {
 
     // MARK: - Storage
 
-    private func mint(at date: Date) -> StoredBundle? {
+    private func mint(at date: Date) -> StoredBundle {
         var entries: [PrekeyEntry] = []
         var privates: [Data] = []
         for _ in 0..<Self.batchSize {
@@ -140,6 +222,19 @@ public final class HeartPrekeyStore {
             keys: entries
         )
         return StoredBundle(bundle: bundle, privateKeys: privates)
+    }
+
+    private func mintSignedPrekey(at date: Date) -> StoredSignedPrekey {
+        let key = Curve25519.KeyAgreement.PrivateKey()
+        return StoredSignedPrekey(
+            prekey: SignedPrekey(
+                id: UUID(),
+                publicKey: key.publicKey.rawRepresentation,
+                created: date,
+                expires: date.addingTimeInterval(Self.spkRotation)
+            ),
+            privateKey: key.rawRepresentation
+        )
     }
 
     /// Nil means "the keychain could not be read", which is NOT the same as "no bundles yet" —
