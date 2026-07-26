@@ -1077,13 +1077,17 @@ public final class ProximityCoordinator {
             advertisedRole = "peer"
         }
 
+        // No "caps" entry: the old `"plan,live,delta"`/`"share"` string was stale discovery-info
+        // no reader ever parsed. Real capability negotiation is `IdentityRangingPayload
+        // .capabilities` (wire2 keys off it) — a future coach coordinator must pass a real
+        // `localCapabilities` array there (pattern: `MeshNetworkManager.localCapabilities()`),
+        // or wire2 silently degrades to legacy for the whole channel.
         return [
             "v": "1",
             "role": advertisedRole,
             "sid": sessionID,
             "fp": identity.localFingerprint,
-            "name": String(displayName.prefix(32)),
-            "caps": mode == .trainer ? "plan,live,delta" : "share"
+            "name": String(displayName.prefix(32))
         ]
     }
 
