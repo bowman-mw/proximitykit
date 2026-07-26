@@ -610,6 +610,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     public var localFingerprint: String { identity.localFingerprint }
     public var localSigningPublicKey: Data { identity.localSigningPublicKey }
+    /// This device's X25519 public half. Public because the QR ceremony transcript binds the
+    /// SCANNER's key agreement key, so anything reasoning about a round we sent — a test, a future
+    /// re-verification surface — needs the same value `handleVerifyResponse` verifies against.
+    public var localKeyAgreementPublicKey: Data { identity.localKeyAgreementPublicKey }
 
     public var sessionParticipants: [MeshSessionParticipant] {
         var participants = [
@@ -854,6 +858,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         receivedPhotoIDsByFingerprint.removeAll()
         receiveQuotaMeshID = nil
         clearGroupKeyState()
+        clearActiveVerifyQR()
         stopSearching()
     }
 
@@ -1550,6 +1555,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func removeSlot(_ slot: PeerSlot) {
         Task { await slot.coordinator.cancel() }
+        clearActiveVerifyQRIfBound(to: slot.id)
         slots.removeAll { $0.id == slot.id }
         slotTrustPolicies.removeValue(forKey: slot.id)
         pruneShopSendTracking(for: slot.id)
@@ -1564,6 +1570,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             await self?.sendEnvelope(.sessionGoodbye, encodable: PayloadSummary(title: "Session ended"), via: slot)
             await slot.coordinator.cancel()
         }
+        clearActiveVerifyQRIfBound(to: slot.id)
         slots.removeAll { $0.id == slot.id }
         slotTrustPolicies.removeValue(forKey: slot.id)
         pruneShopSendTracking(for: slot.id)
@@ -1715,23 +1722,61 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: - QR verification ceremony (bitchat adoptions Increment 4)
 
-    /// Nonce of the QR currently displayed on THIS device (single-use — cleared on the first
-    /// honored challenge). Set by `makeLocalVerifyQRURL`.
-    @ObservationIgnored private var activeVerifyQRNonce: Data?
+    /// The QR currently displayed on THIS device, bound to the slot row the sheet was opened from.
+    /// The slot binding is load-bearing: the sheet names ONE peer ("Verify with Bob"), so a
+    /// challenge quoting this nonce from any OTHER connected peer is a third party racing the
+    /// ceremony — honoring it would commit the racer's slot AND burn the single-use nonce the
+    /// named peer still needs. Cleared on the first honored challenge, on sheet dismissal
+    /// (`clearActiveVerifyQR`), and on expiry.
+    @ObservationIgnored private var activeVerifyQR: (slotID: UUID, nonce: Data, issuedAt: Date)?
     /// Scanner-side pending rounds keyed by slot id; entries die with their slots (≤5 total, no
     /// separate timeout needed — a slot that never answers ends with the session).
     @ObservationIgnored private var pendingQRVerifications: [UUID: (qrNonce: Data, challengeNonce: Data, expectedSigningKey: Data)] = [:]
 
-    /// The signed QR for a peer to scan (displayer side). Freshness-limited to 5 minutes.
-    public func makeLocalVerifyQRURL() -> URL? {
+    /// The signed QR for `slotID`'s peer to scan (displayer side). Freshness-limited to 5 minutes,
+    /// and only a challenge arriving on `slotID` is honored — pass the slot the sheet was opened
+    /// from, never a "current" slot guessed at challenge time.
+    public func makeLocalVerifyQRURL(slotID: UUID) -> URL? {
         guard let made = try? ProximityVerifyQR.makeURL(identity: identity) else { return nil }
-        activeVerifyQRNonce = made.nonce
+        activeVerifyQR = (slotID: slotID, nonce: made.nonce, issuedAt: Date())
         return made.url
+    }
+
+    /// Ends the display half of the ceremony (sheet dismissed, app backgrounded, session over).
+    /// The manager expires the binding on its own as well — this is what makes "a photographed QR
+    /// is useless once the sheet closed" literally true rather than merely time-bounded.
+    public func clearActiveVerifyQR() {
+        guard activeVerifyQR != nil else { return }
+        activeVerifyQR = nil
+        FernletAuditLog.log("mesh.verifyQR.displayCleared")
+    }
+
+    /// Drops the binding when its slot goes away. The ceremony already fails closed without this
+    /// (a challenge is only honored on the bound slot, and dispatch can't resolve a departed one),
+    /// but leaving a live nonce behind a vanished peer is state nobody can ever spend.
+    private func clearActiveVerifyQRIfBound(to slotID: UUID) {
+        guard activeVerifyQR?.slotID == slotID else { return }
+        clearActiveVerifyQR()
     }
 
     private func manualCommitPeer(of slot: PeerSlot) -> ProximityCoordinator.PeerIdentity? {
         if case .awaitingManualCommit(let peer) = slot.coordinator.state { return peer }
         return nil
+    }
+
+    /// The peer identity to answer a ceremony envelope to. `manualCommitPeer` only sees the
+    /// pre-commit gate state, but a challenge can legitimately land on a slot that committed in
+    /// the meantime (the row's plain Connect button, or the peer's own ceremony round), and a nil
+    /// there silently downgrades the sealed response to the legacy format. Fall through the
+    /// post-commit states so the capability read is valid at send time.
+    private func ceremonyPeerIdentity(of slot: PeerSlot) -> ProximityCoordinator.PeerIdentity? {
+        switch slot.coordinator.state {
+        case .awaitingProximityCommit(let peer), .awaitingManualCommit(let peer),
+             .awaitingUserConfirmation(let peer), .connected(let peer), .transferring(let peer, _):
+            return peer
+        default:
+            return nil
+        }
     }
 
     /// Scanner side: a `fernlet://verify` QR was scanned. Validates signature + freshness, binds
@@ -1761,8 +1806,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
               let payload = try? JSONDecoder().decode(VerifyChallengePayload.self, from: plaintext) else { return }
         // Only honor a challenge quoting the QR THIS device is displaying right now — a
         // photographed QR is useless once the sheet closed.
-        guard let displayed = activeVerifyQRNonce, displayed == payload.qrNonce else {
+        guard let active = activeVerifyQR, active.nonce == payload.qrNonce else {
             FernletAuditLog.log("mesh.verifyQR.staleChallengeDropped")
+            return
+        }
+        // Displayer-side expiry: the QR's own timestamp bounds what the SCANNER accepts, which a
+        // hostile scanner simply ignores. abs() so a backwards clock jump can't resurrect a
+        // display either.
+        guard abs(Date().timeIntervalSince(active.issuedAt)) <= ProximityVerifyQR.freshnessWindow else {
+            activeVerifyQR = nil
+            FernletAuditLog.log("mesh.verifyQR.expiredChallengeDropped")
+            return
+        }
+        // The sheet named ONE peer, so a challenge on any other slot is a third party who can see
+        // this screen. Drop it WITHOUT clearing: burning the nonce here is exactly how such a peer
+        // would deny the named peer its genuine round.
+        guard active.slotID == slot.id else {
+            FernletAuditLog.log("mesh.verifyQR.wrongSlotChallengeDropped")
             return
         }
         let message = ProximityVerifySignature.message(
@@ -1771,9 +1831,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             qrNonce: payload.qrNonce
         )
         guard let signature = try? identity.sign(message) else { return }
-        activeVerifyQRNonce = nil // single use
+        activeVerifyQR = nil // single use
         let response = VerifyResponsePayload(challengeNonce: payload.challengeNonce, signature: signature)
-        let supportsWire2 = manualCommitPeer(of: slot)?.supports(.wire2) ?? false
+        let supportsWire2 = ceremonyPeerIdentity(of: slot)?.supports(.wire2) ?? slot.supports(.wire2)
         Task {
             await sendVerifyEnvelope(
                 .verifyResponse,
@@ -1856,6 +1916,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
               ),
               let envelopeData = try? JSONEncoder().encode(envelope) else { return }
         try? await slot.channel.send(envelopeData, to: slot.peer, mode: .reliable)
+    }
+
+    // MARK: Ceremony test seams (`internal` for `@testable` unit tests only)
+
+    /// Backdates the live QR binding so the displayer-side expiry can be exercised without a unit
+    /// test waiting out the freshness window.
+    func backdateActiveVerifyQRForTesting(by seconds: TimeInterval) {
+        guard let active = activeVerifyQR else { return }
+        activeVerifyQR = (active.slotID, active.nonce, active.issuedAt.addingTimeInterval(-seconds))
+    }
+
+    /// The challenge nonce this device minted for `slotID`. The ceremony otherwise reveals it only
+    /// inside a sealed envelope on the slot channel, which a unit test's fake session can't read.
+    func pendingVerifyChallengeNonceForTesting(slotID: UUID) -> Data? {
+        pendingQRVerifications[slotID]?.challengeNonce
     }
 
     private func canEvaluateOverflowCandidate(_ peer: MultipeerPeer) -> Bool {

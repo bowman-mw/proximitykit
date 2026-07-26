@@ -64,7 +64,7 @@ public nonisolated enum ProximityVerifyQR {
     }
 
     /// Builds the signed `fernlet://verify?d=…` URL. Returns the nonce too — the caller must
-    /// remember it (single-use display; see `MeshNetworkManager.activeVerifyQRNonce`).
+    /// remember it (single-use display, bound to one slot; see `MeshNetworkManager.activeVerifyQR`).
     @MainActor
     public static func makeURL(identity: IdentityService, now: Date = Date()) throws -> (url: URL, nonce: Data) {
         let nonce = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })

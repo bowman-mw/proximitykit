@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Security
 import FernletFoundation
 
 /// One-time X25519 prekeys for forward-secret heart drops (bitchat adoptions Increment 3 — the
@@ -80,8 +81,13 @@ public final class HeartPrekeyStore {
 
     /// The bundle to gossip right now — mints on first use, rotates when inside the renewal
     /// horizon, and prunes bundles past expiry + grace.
+    ///
+    /// Fail-closed on keychain trouble: an unreadable keychain returns nil rather than an empty
+    /// state, because minting over a state we could not read would strand the private halves of
+    /// prekeys we already gossiped — every drop sealed to them would then fail to open. A bundle
+    /// whose private halves did not persist is likewise never gossiped.
     public func currentBundle() -> Bundle? {
-        var state = loadState()
+        guard var state = loadState() else { return nil }
         let currentTime = now()
         state.bundles.removeAll { $0.bundle.expires.addingTimeInterval(Self.expiryGrace) < currentTime }
         if let newest = state.bundles.max(by: { $0.bundle.expires < $1.bundle.expires }),
@@ -94,14 +100,14 @@ public final class HeartPrekeyStore {
             return state.bundles.last?.bundle
         }
         state.bundles.append(minted)
-        persist(state)
+        guard persist(state) else { return nil }
         return minted.bundle
     }
 
     /// The private half for an incoming drop's prekey id — searches every retained bundle
     /// (expired-but-in-grace included).
     public func privateKey(forPrekeyID id: UUID) -> Curve25519.KeyAgreement.PrivateKey? {
-        let state = loadState()
+        guard let state = loadState() else { return nil }
         for stored in state.bundles {
             if let index = stored.bundle.keys.firstIndex(where: { $0.id == id }),
                index < stored.privateKeys.count {
@@ -136,25 +142,81 @@ public final class HeartPrekeyStore {
         return StoredBundle(bundle: bundle, privateKeys: privates)
     }
 
-    private func loadState() -> StoredState {
+    /// Nil means "the keychain could not be read", which is NOT the same as "no bundles yet" —
+    /// the difference is the whole point (see `currentBundle()`). `errSecItemNotFound` and an
+    /// undecodable blob both read as an empty state; any other status fails closed.
+    private func loadState() -> StoredState? {
         if let cachedState { return cachedState }
-        guard let data = KeychainItem.load(account: Self.keychainAccount, service: keychainService),
-              let state = try? JSONDecoder().decode(StoredState.self, from: data) else {
+        switch readRow() {
+        case .absent:
             return StoredState(bundles: [])
+        case .unreadable(let status):
+            FernletAuditLog.log("heartdrop.prekeys.readFailed", context: ["status": "\(status)"])
+            return nil
+        case .found(let data):
+            guard let state = try? JSONDecoder().decode(StoredState.self, from: data) else {
+                // A corrupt blob is unrecoverable either way: the private halves in it can't be
+                // parsed, so treating it as empty (and minting fresh) is the only forward path.
+                FernletAuditLog.log("heartdrop.prekeys.corrupt")
+                return StoredState(bundles: [])
+            }
+            cachedState = state
+            return state
         }
-        cachedState = state
-        return state
     }
 
-    private func persist(_ state: StoredState) {
-        cachedState = state
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        KeychainItem.store(
+    /// False when the write did not land — the caller must not treat the state as durable.
+    @discardableResult
+    private func persist(_ state: StoredState) -> Bool {
+        guard let data = try? JSONEncoder().encode(state) else { return false }
+        let status = KeychainItem.store(
             data,
             account: Self.keychainAccount,
             service: keychainService,
             accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             synchronizable: false
         )
+        guard status == errSecSuccess else {
+            // Never cache a state that isn't on disk: the next read must see the keychain's truth
+            // rather than an in-memory bundle whose private halves were lost.
+            cachedState = nil
+            FernletAuditLog.log("heartdrop.prekeys.writeFailed", context: ["status": "\(status)"])
+            return false
+        }
+        cachedState = state
+        return true
+    }
+
+    // MARK: - Keychain read that distinguishes "absent" from "failed"
+
+    private enum RowRead {
+        case found(Data)
+        case absent
+        case unreadable(OSStatus)
+    }
+
+    /// `KeychainItem.load` collapses every failure into nil; this store needs the distinction, so
+    /// it issues the query itself (same attributes as `KeychainItem.load`).
+    private func readRow() -> RowRead {
+        var result: AnyObject?
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: Self.keychainAccount,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnData as String: true,
+            kSecUseDataProtectionKeychain as String: true
+        ]
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            guard let data = result as? Data else { return .unreadable(status) }
+            return .found(data)
+        case errSecItemNotFound:
+            return .absent
+        default:
+            return .unreadable(status)
+        }
     }
 }

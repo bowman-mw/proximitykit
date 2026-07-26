@@ -28,7 +28,15 @@ public nonisolated enum HeartDropSealer {
         case unknownVersion
         case noRecipientKey
         case openFailed
+        case oversized
     }
+
+    /// Hard cap on a drop's wire size, enforced on BOTH ends (bitchat caps courier ciphertext at
+    /// 16 KiB the same way). A heart is ~256 B of payload by construction — no free text, no
+    /// numbers — and the framed inner envelope pads to the 1–2 KiB bucket, so 8 KiB leaves roughly
+    /// 4× headroom for envelope growth while keeping a hostile public-DB record far away from the
+    /// 16 MiB inflate guard `SealedPayloadFraming` would otherwise allow on the main actor.
+    public static let maxWireByteCount = 8 * 1024
 
     static let wireVersion: UInt8 = 1
     static let headerLength = 1 + 16
@@ -58,7 +66,9 @@ public nonisolated enum HeartDropSealer {
         var header = Data([wireVersion])
         header.append(prekey.map { uuidData($0.id) } ?? zeroPrekeyID)
         let box = try ChaChaPoly.seal(framed, using: symmetricKey, authenticating: header)
-        return header + ephemeralPublic + box.combined
+        let wire = header + ephemeralPublic + box.combined
+        guard wire.count <= maxWireByteCount else { throw SealError.oversized }
+        return wire
     }
 
     /// Opens a drop. `prekeyPrivateKey` resolves a prekey id to its retained private half;
@@ -74,6 +84,9 @@ public nonisolated enum HeartDropSealer {
     ) throws -> Data {
         let bytes = Data(wire) // normalize slice indices
         guard bytes.count >= headerLength + 32 + 12 + 16 else { throw SealError.malformed }
+        // Size gate BEFORE any key agreement or inflation: the public database accepts writes from
+        // any authenticated iCloud user, so an oversized record is a stranger's bytes, not ours.
+        guard bytes.count <= maxWireByteCount else { throw SealError.oversized }
         guard bytes[0] == wireVersion else { throw SealError.unknownVersion }
         let header = bytes.prefix(headerLength)
         let prekeyIDBytes = bytes.subdata(in: 1..<headerLength)

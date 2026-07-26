@@ -12,7 +12,8 @@ import FernletFoundation
 /// Flow:
 ///   send  — consent → ledger 5-min gate (consume-on-queue) → signed inner envelope →
 ///           prekey (FS) or static-fallback outer seal → persisted outbox → upload.
-///   fetch — consent → expected tags (kept friends × last 7 UTC days) → open → durable dedup →
+///   fetch — consent → expected tags (kept friends × the full outbox lifetime in UTC days) →
+///           open → durable dedup →
 ///           sender-must-be-active-friend gate → envelope verify (nil replay cache: drops are
 ///           legitimately days old; the durable dedup replaces it) → per-sender per-day budget →
 ///           ledger (existing bubble/glow surfaces it).
@@ -25,14 +26,53 @@ public final class HeartDropService {
     public enum QueueOutcome: Equatable, Sendable {
         case queued
         case rateLimited
+        /// Too many hearts already WAITING for this friend (`HeartDropOutbox.maxPendingPerFriend`).
         case backlogFull
+        /// This friend's share of today is spent (`HeartDropOutbox.maxPerFriendPerDay`). Distinct
+        /// from `.rateLimited` because it is honest: the wait is until tomorrow, not five minutes.
+        case dailyLimitReached
         case disabled
         case failed
     }
 
-    /// Fetch looks back this many UTC days (sender records live 14 d; 7 d of tags keeps the
-    /// query small — a heart older than a week reads stale anyway).
-    public static let pickupWindowDays: UInt64 = 6 // today + 6 back = 7 tags per friend
+    /// Why queued hearts are not flowing. Nothing-silent: `queueHeart` returns `.queued` and the
+    /// UI promises delivery, so every state in which that promise is not being kept has to be
+    /// observable by the app layer. Declared here (not in FernletDomainModel) deliberately.
+    public enum DeliveryProblem: Equatable, Sendable {
+        /// No iCloud account — the dead-drop can neither be written nor read at all.
+        case noAccount
+        /// Uploads keep failing (network, or the public schema not yet promoted).
+        /// `since` is when the oldest still-waiting heart was queued.
+        case uploadFailing(since: Date)
+        /// Hearts given up on: they hit the outbox lifetime without ever reaching the drop.
+        case undeliverable(count: Int)
+    }
+
+    /// Fetch looks back exactly as far as the sender keeps retrying, DERIVED from the outbox
+    /// lifetime so the two can never drift apart: a heart that is still "waiting" on the sender
+    /// must still be findable by the recipient (a two-week trip should not lose hearts).
+    ///
+    /// The window is the lifetime's whole days, NOT one less. Entries expire in CONTINUOUS time
+    /// (`createdAt + entryLifetime`) while tags rotate on UTC midnights, so a drop created just
+    /// before a midnight is still live after the 14th midnight has passed — by which point its
+    /// creation day sits at offset 14, not 13. Querying `0...13` made that final sliver of a live,
+    /// still-uploaded record unfindable while the sender's UI still counted it as deliverable.
+    /// Cost of the alignment: 15 tags per friend instead of 7, which is why
+    /// `HeartDropCloudTransport.fetch` MUST paginate its query cursor.
+    public static let pickupWindowDays: UInt64 = UInt64(HeartDropOutbox.entryLifetime / 86_400)
+
+    /// How far outside the pickup window a drop's signed `createdAt` may sit before the drop is
+    /// refused — clock skew tolerance, and the clamp that keeps the receive-side flood budget
+    /// bounded to a handful of day buckets per sender.
+    static let createdAtSkewTolerance: TimeInterval = 24 * 3600
+    /// Upload retries on one heart before delivery is reported as failing.
+    public static let failingAttemptThreshold = 3
+    /// Floor between unforced `syncNow()` passes. Drops are days-scale by nature, so a minute of
+    /// staleness costs the user nothing, while the scene/tab listener that calls it can fire many
+    /// times a minute.
+    public static let minimumSyncInterval: TimeInterval = 60
+    /// Bound on coalesced re-runs of a single scheduled sync (see `scheduleSync`).
+    static let maxCoalescedPasses = 4
 
     @ObservationIgnored private let identity: IdentityService
     @ObservationIgnored private let prekeys: HeartPrekeyStore
@@ -51,6 +91,25 @@ public final class HeartDropService {
     public private(set) var isSyncing = false
     /// Bumped whenever outbox contents change, so friend rows can re-derive queued counts.
     public private(set) var outboxRevision = 0
+    /// Non-nil when queued hearts are not reaching the dead-drop. Observed by the app layer.
+    public private(set) var deliveryProblem: DeliveryProblem?
+
+    /// Hearts that expired un-uploaded since the user last acknowledged the problem. Process-local
+    /// by design: it is a nudge, not a record, and it must not become another persisted trace of
+    /// who the user sends hearts to.
+    @ObservationIgnored private var undeliveredCount = 0
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
+    /// A heart queued while a sync was already running: the wakeup is coalesced into one re-run
+    /// rather than dropped (it used to wait for the next foreground event).
+    @ObservationIgnored private var syncRequestedAgain = false
+    /// Invalidation token so a sync cancelled mid-flight (delete-all, purge) can't clear
+    /// `isSyncing` out from under the pass that replaced it.
+    @ObservationIgnored private var syncGeneration = 0
+    /// The purge's equivalent: a purge suspended in its remote delete must not apply its
+    /// non-record-scoped after-effects once a newer purge has taken over.
+    @ObservationIgnored private var purgeGeneration = 0
+    /// When the last pass actually started — the throttle floor for `syncNow()`.
+    @ObservationIgnored private var lastSyncStartedAt: Date?
 
     public init(
         ledger: ProximityHeartLedger,
@@ -72,8 +131,8 @@ public final class HeartDropService {
         self.displayName = displayName
         self.identity = identity
         try? identity.ensureProvisioned()
-        self.prekeys = prekeys ?? HeartPrekeyStore()
-        self.peerBundles = peerBundles ?? HeartDropPeerBundleCache()
+        self.prekeys = prekeys ?? HeartPrekeyStore(now: now)
+        self.peerBundles = peerBundles ?? HeartDropPeerBundleCache(now: now)
         self.outbox = outbox ?? HeartDropOutbox(now: now)
         self.dedup = dedup ?? HeartDropDedupStore(now: now)
         self.now = now
@@ -89,7 +148,11 @@ public final class HeartDropService {
     }
 
     /// A friend's verified intro carried a bundle (provenance = the intro envelope signature).
+    /// Consent-gated to mirror `currentLocalBundle()`: an opted-out device neither advertises nor
+    /// accumulates drop reachability. (The cache is capped and LRU-evicted regardless — bundles
+    /// arrive from every verified intro, not only from friends.)
     public func storePeerBundle(_ bundle: HeartPrekeyStore.Bundle, friendSigningKey: Data) {
+        guard isEnabled() else { return }
         peerBundles.store(bundle: bundle, forFriendSigningKey: friendSigningKey)
     }
 
@@ -98,9 +161,20 @@ public final class HeartDropService {
     public func queueHeart(to friend: ProximityTrustedPeerRecord) -> QueueOutcome {
         guard isEnabled(), friend.blockedAt == nil, friend.revokedAt == nil,
               !friend.keyAgreementPublicKey.isEmpty else { return .disabled }
-        guard ledger.canSendHeart(to: friend.fingerprint) else { return .rateLimited }
-
         let sentAt = now()
+        // The daily cap is checked BEFORE the 5-minute gate on purpose: when both apply, "your
+        // hearts for today are sent" is the state that actually persists, and telling the user to
+        // wait five minutes for a heart that will still be refused afterwards is the lie.
+        guard outbox.hasDailyCapacity(forFriendSigningKey: friend.signingPublicKey, at: sentAt) else {
+            return .dailyLimitReached
+        }
+        guard ledger.canSendHeart(to: friend.fingerprint) else { return .rateLimited }
+        // Capacity FIRST, before anything irreversible is spent: a one-time prekey consumed for a
+        // heart that is then refused never returns to the pool, and repeated refusals would drain
+        // the friend's 16-key bundle into permanent static-key fallback — losing forward secrecy
+        // for no delivered heart at all. Same for the ledger's 5-minute cooldown.
+        guard outbox.hasCapacity(forFriendSigningKey: friend.signingPublicKey) else { return .backlogFull }
+
         let payload = HeartPayload(sentAtDayKey: localDayKey(sentAt))
         guard let payloadData = try? JSONEncoder().encode(payload),
               let envelope = try? FernletIdentityEnvelope.signed(
@@ -116,15 +190,27 @@ public final class HeartDropService {
               ),
               let envelopeJSON = try? JSONEncoder().encode(envelope) else { return .failed }
 
+        guard let pairSecret = try? identity.heartDropPairSecret(with: friend.keyAgreementPublicKey) else {
+            return .failed
+        }
+
         // Forward secrecy when a gossiped prekey is available; static fallback otherwise
         // (availability over FS — the friend may never have gossiped a bundle to us yet).
+        // Consumed as late as possible, and handed back on every path that fails after it.
         let prekey = peerBundles.consumePrekey(forFriendSigningKey: friend.signingPublicKey)
-        guard let pairSecret = try? identity.heartDropPairSecret(with: friend.keyAgreementPublicKey),
-              let wire = try? HeartDropSealer.seal(
-                  innerEnvelopeJSON: envelopeJSON,
-                  toPrekey: prekey,
-                  orStaticKey: friend.keyAgreementPublicKey
-              ) else { return .failed }
+        func returnPrekey() {
+            guard let prekey else { return }
+            peerBundles.returnPrekey(id: prekey.id, forFriendSigningKey: friend.signingPublicKey)
+        }
+
+        guard let wire = try? HeartDropSealer.seal(
+            innerEnvelopeJSON: envelopeJSON,
+            toPrekey: prekey,
+            orStaticKey: friend.keyAgreementPublicKey
+        ) else {
+            returnPrekey()
+            return .failed
+        }
 
         let tag = IdentityService.heartDropTag(
             pairSecret: pairSecret,
@@ -138,7 +224,10 @@ public final class HeartDropService {
             wire: wire,
             createdAt: sentAt
         )
-        guard outbox.enqueue(entry) else { return .backlogFull }
+        guard outbox.enqueue(entry) else {
+            returnPrekey()
+            return .backlogFull
+        }
         outboxRevision += 1
         ledger.recordHeartSent(to: friend.fingerprint) // consume-on-queue keeps the 5-min gate honest
         FernletAuditLog.log("heartdrop.queued", context: ["prekey": prekey == nil ? "static" : "one-time"])
@@ -155,7 +244,18 @@ public final class HeartDropService {
     // MARK: - Sync
 
     /// Foreground entry point: flush queued uploads, fetch incoming, clean up expired records.
-    public func syncNow() {
+    ///
+    /// Rate-limited by `minimumSyncInterval`, because the production caller is a scene/tab/lock
+    /// listener that fires on every tab switch and each pass is a real public-database round trip.
+    /// The invariant lives here rather than at the call site so a future caller inherits it. The
+    /// paths that must be immediate do not go through it: `queueHeart` and `syncOnce()` reach
+    /// `scheduleSync()`/`runSync()` directly, so a heart the user just sent still leaves now and
+    /// tests stay deterministic. `force: true` is for a caller that IS user-initiated (a manual
+    /// refresh) but has no heart to enqueue.
+    public func syncNow(force: Bool = false) {
+        if !force, let last = lastSyncStartedAt, now().timeIntervalSince(last) < Self.minimumSyncInterval {
+            return
+        }
         scheduleSync()
     }
 
@@ -165,38 +265,103 @@ public final class HeartDropService {
     public func syncOnce() async {
         while isSyncing { await Task.yield() }
         guard isEnabled(), transport != nil else { return }
+        syncGeneration += 1
+        let generation = syncGeneration
         isSyncing = true
-        defer { isSyncing = false }
+        defer { if generation == syncGeneration { isSyncing = false } }
         await runSync()
     }
 
     private func scheduleSync() {
-        guard !isSyncing, isEnabled(), transport != nil else { return }
+        guard isEnabled(), transport != nil else { return }
+        guard !isSyncing else {
+            // Coalesce rather than drop: a heart queued mid-sync used to wait for the next
+            // foreground event, because the pass that was already running had passed its flush.
+            syncRequestedAgain = true
+            return
+        }
+        syncGeneration += 1
+        let generation = syncGeneration
         isSyncing = true
-        Task { [weak self] in
-            await self?.runSync()
-            self?.isSyncing = false
+        lastSyncStartedAt = now()
+        syncTask = Task { [weak self] in
+            await self?.runCoalescedSyncPasses(generation: generation)
         }
     }
 
+    private func runCoalescedSyncPasses(generation: Int) async {
+        defer { if generation == syncGeneration { isSyncing = false } }
+        var passes = 0
+        repeat {
+            syncRequestedAgain = false
+            await runSync()
+            passes += 1
+        } while syncRequestedAgain && !Task.isCancelled && generation == syncGeneration
+            && passes < Self.maxCoalescedPasses
+    }
+
+    /// Every await boundary re-checks cancellation AND consent: a pass that started before a
+    /// delete-all or a consent withdrawal must not upload, and must not write into the
+    /// just-cleared ledger/dedup/outbox (the "writers that resurrect data after a wipe" class).
     private func runSync() async {
         guard let transport, isEnabled() else { return }
-        guard await transport.accountAvailable() else { return }
+        let accountAvailable = await transport.accountAvailable()
+        guard !Task.isCancelled, isEnabled() else { return }
+        guard accountAvailable else {
+            refreshDeliveryProblem(accountAvailable: false)
+            return
+        }
         await flush(transport)
+        guard !Task.isCancelled, isEnabled() else { return }
         await fetchIncoming(transport)
+        guard !Task.isCancelled, isEnabled() else { return }
         await cleanup(transport)
+        guard !Task.isCancelled, isEnabled() else { return }
+        refreshDeliveryProblem(accountAvailable: true)
     }
 
     private func flush(_ transport: any HeartDropTransporting) async {
         for entry in outbox.pendingUploads() {
+            guard !Task.isCancelled, isEnabled() else { return }
             do {
                 let recordName = try await transport.upload(tag: entry.tag, payload: entry.wire)
+                guard !Task.isCancelled, isEnabled() else {
+                    // The record is on the server but the outbox may be gone; the record name is
+                    // lost with it, so log the orphan rather than write it back into a wiped store.
+                    FernletAuditLog.log("heartdrop.upload.orphaned")
+                    return
+                }
                 outbox.markUploaded(id: entry.id, recordName: recordName)
             } catch {
-                outbox.recordAttempt(id: entry.id) // retried next sync until the 14 d expiry
+                outbox.recordAttempt(id: entry.id) // retried next sync until the outbox expiry
             }
             outboxRevision += 1
         }
+    }
+
+    // MARK: - Delivery health (nothing-silent)
+
+    private func refreshDeliveryProblem(accountAvailable: Bool) {
+        if undeliveredCount > 0 {
+            deliveryProblem = .undeliverable(count: undeliveredCount)
+        } else if !accountAvailable {
+            // Surfaced even with an empty outbox: with no account, away hearts can be neither
+            // delivered nor received, and the toggle being on is an explicit opt-in to the
+            // feature — silently doing nothing is the failure mode this exists to prevent.
+            deliveryProblem = .noAccount
+        } else if let failure = outbox.uploadFailureState(),
+                  failure.maxAttempts >= Self.failingAttemptThreshold {
+            deliveryProblem = .uploadFailing(since: failure.oldestCreatedAt)
+        } else {
+            deliveryProblem = nil
+        }
+    }
+
+    /// Clears a surfaced delivery problem once the user has seen it. The underlying condition
+    /// re-raises it on the next sync if it is still true.
+    public func acknowledgeDeliveryProblem() {
+        undeliveredCount = 0
+        deliveryProblem = nil
     }
 
     private func fetchIncoming(_ transport: any HeartDropTransporting) async {
@@ -218,12 +383,22 @@ public final class HeartDropService {
             }
         }
         guard let records = try? await transport.fetch(tags: Array(tagOwner.keys)) else { return }
+        guard !Task.isCancelled, isEnabled() else { return }
         for record in records {
             openIncoming(record, expectedSender: tagOwner[record.tag])
         }
     }
 
     private func openIncoming(_ record: HeartDropRecord, expectedSender: ProximityTrustedPeerRecord?) {
+        // Size gate before any decryption or inflation — the public database accepts writes from
+        // any authenticated iCloud user, so a fat record under a known tag is a denial-of-service
+        // attempt, not a heart.
+        guard record.payload.count <= HeartDropSealer.maxWireByteCount else {
+            FernletAuditLog.log("heartdrop.rejected", context: [
+                "reason": "oversized", "bytes": "\(record.payload.count)"
+            ])
+            return
+        }
         guard let inner = try? HeartDropSealer.open(
             record.payload,
             prekeyPrivateKey: { [prekeys] id in prekeys.privateKey(forPrekeyID: id) },
@@ -244,8 +419,25 @@ public final class HeartDropService {
         guard let plaintext = try? envelope.verify(identityService: identity, replayCache: nil),
               let heart = try? JSONDecoder().decode(HeartPayload.self, from: plaintext),
               HeartPayload.isValidDayKey(heart.sentAtDayKey) else { return }
+
         // Receive-side flood bound: a malicious client could ignore its 5-min consume-on-send.
-        guard dedup.acceptIfWithinDailyBudget(senderFingerprint: sender.fingerprint, dayKey: heart.sentAtDayKey) else { return }
+        // The bucket is a RECEIVER-side day. `heart.sentAtDayKey` stays display-only — it is
+        // sender-controlled and only shape-checked, so keying the budget on it made the bound
+        // vacuous (~10^8 reachable buckets). `envelope.createdAt` is signature-covered but still
+        // sender-CHOSEN, so it is clamped to the window the pickup query can legitimately have
+        // returned; that leaves ~16 buckets per sender, which is what makes the cap bind.
+        let currentTime = now()
+        let createdAt = envelope.createdAt
+        guard createdAt <= currentTime.addingTimeInterval(Self.createdAtSkewTolerance),
+              createdAt >= currentTime.addingTimeInterval(
+                  -(HeartDropOutbox.entryLifetime + Self.createdAtSkewTolerance)) else {
+            FernletAuditLog.log("heartdrop.rejected", context: ["reason": "createdAt-outside-window"])
+            return
+        }
+        guard dedup.acceptIfWithinDailyBudget(
+            senderFingerprint: sender.fingerprint,
+            dayEpoch: IdentityService.heartDropDayEpoch(at: createdAt)
+        ) else { return }
 
         if ledger.recordReceivedDropHeart(
             id: heart.id,
@@ -259,22 +451,117 @@ public final class HeartDropService {
     private func cleanup(_ transport: any HeartDropTransporting) async {
         let expired = outbox.expiredEntries()
         guard !expired.isEmpty else { return }
+        // Hearts that aged out without ever being uploaded were never delivered — count them so
+        // the user can be told, instead of them disappearing quietly.
+        let neverUploaded = expired.filter { $0.recordName == nil }.count
         let uploadedNames = expired.compactMap(\.recordName)
         if !uploadedNames.isEmpty {
             guard (try? await transport.deleteOwnRecords(recordNames: uploadedNames)) != nil else { return }
         }
+        guard !Task.isCancelled, isEnabled() else { return }
         outbox.remove(ids: expired.map(\.id))
+        if neverUploaded > 0 {
+            undeliveredCount += neverUploaded
+            FernletAuditLog.log("heartdrop.undeliverable", context: ["count": "\(neverUploaded)"])
+        }
         outboxRevision += 1
+    }
+
+    // MARK: - Purge (consent withdrawn / delete-all)
+
+    /// Deletes THIS device's uploaded drop records from the dead-drop and drops the outbox entries
+    /// that named them.
+    ///
+    /// Deliberately NOT gated on `isEnabled()`: both callers run when consent is already gone —
+    /// the user turning the away-hearts toggle off, and delete-all. Delete-all must call this
+    /// BEFORE `wipeForDeleteAll()`, because the wipe destroys the very record names needed to
+    /// delete our own public-database records (recipients cannot delete a sender's records).
+    ///
+    /// Returns false when the remote delete did not succeed; the outbox is then KEPT so a later
+    /// attempt can retry, since a public-DB record nobody can name is a record nobody can remove.
+    @discardableResult
+    public func purgeDeadDrop() async -> Bool {
+        cancelInFlightSync()
+        purgeGeneration += 1
+        let generation = purgeGeneration
+        // Captured BEFORE the await and removed BY ID after it — never `removeAll()`. A purge is a
+        // suspension point long enough for the user to turn away-hearts back on and send: wiping
+        // the outbox on resume would silently destroy that heart, and with it the record name of an
+        // already-uploaded one, stranding that record on the public database forever.
+        let doomed = outbox.snapshot()
+        let recordNames = doomed.compactMap(\.recordName)
+        guard !recordNames.isEmpty else {
+            // No await between the capture and here, so nothing can have raced in.
+            outbox.removeUnchanged(doomed)
+            outboxRevision += 1
+            acknowledgeDeliveryProblem()
+            return true
+        }
+        guard let transport else { return false }
+        guard (try? await transport.deleteOwnRecords(recordNames: recordNames)) != nil else {
+            FernletAuditLog.log("heartdrop.purge.failed", context: ["records": "\(recordNames.count)"])
+            return false
+        }
+        // Exactly what we captured, and only where it is unchanged. Hearts enqueued during the
+        // delete arrived under renewed consent (or belong to a newer purge, which captured them
+        // itself) and survive untouched; so does a captured entry that got UPLOADED during the
+        // delete, whose new record name we did not pass to `deleteOwnRecords`.
+        let removed = outbox.removeUnchanged(doomed)
+        outboxRevision += 1
+        // The only after-effect that is not about the records we deleted, so it is the only one that
+        // has to re-validate: a superseded purge must not clear a delivery problem raised since it
+        // started, or the nothing-silent promise breaks on exactly the re-enable path.
+        if generation == purgeGeneration, !isEnabled() {
+            acknowledgeDeliveryProblem()
+        }
+        FernletAuditLog.log("heartdrop.purged", context: [
+            "records": "\(recordNames.count)", "entries": "\(removed)"
+        ])
+        return true
+    }
+
+    /// Sealed hearts THIS DEVICE has sitting on the CloudKit public database right now — derived
+    /// from the outbox's uploaded record names, never from a process-local flag.
+    ///
+    /// Two things need the derived form: a purge owed from a previous launch (a process flag dies
+    /// with the process, the record names do not), and consent withdrawn on ANOTHER device, which
+    /// arrives by settings sync and so never runs the local setter that would have set a flag.
+    /// Reads `outboxRevision` so an observing view re-derives when the outbox changes.
+    public func uploadedDeadDropRecordCount() -> Int {
+        _ = outboxRevision
+        return outbox.uploadedRecordNames().count
+    }
+
+    /// True when a dead-drop purge is still owed: this device has records out there that only this
+    /// device can name (recipients cannot delete a sender's public-DB records).
+    public func hasStrandedDeadDropRecords() -> Bool {
+        uploadedDeadDropRecordCount() > 0
     }
 
     // MARK: - Delete-all seam (Docs/PrivacyWipeCoverage.md)
 
+    /// Callers should `await purgeDeadDrop()` first when the network allows it — this wipe drops
+    /// the record names our own uploaded records are addressed by.
     public func wipeForDeleteAll() {
+        cancelInFlightSync()
         prekeys.wipeForDeleteAll()
         peerBundles.wipeForDeleteAll()
         outbox.wipeForDeleteAll()
         dedup.wipeForDeleteAll()
         try? identity.wipe() // the service's own live IdentityService cache (4th instance)
+        undeliveredCount = 0
+        deliveryProblem = nil
         outboxRevision += 1
+    }
+
+    /// Cancels the scheduled sync and invalidates its generation, so a pass suspended at an await
+    /// cannot resume into the cleared stores. Cancellation is cooperative — the guards in
+    /// `runSync`/`flush`/`fetchIncoming`/`cleanup` are what actually stop the writes.
+    private func cancelInFlightSync() {
+        syncTask?.cancel()
+        syncTask = nil
+        syncGeneration += 1
+        isSyncing = false
+        syncRequestedAgain = false
     }
 }
