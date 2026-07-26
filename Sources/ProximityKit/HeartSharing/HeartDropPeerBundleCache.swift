@@ -5,6 +5,13 @@ import Foundation
 /// verified, signed identity intro (`ProximityCoordinator` hands it over post-`verify`), keyed by
 /// the sender's full signing key. Contents are public keys + consumption bookkeeping — a plain
 /// sidecar like `HeartLedger.json`, never synced.
+///
+/// Loads through `ProtectedSidecar` (Track A, 2026-07-26) and fails closed while unavailable:
+/// `consumePrekey` returns nil (the caller seals to the static key — the existing documented
+/// fallback, so availability is preserved), and `store`/`returnPrekey` no-op (the bundle
+/// re-gossips at the next verified intro). A consumption mark commits only if it persists: a
+/// mark that lived only in memory would vanish in a crash and let the same one-time key be
+/// sealed to twice.
 @MainActor
 public final class HeartDropPeerBundleCache {
 
@@ -32,25 +39,39 @@ public final class HeartDropPeerBundleCache {
     /// already in flight against an older bundle keep opening.
     public static let maxSealBundleAge: TimeInterval = 7 * 24 * 3600
 
-    private let fileURL: URL
+    private let sidecar: ProtectedSidecar<[String: PeerState]>
     private let now: () -> Date
-    private var peers: [String: PeerState] // key: signing key hex
 
-    public init(fileURL: URL? = nil, now: @escaping () -> Date = { Date() }) {
-        self.fileURL = fileURL ?? FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Fernlet/HeartDropPeerBundles.json")
+    public init(
+        fileURL: URL? = nil,
+        seal: SidecarSeal? = nil,
+        now: @escaping () -> Date = { Date() },
+        readData: ((URL) throws -> Data)? = nil,
+        writeData: ((Data, URL) throws -> Void)? = nil
+    ) {
         self.now = now
-        if let data = try? Data(contentsOf: self.fileURL),
-           let peers = try? JSONDecoder().decode([String: PeerState].self, from: data) {
-            self.peers = peers
-        } else {
-            self.peers = [:]
-        }
+        self.sidecar = ProtectedSidecar(
+            fileURL: fileURL ?? FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Fernlet/HeartDropPeerBundles.json"),
+            empty: [:],
+            seal: seal,
+            auditPrefix: "heartdrop.peerBundles",
+            // Corrupt → empty, overwritable: a lost cache re-fills at the next verified intro,
+            // and a lost consumption mark degrades FS for one send — neither is irrecoverable.
+            now: now,
+            readData: readData,
+            writeData: writeData
+        )
     }
+
+    public var isAvailable: Bool { sidecar.state == .ready }
+    @discardableResult
+    public func retryLoad() -> Bool { sidecar.retryLoad() }
 
     /// Stores/refreshes a friend's gossiped bundle. A NEWER bundle id resets consumption marking;
     /// re-receiving the same bundle keeps it (so a re-intro can't reset one-time semantics).
+    /// No-op while the sidecar is unavailable — the bundle re-gossips at the next verified intro.
     ///
     /// Monotonicity guard: bundles gossip from two coordinators (mesh and presence), so an intro
     /// built BEFORE a rotation can arrive AFTER one built later. A strictly older bundle must
@@ -59,45 +80,53 @@ public final class HeartDropPeerBundleCache {
     public func store(bundle: HeartPrekeyStore.Bundle, forFriendSigningKey key: Data) {
         guard !bundle.keys.isEmpty, bundle.keys.count <= Self.maxBundleKeys,
               bundle.expires > now() else { return }
+        guard sidecar.read() != nil, isAvailable else { return }
         let mapKey = Self.mapKey(key)
-        if var existing = peers[mapKey] {
-            if existing.bundle.bundleID == bundle.bundleID {
-                existing.bundle = bundle
-            } else if bundle.created > existing.bundle.created {
-                existing = PeerState(bundle: bundle)
-            } else {
-                // Same-age-or-older rival bundle: keep what we have, but count the touch so an
-                // actively-gossiping peer doesn't age out of the LRU.
-                existing.lastUsedAt = now()
+        let currentTime = now()
+        sidecar.mutateIfPersisted { peers in
+            if var existing = peers[mapKey] {
+                if existing.bundle.bundleID == bundle.bundleID {
+                    existing.bundle = bundle
+                } else if bundle.created > existing.bundle.created {
+                    existing = PeerState(bundle: bundle)
+                } else {
+                    // Same-age-or-older rival bundle: keep what we have, but count the touch so an
+                    // actively-gossiping peer doesn't age out of the LRU.
+                    existing.lastUsedAt = currentTime
+                    peers[mapKey] = existing
+                    return
+                }
+                existing.lastUsedAt = currentTime
                 peers[mapKey] = existing
-                persist()
-                return
+            } else {
+                peers[mapKey] = PeerState(bundle: bundle, lastUsedAt: currentTime)
             }
-            existing.lastUsedAt = now()
-            peers[mapKey] = existing
-        } else {
-            peers[mapKey] = PeerState(bundle: bundle, lastUsedAt: now())
+            Self.evictIfOverCap(&peers, at: currentTime)
         }
-        evictIfOverCap()
-        persist()
     }
 
     /// Picks an unconsumed, unexpired, still-fresh prekey for the friend and marks it consumed
     /// locally (sender-side one-time semantics — the recipient retains private halves until bundle
     /// expiry + grace because two senders can race the same broadcast bundle). Nil means "seal to
-    /// the static key instead", never "don't send".
+    /// the static key instead", never "don't send" — including while the sidecar is unavailable,
+    /// or when the consumption mark cannot be durably persisted (an unpersisted mark would burn
+    /// the same key twice after a reload).
     public func consumePrekey(forFriendSigningKey key: Data) -> (id: UUID, publicKey: Data)? {
         let mapKey = Self.mapKey(key)
         let currentTime = now()
-        guard var state = peers[mapKey], state.bundle.expires > currentTime,
+        guard let peers = sidecar.read(), isAvailable else { return nil }
+        guard let state = peers[mapKey], state.bundle.expires > currentTime,
               currentTime.timeIntervalSince(state.bundle.created) <= Self.maxSealBundleAge else { return nil }
         guard let entry = state.bundle.keys.first(where: { !state.consumedIDs.contains($0.id) }) else {
             return nil
         }
-        state.consumedIDs.insert(entry.id)
-        state.lastUsedAt = currentTime
-        peers[mapKey] = state
-        persist()
+        let persisted = sidecar.mutateIfPersisted { peers in
+            guard var state = peers[mapKey] else { return }
+            state.consumedIDs.insert(entry.id)
+            state.lastUsedAt = currentTime
+            peers[mapKey] = state
+        }
+        guard persisted else { return nil }
         return (entry.id, entry.publicKey)
     }
 
@@ -107,23 +136,22 @@ public final class HeartDropPeerBundleCache {
     /// the cached bundle still contains the id, so a rotation in between is a no-op.
     public func returnPrekey(id: UUID, forFriendSigningKey key: Data) {
         let mapKey = Self.mapKey(key)
-        guard var state = peers[mapKey], state.consumedIDs.contains(id),
-              state.bundle.keys.contains(where: { $0.id == id }) else { return }
-        state.consumedIDs.remove(id)
-        peers[mapKey] = state
-        persist()
+        sidecar.mutateIfPersisted { peers in
+            guard var state = peers[mapKey], state.consumedIDs.contains(id),
+                  state.bundle.keys.contains(where: { $0.id == id }) else { return }
+            state.consumedIDs.remove(id)
+            peers[mapKey] = state
+        }
     }
 
     /// Delete-all seam (Docs/PrivacyWipeCoverage.md).
     public func wipeForDeleteAll() {
-        peers = [:]
-        try? FileManager.default.removeItem(at: fileURL)
+        sidecar.wipe()
     }
 
     /// Drops the least-recently-touched peers past the cap, and any bundle already past its own
     /// expiry (it can never be sealed to again).
-    private func evictIfOverCap() {
-        let currentTime = now()
+    private static func evictIfOverCap(_ peers: inout [String: PeerState], at currentTime: Date) {
         peers = peers.filter { $0.value.bundle.expires > currentTime }
         guard peers.count > Self.maxPeers else { return }
         let survivors = peers
@@ -134,12 +162,5 @@ public final class HeartDropPeerBundleCache {
 
     private static func mapKey(_ key: Data) -> String {
         key.map { String(format: "%02x", $0) }.joined()
-    }
-
-    private func persist() {
-        try? FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        guard let data = try? JSONEncoder().encode(peers) else { return }
-        try? data.write(to: fileURL, options: [.atomic, .completeFileProtection])
     }
 }
