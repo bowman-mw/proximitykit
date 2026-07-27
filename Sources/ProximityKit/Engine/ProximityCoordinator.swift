@@ -497,14 +497,16 @@ public final class ProximityCoordinator {
             if case .connected = state { return }
             if case .awaitingTapConfirmation(let waiting) = state {
                 // Increment 10 (coach path, Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26):
-                // without UWB there is no distance stream, so the trainer tap gate could never
-                // fire and the session hung to timeout (`tapToConfirm()` has no production
-                // caller). Once the transport is actually connected, auto-advance to the
-                // identity exchange — the human gate on a non-UWB coach session is the explicit
-                // post-identity confirmation (plus the verification ceremony on a first
-                // pairing), mirroring the friend path's manual-commit fallback.
-                if currentMode == .trainer, !ranging.isHardwareSupported {
-                    inspector?.recordCoordinatorEvent("tap gate skipped: no UWB — deferring to explicit confirmation")
+                // the pre-identity tap gate could never fire on ANY hardware — the distance
+                // stream needs an NI ranging session, which only starts after the identity
+                // exchange this gate blocks (`startRangingIfPossible` runs in
+                // `handleIdentityEnvelope`), and `tapToConfirm()` has no production caller —
+                // so every trainer session hung here to timeout. Once the transport is actually
+                // connected, auto-advance to the identity exchange; the human gate is the
+                // explicit post-identity confirmation (plus the verification ceremony on a
+                // first pairing), mirroring the friend path's identity-first architecture.
+                if currentMode == .trainer {
+                    inspector?.recordCoordinatorEvent("tap gate auto-advanced on connect — explicit confirmation gates the session")
                     await finishTapConfirmation(for: waiting)
                 }
                 return
@@ -520,11 +522,9 @@ public final class ProximityCoordinator {
                 return
             }
             transition(to: .awaitingTapConfirmation(peer: peer))
-            if !ranging.isHardwareSupported {
-                // Same non-UWB fallback for the fresh entry (see above).
-                inspector?.recordCoordinatorEvent("tap gate skipped: no UWB — deferring to explicit confirmation")
-                await finishTapConfirmation(for: peer)
-            }
+            // Same auto-advance for the fresh entry (see above).
+            inspector?.recordCoordinatorEvent("tap gate auto-advanced on connect — explicit confirmation gates the session")
+            await finishTapConfirmation(for: peer)
         case .disconnected:
             updateInspectorTransport(state: "notConnected", disconnected: true)
             await end(.transportLost)

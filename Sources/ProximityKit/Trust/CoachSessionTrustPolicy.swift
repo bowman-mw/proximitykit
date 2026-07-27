@@ -42,7 +42,14 @@ public final class CoachSessionTrustPolicy: ProximityTrustPolicy {
 
     public func isTrustedProximityPeer(signingPublicKey: Data) -> Bool {
         guard let record = vault.peer(signingPublicKey: signingPublicKey) else { return false }
-        return record.mode == .trainer && record.revokedAt == nil && record.blockedAt == nil
+        // `unknownModeToken == nil` is load-bearing, not belt-and-braces: `.trainer` is the
+        // decode FREEZE DEFAULT for a mode this build doesn't know
+        // (`ProximityPersistenceRecords` parks the real token), and that record's contract says
+        // the default is privilege-neutral only while nothing derives a privilege from stored
+        // mode. This is the first reader that does — so a record synced from a NEWER build with
+        // a future mode must read as "not a coach", never auto-confirm as one.
+        return record.mode == .trainer && record.unknownModeToken == nil
+            && record.revokedAt == nil && record.blockedAt == nil
     }
 
     public func isRevokedProximitySigningKey(_ publicKey: Data) -> Bool {
