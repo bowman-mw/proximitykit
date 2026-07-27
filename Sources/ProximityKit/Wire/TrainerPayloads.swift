@@ -34,6 +34,15 @@ public nonisolated struct TrainerExportPayload: Codable, Equatable, Sendable {
     /// Upper bound on the encoded bundle (a curated multi-month export is well under this).
     public static let maxBundleBytes = 2 * 1024 * 1024
 
+    /// Hard cap on a coach-session inbound WIRE blob, enforced by `ProximityCoordinator`
+    /// BEFORE the envelope is decoded, decrypted, or inflated (Increment 10 — the hearts
+    /// ordering: `isWellFormed`'s check runs after decrypt+inflate, which is the wrong layer
+    /// for a denial-of-service bound). Derived from `maxBundleBytes`, never hand-written:
+    /// the sealed ciphertext is ≈ payload-sized, the envelope carries it base64 (×4/3) plus
+    /// bounded JSON overhead — 2× covers both with margin while keeping a hostile blob far
+    /// under `SealedPayloadFraming`'s 16 MiB inflate guard.
+    public static let maxTrainerWireBytes = 2 * maxBundleBytes
+
     public var isWellFormed: Bool {
         format == "fernlet.trainer.export" && version == 1 && !bundle.isEmpty && bundle.count <= Self.maxBundleBytes
     }
