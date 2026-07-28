@@ -468,17 +468,23 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// dead "not nearby". `reachable` is meaningful only when presence is enabled.
     public enum HeartAffordance: Equatable, Sendable {
         case heartsOff       // the hearts opt-out is off — the send affordance is hidden entirely
-        case needsPresence   // hearts on but presence off — prompt to enable Nearby Friends
-        case notNearby       // hearts + presence on, friend not currently recognized nearby
-        case reachable       // ready to send
+        case needsPresence   // hearts on, presence off, away delivery off — prompt to enable presence
+        case notNearby       // not recognized nearby, but a heart can still be sent (away delivery)
+        case reachable       // ready to send in person
     }
 
-    /// Pure decision for `HeartAffordance` — hearts function ONLY when presence is also on.
+    /// Pure decision for `HeartAffordance`. IN-PERSON hearts function only when presence is also on
+    /// — but away delivery (bitchat adoptions Increment 3) needs no radio at all, so once the user
+    /// has opted into it the presence prompt is wrong: the friend is simply `.notNearby`, which is
+    /// exactly the state the send affordance renders its dead-drop path from. Without the
+    /// `awayDeliveryEnabled` term, opting into away hearts while leaving Nearby Friends off left
+    /// every friend row on a dead-end "Turn on Nearby Friends to send hearts" nag with no Send
+    /// button at all (review finding, 2026-07-27).
     public nonisolated static func heartAffordance(
-        heartsEnabled: Bool, presenceEnabled: Bool, reachable: Bool
+        heartsEnabled: Bool, presenceEnabled: Bool, reachable: Bool, awayDeliveryEnabled: Bool = false
     ) -> HeartAffordance {
         guard heartsEnabled else { return .heartsOff }
-        guard presenceEnabled else { return .needsPresence }
+        guard presenceEnabled else { return awayDeliveryEnabled ? .notNearby : .needsPresence }
         return reachable ? .reachable : .notNearby
     }
 
@@ -513,7 +519,7 @@ public final class PresenceManager: ProximityPayloadHandling {
                 scheduleHeartStatusClear()
                 return
             }
-            failHeart("\(firstName) isn't nearby right now — hearts travel in person for now.")
+            failHeart(notNearbyHeartMessage(firstName: firstName))
             return
         }
         // Reuse an already-verified live connection to this friend if one exists.
@@ -528,7 +534,7 @@ public final class PresenceManager: ProximityPayloadHandling {
                 scheduleHeartStatusClear()
                 return
             }
-            failHeart("\(firstName) isn't nearby right now — hearts travel in person for now.")
+            failHeart(notNearbyHeartMessage(firstName: firstName))
             return
         }
         guard !heartConnections.contains(where: { $0.id == peer.id }),
@@ -929,6 +935,18 @@ public final class PresenceManager: ProximityPayloadHandling {
     private func failHeart(_ message: String) {
         heartSendState = .failed(message: message)
         scheduleHeartStatusClear()
+    }
+
+    /// Copy for "they aren't nearby and the drop-off couldn't take it either". The `heartsAwayDelivery`
+    /// consent is the ONE thing this manager reads that setting for (`ProximityHost
+    /// .heartsAwayDeliveryEnabled`): with it off, "hearts travel in person" is the honest and
+    /// complete explanation; with it on, the away path was tried (`queueAwayHeart` returned false)
+    /// and failed, so saying hearts only travel in person would contradict the feature the user
+    /// just turned on.
+    private func notNearbyHeartMessage(firstName: String) -> String {
+        store.heartsAwayDeliveryEnabled
+            ? "\(firstName) isn't nearby, and the heart couldn't be tucked away just now — try again in a moment."
+            : "\(firstName) isn't nearby right now — hearts travel in person for now."
     }
 
     private func scheduleHeartStatusClear() {

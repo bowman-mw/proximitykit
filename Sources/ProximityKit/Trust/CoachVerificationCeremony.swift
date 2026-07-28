@@ -94,6 +94,14 @@ public final class CoachVerificationCeremony {
             FernletAuditLog.log("coach.verify.wrongPeerChallengeDropped")
             return .droppedWrongPeer
         }
+        // Fixed-length fields only — the transcript has no length prefixes, and nothing is signed
+        // with the identity key until the wire-supplied nonce and KA key are bounded.
+        guard ProximityVerifySignature.isWellFormedChallenge(
+            payload, scannerKeyAgreementPublicKey: senderKeyAgreementPublicKey
+        ) else {
+            FernletAuditLog.log("coach.verify.malformedChallengeDropped")
+            return .droppedStale
+        }
         let message = ProximityVerifySignature.message(
             scannerKeyAgreementPublicKey: senderKeyAgreementPublicKey,
             challengeNonce: payload.challengeNonce,

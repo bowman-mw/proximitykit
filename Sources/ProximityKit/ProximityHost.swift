@@ -24,8 +24,10 @@ public protocol ProximityHost: AnyObject {
     /// presence-on means a friend still sees you nearby but a heart to you is silently dropped.
     var allowNearbyHearts: Bool { get }
     /// The away-delivery opt-in (bitchat adoptions Increment 3). `PresenceManager` consults it
-    /// only for copy (a race-window failure explains that the heart travels while apart); the
-    /// enforcement homes are `HeartDropService.queueHeart`/`syncNow`.
+    /// only for copy — `notNearbyHeartMessage(firstName:)`, so a failed send doesn't tell a user
+    /// who turned away delivery ON that "hearts travel in person for now". The enforcement homes
+    /// are `HeartDropService.queueHeart`/`syncNow`; the friend row's affordance decision takes it
+    /// as an explicit parameter (`PresenceManager.heartAffordance`) rather than through this host.
     var heartsAwayDeliveryEnabled: Bool { get }
 }
 

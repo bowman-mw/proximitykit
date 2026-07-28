@@ -199,6 +199,37 @@ public final class HeartPrekeyStore {
         return nil
     }
 
+    /// Drops every retained private half that is past its window, WITHOUT minting anything.
+    ///
+    /// `currentBundle()` is the only other place retention is enforced, and its caller
+    /// (`HeartDropService.currentLocalBundle()`) is consent-gated — so turning away hearts off
+    /// froze the `expires + expiryGrace` and `spkRetention` filters forever, and every X25519
+    /// private half ever minted stayed in the keychain until a full delete-all. That defeats the
+    /// documented "the FS window is the bundle lifetime — bounded, monthly-rotating" property for
+    /// exactly the user who opted out (review finding, 2026-07-27). Call this on the consent-off
+    /// path and on every sync tick; it is a no-op once nothing is stale.
+    ///
+    /// Fail-closed like `currentBundle()`: an unreadable keychain prunes nothing rather than
+    /// persisting an empty state over halves we simply couldn't read.
+    public func pruneRetainedKeys() {
+        guard var state = loadState() else { return }
+        let currentTime = now()
+        let bundlesBefore = state.bundles.count
+        let signedBefore = (state.signedPrekeys ?? []).count
+        state.bundles.removeAll { $0.bundle.expires.addingTimeInterval(Self.expiryGrace) < currentTime }
+        state.signedPrekeys = (state.signedPrekeys ?? []).filter {
+            $0.prekey.created.addingTimeInterval(Self.spkRetention) >= currentTime
+        }
+        guard state.bundles.count != bundlesBefore
+                || (state.signedPrekeys ?? []).count != signedBefore else { return }
+        if persist(state) {
+            FernletAuditLog.log("heartdrop.prekeys.pruned", context: [
+                "bundles": "\(bundlesBefore - state.bundles.count)",
+                "signed": "\(signedBefore - (state.signedPrekeys ?? []).count)"
+            ])
+        }
+    }
+
     /// Delete-all seam (Docs/PrivacyWipeCoverage.md).
     public func wipeForDeleteAll() {
         KeychainItem.deleteAll(service: keychainService)

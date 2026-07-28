@@ -118,6 +118,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// tests can't observe the real sealed channel (mirrors `onTempMessageSendForTesting`).
     @ObservationIgnored var onSessionHeartSendForTesting: ((UUID) -> Void)?
     @ObservationIgnored private var sessionHeartStateClearTask: Task<Void, Never>?
+    /// Fingerprints with a session heart between dispatch and wire-write completion. The ledger's
+    /// 5-minute gate can't stand in for this: it is armed consume-on-SEND, i.e. after the await.
+    @ObservationIgnored private var sessionHeartSendsInFlight: Set<String> = []
     /// Phase 5: a friend session committed with this fingerprint (an in-person meeting) — feeds closeness.
     @ObservationIgnored public var onFriendSessionCommitted: ((String) -> Void)?
     /// A photo was exchanged with this friend in the current session (feeds the closeness photo signal).
@@ -536,7 +539,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             failSessionHeart("You just sent \(firstName) some warmth — hearts settle for a few minutes.")
             return
         }
+        // In-flight claim, taken BEFORE the await and released after it. The cooldown alone cannot
+        // close this window: consume-on-send arms the ledger only after the wire write returns, so
+        // a second tap during the first send's suspension still sees a clear cooldown and sends a
+        // duplicate — which the recipient's own 5-minute receive window then silently discards,
+        // while the sender is told "Sent" twice (review finding, 2026-07-27). A claim rather than
+        // an early `recordHeartSent` keeps consume-on-send intact: a failed send must not burn the
+        // five minutes.
+        guard sessionHeartSendsInFlight.insert(friend.fingerprint).inserted else {
+            failSessionHeart("Already sending \(firstName) some warmth — one moment.")
+            return
+        }
         guard let slot = slots.first(where: { $0.fingerprint == friend.fingerprint && $0.supports(.hearts) }) else {
+            sessionHeartSendsInFlight.remove(friend.fingerprint)
             failSessionHeart("\(firstName) left the session — no heart was sent.")
             return
         }
@@ -558,7 +573,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         fingerprint: String,
         recipientName: String
     ) async {
-        // Re-check the cooldown right before the wire write (a racing send may have consumed it).
+        // The in-flight claim taken by `sendSessionHeart` is released on EVERY exit from here.
+        defer { sessionHeartSendsInFlight.remove(fingerprint) }
+        // Re-check the cooldown: the claim stops a concurrent duplicate, this stops a heart the
+        // OTHER transport (the presence path shares this ledger) armed while we were suspended.
         guard heartLedger?.canSendHeart(to: fingerprint) ?? true else {
             failSessionHeart("You just sent \(PresenceManager.firstName(of: recipientName)) some warmth — hearts settle for a few minutes.")
             return
@@ -1825,6 +1843,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.verifyQR.wrongSlotChallengeDropped")
             return
         }
+        // Fixed-length fields only — the transcript has no length prefixes, and nothing is signed
+        // with the identity key until the wire-supplied nonce and KA key are bounded.
+        guard ProximityVerifySignature.isWellFormedChallenge(
+            payload, scannerKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey
+        ) else {
+            FernletAuditLog.log("mesh.verifyQR.malformedChallengeDropped")
+            return
+        }
         let message = ProximityVerifySignature.message(
             scannerKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
             challengeNonce: payload.challengeNonce,
@@ -2540,6 +2566,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         sessionHeartStateClearTask?.cancel()
         sessionHeartStateClearTask = nil
         sessionHeartState = .idle
+        // The slots these claims named are gone; a stale claim would refuse the first heart of the
+        // NEXT session (the deliver task's own `defer` never runs if its slot died mid-flight).
+        sessionHeartSendsInFlight.removeAll()
     }
 
     // MARK: - Envelope sending

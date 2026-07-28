@@ -105,9 +105,13 @@ public nonisolated enum ProximityVerifyQR {
     /// Shape + signature + freshness.
     public static func isValid(_ payload: Payload, at now: Date = Date()) -> Bool {
         guard payload.version == 1,
-              payload.nonce.count == 16,
-              !payload.signingPublicKey.isEmpty,
-              !payload.keyAgreementPublicKey.isEmpty else { return false }
+              payload.nonce.count == ProximityVerifySignature.nonceByteCount,
+              // Exact Curve25519 lengths, not merely non-empty: `canonicalBytes` concatenates these
+              // two keys with no length prefix, so variable-length keys would make the signed bytes
+              // ambiguous across different (signing, keyAgreement) splits.
+              payload.signingPublicKey.count == ProximityVerifySignature.publicKeyByteCount,
+              payload.keyAgreementPublicKey.count == ProximityVerifySignature.publicKeyByteCount
+        else { return false }
         let age = abs(now.timeIntervalSince1970 - TimeInterval(payload.timestamp))
         guard age <= freshnessWindow else { return false }
         return IdentityService.verify(
@@ -165,8 +169,30 @@ public nonisolated struct VerifyResponsePayload: Codable, Equatable, Sendable {
 public nonisolated enum ProximityVerifySignature {
     static let domain = Data("fernlet.verify.response.v1".utf8)
 
+    /// Byte length every nonce in the ceremony must have. The transcript below concatenates its
+    /// fields WITHOUT length prefixes, so it is unambiguous only while every field is fixed-length
+    /// — which is why `isWellFormedChallenge` is mandatory before anything is signed.
+    public static let nonceByteCount = 16
+    /// Curve25519 raw public-key length, for both the scanner's KA key and the QR's keys.
+    public static let publicKeyByteCount = 32
+
+    /// Whether an inbound challenge's fields are the fixed lengths the transcript assumes. Callers
+    /// MUST check this before signing: `qrNonce` is pinned by the equality check against the live
+    /// display nonce, but `challengeNonce` and the scanner's KA key come straight off the wire, and
+    /// an unbounded, unstructured signing oracle over the long-term identity key is one refactor
+    /// away from being exploitable (review finding, 2026-07-27).
+    public static func isWellFormedChallenge(
+        _ payload: VerifyChallengePayload,
+        scannerKeyAgreementPublicKey: Data
+    ) -> Bool {
+        payload.challengeNonce.count == nonceByteCount
+            && payload.qrNonce.count == nonceByteCount
+            && scannerKeyAgreementPublicKey.count == publicKeyByteCount
+    }
+
     /// The signed transcript: domain ‖ the SCANNER's KA key (binds the response to who asked) ‖
-    /// both nonces. Signed by the displayer's identity signing key.
+    /// both nonces. Signed by the displayer's identity signing key. Every field is fixed-length by
+    /// `isWellFormedChallenge`, which the callers gate on — do not sign an unchecked payload.
     public static func message(
         scannerKeyAgreementPublicKey: Data,
         challengeNonce: Data,

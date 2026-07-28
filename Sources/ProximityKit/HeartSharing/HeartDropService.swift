@@ -154,7 +154,13 @@ public final class HeartDropService {
     /// Our current bundle for intro gossip — nil while consent is off, so an opted-out device
     /// never advertises drop reachability.
     public func currentLocalBundle() -> HeartPrekeyStore.Bundle? {
-        guard isEnabled() else { return nil }
+        guard isEnabled() else {
+            // Retention still has to run with consent off: `currentBundle()` is the only other
+            // place it happens, so returning early here used to strand every retained private half
+            // in the keychain forever for exactly the user who opted out.
+            prekeys.pruneRetainedKeys()
+            return nil
+        }
         return prekeys.currentBundle()
     }
 
@@ -300,13 +306,23 @@ public final class HeartDropService {
     /// fire-and-forget `syncNow()`. Waits out any in-flight sync (e.g. the one `queueHeart`
     /// auto-kicked) and then runs a full pass of its own, so callers return to a settled state.
     public func syncOnce() async {
-        while isSyncing { await Task.yield() }
+        // Await the in-flight pass BY ITS HANDLE. The old `while isSyncing { await Task.yield() }`
+        // re-enqueued onto the main actor on every yield for the whole duration of a CloudKit round
+        // trip — millions of hops competing with UI work (review finding, 2026-07-27). Both entry
+        // points (`scheduleSync` and this one) publish their task to `syncTask` synchronously
+        // before their first suspension, so this handle always names the pass that is running.
+        await syncTask?.value
         guard isEnabled(), transport != nil else { return }
         syncGeneration += 1
         let generation = syncGeneration
         isSyncing = true
-        defer { if generation == syncGeneration { isSyncing = false } }
-        await runSync()
+        let pass = Task { [weak self] in await self?.runSync() ?? () }
+        syncTask = pass
+        await pass.value
+        if generation == syncGeneration {
+            isSyncing = false
+            syncTask = nil
+        }
     }
 
     private func scheduleSync() {
@@ -506,15 +522,13 @@ public final class HeartDropService {
         ), let envelope = try? JSONDecoder().decode(FernletIdentityEnvelope.self, from: inner) else { return }
 
         guard envelope.payloadType == .friendHeartDrop else { return }
-        // Durable dedup FIRST — the ledger's 48 h retention can't stop a week-later re-fetch.
-        guard dedup.recordIfNew(envelopeID: envelope.envelopeID) else { return }
         // The tag binds the pair; the signature must match the SAME friend (an attacker knowing a
         // tag still can't impersonate — the inner envelope is signed by the sender's identity key).
         guard let sender = expectedSender,
               envelope.senderSigningPublicKey == sender.signingPublicKey,
               sender.blockedAt == nil, sender.revokedAt == nil else { return }
         // nil replay cache: drops are legitimately older than the 24 h cache window; the durable
-        // dedup above replaces it. Signature/schema/expiry/recipient checks all still run.
+        // dedup below replaces it. Signature/schema/expiry/recipient checks all still run.
         guard let plaintext = try? envelope.verify(identityService: identity, replayCache: nil),
               let heart = try? JSONDecoder().decode(HeartPayload.self, from: plaintext),
               HeartPayload.isValidDayKey(heart.sentAtDayKey) else { return }
@@ -533,6 +547,13 @@ public final class HeartDropService {
             FernletAuditLog.log("heartdrop.rejected", context: ["reason": "createdAt-outside-window"])
             return
         }
+        // Durable dedup — the ledger's 48 h retention can't stop a week-later re-fetch. Marked only
+        // AFTER the sender match, the signature verification and the createdAt window, all of which
+        // cost nothing extra here (the envelope is already decoded). Marking first let unverified
+        // records consume slots in the 8192-entry store, which evicts oldest-first: a flood under a
+        // valid tag evicted the marks of genuine drops still inside the 14-day pickup window, and
+        // those re-delivered as duplicate hearts on the next sync (review finding, 2026-07-27).
+        guard dedup.recordIfNew(envelopeID: envelope.envelopeID) else { return }
         switch dedup.acceptIfWithinDailyBudget(
             senderFingerprint: sender.fingerprint,
             dayEpoch: IdentityService.heartDropDayEpoch(at: createdAt)
@@ -593,6 +614,12 @@ public final class HeartDropService {
     @discardableResult
     public func purgeDeadDrop() async -> Bool {
         cancelInFlightSync()
+        // The consent-off path is also the retention tick for the local prekey material: a user who
+        // turns away hearts off and never opens another proximity session would otherwise never run
+        // `currentLocalBundle()` again, and every retained private half would sit in the keychain
+        // for good. Unconditional (not tied to the purge's own success): it removes only material
+        // that is already past its window.
+        prekeys.pruneRetainedKeys()
         purgeGeneration += 1
         let generation = purgeGeneration
         // Captured BEFORE the await and removed BY ID after it — never `removeAll()`. A purge is a
