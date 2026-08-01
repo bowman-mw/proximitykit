@@ -98,6 +98,8 @@ public final class ProximityHeartLedger {
     ///   - fileURL: injectable for tests (relaunch = a new ledger on the same URL); defaults to
     ///     `Application Support/Fernlet/HeartLedger.json`.
     ///   - now: injectable clock for the day-key rate limit and glow decay.
+    ///   - readData: injectable file reader for tests; defaults to `Data(contentsOf:)`.
+    ///   - writeData: injectable file writer for tests; defaults to atomic protected sidecar writes.
     public init(
         fileURL: URL? = nil,
         now: @escaping () -> Date = Date.init,
