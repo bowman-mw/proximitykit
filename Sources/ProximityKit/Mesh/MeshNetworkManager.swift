@@ -446,6 +446,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func registerSessionMessageHandler() {
         registerPayloadHandler(for: .tempMessage) { [weak self] envelope, plaintext, peer in
             guard let self else { return }
+            // The 13+ age gate, enforced on the RECEIVE side too. Withholding `.messages` from
+            // `localCapabilities()` is only an advertisement: a peer on a modified build, or one
+            // holding capabilities cached from an earlier session, can still send. Dropping here is
+            // what actually keeps the transcript empty.
+            guard self.isChatAllowed else {
+                FernletAuditLog.log("mesh.tempMessage.droppedAgeGated")
+                return
+            }
             guard let peerIdentity = peer else {
                 FernletAuditLog.log("mesh.tempMessage.droppedUnverifiedSender")
                 return
@@ -1317,6 +1325,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public var onPeerPrekeyBundle: ((Data, HeartPrekeyStore.Bundle) -> Void)?
     public var heartsAwayEnabledProvider: (() -> Bool)?
 
+    /// Whether this device may take part in live-session chat at all — the 13+ age gate (see
+    /// `AgeAssuranceRecord`). Optional-and-nil means NOT allowed, matching `heartsAwayEnabledProvider`:
+    /// a manager nobody wired stays silent rather than opening a messaging surface to a child.
+    ///
+    /// Enforced in three places, because any one alone is insufficient:
+    /// 1. `localCapabilities()` withholds `.messages`, so peers never broadcast to us in the first place.
+    /// 2. `sendTempMessage` refuses, so nothing leaves this device.
+    /// 3. the `.tempMessage` handler drops, because (1) is only an advertisement — a peer running a
+    ///    modified build, or one that cached our capabilities from an earlier session, can still send.
+    @ObservationIgnored public var chatAllowedProvider: (() -> Bool)?
+
+    /// Resolved once per decision point so the three enforcement seams can never disagree. Public so the
+    /// in-session UI can withhold the chat affordance from the same value the transport enforces.
+    public var isChatAllowed: Bool { chatAllowedProvider?() == true }
+
     func localCapabilities() -> [String] {
         var capabilities = [ProximityCapability.photos.rawValue]
         // wire2 (bitchat adoptions Increment 2): sealed-payload compress+pad framing. A wire
@@ -1331,10 +1354,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             capabilities.append(ProximityCapability.shop.rawValue)
         }
         // Phase 5: temporary messages are a core in-session feature with no separate v1 opt-out —
-        // session membership (the UWB dwell + admission) IS the consent gate, so `messages` is
-        // advertised whenever we join a friend session. (Owner may override with a `messages` setting
-        // later, mirroring the `shop` gate above; see design_choices.)
-        capabilities.append(ProximityCapability.messages.rawValue)
+        // session membership (the UWB dwell + admission) IS the consent gate. The one thing that DOES
+        // withhold it is the 13+ age gate: a device below the line never advertises `messages`, so
+        // friends' devices skip it in the room broadcast instead of sending into a surface it will drop.
+        if isChatAllowed {
+            capabilities.append(ProximityCapability.messages.rawValue)
+        }
         // Content-moderation reports are a safety feature with no opt-out — always advertised so a
         // friend's device knows it may hand us the reports it has verified.
         capabilities.append(ProximityCapability.moderation.rawValue)
@@ -2535,6 +2560,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// opted-out peers are skipped (they'd park-and-drop it anyway). No offline queue: a message only
     /// reaches peers currently in the session, and it vanishes at session end (`sessionMessages.clear`).
     public func sendTempMessage(_ rawText: String) {
+        // The 13+ age gate. The compose bar is withheld below the line, so this is the defense-in-depth
+        // re-check at the point of use rather than the primary gate.
+        guard isChatAllowed else {
+            FernletAuditLog.log("mesh.tempMessage.sendBlockedAgeGated")
+            return
+        }
         let text = SessionMessageStore.sanitize(rawText)
         guard !text.isEmpty else { return }
         let id = UUID()
