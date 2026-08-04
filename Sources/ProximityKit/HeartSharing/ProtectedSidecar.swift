@@ -8,6 +8,8 @@ import FernletFoundation
 /// Docs/Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26.md). The keychain-backed production
 /// implementation lives in `HeartDropSidecarSeal`; tests inject their own closures.
 public struct SidecarSeal {
+    /// Seal/open failures, classified by recoverability — the transient case defers like a
+    /// locked-file read; the others invoke per-store data-loss policy.
     public enum SealError: Error, Equatable {
         /// The seal key could not be read right now (locked keychain, interaction required).
         /// Treated like a deferred file read: the store goes `.unavailable` and retries.
@@ -75,6 +77,7 @@ public final class ProtectedSidecar<Value: Codable> {
         case unavailable
     }
 
+    /// What became of a `mutate` call — persisted, applied only in memory, or refused outright.
     public enum MutateOutcome: Equatable {
         /// Applied and durably on disk.
         case persisted
@@ -86,6 +89,8 @@ public final class ProtectedSidecar<Value: Codable> {
         case refused
     }
 
+    /// The three-state internal model behind the two-state public `State` — dirty and unloaded
+    /// recover differently (re-persist vs re-read), which is the whole point of the split.
     private enum Storage {
         /// Memory and disk agree.
         case ready(Value)

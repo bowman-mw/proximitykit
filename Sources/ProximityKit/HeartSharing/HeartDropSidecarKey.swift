@@ -111,6 +111,8 @@ public enum HeartDropSidecarSeal {
         }
     }
 
+    /// Three-way keychain read result — the absent-vs-unreadable distinction is what lets the
+    /// seal fail closed on a transient error instead of minting over an unreadable key.
     private enum RowRead {
         case found(Data)
         case absent

@@ -22,9 +22,11 @@ import FernletDomainModel
 
 // MARK: - Params hash
 
-/// SHA-256 over the canonical descriptor bytes — the stable identity of an activity's parameters that
-/// the signed token binds. Lives here (not DomainModel) so the domain model stays crypto-free, exactly
-/// like `ModerationContentHash`.
+/// SHA-256 over the canonical descriptor bytes — the stable identity of an activity's parameters
+/// that the signed token binds.
+///
+/// Lives here (not DomainModel) so the domain model stays crypto-free, exactly like
+/// ``ModerationContentHash``.
 public nonisolated enum ActivityParamsHash {
     public static func of(_ descriptor: ActivityDescriptor) -> Data {
         Data(SHA256.hash(data: canonicalBytes(for: descriptor)))
@@ -33,9 +35,10 @@ public nonisolated enum ActivityParamsHash {
 
 // MARK: - Wire payloads
 
-/// A host advertises an activity it is running to a committed friend. Sealed to the recipient. Carries
-/// the full descriptor (so the joiner can pin the host key + params) and the host's current roster
-/// version (display only — the signed snapshot in the grant is the trust input).
+/// A host advertises an activity it is running to a committed friend. Sealed to the recipient.
+///
+/// Carries the full descriptor (so the joiner can pin the host key + params) and the host's
+/// current roster version (display only — the signed snapshot in the grant is the trust input).
 public nonisolated struct ActivityOfferPayload: Codable, Equatable, Sendable {
     public var format = "fernlet.proximity.activity.offer"
     public var version = 1
@@ -50,10 +53,12 @@ public nonisolated struct ActivityOfferPayload: Codable, Equatable, Sendable {
     public var isWellFormed: Bool { format == "fernlet.proximity.activity.offer" && version == 1 }
 }
 
-/// A committed peer asks to join an offered activity. UNSEALED (mirror `clothingCatalogRequest`): it
-/// carries only the joiner's public keys + display name. The host RE-VALIDATES the claimed fingerprint /
-/// signing key against the transport-verified slot before minting, and binds the grant to the VERIFIED
-/// key — never the claimed one — so an unsealed, spoofable body is harmless.
+/// A committed peer asks to join an offered activity.
+///
+/// UNSEALED (mirror `clothingCatalogRequest`): it carries only the joiner's public keys + display
+/// name. The host RE-VALIDATES the claimed fingerprint / signing key against the
+/// transport-verified slot before minting, and binds the grant to the VERIFIED key — never the
+/// claimed one — so an unsealed, spoofable body is harmless.
 public nonisolated struct ActivityJoinRequestPayload: Codable, Equatable, Sendable {
     public var format = "fernlet.proximity.activity.join.request"
     public var version = 1
@@ -84,6 +89,9 @@ public nonisolated struct ActivityJoinRequestPayload: Codable, Equatable, Sendab
 }
 
 /// The host's signed grant: an invitee-key-bound token + the roster snapshot at grant time. Sealed.
+///
+/// The joiner verifies both the token and the snapshot under the host key it pinned from the
+/// offer before treating itself as a member (`ProximityActivityManager.handleJoinGrant`).
 public nonisolated struct ActivityJoinGrantPayload: Codable, Equatable, Sendable {
     public var format = "fernlet.proximity.activity.join.grant"
     public var version = 1
@@ -98,8 +106,9 @@ public nonisolated struct ActivityJoinGrantPayload: Codable, Equatable, Sendable
     public var isWellFormed: Bool { format == "fernlet.proximity.activity.join.grant" && version == 1 }
 }
 
-/// A host-signed roster snapshot, gossiped opportunistically to keep members consistent. Sealed. Anyone
-/// may relay it — it self-authenticates under the pinned host key.
+/// A host-signed roster snapshot, gossiped opportunistically to keep members consistent. Sealed.
+///
+/// Anyone may relay it — it self-authenticates under the pinned host key.
 public nonisolated struct ActivityRosterSnapshotPayload: Codable, Equatable, Sendable {
     public var format = "fernlet.proximity.activity.roster"
     public var version = 1
@@ -119,6 +128,7 @@ public nonisolated struct ActivitySyncPayload: Codable, Equatable, Sendable {
     public var version = 1
     public let held: [Entry]
 
+    /// One digest line: an activity id and the roster version the sender holds for it.
     public nonisolated struct Entry: Codable, Equatable, Sendable {
         public let activityID: UUID
         public let versionHeld: Int
@@ -138,6 +148,8 @@ public nonisolated struct ActivitySyncPayload: Codable, Equatable, Sendable {
 // MARK: - ActivityJoinToken signing / verification
 
 extension ActivityJoinToken {
+    /// Rejection reasons for a join token — each pins one binding the host's signature must
+    /// honor (activity id, params hash, joiner key, pinned host key, expiry, fingerprints).
     public enum VerifyError: Error, Equatable {
         case schemaVersionUnsupported
         case activityMismatch
@@ -216,6 +228,8 @@ extension ActivityJoinToken {
 // MARK: - ActivityRosterSnapshot signing / verification
 
 extension ActivityRosterSnapshot {
+    /// Rejection reasons for a roster snapshot, including the anti-bloat bounds that stop an
+    /// abusive host from signing a multi-megabyte roster we would persist and re-relay.
     public enum VerifyError: Error, Equatable {
         case schemaVersionUnsupported
         case activityMismatch

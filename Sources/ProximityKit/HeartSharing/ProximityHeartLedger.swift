@@ -54,6 +54,21 @@ public nonisolated struct ReceivedHeartRecord: Codable, Equatable, Identifiable,
     }
 }
 
+/// Device-local persistence for hearts: received-heart records (the Home bubble + 24h health-bar
+/// glow) and the per-friend 5-minute rate limit, enforced in BOTH directions and shared by every
+/// heart transport (presence, in-session mesh, dead-drop).
+///
+/// Rate model (owner decision): no daily limit — one heart per friend per 5 minutes each way,
+/// keyed on last-send/last-receive timestamps per fingerprint; consume-on-send means
+/// `recordHeartSent` runs only after the wire write succeeds. Dead-drop hearts use
+/// `recordReceivedDropHeart`, which keeps id-dedup + retention but deliberately skips (and does
+/// not arm) the 5-minute receive window — a multi-day pickup batch must not collapse to one
+/// heart. Persistence rides a ``ProtectedSidecar`` (Application Support/`HeartLedger.json`,
+/// `.completeFileProtection`, NEVER in the synced snapshot) and fails closed while unloaded:
+/// sends are refused and receives unrecorded, with the drop record left on the server for a later
+/// pass. `receivedHearts` is a published mirror refreshed after every mutation and sidecar
+/// recovery. Retention: 48 h / 32 hearts; `clearAll` is wired from reset-everything.
+/// `@MainActor @Observable`.
 @MainActor
 @Observable
 public final class ProximityHeartLedger {
@@ -71,6 +86,8 @@ public final class ProximityHeartLedger {
     static let rateLimitInterval: TimeInterval = 5 * 60
     static let maxStoredHearts = 32
 
+    /// Versioned sidecar shape: the two per-fingerprint rate-limit timestamp maps plus the
+    /// received-heart records. Decodes v1 blobs tolerantly (see `init(from:)`).
     private struct PersistedState: Codable {
         var version = 2
         /// Last-send timestamp per friend fingerprint (the send-side rate key).
@@ -97,7 +114,7 @@ public final class ProximityHeartLedger {
     /// - Parameters:
     ///   - fileURL: injectable for tests (relaunch = a new ledger on the same URL); defaults to
     ///     `Application Support/Fernlet/HeartLedger.json`.
-    ///   - now: injectable clock for the day-key rate limit and glow decay.
+    ///   - now: injectable clock for the 5-minute rate windows and glow decay.
     ///   - readData: injectable file reader for tests; defaults to `Data(contentsOf:)`.
     ///   - writeData: injectable file writer for tests; defaults to atomic protected sidecar writes.
     public init(

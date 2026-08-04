@@ -11,6 +11,11 @@ import Foundation
 import Observation
 import FernletDomainModel
 
+/// One friend's shared fuzzy wellbeing state + companion appearance, stamped with the in-person
+/// meeting it was captured at.
+///
+/// The persisted row of ``FriendStateCache``; keyed by the friend's fingerprint and shown with
+/// "as of last time you met" staleness treatment.
 public nonisolated struct CachedFriendState: Codable, Equatable, Identifiable {
     public let fingerprint: String
     public var fuzzyState: FriendFuzzyState
@@ -29,6 +34,17 @@ public nonisolated struct CachedFriendState: Codable, Equatable, Identifiable {
     }
 }
 
+/// Device-local cache of the fuzzy wellbeing state + avatar appearance each friend shared at the
+/// last in-person meeting (Phase 4 of the mesh redesign).
+///
+/// Fed by the app when a verified `.friendState` payload arrives from a committed, vault-trusted
+/// friend; read by the Friends UI. Persistence is a JSON sidecar in Application Support with
+/// `.completeFileProtection` — deliberately NEVER in the synced snapshot, since a friend's
+/// struggling state is theirs and must not follow the user into iCloud. Entries expire from the
+/// UI after 30 days (`staleAfter`), the map is bounded at `maxStates` (newest kept), and decode
+/// is per-row tolerant so one unknown future value can never wipe the cache. `remove` is wired
+/// from block/revoke so a removed friend leaves nothing behind; `clearAll` from reset-everything.
+/// `@MainActor @Observable`: UI-facing state.
 @MainActor
 @Observable
 public final class FriendStateCache {
@@ -94,6 +110,7 @@ public final class FriendStateCache {
         init(from decoder: Decoder) throws { value = try? T(from: decoder) }
     }
 
+    /// Versioned on-disk shape; decodes rows leniently so one bad element never drops the file.
     private struct PersistedState: Codable {
         var version = 1
         var states: [CachedFriendState] = []

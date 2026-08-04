@@ -2,6 +2,23 @@ import Foundation
 import Observation
 import FernletDomainModel
 
+/// The persistent record of every proximity relationship: kept friends, revoked ("Removed")
+/// peers, blocked keys, reported sellers, and the trainer audit trail.
+///
+/// The subsystem's source of truth for peer lifecycle. Records key on the full Ed25519 signing
+/// key (authorization identity); fingerprints are display/routing metadata, re-normalized to 16
+/// chars from the signing key on every `apply` load so legacy 8-char rows can never weaken a
+/// check. Lifecycle invariants: `block` also revokes (and mints a never-trusted stub when the key
+/// is unknown); `unblock` deliberately leaves `revokedAt` alone (block and revoke are independent
+/// states); `trust` clears both, re-activating a removed friend. `report` stamps report metadata
+/// and, by default, blocks + revokes too.
+///
+/// Conforms to ``ProximityTrustPolicy`` answering from stored records (trusted = active
+/// unrevoked; the channel-specific policies wrap this vault instead of using it directly).
+/// Persistence is delegated: the app's `FernletStore` supplies `initialPeers`/`initialAudit`
+/// from the snapshot and observes `onChange` to save — the vault itself never touches disk.
+/// Audit events are capped at 500, newest first. `@MainActor @Observable`: the Friends UI reads
+/// `trustedPeers` directly.
 @MainActor
 @Observable
 public final class ProximityTrustVault: ProximityTrustPolicy {

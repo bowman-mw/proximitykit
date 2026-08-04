@@ -11,6 +11,18 @@ import Foundation
 import Observation
 import FernletDomainModel
 
+/// Device-local record of per-friend in-person interaction counts (Phase 5) — the input to the
+/// deterministic closeness score and the close-slot assignment with hysteresis.
+///
+/// The app feeds it interaction events (sessions, photo sessions, accepted shares, hearts each
+/// direction); each bumps a day-granularity capped counter — no timestamps, names, or durations,
+/// so it is a warmth signal, never a who-met-whom surveillance log. Closeness derives via
+/// `ClosenessMath` over age-bucketed daily counts; `evaluateSlots` runs at most once per day and
+/// persists `slotState` so hysteresis dwell survives relaunch. Persistence is a JSON sidecar in
+/// Application Support (`.completeFileProtection`), NEVER in the synced snapshot; retention is 31
+/// days and at most 64 tracked friends (least-close dropped). Day keys pin one timezone-stable
+/// formatter/calendar pair so bucketing and diffing always agree. `remove` is wired from
+/// block/revoke; `clearAll` from reset-everything. `@MainActor @Observable`.
 @MainActor
 @Observable
 public final class ClosenessLedger {
@@ -145,6 +157,7 @@ public final class ClosenessLedger {
         save()
     }
 
+    /// Versioned on-disk shape; missing keys decode to empty so older files keep loading.
     private struct PersistedState: Codable {
         var version = 1
         var byFriend: [String: [String: FriendInteractionDayCounts]] = [:]

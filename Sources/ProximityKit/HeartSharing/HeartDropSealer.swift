@@ -23,6 +23,11 @@ import CryptoKit
 /// bit the server could infer from client version anyway).
 public nonisolated enum HeartDropSealer {
 
+    /// Why a drop could not be sealed or opened: malformed/oversized wire bytes, an unknown
+    /// format version, a missing/unresolvable recipient key, or an AEAD failure.
+    ///
+    /// Callers treat every case as "leave the record alone / don't send" — no case is retried
+    /// with different keys.
     public enum SealError: Error, Equatable {
         case malformed
         case unknownVersion

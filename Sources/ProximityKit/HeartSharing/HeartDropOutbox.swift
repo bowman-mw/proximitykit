@@ -16,6 +16,12 @@ import Foundation
 @MainActor
 public final class HeartDropOutbox {
 
+    /// One queued heart drop: the sealed wire bytes, the day tag they upload under, retry
+    /// bookkeeping, and — once uploaded — the server record name.
+    ///
+    /// `recordName` is the one field nothing can reconstruct: it is the only handle for
+    /// deleting our own public-DB record, which drives the outbox's commit-even-on-write-failure
+    /// semantics.
     public struct Entry: Codable, Equatable, Sendable {
         public let id: UUID
         public let friendSigningKey: Data
@@ -39,6 +45,8 @@ public final class HeartDropOutbox {
         }
     }
 
+    /// Result of `enqueue` — queued durably, refused by the per-friend backlog cap, or refused
+    /// because the sidecar could not durably record it.
     public enum EnqueueOutcome: Equatable, Sendable {
         case queued
         case backlogFull
@@ -334,6 +342,8 @@ public final class HeartDropDedupStore {
     static let maxSeenEnvelopeIDs = 8192
     static let maxSenderDayCounters = 4096
 
+    /// The dedup sidecar's shape: seen envelope ids (with timestamps for pruning) and the
+    /// per-sender-per-day acceptance counters.
     private struct State: Codable {
         var seenEnvelopeIDs: [UUID: Date] = [:]
         /// "senderFingerprint|utcDayEpoch" → accepted count.
@@ -366,6 +376,8 @@ public final class HeartDropDedupStore {
         )
     }
 
+    /// Result of the per-sender daily acceptance check — each case dictates a different caller
+    /// obligation (record, discard-and-keep-dedup, or undo-and-retry-later).
     public enum BudgetOutcome: Equatable, Sendable {
         case accepted
         /// The sender's share of this day is spent — a by-design discard; the caller keeps its

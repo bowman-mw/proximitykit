@@ -3,10 +3,20 @@ import MultipeerConnectivity
 import Combine
 import FernletDomainModel
 
+/// Namespace for shared Bonjour service-type constants.
+///
+/// Only the coach channel's `fernlet-coach` lives here; the friend and presence radios declare
+/// their service types on their owning session/manager types. Every service type must also
+/// appear in the app's Info.plist `NSBonjourServices` or discovery silently fails on device.
 nonisolated public enum MultipeerServiceType {
     public static let trainer = "fernlet-coach"
 }
 
+/// Observable lifecycle of a ``MultipeerTransport``, from idle discovery through connection to
+/// failure/disconnect.
+///
+/// ``ProximityCoordinator`` subscribes to this stream and drives its own handshake state machine
+/// off the transitions (e.g. `.connected` triggers the identity introduction in friend mode).
 public enum MultipeerTransportState: Equatable {
     case idle
     case advertising
@@ -35,6 +45,11 @@ public enum MultipeerTransportState: Equatable {
     }
 }
 
+/// An inbound MC invitation awaiting a local accept/reject decision.
+///
+/// Carries the single-shot `respond` callback from the MC advertiser delegate; equality ignores
+/// it (peer + info + context only). Surfaced as `.awaitingLocalAcceptance` — friend mode
+/// auto-accepts, trainer mode presents it to the user.
 public struct MultipeerPendingInvite: Equatable {
     public let peer: MultipeerPeer
     public let advertisedInfo: [String: String]
@@ -58,12 +73,21 @@ public struct MultipeerPendingInvite: Equatable {
     }
 }
 
+/// Failures a ``MultipeerTransport`` can surface — radio availability, session lifecycle, and
+/// per-send errors.
+///
+/// `sendFailed` wraps the underlying MC error description; the others describe states callers
+/// can retry or surface to the user.
 public enum MultipeerTransportError: Equatable, Error {
     case wifiUnavailable, bluetoothUnavailable, peerIDLoadFailed
     case sessionRejected, sessionTimeout, unexpectedState
     case sendFailed(reason: String)
 }
 
+/// One raw inbound data frame from a peer, as delivered on ``MultipeerTransport/inbound``.
+///
+/// The bytes are untrusted wire input — ``ProximityCoordinator`` decodes, size-gates, and
+/// signature-verifies them before anything downstream sees the payload.
 public struct MultipeerInboundMessage {
     public let peer: MultipeerPeer
     public let data: Data
@@ -78,6 +102,13 @@ public struct MultipeerInboundMessage {
     }
 }
 
+/// The transport abstraction ``ProximityCoordinator`` drives: advertise/browse, invite/accept,
+/// reliable/unreliable send, and Combine streams of state + inbound data.
+///
+/// The production conformer is `PeerChannelTransport` — a per-peer routing adapter over the
+/// shared ``MeshMultipeerSession`` MCSession — so a coordinator never manages MC lifecycle
+/// itself; tests inject scripted fakes. `@MainActor`: the coordinator and every conformer live
+/// on the main actor, with delegate callbacks hopped in.
 @MainActor
 public protocol MultipeerTransport: AnyObject {
     var state: AnyPublisher<MultipeerTransportState, Never> { get }

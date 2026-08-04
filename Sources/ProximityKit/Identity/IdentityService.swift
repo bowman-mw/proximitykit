@@ -23,6 +23,11 @@ import FernletDomainModel
 
 // MARK: - Keychain key identifiers
 
+/// Fixed keychain account names for the identity key material (content-addressed escrow slots
+/// are derived separately from the escrow key's own public key).
+///
+/// The `backupEscrowPrivateKey` account is legacy: read for back-compat, never written by this
+/// build.
 private enum IdentityKeychainKey: String {
     case signingPrivateKey          = "signingPrivateKey"
     case keyAgreementPrivateKey     = "keyAgreementPrivateKey"
@@ -33,6 +38,11 @@ private enum IdentityKeychainKey: String {
 
 // MARK: - Errors
 
+/// Failures of the identity crypto surface: keys not yet provisioned, malformed key bytes, or a
+/// seal/open that could not complete.
+///
+/// `notProvisioned` means `ensureProvisioned()` has not run (or the keychain was wiped) — the
+/// operation is retryable after provisioning; the rest mean "drop the payload".
 public enum IdentityError: Error, Equatable {
     case notProvisioned
     case invalidKeyData
@@ -42,6 +52,25 @@ public enum IdentityError: Error, Equatable {
 
 // MARK: - IdentityService
 
+/// The per-device cryptographic identity for the proximity subsystem: Ed25519 signing, X25519
+/// key agreement, heart-drop/presence tag derivation, group-key wrapping, and the iCloud-synced
+/// backup-escrow key lifecycle.
+///
+/// Responsibilities: provisioning + caching the keychain-backed key pairs
+/// (`ensureProvisioned()`, idempotent, with three migration cases documented inline); signing
+/// (`sign`) and static verification (`verify`); the pairwise ECDH→HKDF→ChaChaPoly seal/open used
+/// for all sealed payloads (with optional wire2 framing); domain-separated pair secrets and
+/// rotating tags for presence recognition and heart-drop day tags; and the WS-1..WS-4
+/// backup-escrow reconciliation, where CONTENT-ADDRESSED keychain slots make divergent escrow
+/// keys coexist as a detectable `.conflict` instead of silently overwriting each other.
+///
+/// Key separation is the core invariant: the signing + proximity KA keys are
+/// ThisDeviceOnly and never sync; only the backup-escrow key is synchronizable. The private keys
+/// never leave this type — collaborators pass closures (e.g. `HeartDropSealer.open` takes
+/// `heartDropStaticAgreement`). Several instances coexist in the app (mesh, presence, recipe
+/// share, heart-drop service) over the same keychain rows; `wipe()` clears the rows plus THIS
+/// instance's cache, so delete-all must call it on every live instance. `@MainActor`; the pure
+/// crypto statics (`verify`, `fingerprint`, tag derivations) are `nonisolated` for off-main use.
 @MainActor
 public final class IdentityService {
 

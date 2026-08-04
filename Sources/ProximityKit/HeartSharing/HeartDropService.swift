@@ -23,6 +23,8 @@ import FernletFoundation
 @Observable
 public final class HeartDropService {
 
+    /// Result of `queueHeart` — every non-`.queued` case maps to distinct, honest user copy
+    /// (cooldown vs daily cap vs backlog vs storage outage vs disabled).
     public enum QueueOutcome: Equatable, Sendable {
         case queued
         case rateLimited

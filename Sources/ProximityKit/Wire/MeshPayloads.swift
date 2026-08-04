@@ -10,11 +10,21 @@ import FernletDomainModel
 // `@MainActor` (it signs with the `@MainActor` IdentityService key); `.verify` is `nonisolated`
 // (pure signature math + canonical bytes).
 
+/// A mesh's admission posture: `open` advertises the mesh and auto-invites, `closed` stops
+/// admitting and switches metadata to group-key encryption.
+///
+/// Set by the founding member, merged last-write-wins by `modeSetAt` in the descriptor.
 public nonisolated enum MeshMode: String, Codable, Equatable, Sendable {
     case open
     case closed
 }
 
+/// One member row of a ``MeshDescriptor``: fingerprint, display name, both public keys, and join
+/// time.
+///
+/// Descriptor-gossip data — receivers never use these key fields for sealing or key wrapping
+/// (the handshake-verified slot keys are the trust input); they identify members for display and
+/// merge dedup.
 public nonisolated struct MeshMember: Codable, Equatable, Identifiable, Sendable {
     public var id: String { fingerprint }
 
@@ -39,6 +49,12 @@ public nonisolated struct MeshMember: Codable, Equatable, Identifiable, Sendable
     }
 }
 
+/// The shared description of a mesh — id, name, mode, member list — with per-field
+/// last-write-wins timestamps so concurrent edits merge deterministically.
+///
+/// Broadcast as `.meshDescriptor` whenever it changes; ``MeshNetworkManager`` merges incoming
+/// copies field-by-field (newer `nameSetAt`/`modeSetAt` wins, members union minus removed
+/// fingerprints) rather than replacing wholesale.
 public nonisolated struct MeshDescriptor: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID { meshID }
 
@@ -75,6 +91,9 @@ public nonisolated struct MeshDescriptor: Codable, Equatable, Identifiable, Send
     }
 }
 
+/// The `.meshDescriptor` wire body: just the current ``MeshDescriptor``.
+///
+/// Sent to every slot on any descriptor change and to newly committed slots at connect.
 public nonisolated struct MeshStateChangePayload: Codable, Equatable, Sendable {
     public let descriptor: MeshDescriptor
 
@@ -83,6 +102,11 @@ public nonisolated struct MeshStateChangePayload: Codable, Equatable, Sendable {
     }
 }
 
+/// A proposal to vote a member out of the mesh, valid for 60 seconds.
+///
+/// Two-party removal: a proposal takes effect only once a second member seconds it
+/// (``MeshRemovalSecondPayload``). Receivers cap and de-dupe pending proposals because the id
+/// and proposer fields are sender-controlled.
 public nonisolated struct MeshRemovalProposalPayload: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let targetFingerprint: String
@@ -111,6 +135,10 @@ public nonisolated struct MeshRemovalProposalPayload: Codable, Equatable, Identi
     }
 }
 
+/// The seconding vote that makes a removal proposal binding.
+///
+/// Receivers require the seconder to be the authenticated sender, distinct from both proposer
+/// and target, before applying the removal and rebroadcasting.
 public nonisolated struct MeshRemovalSecondPayload: Codable, Equatable, Sendable {
     public let proposal: MeshRemovalProposalPayload
     public let seconderFingerprint: String
@@ -121,6 +149,11 @@ public nonisolated struct MeshRemovalSecondPayload: Codable, Equatable, Sendable
     }
 }
 
+/// A non-member's request to join a mesh, carrying its claimed identity (fingerprint + keys +
+/// display name).
+///
+/// Receivers reject any request whose claimed fingerprint/signing key differ from the
+/// transport-authenticated sender before queueing it for the user's allow/decline.
 public nonisolated struct MeshAdmissionRequestPayload: Codable, Equatable, Sendable {
     public let meshID: UUID
     public let requesterFingerprint: String
@@ -143,6 +176,11 @@ public nonisolated struct MeshAdmissionRequestPayload: Codable, Equatable, Senda
     }
 }
 
+/// The admitter's answer to an admission request: the signed ``MeshAdmissionToken`` plus, from
+/// Phase 3, the current group key pairwise-wrapped to the joiner's handshake-verified KA key.
+///
+/// The outer `meshID` is UNSIGNED — receivers must (and do) verify the signed `token.meshID`
+/// against it, so a valid token for one mesh cannot be replayed inside a grant claiming another.
 public nonisolated struct MeshAdmissionGrantPayload: Codable, Equatable, Sendable {
     public let meshID: UUID
     public let requesterFingerprint: String
@@ -161,6 +199,15 @@ public nonisolated struct MeshAdmissionGrantPayload: Codable, Equatable, Sendabl
     }
 }
 
+/// The admitter-signed membership credential: binds the joiner's fingerprint AND full signing
+/// key to a mesh id, with a 2-hour default expiry.
+///
+/// Minted via ``signed(meshID:joinerFingerprint:joinerSigningPublicKey:admitterIdentity:grantedAt:expiresAt:)``
+/// and checked via ``verify(joinerSigningPublicKey:expectedMeshID:now:)``, which requires the
+/// locally-held key to equal the bound joiner key (defeating fingerprint-collision
+/// impersonation) and the signed meshID to equal the grant's claimed mesh. Verification accepts
+/// both the v2 cross-platform canonical bytes and the legacy encoder — a documented permanent
+/// dual-verify (see the inline F8 note), since the token carries no signed schema version.
 public nonisolated struct MeshAdmissionToken: Codable, Equatable, Sendable {
     public let meshID: UUID
     public let joinerFingerprint: String
@@ -192,9 +239,11 @@ public nonisolated struct MeshAdmissionToken: Codable, Equatable, Sendable {
     }
 }
 
-/// Sent after a successful trusted handshake.
-/// Lets peers label strangers as "Friend of Aisha" in the mesh roster.
-/// Never persisted across app launches; cache expires after 2 hours.
+/// Sent after a successful trusted handshake so peers can label strangers as "Friend of Aisha"
+/// in the mesh roster.
+///
+/// ``MeshNetworkManager`` caches vouches in memory only — never persisted across app launches —
+/// and the cache expires after 2 hours.
 public nonisolated struct MeshFriendVouchListPayload: Codable, Equatable, Sendable {
     public let voucherFingerprint: String
     public let voucherDisplayName: String
@@ -216,8 +265,12 @@ public nonisolated struct MeshFriendVouchListPayload: Codable, Equatable, Sendab
 
 // MARK: - Phase 3 Group Encryption Payloads
 
-// Broadcast by the coordinator once per rotation.
-// perMember maps each member fingerprint to their pairwise-encrypted copy of the 32-byte new key.
+/// Broadcast by the elected coordinator once per rotation: the new epoch plus each member
+/// fingerprint's pairwise-encrypted copy of the 32-byte group key.
+///
+/// A member absent from `perMember` was excluded from the rotation and must re-request
+/// admission. Receivers require the authenticated sender to be both the elected coordinator and
+/// the payload's claimed coordinator.
 public nonisolated struct MeshKeyRotationPayload: Codable, Equatable, Sendable {
     public let newEpoch: Int
     public let perMember: [String: Data]
@@ -237,7 +290,10 @@ public nonisolated struct MeshKeyRotationPayload: Codable, Equatable, Sendable {
     }
 }
 
-// Sent by each member after successfully unwrapping and caching the new key.
+/// A member's acknowledgment in the rotation protocol — sent for the closing epoch during the
+/// drain phase and again after unwrapping the new key.
+///
+/// The coordinator collects sync-phase acks to decide who receives the next key.
 public nonisolated struct MeshKeyAckPayload: Codable, Equatable, Sendable {
     public let epoch: Int
     public let memberFingerprint: String
@@ -248,8 +304,10 @@ public nonisolated struct MeshKeyAckPayload: Codable, Equatable, Sendable {
     }
 }
 
-// Broadcast by the coordinator before generating a new key.
-// Members drain in-flight photo exchanges before responding with a MeshKeyAckPayload.
+/// Broadcast by the coordinator before generating a new key: "epoch N is closing".
+///
+/// Members drain in-flight photo exchanges, then answer with a ``MeshKeyAckPayload`` for the
+/// closing epoch so the coordinator knows who is ready for the new key.
 public nonisolated struct MeshRotationSyncPayload: Codable, Equatable, Sendable {
     public let closingEpoch: Int
 
@@ -258,7 +316,11 @@ public nonisolated struct MeshRotationSyncPayload: Codable, Equatable, Sendable 
     }
 }
 
-// Broadcast by the coordinator every ~20 seconds. Never encrypted - any peer can read it.
+/// The coordinator's ~20-second liveness beacon: who coordinates, the current epoch, and the
+/// planned next rotation. Never encrypted — any peer can read it.
+///
+/// Members clamp `nextRotationAt` to one rotation window (anti-griefing), only honor beacons
+/// from the elected fingerprint, and take over coordination when the beacon goes silent.
 public nonisolated struct MeshCoordinatorBeaconPayload: Codable, Equatable, Sendable {
     public let coordinatorFingerprint: String
     public let currentEpoch: Int
@@ -278,7 +340,11 @@ public nonisolated struct MeshCoordinatorBeaconPayload: Codable, Equatable, Send
     }
 }
 
-// Closed-mode wrapper: inner payload is AES-256-GCM ciphertext over a JSON EncryptedMetadataInner.
+/// Closed-mode wrapper for mesh control payloads: AES-256-GCM ciphertext (over a JSON
+/// ``EncryptedMetadataInner``) plus its nonce and the key epoch it was sealed under.
+///
+/// Receivers decrypt only when their current group key's epoch matches, then re-dispatch the
+/// inner payload through the normal handlers.
 public nonisolated struct MeshEncryptedMetadataPayload: Codable, Equatable, Sendable {
     public let ciphertext: Data   // AES-GCM ciphertext + 16-byte tag
     public let nonce: Data        // 12-byte random nonce
@@ -291,7 +357,11 @@ public nonisolated struct MeshEncryptedMetadataPayload: Codable, Equatable, Send
     }
 }
 
-// Inner content of MeshEncryptedMetadataPayload after decryption.
+/// Inner content of a ``MeshEncryptedMetadataPayload`` after decryption: the real payload type
+/// token plus its encoded bytes.
+///
+/// Only a known subset of control types is re-dispatched from here (descriptor, photo
+/// manifest/request, admission grant).
 public nonisolated struct EncryptedMetadataInner: Codable, Sendable {
     public let payloadType: String
     public let payload: Data
@@ -306,6 +376,10 @@ public nonisolated struct EncryptedMetadataInner: Codable, Sendable {
 // (`canonicalBytes(for:)` = new cross-platform v2, `legacyCanonicalBytes(for:)` = pre-WI-6).
 
 extension MeshAdmissionToken {
+    /// Rejection reasons for an admission token.
+    ///
+    /// Each case pins one binding the admitter's signature must honor: mesh id, expiry, joiner
+    /// key, fingerprints, or the signature itself.
     public enum VerifyError: Error, Equatable {
         case expired
         case fingerprintMismatch

@@ -20,6 +20,12 @@
 
 import Foundation
 
+/// Wire envelope body for the curated Trainer / Nutritionist export bundle.
+///
+/// The bundle bytes are opaque to ProximityKit — the app owns the allowlist-projected `Codable`
+/// shape (see the header note) — so this type only carries, bounds, and shape-checks them. It is
+/// the wire seam the future `fernlet-coach` trainer channel will use; until that ships, the app
+/// shares the reviewed bundle as a file.
 public nonisolated struct TrainerExportPayload: Codable, Equatable, Sendable {
     public var format = "fernlet.trainer.export"
     public var version = 1

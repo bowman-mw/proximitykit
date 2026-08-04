@@ -1,16 +1,33 @@
 import Foundation
 import FernletDomainModel
 
+/// Failures of the mesh group-key photo/metadata AES-GCM crypto.
+///
+/// Thrown by ``MeshNetworkManager``'s static encrypt/decrypt helpers; callers treat either case
+/// as "drop the payload".
 enum MeshEncryptionError: Error {
     case decryptionFailed
     case encryptionFailed
 }
 
+/// A slot's traffic class in the capped mesh session.
+///
+/// ``MeshNetworkManager`` re-ranks slots by stable distance: the nearest peers get the three
+/// `active` slots (full payload routing) and the rest fall to `lightweight` (heartbeats only).
 public enum SlotKind {
     case active      // full payload routing, up to 3
     case lightweight // heartbeats only, up to 2
 }
 
+/// One peer's seat in the live mesh session: the transport channel, its ``ProximityCoordinator``,
+/// and the handshake-verified identity captured at commit.
+///
+/// Owned exclusively by ``MeshNetworkManager``, which appends a slot when an MC channel comes up
+/// and fills `fingerprint` / the verified key fields only when the coordinator reaches
+/// `.connected` — a nil `fingerprint` means an UNCOMMITTED candidate, which the feature-payload
+/// registry gate must drop. `verifiedKeyAgreementPublicKey` is the sealing target for every
+/// pairwise-sealed send (never descriptor gossip); `peerCapabilities` gates room broadcasts.
+/// Memory-only session state, never persisted.
 public struct PeerSlot: Identifiable {
     public let id: UUID  // == peer.id
     public let peer: MultipeerPeer
@@ -41,8 +58,11 @@ public struct PeerSlot: Identifiable {
     }
 }
 
-/// In-memory symmetric group key for the current mesh session.
-/// Never written to disk or keychain; lost on app termination or mesh leave.
+/// In-memory symmetric group key for the current mesh session, tagged with its rotation epoch.
+///
+/// Distributed pairwise-wrapped by the elected coordinator (`encryptGroupKey`) and rotated every
+/// 15 minutes; used for closed-mode photo/metadata AES-GCM. Never written to disk or keychain;
+/// lost on app termination or mesh leave.
 public struct MeshGroupKey {
     public let epoch: Int
     public let keyBytes: Data   // 32 bytes
@@ -55,6 +75,10 @@ public struct MeshGroupKey {
     }
 }
 
+/// One timestamped UWB distance reading for a slot.
+///
+/// ``MeshNetworkManager`` keeps a 10-second rolling window of these per slot to compute the
+/// stable distance that drives slot ranking and overflow eviction.
 struct MeshDistanceSample: Equatable {
     let recordedAt: Date
     let meters: Double
@@ -106,6 +130,11 @@ public nonisolated struct MeshFriendReviewBatch: Identifiable, Equatable, Sendab
     }
 }
 
+/// Display row for one member of the current session (mesh members or committed pairwise slots),
+/// including the local device.
+///
+/// Derived on demand by `MeshNetworkManager.sessionParticipants` for the session UI and photo
+/// metadata; identity is the fingerprint. Not persisted.
 public struct MeshSessionParticipant: Identifiable, Equatable {
     public var id: String { fingerprint }
 

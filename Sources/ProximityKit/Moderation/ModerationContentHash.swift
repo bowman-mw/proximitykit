@@ -10,6 +10,12 @@ import Foundation
 import CryptoKit
 import FernletDomainModel
 
+/// Derives the stable content key a moderation report binds to: SHA-256 over an item's
+/// sanitized artwork (texture grid + slot), never its id, name, or price.
+///
+/// Used by the report/ban flows (``ModerationLedger``, ``ModerationBanStore``) so a designer
+/// cannot escape a report by relisting the same artwork under a new id or name. Pure namespace
+/// enum — stateless, `nonisolated`, CryptoKit only.
 public nonisolated enum ModerationContentHash {
     /// Order-stable SHA-256 over the grid + slot. Callers should pass a sanitized texture/slot.
     public static func of(texture: ItemGridTexture, slot: ItemSlot) -> Data {

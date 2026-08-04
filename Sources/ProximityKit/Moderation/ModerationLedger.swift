@@ -11,6 +11,17 @@ import Foundation
 import Observation
 import FernletDomainModel
 
+/// Device-local, append-only store of moderation report rows: this device's own reports and
+/// retracts plus peers' one-hop-verified rows.
+///
+/// The evidence base ``ModerationBanStore/reconcile(rows:localSigningKey:)`` and the shop's
+/// hide-reported-items checks read from. Rows carry a deterministic id
+/// (`ModerationLedgerEntry.rowID`) so a repeat report de-dupes and a retract supersedes its
+/// report via a higher `reporterSeq`; upsert keeps the higher-seq row, making re-delivery
+/// idempotent. Persistence is a JSON sidecar in Application Support
+/// (`.completeFileProtection`), deliberately NEVER in the synced snapshot — who reported whom is
+/// sensitive social data. Bounded at `maxRows` (oldest evicted); `clearAll` is wired from
+/// reset-everything. `@MainActor @Observable`: rows drive moderation UI.
 @MainActor
 @Observable
 public final class ModerationLedger {
@@ -114,6 +125,7 @@ public final class ModerationLedger {
         save()
     }
 
+    /// Versioned on-disk shape; tolerant of missing keys so older files keep decoding.
     private struct PersistedState: Codable {
         var version = 1
         var rows: [ModerationLedgerEntry] = []

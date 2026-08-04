@@ -1,6 +1,11 @@
 import Foundation
 import FernletDomainModel
 
+/// Generates friendly two-word default names ("sunny-meadow") for freshly created meshes.
+///
+/// Used by ``MeshNetworkManager`` when the user starts or promotes a mesh without naming it.
+/// Pure word-list lookup — no state, no identity content, safe to show on the open-mesh
+/// Bonjour advertisement.
 enum MeshNameGenerator {
     static func generate() -> String {
         "\(adjectives.randomElement() ?? "sunny")-\(nouns.randomElement() ?? "meadow")"

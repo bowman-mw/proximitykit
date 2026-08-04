@@ -4,6 +4,11 @@ import FernletDomainModel
 // WI-9: wire recipe-share payloads marked `nonisolated, Sendable` — see the note in MeshPayloads.swift.
 // ProximityKit's `.defaultIsolation(MainActor.self)` would otherwise MainActor-isolate these value
 // types and their synthesized `Codable` conformances, blocking off-main decode under Swift 6.
+/// The `.recipeShare` wire body: format/version markers plus one ``ProximitySharedRecipe``.
+///
+/// Built by the app's share sheet, sent sealed by ``ProximityRecipeShareManager``, and received
+/// into ``PendingProximityRecipeShare``. The share-notes members implement the "Include notes"
+/// privacy toggle — sender-authored free text can be withheld before the payload leaves.
 public nonisolated struct ProximityRecipeSharePayload: Codable, Equatable, Identifiable, Sendable {
     public var format = "fernlet.proximity.recipe"
     public var version = 1
@@ -64,11 +69,21 @@ public nonisolated struct ProximityRecipeSharePayload: Codable, Equatable, Ident
     }
 }
 
+/// Which variant a ``ProximitySharedRecipe`` carries: a user-authored local recipe or a
+/// web-imported saved recipe.
+///
+/// The distinction drives the notes-privacy rules — local steps are personal prose, saved steps
+/// come from a public URL.
 public nonisolated enum ProximitySharedRecipeKind: String, Codable, Equatable, Sendable {
     case local
     case saved
 }
 
+/// Tagged union of the two shareable recipe shapes, with convenience accessors that read whichever
+/// side `kind` selects.
+///
+/// Exactly one of `local` / `saved` is populated; the accessors fall back to safe defaults so a
+/// malformed payload still renders rather than crashing.
 public nonisolated struct ProximitySharedRecipe: Codable, Equatable, Sendable {
     public var kind: ProximitySharedRecipeKind
     public var local: SharedRecipePayload?
@@ -112,6 +127,12 @@ public nonisolated struct ProximitySharedRecipe: Codable, Equatable, Sendable {
     }
 }
 
+/// Wire projection of a web-imported saved recipe: name, source URL, ingredients, macro totals,
+/// micronutrients, and (optionally) parsed cooking steps.
+///
+/// The `summary` is the only sender-authored free text here, which is why `omittingShareNotes()`
+/// clears it alone. The companion local-recipe shape (`SharedRecipePayload`) lives in
+/// `FernletDomainModel`.
 public nonisolated struct SharedSavedRecipePayload: Codable, Equatable, Sendable {
     public var name: String
     public var sourceURLString: String
@@ -153,6 +174,11 @@ public nonisolated struct SharedSavedRecipePayload: Codable, Equatable, Sendable
     }
 }
 
+/// A received recipe share awaiting the user's accept/dismiss decision.
+///
+/// Held in memory by ``ProximityRecipeShareManager/pendingRecipeShares`` (capped, rate-limited);
+/// `senderFingerprint` is the transport-verified identity when available. Identity is the
+/// payload's id so a re-send replaces rather than stacks.
 public struct PendingProximityRecipeShare: Identifiable, Equatable {
     public var id: UUID { payload.id }
     public var senderDisplayName: String
@@ -173,6 +199,10 @@ public struct PendingProximityRecipeShare: Identifiable, Equatable {
     }
 }
 
+/// A nearby Fernlet the user can send a recipe to, as shown in the share sheet's recipient list.
+///
+/// `id` is the discovered peer's UUID; `fingerprint` stays nil until the identity introduction
+/// verifies, after which the row upgrades to the verified display name.
 public struct ProximityRecipeShareRecipient: Identifiable, Equatable {
     public var id: UUID
     public var displayName: String

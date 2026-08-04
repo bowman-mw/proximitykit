@@ -15,6 +15,8 @@ import Foundation
 @MainActor
 public final class HeartDropPeerBundleCache {
 
+    /// One friend's cached prekey material: their gossiped one-time bundle, this device's
+    /// consumed-id marks against it, the independently-updated signed prekey, and the LRU stamp.
     private struct PeerState: Codable {
         var bundle: HeartPrekeyStore.Bundle
         var consumedIDs: Set<UUID> = []

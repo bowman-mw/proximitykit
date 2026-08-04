@@ -17,6 +17,19 @@ import FernletDomainModel
 // type `nonisolated, Sendable` (matching the FernletDomainModel wire types — PayloadType/PayloadSummary)
 // makes decode + signature verification safe from any isolation domain. The two members that touch
 // the `@MainActor` IdentityService/ReplayCache (`verify`, `signed`) stay `@MainActor` explicitly.
+/// The signed wire envelope EVERY peer-to-peer transfer between Fernlet devices travels in:
+/// sender keys + display name, an optional recipient fingerprint, the (possibly sealed) payload,
+/// and an Ed25519 signature over deterministic canonical bytes.
+///
+/// Minted only via ``signed(identityService:envelopeID:senderDisplayName:recipientFingerprint:payloadType:payloadEncryption:payloadSummary:payload:createdAt:expiresAt:)``
+/// and consumed only via ``verify(identityService:replayCache:sealedPayloadFormat:)``, which
+/// enforces schema version, expiry, signature, recipient match, mandatory sealing for sensitive
+/// payload types, and replay protection — callers never trust a field before `verify` returns.
+/// The canonical signing bytes are version-gated (legacy v1 JSON vs the v2 cross-platform binary
+/// serializer in `CanonicalSignatureSerializer`). `payloadTypeToken` keeps the raw wire token so
+/// an envelope from a NEWER build still decodes, re-encodes byte-identically, and verifies — the
+/// unknown type is parked (`isUnknownPayloadType`) and never dispatched, fail-closed. Value type,
+/// `nonisolated`/`Sendable`; only `verify`/`signed` touch main-actor state.
 public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable {
     public let schemaVersion: Int                 // 1
     public let envelopeID: UUID                   // for replay protection + Inspector log correlation
@@ -47,10 +60,11 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
     /// or dispatched — fail-closed by non-dispatch.
     public var isUnknownPayloadType: Bool { payloadType == nil }
 
-    // Wire-compatibility mapping: `payloadTypeToken` occupies the original `payloadType` key. A
-    // known type's token IS its rawValue, so the JSON emitted for every pre-existing envelope is
-    // byte-identical to the previous `PayloadType`-typed encoding (and the legacy v1 canonical
-    // bytes, which re-encode the envelope, are unchanged too).
+    /// Wire-compatibility mapping: `payloadTypeToken` occupies the original `payloadType` key.
+    ///
+    /// A known type's token IS its rawValue, so the JSON emitted for every pre-existing envelope
+    /// is byte-identical to the previous `PayloadType`-typed encoding (and the legacy v1 canonical
+    /// bytes, which re-encode the envelope, are unchanged too).
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
         case envelopeID
@@ -154,6 +168,10 @@ extension FernletIdentityEnvelope {
 // MARK: - Verification
 
 extension FernletIdentityEnvelope {
+    /// The distinct ways `verify` rejects an envelope.
+    ///
+    /// Every case means "drop the envelope"; `replayDetected` doubles as the ``ReplayCache``'s
+    /// stale-createdAt rejection.
     public enum VerifyError: Error, Equatable {
         case schemaVersionUnsupported
         case expired

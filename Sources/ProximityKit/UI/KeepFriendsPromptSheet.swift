@@ -45,6 +45,10 @@ struct KeepFriendsSection: View {
     }
 }
 
+/// One keep-as-friend row: sanitized display name, fingerprint, and the Keep/Keeping chip.
+///
+/// Private child of ``KeepFriendsSection``; the toggle closure flips membership in the shared
+/// kept-fingerprints binding.
 private struct KeepFriendRow: View {
     let candidate: MeshSessionRosterEntry
     let isKept: Bool

@@ -23,6 +23,8 @@ import FernletFoundation
 @MainActor
 public final class HeartPrekeyStore {
 
+    /// One one-time X25519 prekey's public half plus the id senders use to name it in the
+    /// drop header. Sixteen of these make up a gossiped ``Bundle``.
     public struct PrekeyEntry: Codable, Equatable, Sendable {
         public let id: UUID
         public let publicKey: Data
@@ -97,15 +99,18 @@ public final class HeartPrekeyStore {
     public static let keychainService = "com.fernlet.heartdrop"
     static let keychainAccount = "prekeyPrivateHalves"
 
+    /// A minted bundle plus its private halves, as persisted in the keychain blob.
     private struct StoredBundle: Codable {
         var bundle: Bundle
         /// Raw representations, index-aligned with `bundle.keys`.
         var privateKeys: [Data]
     }
+    /// A minted signed prekey plus its private half, as persisted in the keychain blob.
     private struct StoredSignedPrekey: Codable {
         var prekey: SignedPrekey
         var privateKey: Data
     }
+    /// The whole keychain blob: every retained bundle and signed prekey with private halves.
     private struct StoredState: Codable {
         var bundles: [StoredBundle]
         /// OPTIONAL and must stay so: a non-optional field would make synthesized `Codable`
@@ -315,6 +320,8 @@ public final class HeartPrekeyStore {
 
     // MARK: - Keychain read that distinguishes "absent" from "failed"
 
+    /// Three-way keychain read result — absent (mint fresh) vs unreadable (fail closed) is the
+    /// distinction that keeps gossiped private halves from being stranded by a transient error.
     private enum RowRead {
         case found(Data)
         case absent

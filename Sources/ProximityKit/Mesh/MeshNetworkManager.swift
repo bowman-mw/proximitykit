@@ -9,6 +9,11 @@ import PrivateMediaStore
 
 // MARK: - Supporting types
 
+/// One tile on the home photo wall: a single photo, or an aggregated session carousel with its
+/// chosen cover.
+///
+/// Derived on demand by `MeshNetworkManager.photoWallPosts` from the cached photo metadata plus
+/// the wall preferences (aggregation, covers, favorites); never persisted itself.
 public struct FriendPhotoWallPost: Identifiable {
     public let id: UUID
     public let session: FriendPhotoSessionMetadata?
@@ -30,12 +35,22 @@ public struct FriendPhotoWallPost: Identifiable {
     public var isCarousel: Bool { photos.count > 1 }
 }
 
+/// Persisted photo-wall preferences: which sessions are aggregated into carousels, their cover
+/// photos, and the per-session favorite.
+///
+/// Loaded/saved by ``FriendPhotoWallPreferencesStore``; lives beside the photo cache, never in
+/// the synced snapshot.
 private struct FriendPhotoWallPreferences: Codable {
     var aggregatedSessionIDs: Set<UUID> = []
     var coverPhotoIDsBySession: [UUID: UUID] = [:]
     var favoritePhotoIDsBySession: [UUID: UUID] = [:]
 }
 
+/// Best-effort JSON file persistence for ``FriendPhotoWallPreferences``
+/// (`MeshPhotoWallPreferences.json`, `.completeFileProtection`).
+///
+/// A failed load returns empty preferences; a failed save is silently dropped — wall cosmetics,
+/// not data of record.
 private struct FriendPhotoWallPreferencesStore {
     let fileURL: URL
 
@@ -56,6 +71,35 @@ private struct FriendPhotoWallPreferencesStore {
 
 // MARK: - MeshNetworkManager
 
+/// The friend-mesh session manager — the largest orchestrator in the subsystem. Runs the
+/// `fernlet-friend` radio, forms UWB dwell-committed sessions (pairwise → mesh at two commits),
+/// and hosts every feature that rides the mesh: disposable-camera photos, the clothing shop,
+/// live-session chat, in-session hearts, moderation relay, fuzzy friend state, Group Activities,
+/// the QR verification ceremony, and the post-session keep-as-friend review.
+///
+/// Structure: one shared ``MeshMultipeerSession`` MCSession feeds per-peer `PeerChannelTransport`
+/// channels; each channel gets a ``PeerSlot`` with its own ``ProximityCoordinator`` and a
+/// retained ``FriendSessionTrustPolicy``. Slots are capped (3 active + 2 lightweight, ranked by
+/// stable UWB distance with hysteresis-guarded overflow eviction) and a symmetric `sid`
+/// comparison picks the single inviter of a mutually-discovered pair. Core mesh-control payloads
+/// are handled in the dispatch switch; feature payloads go through the Phase-1 registry, whose
+/// committed-slot gate (`slot.fingerprint != nil`) is the security boundary — the coordinator
+/// dispatches with a merely-pending identity and no state gate.
+///
+/// Session lifecycle invariants: "session formation" is the FIRST slot commit (not search start,
+/// which fires on every Social-tab entry); the last-committed-slot-gone moment promotes the
+/// roster into `pendingFriendReview`, opens the clothing-shop window, and clears the chat
+/// transcript. Phase-3 group crypto: a lowest-fingerprint coordinator election, a 20 s beacon,
+/// and a 15-minute key rotation distribute the ``MeshGroupKey`` pairwise-wrapped to
+/// handshake-verified KA keys; closed-mode metadata and epoch ≥ 1 photos ride AES-GCM under it.
+/// Photos persist metadata-only in the `PrivateMediaStore`-backed cache (bytes on disk,
+/// rehydrated on demand) with per-sender send/receive quotas.
+///
+/// Capabilities (`localCapabilities()`) gate every optional feature per peer, including the 13+
+/// chat age gate — enforced at advertisement, send, AND receive. `wipeIdentityForDeleteAll` is
+/// this manager's leg of the delete-all seam. Memory-only session state everywhere except the
+/// photo cache, wall preferences, and the activity sidecar — none of it synced.
+/// `@MainActor @Observable`; the app owns start/stop via tab/scene/lock gating.
 @MainActor
 @Observable
 public final class MeshNetworkManager: ProximityPayloadHandling {

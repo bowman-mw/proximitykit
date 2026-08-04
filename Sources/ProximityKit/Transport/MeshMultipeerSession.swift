@@ -7,9 +7,14 @@ import FernletDomainModel
 
 // MARK: - PeerChannelTransport
 
-/// Per-peer MultipeerTransport adapter for mesh slots.
-/// MeshMultipeerSession manages the shared MCSession; this type routes
-/// state and data events for a single peer without managing MC lifecycle.
+/// Per-peer ``MultipeerTransport`` adapter for mesh slots.
+///
+/// ``MeshMultipeerSession`` manages the shared MCSession; this type routes state and data events
+/// for a single peer without managing MC lifecycle — the advertise/browse/invite/accept
+/// requirements are deliberate no-ops, `send` forwards to the shared session, and `disconnect`
+/// only signals idle locally. The owning session calls `notifyConnected` /
+/// `notifyDisconnected` / `receive` to feed the publishers the peer's ``ProximityCoordinator``
+/// subscribes to.
 @MainActor
 final class PeerChannelTransport: MultipeerTransport {
     let peer: MultipeerPeer
@@ -65,9 +70,20 @@ final class PeerChannelTransport: MultipeerTransport {
 
 // MARK: - MeshMultipeerSession
 
-/// Owns a single MCSession shared across all mesh peers.
-/// Creates PeerChannelTransport instances on demand and routes MC delegate
-/// callbacks to the appropriate channel.
+/// The shared MultipeerConnectivity radio: one MCSession, advertiser, and browser, multiplexed
+/// into per-peer ``PeerChannelTransport`` channels.
+///
+/// Every multi-peer radio (mesh, recipe share, presence) owns an instance. Responsibilities:
+/// stable-vs-ephemeral peer identity (`usesEphemeralPeerID: true` mints a random, never-persisted
+/// MCPeerID for the presence radio — it must NOT touch the shared ``FileMCPeerIDStore``);
+/// discovery lifecycle including `pauseDiscovery`/`resumeDiscovery` (radio quiet to new peers,
+/// live connections kept — with the CONTRACT that `invite(_:)` never runs while paused);
+/// connecting-window tracking with 31 s self-expiring entries so acceptance gates can close the
+/// pending-connection race; and loud surfacing of `didNotStart*` failures via `onTransportError`
+/// (a service type missing from `NSBonjourServices`, or a declined Local Network prompt, is
+/// otherwise silently dead). All MC delegate callbacks arrive nonisolated and transfer their
+/// non-Sendable `MCPeerID`/handler values to the main actor via `nonisolated(unsafe)` locals —
+/// see the inline notes. `@MainActor`; owners wire behavior through the closure hooks.
 @MainActor
 final class MeshMultipeerSession: NSObject {
 

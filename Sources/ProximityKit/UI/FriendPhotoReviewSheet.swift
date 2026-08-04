@@ -5,6 +5,11 @@ import UIKit
 import FernletDomainModel
 import os
 
+/// One selectable photo thumbnail in the session-end review grid.
+///
+/// Renders the payload's inline bytes when present, otherwise rehydrates them on demand through
+/// `loadImageData` (session photos are held metadata-only to bound memory); a checkmark overlay
+/// marks selection.
 struct FriendPhotoTile: View {
     let photo: FriendPhotoPayload
     let selected: Bool
@@ -45,6 +50,13 @@ struct FriendPhotoTile: View {
     }
 }
 
+/// The session-end photo review sheet: pick which shared pictures to keep (everything else is
+/// deleted from the temporary cache), with the keep-as-friend section riding along when eligible
+/// candidates exist.
+///
+/// Presented by the app's session-end flow off the promoted review state; the host supplies the
+/// save/discard actions (explicitly `@MainActor`-typed so their bodies stay on the main actor
+/// after `await` resumes) and the optional disk-cache rehydrator for metadata-only photos.
 public struct FriendPhotoReviewSheet: View {
     let photos: [FriendPhotoPayload]
     @Binding var selectedIDs: Set<UUID>
@@ -151,6 +163,13 @@ public struct FriendPhotoReviewSheet: View {
     }
 }
 
+/// Saves selected friend photos into the system photo library (add-only authorization).
+///
+/// Stateless namespace enum used by the review sheet's save action. Deliberately `nonisolated`
+/// with a `@Sendable` change block: `PHPhotoLibrary.performChanges` runs on its own serial queue,
+/// and inheriting the module's MainActor default there trips the Swift executor precondition (the
+/// build-19 TestFlight crash). Counts actual creation requests so an all-decode-failure surfaces
+/// as ``NothingSavedError`` instead of a false success.
 public enum FriendPhotoLibrarySaver {
     /// Thrown when the payload list was non-empty but every image failed to decode, so no
     /// asset was actually created. Without this the flow reports success and leaves the

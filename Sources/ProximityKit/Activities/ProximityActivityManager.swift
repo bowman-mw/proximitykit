@@ -25,6 +25,21 @@ import Foundation
 import Observation
 import FernletDomainModel
 
+/// The state + logic brain for Group Activities (Phase 6): hosting, joining, offers, pending
+/// join requests, and host-authoritative roster convergence — riding the friend mesh with no
+/// radio of its own.
+///
+/// Owned by ``MeshNetworkManager`` (a sub-manager like ``MeshClothingShop``), which wires in the
+/// two seams this type uses instead of touching MCSession: `send` (seal + sign + transmit to one
+/// verified fingerprint's committed slot) and `committedActivityPeerFingerprints`. Authorization
+/// is independent of the shared handshake: membership is carried by the host-signed,
+/// invitee-key-bound `ActivityJoinToken`, snapshots verify only under the host key PINNED at
+/// join, and roster convergence is max-version-wins. Receive paths reject oversized/hand-crafted
+/// descriptors (the 7-day lifetime ceiling is re-enforced here, by rejection rather than
+/// clamping, because the signed params hash must not be rewritten) and never serve a roster to a
+/// non-member. Hosted/joined activities persist in a device-local sidecar
+/// (`ActivityLedger.json`, `.completeFileProtection`, NEVER synced) until `expiresAt`; offers
+/// and pending joins are memory-only. `@MainActor @Observable`.
 @MainActor
 @Observable
 public final class ProximityActivityManager {
@@ -578,6 +593,8 @@ public final class ProximityActivityManager {
 
     // MARK: - Persistence (device-local sidecar, NEVER synced)
 
+    /// Versioned sidecar shape: hosted + joined activities only (offers and pending joins are
+    /// deliberately memory-only). Missing keys decode to empty.
     private struct PersistedState: Codable {
         var version = 1
         var hosted: [HostedActivity] = []

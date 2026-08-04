@@ -5,6 +5,12 @@ import Observation
 import UIKit
 import FernletDomainModel
 
+/// Diagnostic sink for a ``ProximityCoordinator``'s session lifecycle: state transitions,
+/// envelope records, ranging samples, transport info, and errors.
+///
+/// The app's Connection Inspector conforms; every requirement has a default no-op (see the
+/// extension) so lightweight conformers like ``ProximityInspectorEventRecorder`` implement only
+/// what they need. Held `weak` by the coordinator.
 @MainActor
 public protocol ProximityInspectorRecording: AnyObject {
     func beginSession(role: ProximityCoordinator.Role, mode: ProximityCoordinator.Mode, localFingerprint: String)
@@ -18,6 +24,13 @@ public protocol ProximityInspectorRecording: AnyObject {
     func endSession(endState: String)
 }
 
+/// The one callback a ``ProximityCoordinator`` delivers verified application payloads through.
+///
+/// Fires only after `FernletIdentityEnvelope.verify` succeeded and the type is not a
+/// coordinator-internal one (identity intro/ack, heartbeat); `peer` is the handshake-verified
+/// identity when one exists, else the pending identity — receivers must apply their own
+/// committed/blocked gates. Conformers: ``MeshNetworkManager``, ``ProximityRecipeShareManager``,
+/// ``PresenceManager``. Held `weak` by the coordinator.
 @MainActor
 public protocol ProximityPayloadHandling: AnyObject {
     func proximityCoordinator(
@@ -39,6 +52,10 @@ extension ProximityInspectorRecording {
     public func endSession(endState: String) {}
 }
 
+/// Minimal ``ProximityInspectorRecording`` that just accumulates coordinator event strings.
+///
+/// Used by tests and lightweight diagnostics; every other requirement takes the protocol's
+/// default no-op.
 @MainActor
 public final class ProximityInspectorEventRecorder: ProximityInspectorRecording {
     public private(set) var events: [String] = []
@@ -52,6 +69,11 @@ public final class ProximityInspectorEventRecorder: ProximityInspectorRecording 
 
 // WI-9: mesh wire payloads decoded from peer plaintext — `nonisolated, Sendable` so the decode is
 // not pinned to the MainActor by ProximityKit's `.defaultIsolation(MainActor.self)` (see MeshPayloads.swift).
+/// Body of the identity intro/ack envelope: negotiated ranging mode, the UWB discovery token,
+/// the advertised capability tokens, and the optional heart-drop prekey bundle.
+///
+/// All later additions are additive optional keys so old decoders keep working; provenance of
+/// the prekey bundle is the intro envelope's Ed25519 signature.
 private nonisolated struct IdentityRangingPayload: Codable, Sendable {
     let rangingMode: String
     let discoveryToken: Data?
@@ -75,7 +97,14 @@ private nonisolated struct IdentityRangingPayload: Codable, Sendable {
     }
 }
 
+/// Body of the `.sessionHeartbeat` envelope: a ping (with an id the ack quotes back) or an ack.
+///
+/// Used by ``ProximityCoordinator`` for liveness and RTT measurement on a connected session;
+/// three missed intervals end the session as `transportLost`.
 private nonisolated struct SessionHeartbeatPayload: Codable, Sendable {
+    /// Ping (expects an ack quoting `heartbeatID`) or ack (carries `responseTo`).
+    ///
+    /// The coordinator answers pings with acks and matches acks back to pending pings by id.
     enum Kind: String, Codable, Sendable {
         case ping
         case ack
@@ -87,6 +116,34 @@ private nonisolated struct SessionHeartbeatPayload: Codable, Sendable {
     let responseTo: UUID?
 }
 
+/// The per-connection handshake + session engine: drives one peer from discovery through the
+/// signed identity exchange and the proximity commit gate to a verified, heartbeat-kept session,
+/// and is the single choke point every inbound envelope passes through.
+///
+/// One coordinator per peer connection, owned by a manager (mesh slot, recipe pairing, presence
+/// heart connection) that injects the transport, ranging provider, trust policy, payload handler,
+/// and shared ``ReplayCache``. The friend-mode state machine: transport connect →
+/// `awaitingIdentityIntroduction` (signed intro/ack with ranging token + capabilities) →
+/// `awaitingProximityCommit` (UWB 15 cm / 0.8 s dwell) or `awaitingManualCommit` (no UWB) →
+/// `connected`, with an immediate heartbeat so the peer can auto-commit. Trainer mode
+/// auto-advances the legacy tap gate on connect and gates on remembered trust / explicit user
+/// confirmation instead of the dwell.
+///
+/// Security invariants: every inbound envelope is checked against the trust policy (revoked →
+/// hard fail, blocked → silent drop) and then `verify`'d (signature/expiry/recipient/replay/
+/// mandatory sealing) before dispatch; unknown newer-build payload types are parked, never
+/// dispatched; trainer sessions size-gate the raw wire blob BEFORE decode. On a
+/// presence-originated heart connection (`sealedIntroductionPeerKeyAgreementKey` set) the
+/// SEALED-INTRODUCTION rule applies: identity intro/ack travel only inside a
+/// ``SealedIntroductionEnvelope`` sealed to the intended friend's KA key, plain identity
+/// envelopes are rejected, and heartbeats are not answered until the sealed identity verified —
+/// a tag-replay forger learns nothing. Sealed sends/receives negotiate wire2 framing off the
+/// peer's advertised capabilities.
+///
+/// Failure model: connection-phase and proximity-gate timeouts end the session; heartbeat
+/// silence (3× interval) or 3 consecutive send failures end it as `transportLost`; friend mode
+/// auto-reconnects after transport loss while `autoReconnect` holds. `@MainActor @Observable`:
+/// managers observe `state` to drive slot/connection bookkeeping.
 @MainActor
 @Observable
 public final class ProximityCoordinator {
@@ -638,6 +695,10 @@ public final class ProximityCoordinator {
         return try JSONEncoder().encode(SealedIntroductionEnvelope(sealedIntroduction: ciphertext))
     }
 
+    /// Outcome of trying to unwrap an inbound blob as a ``SealedIntroductionEnvelope``.
+    ///
+    /// Consumed only by `handleInbound` on a sealed-introduction coordinator: `.failed` is the
+    /// fail-closed branch (a wrapper the local KA key cannot open, i.e. a tag-replay forger).
     private enum SealedIntroUnwrap {
         case notWrapped          // a plain envelope (e.g. a post-commit heartbeat) — process as-is
         case opened(Data)        // a sealed wrapper opened with the local KA private key
@@ -1298,6 +1359,11 @@ public final class ProximityCoordinator {
 }
 
 extension ProximityCoordinator {
+    /// The coordinator's observable handshake/session state machine.
+    ///
+    /// Managers key their slot/connection bookkeeping off transitions: `awaitingManualCommit` /
+    /// `awaitingProximityCommit` are the commit gates, `connected` carries the verified
+    /// ``PeerIdentity``, and `.ended`/`.failed` drive eviction sweeps.
     public enum State: Equatable {
         case idle
         case starting
@@ -1334,6 +1400,13 @@ extension ProximityCoordinator {
         }
     }
 
+    /// The handshake-verified identity of a session peer: both public keys, the derived
+    /// fingerprint, the negotiated ranging mode, and the advertised capabilities.
+    ///
+    /// Built only from a signature-verified identity envelope — its key fields are the ONLY
+    /// legitimate inputs for sealing, key wrapping, and trust decisions (never descriptor gossip
+    /// or wire claims). `displayName` remains peer-supplied and must be sanitized before
+    /// persistence or display.
     public struct PeerIdentity: Equatable, Identifiable {
         public let id: UUID
         public let displayName: String
@@ -1377,6 +1450,10 @@ extension ProximityCoordinator {
 
     public typealias RangingMode = ProximityRangingMode
 
+    /// Why a session reached `.ended`.
+    ///
+    /// Managers branch on the reason during their eviction sweeps; `transportLost` additionally
+    /// triggers the friend-mode auto-reconnect path when it is armed.
     public enum EndReason: Equatable {
         case userCancelled
         case peerCancelled
@@ -1386,6 +1463,10 @@ extension ProximityCoordinator {
         case completedSuccessfully
     }
 
+    /// Coordinator-level failures thrown from the send path and the identity handshake.
+    ///
+    /// Callers of ``ProximityCoordinator/send(_:)`` see `notConnected`; the other cases fail the
+    /// session internally.
     public enum CoordinatorError: Error, Equatable {
         case notConnected
         case fingerprintMismatch

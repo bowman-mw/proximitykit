@@ -70,6 +70,28 @@ private struct PresenceHeartConnection: Identifiable {
     var didSend = false
 }
 
+/// The standing presence radio (`fernlet-near`): lets KEPT friends recognize each other nearby
+/// without connecting, and delivers in-person hearts over on-demand pairwise connections formed
+/// on that recognition.
+///
+/// Privacy posture is the design center: the advertisement carries ONLY rotating pairwise-DH
+/// tags (truncated HMACs of the 15-minute epoch under per-friend-pair static-static X25519
+/// secrets — see `IdentityService.presenceTag`), the MCPeerID is per-start random and never
+/// persisted, and all state (nearby set, connections, diagnostics) is memory-only with no
+/// identities in any log line. Matching spans ±1 epoch; three self-exclusion layers drop our own
+/// ghost advertisements; a 45 s lost-grace debounce smooths the epoch advertiser-restart flap.
+///
+/// Hearts (Phase 4b): sends invite the tag-matched peer, run a 1-RTT friend handshake with the
+/// SEALED-INTRODUCTION rule (intro/ack sealed to the intended friend's vault KA key so a
+/// tag-replay forger learns nothing), auto-commit, verify the connected identity IS that friend
+/// and heart-eligible, deliver one sealed `.friendHeart`, then tear down — zombie connections
+/// must never accumulate toward the 8-peer MCSession cap. Receives accept invitations only from
+/// tag-matched peers and enforce the `allowNearbyHearts` opt-out, the trusted-friend gate, and
+/// the shared ``ProximityHeartLedger`` 5-minute receive window. The away-delivery seams
+/// (`queueAwayHeart`, prekey-bundle gossip) hand race-window sends to the dead-drop. Every
+/// escaping Task captures `[weak self]` (manager-Task lifetime rule — the owning store holds
+/// this `unowned`). Lifecycle is owned by the app (opt-in setting + scene/tab/lock).
+/// `@MainActor @Observable`.
 @MainActor
 @Observable
 public final class PresenceManager: ProximityPayloadHandling {

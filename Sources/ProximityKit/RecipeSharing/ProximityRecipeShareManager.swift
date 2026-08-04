@@ -3,6 +3,10 @@ import Observation
 import UIKit
 import FernletDomainModel
 
+/// One live recipe-share pairing: the peer, its channel + coordinator, and (once the handshake
+/// completes) the verified fingerprint and KA key.
+///
+/// Under the hard 2-device cap the manager holds at most one of these at a time.
 private struct RecipeShareConnection: Identifiable {
     let id: UUID
     let peer: MultipeerPeer
@@ -23,6 +27,10 @@ private struct RecipeShareConnection: Identifiable {
 // They hold no main-actor state, so keeping them nonisolated preserves their off-main
 // usability under Swift 6 mode (behaviour-identical to the prior Swift 5 language mode).
 // Mirrors WI-9's nonisolated wire types; the @MainActor manager below still uses them freely.
+/// One timestamped, identity-free line in a proximity manager's diagnostics ring.
+///
+/// Shared display shape across the recipe-share and presence managers' diagnostic surfaces;
+/// messages never carry fingerprints or keys.
 public struct ProximityRecipeShareDiagnosticEvent: Identifiable, Equatable {
     public nonisolated let id: UUID
     public nonisolated let timestamp: Date
@@ -35,6 +43,11 @@ public struct ProximityRecipeShareDiagnosticEvent: Identifiable, Equatable {
     }
 }
 
+/// Stateless ring-buffer helper for the diagnostics event list: append and trim to the newest
+/// `maxEvents`.
+///
+/// Pure and `nonisolated` so any isolation domain can use it; both the recipe-share and
+/// presence managers funnel their `recordDiagnostic` through it.
 public enum ProximityRecipeShareDiagnostics {
     public nonisolated static let maxEvents = 40
 
@@ -48,9 +61,25 @@ public enum ProximityRecipeShareDiagnostics {
     }
 }
 
+/// The recipe-share radio (`fernlet-recipe`): discovers nearby Fernlets, forms a hard-capped
+/// 2-device verified pairing, and exchanges sealed `.recipeShare` payloads.
+///
+/// Owns its own ``MeshMultipeerSession``, ``IdentityService`` cache, and ``ReplayCache``; each
+/// pairing gets a ``ProximityCoordinator`` with a retained ``FriendSessionTrustPolicy`` (the
+/// coordinator's trust ref is `weak` — dropping the retention silently disables the
+/// revoked/blocked drops). The hard 2-device cap is enforced at four layers: the inbound
+/// invitation gate, the outbound send guard, the connecting-window check, and the belt-and-braces
+/// channel admission — with the radio PAUSED while paired (`pauseDiscovery`) and reopened only on
+/// manager-level record eviction, never on MC disconnect events (a failed handshake fires none).
+/// Timeouts: a 12 s pre-connect timer (the peer-is-busy case), the coordinator's 25 s handshake
+/// budget, and a parked-connection sweep for coordinators stalled pre-verification. Inbound
+/// shares are rate-limited per sender and capped at 8 pending. Lifecycle is owned by the app
+/// (ContentView gates on tab/scene/lock). `@MainActor @Observable`.
 @MainActor
 @Observable
 public final class ProximityRecipeShareManager: ProximityPayloadHandling {
+    /// The observable send pipeline the share sheet renders: connecting → sending → sent, or a
+    /// failure message; `idle` between sends (auto-cleared after 2.5 s).
     public enum SendState: Equatable {
         case idle
         case connecting(recipientName: String)

@@ -1,6 +1,14 @@
 import Foundation
 import FernletDomainModel
 
+/// Dwell gate over a stream of distance samples: fires once the peer has stayed inside a
+/// distance threshold for a minimum dwell time and sample count.
+///
+/// ``ProximityCoordinator`` runs two instances — a tight "tap" gate for trainer mode
+/// (0.05 m / 1.0 s) and the friend-mode commit gate (0.15 m / 0.8 s) that turns physical
+/// closeness into session consent. Stateful and single-peer: any sample outside the threshold
+/// resets the dwell clock, and callers `reset()` between sessions. `ingest` returns `true`
+/// exactly when the commit condition is currently satisfied.
 public final class ProximityCommitDetector {
     private var thresholdEntryTime: Date?
     private var closeSampleCount = 0

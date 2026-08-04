@@ -41,6 +41,8 @@ public nonisolated enum SealedPayloadFormat: Equatable, Sendable {
 /// `maxInflatedByteCount`.
 public nonisolated enum SealedPayloadFraming {
 
+    /// Unframe failures: structurally invalid frame bytes, or a compressed body that would
+    /// inflate past `maxInflatedByteCount` (the inflate-bomb guard).
     public enum FramingError: Error, Equatable {
         case malformed
         case inflatedTooLarge

@@ -10,6 +10,7 @@ import CryptoKit
 /// favorites-impersonation flaw lacked.
 public nonisolated enum ProximityVerifyQR {
 
+    /// Thrown by `makeURL` when the payload could not be JSON-encoded into a URL.
     public enum VerifyQRError: Error { case encodingFailed }
 
     public static let urlScheme = "fernlet"
@@ -19,6 +20,11 @@ public nonisolated enum ProximityVerifyQR {
     public static let freshnessWindow: TimeInterval = 5 * 60
     static let signingDomain = Data("fernlet.verify.qr.v1".utf8)
 
+    /// The self-signed content of a `fernlet://verify` QR: both public keys, a timestamp, a
+    /// single-use display nonce, and the Ed25519 signature over their canonical bytes.
+    ///
+    /// Verified by `isValid` (shape + freshness + signature) on the scanner side before any
+    /// challenge is minted.
     public struct Payload: Codable, Equatable, Sendable {
         public let version: Int
         public let signingPublicKey: Data
@@ -166,6 +172,13 @@ public nonisolated struct VerifyResponsePayload: Codable, Equatable, Sendable {
     }
 }
 
+/// The QR ceremony's response-transcript rules: fixed field lengths, the well-formedness gate,
+/// and the exact byte layout the displayer signs.
+///
+/// Shared by both ceremony implementations (`MeshNetworkManager`'s slot-bound flow and
+/// ``CoachVerificationCeremony``) so their transcripts can never diverge. The transcript has no
+/// length prefixes, which is why `isWellFormedChallenge` is mandatory before anything is signed
+/// with the long-term identity key.
 public nonisolated enum ProximityVerifySignature {
     static let domain = Data("fernlet.verify.response.v1".utf8)
 

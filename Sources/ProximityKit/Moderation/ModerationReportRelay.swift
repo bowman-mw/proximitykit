@@ -10,7 +10,10 @@
 import Foundation
 import FernletDomainModel
 
-/// One report row plus the reporter's signature over its canonical bytes.
+/// One report row plus the reporter's Ed25519 signature over its canonical bytes.
+///
+/// The unit of the one-hop relay: the receiver re-verifies the signature against the
+/// transport-verified sender key before the row is ever stored.
 public nonisolated struct SignedModerationReport: Codable, Equatable, Sendable {
     public var entry: ModerationLedgerEntry
     public var signature: Data
@@ -20,7 +23,10 @@ public nonisolated struct SignedModerationReport: Codable, Equatable, Sendable {
     }
 }
 
-/// A sealed bundle of the sender's own signed reports (capped).
+/// A sealed wire bundle of the sender's OWN signed reports (capped at `maxReports`).
+///
+/// Rides the friend mesh as the `.itemReport` payload; carries retractions alongside reports so
+/// an undo propagates to peers who already stored the original row.
 public nonisolated struct ModerationReportPayload: Codable, Equatable, Sendable {
     public var format = "fernlet.proximity.moderation.report"
     public var version = 1
@@ -32,6 +38,14 @@ public nonisolated struct ModerationReportPayload: Codable, Equatable, Sendable 
     }
 }
 
+/// Builds and verifies the one-hop moderation-report wire (Phase 3b): a reporter hands only rows
+/// they personally signed to a vault-trusted friend, and the receiver stores only rows the
+/// transport-verified sender signed.
+///
+/// The no-transitive-relay rule is the Sybil defense — each device tallies over reports it
+/// verified itself. Stateless namespace enum; ``MeshNetworkManager`` calls `buildPayload` on slot
+/// commit and `verifiedRows` in its `.itemReport` handler, with storage owned by the app-side
+/// ``ModerationLedger``.
 public enum ModerationReportRelay {
     /// Builds a payload of the local user's OWN rows (reporter == local key), each signed. Carries both
     /// reports AND their retractions, so undoing a report propagates to peers who already stored it (a

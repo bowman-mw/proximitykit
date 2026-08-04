@@ -25,6 +25,11 @@ import Security
 import FernletFoundation
 import FernletDomainModel
 
+/// The keychain-persisted state of one store ban: duration, credited monotonic/wall time, the
+/// clock high-water ratchet, tamper count, and the artworks the ban already answered for.
+///
+/// Written and refreshed on every read by ``ModerationBanStore``'s credited-time countdown;
+/// stored per account (self vs per-peer) under the dedicated moderation keychain service.
 nonisolated struct BanRecord: Codable {
     var banID: UUID
     var subject: String
@@ -43,6 +48,18 @@ nonisolated struct BanRecord: Codable {
     var handledContentHashes: [String]? = nil
 }
 
+/// The tamper-resistant 30-day store-ban clock for repeatedly-reported clothing designers —
+/// self-bans (this device's shop) and local peer bans (their catalogs are dropped).
+///
+/// Survives app delete+reinstall (records live in the Keychain under the dedicated
+/// `com.fernlet.moderation` service, ThisDeviceOnly, never wiped by identity resets — the
+/// self-ban is keyed to a constant device account, not the identity key) and survives device
+/// clock changes (a credited-time countdown over `mach_continuous_time` plus a wall-clock
+/// high-water ratchet: rollback voids wall credit and flags tampering; a forward jump credits
+/// almost nothing, and the reboot-gap credit is capped). `reconcile` applies bans the verified
+/// report set warrants, re-arming a served ban only on a NEW qualifying artwork. Enforcement
+/// here is honest-client compliance at list/broadcast time; the load-bearing enforcement is
+/// receiver-side. Deliberately NOT cleared by "Reset everything". `@MainActor @Observable`.
 @MainActor
 @Observable
 public final class ModerationBanStore {

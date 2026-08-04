@@ -5,6 +5,13 @@ import ActivityKit
 import FernletDomainModel
 #endif
 
+/// Seam for the "connection in progress" foreground anchor a ``ProximityCoordinator`` raises
+/// while a session is live — a Live Activity in production, a no-op elsewhere.
+///
+/// The coordinator calls `start` when a peer identity is confirmed, `update` with running byte
+/// counters on every transfer, and `stop` at session end/failure. Conformers:
+/// ``ActivityKitProximityForegroundAnchor`` (ActivityKit) and ``NoopProximityForegroundAnchor``
+/// (tests, platforms without ActivityKit).
 @MainActor
 public protocol ProximityForegroundAnchoring: AnyObject {
     var isActive: Bool { get }
@@ -13,6 +20,9 @@ public protocol ProximityForegroundAnchoring: AnyObject {
     func stop() async
 }
 
+/// ``ProximityForegroundAnchoring`` that tracks only the active flag and shows nothing.
+///
+/// Injected in unit tests and used as the fallback when ActivityKit is unavailable.
 @MainActor
 final class NoopProximityForegroundAnchor: ProximityForegroundAnchoring {
     private(set) var isActive = false
@@ -29,7 +39,14 @@ final class NoopProximityForegroundAnchor: ProximityForegroundAnchoring {
 }
 
 #if canImport(ActivityKit)
+/// ActivityKit attributes for the proximity-connection Live Activity: the fixed peer name and
+/// start time, plus the mutable transfer counters.
+///
+/// The app target's Live Activity widget renders these; this module only requests and updates
+/// the activity.
 struct ProximityConnectionActivityAttributes: ActivityAttributes {
+    /// The mutable half of the Live Activity: running byte counters and a status word
+    /// ("Connected" / "Ended"). Updated by ``ActivityKitProximityForegroundAnchor``.
     struct ContentState: Codable, Hashable {
         var bytesSent: Int
         var bytesReceived: Int
@@ -40,6 +57,15 @@ struct ProximityConnectionActivityAttributes: ActivityAttributes {
     var startedAt: Date
 }
 
+/// Production ``ProximityForegroundAnchoring``: runs a Live Activity for the duration of a
+/// proximity connection so the transfer stays visible when the user leaves the app.
+///
+/// Holds at most one `Activity` at a time; `start` no-ops when activities are disabled or one is
+/// already live, `update` deduplicates identical counter values, and `stop` claims ownership
+/// (nils the stored activity) synchronously BEFORE its await so a racing `update` bails instead
+/// of resurrecting an ended activity. Content auto-stales after 90 s as the backstop for the
+/// narrow documented races. Non-Sendable `Activity` values are transferred across nonisolated
+/// async calls via `nonisolated(unsafe)` locals — see the inline notes.
 @MainActor
 final class ActivityKitProximityForegroundAnchor: ProximityForegroundAnchoring {
     private var activity: Activity<ProximityConnectionActivityAttributes>?

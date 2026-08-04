@@ -7,6 +7,16 @@
 import Foundation
 import FernletDomainModel
 
+/// Rolling 24-hour cache of seen envelope IDs, the live-radio replay-attack defense.
+///
+/// ``FernletIdentityEnvelope/verify(identityService:replayCache:sealedPayloadFormat:)`` records
+/// every accepted envelope here and throws `.replayDetected` on a duplicate ID or an envelope
+/// whose `createdAt` predates the retention window (the flush-and-replay defense). Each radio
+/// manager owns one instance shared across its coordinators. Bounded at `maxEntries` with
+/// newest-kept eviction so a flood cannot evict the fingerprints of recent legitimate envelopes.
+/// The heart dead-drop path deliberately passes a nil cache and uses its own durable dedup
+/// instead (drops are legitimately days old). `@MainActor`: mutated from the coordinators'
+/// main-actor verify path.
 @MainActor
 public final class ReplayCache {
     private var seen: [UUID: Date] = [:]
