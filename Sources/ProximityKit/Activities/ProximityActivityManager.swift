@@ -101,7 +101,7 @@ public final class ProximityActivityManager {
 
     @ObservationIgnored private unowned let store: any ProximityHost
     @ObservationIgnored private let identity: IdentityService?
-    @ObservationIgnored private let fileURL: URL
+    @ObservationIgnored private let file: JSONSidecarFile<PersistedState>
     @ObservationIgnored private let now: () -> Date
 
     /// Set by `MeshNetworkManager`: seal+sign+transmit a payload to a verified fingerprint's committed
@@ -123,7 +123,7 @@ public final class ProximityActivityManager {
     ) {
         self.store = store
         self.identity = identity
-        self.fileURL = fileURL ?? Self.defaultFileURL()
+        self.file = JSONSidecarFile(fileURL: fileURL ?? Self.defaultFileURL())
         self.now = now
         load()
         gcExpired()
@@ -588,14 +588,17 @@ public final class ProximityActivityManager {
         pendingJoinRequests = []
         lastSyncReplyAt = [:]
         activityError = nil
-        try? FileManager.default.removeItem(at: fileURL)
+        file.removeFile()
     }
 
     // MARK: - Persistence (device-local sidecar, NEVER synced)
 
     /// Versioned sidecar shape: hosted + joined activities only (offers and pending joins are
     /// deliberately memory-only). Missing keys decode to empty.
-    private struct PersistedState: Codable {
+    ///
+    /// `nonisolated` so its hand-written `Decodable` conformance stays usable from the
+    /// nonisolated ``JSONSidecarFile`` generic (pure data).
+    private nonisolated struct PersistedState: Codable {
         var version = 1
         var hosted: [HostedActivity] = []
         var joined: [JoinedActivity] = []
@@ -609,8 +612,7 @@ public final class ProximityActivityManager {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let state = try? JSONDecoder().decode(PersistedState.self, from: data) else { return }
+        guard let state = file.load() else { return }
         hostedActivities = state.hosted
         joinedActivities = state.joined
     }
@@ -619,14 +621,10 @@ public final class ProximityActivityManager {
         var state = PersistedState()
         state.hosted = hostedActivities
         state.joined = joinedActivities
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        try? FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: [.atomic, .completeFileProtection])
+        file.save(state)
     }
 
     private nonisolated static func defaultFileURL() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Fernlet/ActivityLedger.json")
+        JSONSidecarFile<PersistedState>.defaultFileURL(name: "ActivityLedger.json")
     }
 }

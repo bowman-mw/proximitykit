@@ -28,13 +28,13 @@ public final class ModerationLedger {
     /// All stored rows (reports + retracts), most recent last. Bounded by `maxRows`.
     public private(set) var rows: [ModerationLedgerEntry] = []
 
-    @ObservationIgnored private let fileURL: URL
+    @ObservationIgnored private let file: JSONSidecarFile<PersistedState>
     @ObservationIgnored private let now: () -> Date
 
     static let maxRows = 512
 
     public init(fileURL: URL? = nil, now: @escaping () -> Date = Date.init) {
-        self.fileURL = fileURL ?? Self.defaultFileURL()
+        self.file = JSONSidecarFile(fileURL: fileURL ?? Self.defaultFileURL())
         self.now = now
         load()
     }
@@ -100,7 +100,7 @@ public final class ModerationLedger {
     /// Wipes every row and the on-disk sidecar (wired from `FernletStore.resetAll`).
     public func clearAll() {
         rows = []
-        try? FileManager.default.removeItem(at: fileURL)
+        file.removeFile()
     }
 
     // MARK: - Internals
@@ -126,7 +126,10 @@ public final class ModerationLedger {
     }
 
     /// Versioned on-disk shape; tolerant of missing keys so older files keep decoding.
-    private struct PersistedState: Codable {
+    ///
+    /// `nonisolated` so its hand-written `Decodable` conformance stays usable from the
+    /// nonisolated ``JSONSidecarFile`` generic (pure data: an `Int` plus nonisolated entries).
+    private nonisolated struct PersistedState: Codable {
         var version = 1
         var rows: [ModerationLedgerEntry] = []
         init() {}
@@ -138,22 +141,17 @@ public final class ModerationLedger {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let state = try? JSONDecoder().decode(PersistedState.self, from: data) else { return }
+        guard let state = file.load() else { return }
         rows = state.rows.sorted { $0.createdAt < $1.createdAt }
     }
 
     private func save() {
         var state = PersistedState()
         state.rows = rows
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        try? FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: [.atomic, .completeFileProtection])
+        file.save(state)
     }
 
     private nonisolated static func defaultFileURL() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Fernlet/ModerationLedger.json")
+        JSONSidecarFile<PersistedState>.defaultFileURL(name: "ModerationLedger.json")
     }
 }

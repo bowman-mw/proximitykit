@@ -237,13 +237,7 @@ final class MeshMultipeerSession: NSObject {
             Self.logger.error("invite(_:) while discovery is paused — dropped; resumeDiscovery() must precede invites")
             return
         }
-        let inviteID = UUID()
-        pendingConnectionPeers[peer.underlying] = inviteID
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(31))
-            guard self?.pendingConnectionPeers[peer.underlying] == inviteID else { return }
-            self?.pendingConnectionPeers.removeValue(forKey: peer.underlying)
-        }
+        registerPendingConnection(peer.underlying)
         _ = prepareChannel(for: peer.underlying)
         browser.invitePeer(peer.underlying, to: session, withContext: nil, timeout: 30)
     }
@@ -268,6 +262,30 @@ final class MeshMultipeerSession: NSObject {
     }
 
     // MARK: - Private helpers
+
+    /// Length of the connecting window in seconds — deliberately the `invitePeer` timeout (30 s)
+    /// plus one, so a pending entry outlives the MC-level attempt it tracks. Keep the class
+    /// doc's "31 s" note in sync if this changes.
+    private static let connectingWindowSeconds: Int64 = 31
+
+    /// Opens (or refreshes) the connecting window for `peerID`: mints a fresh invite token,
+    /// writes it into `pendingConnectionPeers`, and schedules a self-expiry task that removes
+    /// the entry after ``connectingWindowSeconds`` — unless a newer registration or a
+    /// `.connected`/`.notConnected` transition already replaced or cleared it.
+    ///
+    /// Deliberately UNCONDITIONAL: re-registering overwrites the token and thereby refreshes
+    /// the window (the advertiser-accept path relies on this in the cross-invite race).
+    /// Callers that must NOT refresh an in-flight window guard on
+    /// `pendingConnectionPeers[peerID] == nil` themselves (the `.connecting` delegate branch).
+    private func registerPendingConnection(_ peerID: MCPeerID) {
+        let inviteID = UUID()
+        pendingConnectionPeers[peerID] = inviteID
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.connectingWindowSeconds))
+            guard self?.pendingConnectionPeers[peerID] == inviteID else { return }
+            self?.pendingConnectionPeers.removeValue(forKey: peerID)
+        }
+    }
 
     private func ensureSession() {
         guard mcSession == nil else { return }
@@ -359,14 +377,10 @@ extension MeshMultipeerSession: MCSessionDelegate {
                 self.channels.removeValue(forKey: peerID)
                 self.onPeerDisconnected?(peer, "Peer disconnected")
             case .connecting:
+                // The nil-guard is load-bearing: invite -> .connecting is the normal sequence,
+                // and re-registering here would refresh (extend) the invite-time window.
                 if self.pendingConnectionPeers[peerID] == nil {
-                    let inviteID = UUID()
-                    self.pendingConnectionPeers[peerID] = inviteID
-                    Task { @MainActor [weak self] in
-                        try? await Task.sleep(for: .seconds(31))
-                        guard self?.pendingConnectionPeers[peerID] == inviteID else { return }
-                        self?.pendingConnectionPeers.removeValue(forKey: peerID)
-                    }
+                    self.registerPendingConnection(peerID)
                 }
             @unknown default:
                 break
@@ -405,13 +419,7 @@ extension MeshMultipeerSession: MCNearbyServiceAdvertiserDelegate {
             let peer = self.peer(for: peerID)
             let accept = self.shouldAcceptInvitation?(peer) ?? false
             if accept {
-                let inviteID = UUID()
-                self.pendingConnectionPeers[peerID] = inviteID
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .seconds(31))
-                    guard self?.pendingConnectionPeers[peerID] == inviteID else { return }
-                    self?.pendingConnectionPeers.removeValue(forKey: peerID)
-                }
+                self.registerPendingConnection(peerID)
                 _ = self.prepareChannel(for: peerID)
             }
             invitationHandler(accept, accept ? self.mcSession : nil)

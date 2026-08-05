@@ -147,11 +147,10 @@ public final class SessionMessageStore {
         seenIDs.insert(id)
         rateBucketBySender[senderFingerprint] = (available - 1, now)
 
-        let name = ItemNameModeration.sanitizedName(senderDisplayName)
         append(Message(
             id: id,
             senderFingerprint: senderFingerprint,
-            senderDisplayName: name.isEmpty ? "A friend" : name,
+            senderDisplayName: ItemNameModeration.moderatedPeerDisplayName(senderDisplayName),
             text: text,
             sentAt: sentAt,
             isOutgoing: false

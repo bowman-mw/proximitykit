@@ -207,3 +207,81 @@ public enum FriendPhotoLibrarySaver {
         guard savedCount.withLock({ $0 }) > 0 else { throw NothingSavedError() }
     }
 }
+
+/// A user-facing photo-library save failure: the alert body plus whether the alert should offer
+/// the Open Settings shortcut (only the permission denial does).
+///
+/// UI-only presentation state — deliberately NOT `Codable` and never persisted or sent over the
+/// wire. Produced by ``FriendPhotoLibrarySaver``'s `userFacingFailure(for:photoCount:)` mapping
+/// and rendered by the shared `photoSaveFailureAlert(_:failure:)` modifier so every save surface
+/// (session-end review, disconnect review, album carousel) shows identical wording.
+public struct PhotoSaveFailure: Equatable {
+    /// The alert body shown to the user.
+    public var message: String
+    /// Whether the alert offers an "Open Settings" button — true only for the
+    /// photo-library-permission denial, whose fix lives in Settings.
+    public var offersSettings: Bool
+
+    /// The catch-all failure ("Could not save to your photo library. Please try again."), also
+    /// assigned directly by hosts as the pre-save guard when a photo's bytes could not be
+    /// rehydrated from the encrypted disk cache at all.
+    public static let generic = PhotoSaveFailure(
+        message: "Could not save to your photo library. Please try again.",
+        offersSettings: false
+    )
+}
+
+extension FriendPhotoLibrarySaver {
+    /// Maps a `save(_:)` failure onto the shared user-facing alert content.
+    ///
+    /// `photoCount` is how many photos the caller was saving — it selects the singular or plural
+    /// corruption wording when every image failed to decode (``NothingSavedError``). A permission
+    /// denial (`CocoaError.userCancelled` from the add-only authorization gate) yields the only
+    /// failure that offers the Open Settings shortcut; any other error maps to
+    /// ``PhotoSaveFailure/generic``.
+    public static func userFacingFailure(for error: Error, photoCount: Int) -> PhotoSaveFailure {
+        if (error as? CocoaError)?.code == .userCancelled {
+            return PhotoSaveFailure(
+                message: "Fernlet needs access to your Photo Library to save photos. Open Settings to grant access.",
+                offersSettings: true
+            )
+        }
+        if error is NothingSavedError {
+            return PhotoSaveFailure(
+                message: photoCount == 1
+                    ? "This picture couldn't be saved. It may be corrupted."
+                    : "None of the selected pictures could be saved. They may be corrupted — try choosing different ones.",
+                offersSettings: false
+            )
+        }
+        return .generic
+    }
+}
+
+extension View {
+    /// Presents the shared "couldn't save" alert whenever `failure` is non-nil.
+    ///
+    /// Renders identically at every photo-save surface: the failure's message as the body, an
+    /// "Open Settings" button (deep-linking to the app's Settings page) only when the failure
+    /// offers it, and an OK cancel button; every button clears the binding. The title stays a
+    /// parameter because the carousel's single-photo alert is deliberately titled in the
+    /// singular ("Couldn't Save Photo") while the review sheets use the plural.
+    public func photoSaveFailureAlert(
+        _ title: String,
+        failure: Binding<PhotoSaveFailure?>
+    ) -> some View {
+        alert(title, isPresented: failure.isPresent()) {
+            if failure.wrappedValue?.offersSettings == true {
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                    failure.wrappedValue = nil
+                }
+            }
+            Button("OK", role: .cancel) { failure.wrappedValue = nil }
+        } message: {
+            Text(failure.wrappedValue?.message ?? "")
+        }
+    }
+}

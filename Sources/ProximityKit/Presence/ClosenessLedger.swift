@@ -31,14 +31,14 @@ public final class ClosenessLedger {
     /// The current close-slot assignment (persisted so hysteresis dwell survives relaunch).
     public private(set) var slotState = CloseSlotState()
 
-    @ObservationIgnored private let fileURL: URL
+    @ObservationIgnored private let file: JSONSidecarFile<PersistedState>
     @ObservationIgnored private let now: () -> Date
 
     static let retentionDays = 31
     static let maxTrackedFriends = 64
 
     public init(fileURL: URL? = nil, now: @escaping () -> Date = Date.init) {
-        self.fileURL = fileURL ?? Self.defaultFileURL()
+        self.file = JSONSidecarFile(fileURL: fileURL ?? Self.defaultFileURL())
         self.now = now
         load()
     }
@@ -105,7 +105,7 @@ public final class ClosenessLedger {
     public func clearAll() {
         byFriend = [:]
         slotState = CloseSlotState()
-        try? FileManager.default.removeItem(at: fileURL)
+        file.removeFile()
     }
 
     // MARK: - Date helpers (local day keys, matching the app's day semantics)
@@ -158,7 +158,10 @@ public final class ClosenessLedger {
     }
 
     /// Versioned on-disk shape; missing keys decode to empty so older files keep loading.
-    private struct PersistedState: Codable {
+    ///
+    /// `nonisolated` so its hand-written `Decodable` conformance stays usable from the
+    /// nonisolated ``JSONSidecarFile`` generic (pure data).
+    private nonisolated struct PersistedState: Codable {
         var version = 1
         var byFriend: [String: [String: FriendInteractionDayCounts]] = [:]
         var slotState = CloseSlotState()
@@ -172,8 +175,7 @@ public final class ClosenessLedger {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let state = try? JSONDecoder().decode(PersistedState.self, from: data) else { return }
+        guard let state = file.load() else { return }
         byFriend = state.byFriend
         slotState = state.slotState
     }
@@ -182,14 +184,10 @@ public final class ClosenessLedger {
         var state = PersistedState()
         state.byFriend = byFriend
         state.slotState = slotState
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        try? FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: [.atomic, .completeFileProtection])
+        file.save(state)
     }
 
     private nonisolated static func defaultFileURL() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Fernlet/ClosenessLedger.json")
+        JSONSidecarFile<PersistedState>.defaultFileURL(name: "ClosenessLedger.json")
     }
 }

@@ -29,7 +29,11 @@ list in the manifest is the truth.
 **How a session forms.** A radio owner (``MeshNetworkManager`` for the friend mesh,
 ``ProximityRecipeShareManager`` for recipe pairing, ``PresenceManager`` for presence hearts)
 runs a `MeshMultipeerSession` — one shared MCSession multiplexed into per-peer
-`PeerChannelTransport` channels. Each connected peer gets a ``ProximityCoordinator``, the
+`PeerChannelTransport` channels. All three resolve the display name they advertise the same way
+(host preference, device name as fallback), and the peer-supplied names that reach chat, hearts,
+vouches, and the keep-as-friend rows pass one sanitize-or-"A friend" coercion; both live in
+`PeerDisplayNames.swift`, the single home of what was a copy per call site. Each connected peer
+gets a ``ProximityCoordinator``, the
 per-connection engine that exchanges signed identity introductions (carrying the UWB discovery
 token, advertised capability tokens, and optionally a heart-drop prekey bundle), starts ranging
 through a ``RangingProvider`` (``NIRangingSession`` in production), and gates the commit on
@@ -53,7 +57,10 @@ Group Activities (``ProximityActivityManager``, whose authorization is a host-si
 invitee-key-bound token rather than the shared handshake). Feature payloads dispatch through a
 registry whose committed-slot gate is the security boundary; the session end promotes the roster
 into the keep-as-friend review (``FriendMintingReview``, ``KeepFriendsPromptSheet``,
-``FriendPhotoReviewSheet``).
+``FriendPhotoReviewSheet``). Photo-library save failures surface through one shared mapping —
+``FriendPhotoLibrarySaver``'s `userFacingFailure(for:photoCount:)` producing a
+``PhotoSaveFailure`` rendered by the `photoSaveFailureAlert(_:failure:)` view modifier — so every
+save surface (review sheets and the album carousel) shows identical wording.
 
 **Presence and hearts.** ``PresenceManager`` runs a standing radio that broadcasts only rotating
 pairwise-DH tags — no names, no stable identifiers, a fresh random MCPeerID per start — so kept
@@ -71,17 +78,23 @@ which enforces the bidirectional 5-minute rate limit for every heart transport.
 in Swift 6 language mode: managers, coordinators, and stores are `@MainActor` (most
 `@Observable`), while every wire value type, the canonical signing serializer, and the pure
 crypto statics are explicitly `nonisolated` + `Sendable` so untrusted bytes can be decoded and
-signatures verified off the main actor (the WI-9 convention). Framework delegate callbacks
-(MCSession, NearbyInteraction, ActivityKit) transfer non-Sendable objects across the main-actor
+signatures verified off the main actor (the WI-9 convention). The managers that mirror
+coordinator state into their own observable properties (``MeshNetworkManager``,
+``ProximityRecipeShareManager``, ``PresenceManager``) drive that mirroring through the internal
+`ObservationLoop` helper (`Engine/ObservationLoop.swift`), which owns the shared
+`withObservationTracking` re-arm machinery and holds its owner weakly so the loop ends when the
+manager deallocates. Framework delegate callbacks (MCSession, NearbyInteraction, ActivityKit)
+transfer non-Sendable objects across the main-actor
 hop via documented `nonisolated(unsafe)` locals. Signing inputs come from the deterministic
 binary serializer in `CanonicalSignatureSerializer.swift` (domain-tagged per signed type,
 cross-platform stable; the legacy JSON encoder is retained verify-only). Persistence follows one
 stance throughout: small JSON sidecars in Application Support with `.completeFileProtection`,
-never synced — and the heart-sharing sidecars additionally load through ``ProtectedSidecar``
-(sealed at rest via ``HeartDropSidecarSeal``), which classifies read failures so a locked-device
-read can never be mistaken for "empty" and overwrite real data. Key material lives in the
-keychain, ThisDeviceOnly, except the deliberately-synced backup-escrow key whose
-content-addressed slot lifecycle ``IdentityService`` reconciles non-silently.
+never synced — the best-effort stores share the internal `JSONSidecarFile` helper
+(`Support/JSONSidecarFile.swift`), while the heart-sharing sidecars additionally load through
+``ProtectedSidecar`` (sealed at rest via ``HeartDropSidecarSeal``), which classifies read
+failures so a locked-device read can never be mistaken for "empty" and overwrite real data. Key
+material lives in the keychain, ThisDeviceOnly, except the deliberately-synced backup-escrow key
+whose content-addressed slot lifecycle ``IdentityService`` reconciles non-silently.
 
 Before changing anything here, read the wire-compatibility notes on the type you are touching:
 canonical signing bytes, sealed-payload framing (``SealedPayloadFraming``), the freeze/park
@@ -257,3 +270,4 @@ compatibility contracts with in-field peers.
 - ``KeepFriendsPromptSheet``
 - ``FriendPhotoReviewSheet``
 - ``FriendPhotoLibrarySaver``
+- ``PhotoSaveFailure``

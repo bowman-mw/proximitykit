@@ -359,10 +359,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         ]
     }
 
-    private var displayName: String {
-        let name = store.proximityDisplayName.trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? UIDevice.current.name : name
-    }
+    /// The advertised local display name (shared coercion; see `PeerDisplayNames.swift`).
+    private var displayName: String { store.resolvedProximityDisplayName }
 
     private func handlePeerDiscovered(_ peer: MultipeerPeer) {
         // Exclude self using session ID comparison; blocklist is enforced post-introduction.
@@ -456,29 +454,19 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     private func startObserving() {
         observationTask?.cancel()
-        observationTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-                withObservationTracking {
-                    _ = self.connectionObservationRevision
-                    _ = self.connections.count
-                    for connection in self.connections {
-                        _ = connection.coordinator.state
-                    }
-                } onChange: {
-                    continuation.yield(())
+        observationTask = ObservationLoop.start(
+            on: self,
+            tracking: { owner in
+                _ = owner.connectionObservationRevision
+                _ = owner.connections.count
+                for connection in owner.connections {
+                    _ = connection.coordinator.state
                 }
-                await withTaskCancellationHandler {
-                    for await _ in stream { break }
-                } onCancel: {
-                    continuation.finish()
-                }
-                continuation.finish()
-                guard !Task.isCancelled else { return }
-                self.checkCoordinatorStates()
+            },
+            onChange: { owner in
+                owner.checkCoordinatorStates()
             }
-        }
+        )
     }
 
     private func checkCoordinatorStates() {

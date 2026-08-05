@@ -278,7 +278,7 @@ public final class HeartPrekeyStore {
     /// undecodable blob both read as an empty state; any other status fails closed.
     private func loadState() -> StoredState? {
         if let cachedState { return cachedState }
-        switch readRow() {
+        switch KeychainItem.loadDistinguishingAbsence(account: Self.keychainAccount, service: keychainService) {
         case .absent:
             return StoredState(bundles: [])
         case .unreadable(let status):
@@ -316,40 +316,5 @@ public final class HeartPrekeyStore {
         }
         cachedState = state
         return true
-    }
-
-    // MARK: - Keychain read that distinguishes "absent" from "failed"
-
-    /// Three-way keychain read result — absent (mint fresh) vs unreadable (fail closed) is the
-    /// distinction that keeps gossiped private halves from being stranded by a transient error.
-    private enum RowRead {
-        case found(Data)
-        case absent
-        case unreadable(OSStatus)
-    }
-
-    /// `KeychainItem.load` collapses every failure into nil; this store needs the distinction, so
-    /// it issues the query itself (same attributes as `KeychainItem.load`).
-    private func readRow() -> RowRead {
-        var result: AnyObject?
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
-            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: true,
-            kSecUseDataProtectionKeychain as String: true
-        ]
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        switch status {
-        case errSecSuccess:
-            guard let data = result as? Data else { return .unreadable(status) }
-            return .found(data)
-        case errSecItemNotFound:
-            return .absent
-        default:
-            return .unreadable(status)
-        }
     }
 }

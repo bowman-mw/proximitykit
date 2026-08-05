@@ -65,7 +65,7 @@ public enum HeartDropSidecarSeal {
     // MARK: - Key management
 
     private static func loadKeyForOpen(service: String) throws -> SymmetricKey {
-        switch readKeyRow(service: service) {
+        switch KeychainItem.loadDistinguishingAbsence(account: keychainAccount, service: service) {
         case .found(let data) where data.count == 32:
             return SymmetricKey(data: data)
         case .found:
@@ -79,7 +79,7 @@ public enum HeartDropSidecarSeal {
     }
 
     private static func loadOrMintKey(service: String) throws -> SymmetricKey {
-        switch readKeyRow(service: service) {
+        switch KeychainItem.loadDistinguishingAbsence(account: keychainAccount, service: service) {
         case .found(let data) where data.count == 32:
             return SymmetricKey(data: data)
         case .found:
@@ -103,45 +103,11 @@ public enum HeartDropSidecarSeal {
             // Read-back-verify BEFORE sealing anything: a full or locked keychain can silently
             // drop the row, and sealing against an unverified key writes ciphertext nothing can
             // ever open (bitchat's MessageOutboxStore does the same).
-            guard case .found(let echoed) = readKeyRow(service: service), echoed == keyData else {
+            guard case .found(let echoed) = KeychainItem.loadDistinguishingAbsence(account: keychainAccount, service: service), echoed == keyData else {
                 FernletAuditLog.log("heartdrop.sidecarKey.verifyFailed")
                 throw SidecarSeal.SealError.sealFailed
             }
             return key
-        }
-    }
-
-    /// Three-way keychain read result — the absent-vs-unreadable distinction is what lets the
-    /// seal fail closed on a transient error instead of minting over an unreadable key.
-    private enum RowRead {
-        case found(Data)
-        case absent
-        case unreadable(OSStatus)
-    }
-
-    /// `KeychainItem.load` collapses every failure into nil; the seal needs
-    /// absent-vs-unreadable (unrecoverable vs transient), so it issues the query itself —
-    /// same shape as `HeartPrekeyStore.readRow()`.
-    private static func readKeyRow(service: String) -> RowRead {
-        var result: AnyObject?
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: keychainAccount,
-            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: true,
-            kSecUseDataProtectionKeychain as String: true
-        ]
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        switch status {
-        case errSecSuccess:
-            guard let data = result as? Data else { return .unreadable(status) }
-            return .found(data)
-        case errSecItemNotFound:
-            return .absent
-        default:
-            return .unreadable(status)
         }
     }
 }

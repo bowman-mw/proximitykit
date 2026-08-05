@@ -38,35 +38,14 @@ public struct FriendPhotoWallPost: Identifiable {
 /// Persisted photo-wall preferences: which sessions are aggregated into carousels, their cover
 /// photos, and the per-session favorite.
 ///
-/// Loaded/saved by ``FriendPhotoWallPreferencesStore``; lives beside the photo cache, never in
-/// the synced snapshot.
+/// Loaded/saved through the shared ``JSONSidecarFile`` helper (`MeshPhotoWallPreferences.json`,
+/// `.completeFileProtection`); lives beside the photo cache, never in the synced snapshot. A
+/// failed load falls back to empty preferences; a failed save is silently dropped — wall
+/// cosmetics, not data of record.
 private struct FriendPhotoWallPreferences: Codable {
     var aggregatedSessionIDs: Set<UUID> = []
     var coverPhotoIDsBySession: [UUID: UUID] = [:]
     var favoritePhotoIDsBySession: [UUID: UUID] = [:]
-}
-
-/// Best-effort JSON file persistence for ``FriendPhotoWallPreferences``
-/// (`MeshPhotoWallPreferences.json`, `.completeFileProtection`).
-///
-/// A failed load returns empty preferences; a failed save is silently dropped — wall cosmetics,
-/// not data of record.
-private struct FriendPhotoWallPreferencesStore {
-    let fileURL: URL
-
-    func load() -> FriendPhotoWallPreferences {
-        guard let data = try? Data(contentsOf: fileURL),
-              let preferences = try? JSONDecoder().decode(FriendPhotoWallPreferences.self, from: data) else {
-            return FriendPhotoWallPreferences()
-        }
-        return preferences
-    }
-
-    func save(_ preferences: FriendPhotoWallPreferences) {
-        guard let data = try? JSONEncoder().encode(preferences) else { return }
-        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: [.atomic, .completeFileProtection])
-    }
 }
 
 // MARK: - MeshNetworkManager
@@ -204,7 +183,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private let identity: IdentityService
     @ObservationIgnored private let replayCache = ReplayCache()
     @ObservationIgnored private let photoCacheStore: PrivateMediaStore
-    @ObservationIgnored private let photoWallPreferencesStore: FriendPhotoWallPreferencesStore
+    @ObservationIgnored private let photoWallPreferencesStore: JSONSidecarFile<FriendPhotoWallPreferences>
     @ObservationIgnored private var photoWallPreferences: FriendPhotoWallPreferences
     /// Observed proxy for favorite changes. `photoWallPreferences` itself is `@ObservationIgnored`
     /// because its `photoWallPosts` getter mutates it during view-body evaluation (plainly observing
@@ -314,9 +293,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         ).first!.appendingPathComponent("Fernlet/MeshPhotoCache.json")
         self.photoCacheStore = PrivateMediaStore(indexURL: cacheURL)
         let preferencesURL = cacheURL.deletingLastPathComponent().appendingPathComponent("MeshPhotoWallPreferences.json")
-        let preferencesStore = FriendPhotoWallPreferencesStore(fileURL: preferencesURL)
+        let preferencesStore = JSONSidecarFile<FriendPhotoWallPreferences>(fileURL: preferencesURL)
         self.photoWallPreferencesStore = preferencesStore
-        self.photoWallPreferences = preferencesStore.load()
+        self.photoWallPreferences = preferencesStore.load() ?? FriendPhotoWallPreferences()
         meshPhotos = photoCacheStore.load()
         setupMeshSession()
         registerClothingShopHandler()
@@ -558,8 +537,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         // Wire boundary: the display name is peer-supplied — sanitize (control/zero-width/bidi scalars
         // out, length-capped) before it can be persisted by the ledger.
-        var senderName = ItemNameModeration.sanitizedName(peer.displayName)
-        if senderName.isEmpty { senderName = "A friend" }
+        let senderName = ItemNameModeration.moderatedPeerDisplayName(peer.displayName)
         // Route through the SAME device-local ledger the presence path uses: it drops duplicates
         // (same id) and enforces the 5-minute per-sender receive rate. Then feed closeness identically.
         if heartLedger?.recordReceivedHeart(id: payload.id, senderDisplayName: senderName, senderFingerprint: peer.fingerprint) ?? false {
@@ -1330,8 +1308,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard payload.expiresAt > Date(),
               payload.voucherFingerprint == senderFingerprint else { return }
         let cappedExpiry = min(payload.expiresAt, Date().addingTimeInterval(2 * 3600))
-        var name = ItemNameModeration.sanitizedName(payload.voucherDisplayName)
-        if name.isEmpty { name = "A friend" }
+        let name = ItemNameModeration.moderatedPeerDisplayName(payload.voucherDisplayName)
         vouchCache[payload.voucherFingerprint] = MeshFriendVouchListPayload(
             voucherFingerprint: payload.voucherFingerprint,
             voucherDisplayName: name,
@@ -1347,10 +1324,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: - Private helpers
 
-    private var displayName: String {
-        let name = store.proximityDisplayName.trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? UIDevice.current.name : name
-    }
+    /// The advertised local display name (shared coercion; see `PeerDisplayNames.swift`).
+    private var displayName: String { store.resolvedProximityDisplayName }
 
     private var activeSlots: [PeerSlot] {
         slots.filter { $0.kind == .active }
@@ -1997,20 +1972,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         supportsWire2: Bool,
         via slot: PeerSlot
     ) async {
-        guard !kaKey.isEmpty,
-              let payloadData = try? JSONEncoder().encode(encodable),
-              let ciphertext = try? identity.seal(payloadData, to: kaKey, format: supportsWire2 ? .wire2 : .legacy),
-              let envelope = try? FernletIdentityEnvelope.signed(
-                  identityService: identity,
-                  senderDisplayName: displayName,
-                  recipientFingerprint: fingerprint,
-                  payloadType: type,
-                  payloadEncryption: .sealedTo(recipientKeyAgreementPublicKey: kaKey),
-                  payloadSummary: PayloadSummary(title: type.rawValue),
-                  payload: ciphertext
-              ),
-              let envelopeData = try? JSONEncoder().encode(envelope) else { return }
-        try? await slot.channel.send(envelopeData, to: slot.peer, mode: .reliable)
+        // auditSendFailure: false preserves the ceremony's historical silent-swallow of wire
+        // failures (the caller retries via the ceremony state machine, not the audit log).
+        _ = await sendEnvelopeCore(
+            type,
+            encodable: encodable,
+            sealTo: (kaKey: kaKey, supportsWire2: supportsWire2),
+            fingerprint: fingerprint,
+            via: slot,
+            auditSendFailure: false
+        )
     }
 
     // MARK: Ceremony test seams (`internal` for `@testable` unit tests only)
@@ -2653,18 +2624,53 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// (TF b19 item 5) uses it for consume-on-send + sent/failed feedback.
     @discardableResult
     private func sendEnvelope(_ type: PayloadType, encodable: some Encodable, via slot: PeerSlot, sealed: Bool = false) async -> Bool {
+        if sealed {
+            guard let kaKey = slot.verifiedKeyAgreementPublicKey else { return false }
+            return await sendEnvelopeCore(
+                type,
+                encodable: encodable,
+                sealTo: (kaKey: kaKey, supportsWire2: slot.supports(.wire2)),
+                fingerprint: slot.fingerprint,
+                via: slot,
+                auditSendFailure: true
+            )
+        }
+        return await sendEnvelopeCore(
+            type,
+            encodable: encodable,
+            sealTo: nil,
+            fingerprint: slot.fingerprint,
+            via: slot,
+            auditSendFailure: true
+        )
+    }
+
+    /// Shared seal+sign+send core behind `sendEnvelope` and `sendVerifyEnvelope`: encodes the
+    /// payload, optionally seals it to `sealTo.kaKey` (wire2 or legacy per `sealTo.supportsWire2`;
+    /// an empty key fails closed — a sealed request is never downgraded to an unsealed send),
+    /// signs the envelope, and transmits it reliably on the slot channel. Returns whether the
+    /// wire write succeeded; a send failure is audit-logged only when `auditSendFailure` is true
+    /// (the pre-commit ceremony path swallows it silently, matching its historical behavior).
+    private func sendEnvelopeCore(
+        _ type: PayloadType,
+        encodable: some Encodable,
+        sealTo seal: (kaKey: Data, supportsWire2: Bool)?,
+        fingerprint: String?,
+        via slot: PeerSlot,
+        auditSendFailure: Bool
+    ) async -> Bool {
         guard let payloadData = try? JSONEncoder().encode(encodable) else { return false }
         let finalPayload: Data
         let encryption: PayloadEncryption
-        if sealed {
-            guard let kaKey = slot.verifiedKeyAgreementPublicKey, !kaKey.isEmpty,
+        if let seal {
+            guard !seal.kaKey.isEmpty,
                   let ciphertext = try? identity.seal(
                       payloadData,
-                      to: kaKey,
-                      format: slot.supports(.wire2) ? .wire2 : .legacy
+                      to: seal.kaKey,
+                      format: seal.supportsWire2 ? .wire2 : .legacy
                   ) else { return false }
             finalPayload = ciphertext
-            encryption = .sealedTo(recipientKeyAgreementPublicKey: kaKey)
+            encryption = .sealedTo(recipientKeyAgreementPublicKey: seal.kaKey)
         } else {
             finalPayload = payloadData
             encryption = .none
@@ -2672,7 +2678,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let envelope = try? FernletIdentityEnvelope.signed(
             identityService: identity,
             senderDisplayName: displayName,
-            recipientFingerprint: slot.fingerprint,
+            recipientFingerprint: fingerprint,
             payloadType: type,
             payloadEncryption: encryption,
             payloadSummary: PayloadSummary(title: type.rawValue),
@@ -2683,7 +2689,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             try await slot.channel.send(envelopeData, to: slot.peer, mode: .reliable)
             return true
         } catch {
-            FernletAuditLog.log("mesh.sendEnvelope.failed", context: ["type": type.rawValue, "error": error.localizedDescription])
+            if auditSendFailure {
+                FernletAuditLog.log("mesh.sendEnvelope.failed", context: ["type": type.rawValue, "error": error.localizedDescription])
+            }
             return false
         }
     }
@@ -3014,33 +3022,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func startObserving() {
         observationTask?.cancel()
-        observationTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                // AsyncStream does not finish automatically when its consumer task is
-                // cancelled. Finish the continuation explicitly so repeated discovery
-                // sessions do not leave suspended observer tasks behind.
-                let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-                withObservationTracking {
-                    _ = self.slots.count
-                    for slot in self.slots {
-                        _ = slot.coordinator.state
-                        _ = slot.coordinator.lastKnownDistance
-                    }
-                } onChange: {
-                    continuation.yield(())
+        observationTask = ObservationLoop.start(
+            on: self,
+            tracking: { owner in
+                _ = owner.slots.count
+                for slot in owner.slots {
+                    _ = slot.coordinator.state
+                    _ = slot.coordinator.lastKnownDistance
                 }
-                await withTaskCancellationHandler {
-                    for await _ in stream { break }
-                } onCancel: {
-                    continuation.finish()
-                }
-                continuation.finish()
-                guard !Task.isCancelled else { return }
-                self.checkCoordinatorStates()
-                self.updateDistanceSamples()
+            },
+            onChange: { owner in
+                owner.checkCoordinatorStates()
+                owner.updateDistanceSamples()
             }
-        }
+        )
     }
 
     private func checkCoordinatorStates() {

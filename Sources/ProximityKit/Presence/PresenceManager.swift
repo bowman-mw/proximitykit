@@ -510,10 +510,8 @@ public final class PresenceManager: ProximityPayloadHandling {
         return reachable ? .reachable : .notNearby
     }
 
-    private var displayName: String {
-        let name = store.proximityDisplayName.trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? UIDevice.current.name : name
-    }
+    /// The advertised local display name (shared coercion; see `PeerDisplayNames.swift`).
+    private var displayName: String { store.resolvedProximityDisplayName }
 
     /// Deliver a heart to a nearby friend over an on-demand pairwise connection. Multi-second
     /// pipeline; drives `heartSendState`. The FriendListView button is enabled only while the
@@ -684,29 +682,19 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     private func startHeartObserving() {
         heartObservationTask?.cancel()
-        heartObservationTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-                withObservationTracking {
-                    _ = self.heartConnectionObservationRevision
-                    _ = self.heartConnections.count
-                    for connection in self.heartConnections {
-                        _ = connection.coordinator.state
-                    }
-                } onChange: {
-                    continuation.yield(())
+        heartObservationTask = ObservationLoop.start(
+            on: self,
+            tracking: { owner in
+                _ = owner.heartConnectionObservationRevision
+                _ = owner.heartConnections.count
+                for connection in owner.heartConnections {
+                    _ = connection.coordinator.state
                 }
-                await withTaskCancellationHandler {
-                    for await _ in stream { break }
-                } onCancel: {
-                    continuation.finish()
-                }
-                continuation.finish()
-                guard !Task.isCancelled else { return }
-                self.checkHeartCoordinatorStates()
+            },
+            onChange: { owner in
+                owner.checkHeartCoordinatorStates()
             }
-        }
+        )
     }
 
     private func checkHeartCoordinatorStates() {
@@ -926,8 +914,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         }
         // Wire boundary: the display name is peer-supplied — sanitize (control/zero-width/bidi
         // scalars out, length-capped) before it is persisted.
-        var senderName = ItemNameModeration.sanitizedName(peer.displayName)
-        if senderName.isEmpty { senderName = "A friend" }
+        let senderName = ItemNameModeration.moderatedPeerDisplayName(peer.displayName)
         // The ledger drops duplicates (same id) and enforces the 5-minute per-sender receive rate.
         if ledger.recordReceivedHeart(id: payload.id, senderDisplayName: senderName, senderFingerprint: peer.fingerprint) {
             onHeartReceived?(peer.fingerprint)

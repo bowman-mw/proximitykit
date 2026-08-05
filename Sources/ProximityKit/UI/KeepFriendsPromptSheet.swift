@@ -55,10 +55,9 @@ private struct KeepFriendRow: View {
     let toggle: () -> Void
 
     /// The display name is peer-supplied wire input — sanitize for display (control/zero-width/
-    /// bidi scalars out), matching how the heart manager renders peer names.
+    /// bidi scalars out) via the shared coercion the heart manager also renders peer names with.
     private var displayName: String {
-        let sanitized = ItemNameModeration.sanitizedName(candidate.displayName)
-        return sanitized.isEmpty ? "A friend" : sanitized
+        ItemNameModeration.moderatedPeerDisplayName(candidate.displayName)
     }
 
     var body: some View {

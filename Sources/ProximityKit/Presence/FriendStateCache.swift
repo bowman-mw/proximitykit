@@ -50,7 +50,7 @@ public nonisolated struct CachedFriendState: Codable, Equatable, Identifiable {
 public final class FriendStateCache {
     public private(set) var states: [String: CachedFriendState] = [:]
 
-    @ObservationIgnored private let fileURL: URL
+    @ObservationIgnored private let file: JSONSidecarFile<PersistedState>
     @ObservationIgnored private let now: () -> Date
 
     static let maxStates = 64
@@ -58,7 +58,7 @@ public final class FriendStateCache {
     public static let staleAfter: TimeInterval = 30 * 24 * 3600
 
     public init(fileURL: URL? = nil, now: @escaping () -> Date = Date.init) {
-        self.fileURL = fileURL ?? Self.defaultFileURL()
+        self.file = JSONSidecarFile(fileURL: fileURL ?? Self.defaultFileURL())
         self.now = now
         load()
     }
@@ -86,7 +86,7 @@ public final class FriendStateCache {
 
     public func clearAll() {
         states = [:]
-        try? FileManager.default.removeItem(at: fileURL)
+        file.removeFile()
     }
 
     // MARK: - Persistence
@@ -105,13 +105,21 @@ public final class FriendStateCache {
     /// Wraps a `Decodable` so a single element that fails to decode becomes `nil` instead of throwing and
     /// taking the whole array down with it (freeze/park convention — one unknown row must not wipe the
     /// cache; e.g. a future `FriendFuzzyState` case written by a newer build then read after a downgrade).
-    private struct Lenient<T: Decodable>: Decodable {
+    /// Wraps one element of a decoded array so a single undecodable element becomes `nil`
+    /// instead of failing the whole array.
+    ///
+    /// `nonisolated` (like ``PersistedState``) so its hand-written `Decodable` conformance is
+    /// usable from the nonisolated decode path.
+    private nonisolated struct Lenient<T: Decodable>: Decodable {
         let value: T?
         init(from decoder: Decoder) throws { value = try? T(from: decoder) }
     }
 
     /// Versioned on-disk shape; decodes rows leniently so one bad element never drops the file.
-    private struct PersistedState: Codable {
+    ///
+    /// `nonisolated` so its hand-written `Decodable` conformance stays usable from the
+    /// nonisolated ``JSONSidecarFile`` generic (pure data).
+    private nonisolated struct PersistedState: Codable {
         var version = 1
         var states: [CachedFriendState] = []
         init() {}
@@ -120,27 +128,22 @@ public final class FriendStateCache {
             version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
             // Per-row tolerant: skip any undecodable row, keep the rest.
             states = (try c.decodeIfPresent([Lenient<CachedFriendState>].self, forKey: .states) ?? [])
-                .compactMap(\.value)
+                .compactMap { $0.value }
         }
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let state = try? JSONDecoder().decode(PersistedState.self, from: data) else { return }
+        guard let state = file.load() else { return }
         states = Dictionary(state.states.map { ($0.fingerprint, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     private func save() {
         var state = PersistedState()
         state.states = Array(states.values)
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        try? FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: [.atomic, .completeFileProtection])
+        file.save(state)
     }
 
     private nonisolated static func defaultFileURL() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Fernlet/FriendStateCache.json")
+        JSONSidecarFile<PersistedState>.defaultFileURL(name: "FriendStateCache.json")
     }
 }
