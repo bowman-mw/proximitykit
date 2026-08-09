@@ -43,7 +43,7 @@ public struct MultipeerPeer: Hashable, Identifiable {
 // Mirrors WI-9's nonisolated wire types.
 /// Persistence seam for the app's stable `MCPeerID`, so peer identity survives relaunches.
 ///
-/// ``MeshMultipeerSession`` loads (or mints and saves) the archived ID through this at init;
+/// `MeshMultipeerSession` loads (or mints and saves) the archived ID through this at init;
 /// ``FileMCPeerIDStore`` is the production conformer and tests inject in-memory fakes. The
 /// ephemeral presence radio deliberately bypasses it (see `usesEphemeralPeerID`).
 public protocol MCPeerIDStoring {

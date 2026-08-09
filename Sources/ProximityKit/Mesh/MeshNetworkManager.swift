@@ -56,7 +56,7 @@ private struct FriendPhotoWallPreferences: Codable {
 /// live-session chat, in-session hearts, moderation relay, fuzzy friend state, Group Activities,
 /// the QR verification ceremony, and the post-session keep-as-friend review.
 ///
-/// Structure: one shared ``MeshMultipeerSession`` MCSession feeds per-peer `PeerChannelTransport`
+/// Structure: one shared `MeshMultipeerSession` MCSession feeds per-peer `PeerChannelTransport`
 /// channels; each channel gets a ``PeerSlot`` with its own ``ProximityCoordinator`` and a
 /// retained ``FriendSessionTrustPolicy``. Slots are capped (3 active + 2 lightweight, ranked by
 /// stable UWB distance with hysteresis-guarded overflow eviction) and a symmetric `sid`

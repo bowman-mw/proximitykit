@@ -10,7 +10,7 @@ import FernletDomainModel
 ///
 /// The coordinator calls `start` when a peer identity is confirmed, `update` with running byte
 /// counters on every transfer, and `stop` at session end/failure. Conformers:
-/// ``ActivityKitProximityForegroundAnchor`` (ActivityKit) and ``NoopProximityForegroundAnchor``
+/// `ActivityKitProximityForegroundAnchor` (ActivityKit) and `NoopProximityForegroundAnchor`
 /// (tests, platforms without ActivityKit).
 @MainActor
 public protocol ProximityForegroundAnchoring: AnyObject {
@@ -46,7 +46,7 @@ final class NoopProximityForegroundAnchor: ProximityForegroundAnchoring {
 /// the activity.
 struct ProximityConnectionActivityAttributes: ActivityAttributes {
     /// The mutable half of the Live Activity: running byte counters and a status word
-    /// ("Connected" / "Ended"). Updated by ``ActivityKitProximityForegroundAnchor``.
+    /// ("Connected" / "Ended"). Updated by `ActivityKitProximityForegroundAnchor`.
     struct ContentState: Codable, Hashable {
         var bytesSent: Int
         var bytesReceived: Int

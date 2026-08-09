@@ -106,7 +106,7 @@ public struct MultipeerInboundMessage {
 /// reliable/unreliable send, and Combine streams of state + inbound data.
 ///
 /// The production conformer is `PeerChannelTransport` — a per-peer routing adapter over the
-/// shared ``MeshMultipeerSession`` MCSession — so a coordinator never manages MC lifecycle
+/// shared `MeshMultipeerSession` MCSession — so a coordinator never manages MC lifecycle
 /// itself; tests inject scripted fakes. `@MainActor`: the coordinator and every conformer live
 /// on the main actor, with delegate callbacks hopped in.
 @MainActor

@@ -64,7 +64,7 @@ public enum ProximityRecipeShareDiagnostics {
 /// The recipe-share radio (`fernlet-recipe`): discovers nearby Fernlets, forms a hard-capped
 /// 2-device verified pairing, and exchanges sealed `.recipeShare` payloads.
 ///
-/// Owns its own ``MeshMultipeerSession``, ``IdentityService`` cache, and ``ReplayCache``; each
+/// Owns its own `MeshMultipeerSession`, ``IdentityService`` cache, and ``ReplayCache``; each
 /// pairing gets a ``ProximityCoordinator`` with a retained ``FriendSessionTrustPolicy`` (the
 /// coordinator's trust ref is `weak` — dropping the retention silently disables the
 /// revoked/blocked drops). The hard 2-device cap is enforced at four layers: the inbound
