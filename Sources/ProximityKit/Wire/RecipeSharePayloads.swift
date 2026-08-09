@@ -10,24 +10,39 @@ import FernletDomainModel
 /// into ``PendingProximityRecipeShare``. The share-notes members implement the "Include notes"
 /// privacy toggle — sender-authored free text can be withheld before the payload leaves.
 public nonisolated struct ProximityRecipeSharePayload: Codable, Equatable, Identifiable, Sendable {
+    /// Wire cap for ``imageJPEGData``: the sender downscales/re-encodes until the JPEG fits (or
+    /// omits it), and the receiver drops any image above it before decoding a single pixel. Well
+    /// under the friend channel's 10 MB envelope bound, so a recipe-with-picture always fits.
+    public static let maxImageBytes = 512 * 1024
+
     public var format = "fernlet.proximity.recipe"
     public var version = 1
     public var id = UUID()
     public var sentAt = Date()
     public var recipe: ProximitySharedRecipe
+    /// A downscaled JPEG of the recipe's picture (the sender's stored recipe photo — their own pick
+    /// or a web-derived default), at most ``maxImageBytes``, so the receiving device gets the
+    /// picture without ever fetching the web. Optional key, `version` STAYS 1 — the same wire-compat
+    /// rule as `SharedSavedRecipePayload.steps`: an older peer's synthesized `Codable` ignores the
+    /// extra key and decodes minus the image; a newer peer decoding an older payload sees `nil`.
+    /// The app-side receiver seals accepted bytes into its own private recipe-photo store and marks
+    /// the recipe's web-image fetch as already attempted, so a received recipe never web-fetches.
+    public var imageJPEGData: Data?
 
     public init(
         format: String = "fernlet.proximity.recipe",
         version: Int = 1,
         id: UUID = UUID(),
         sentAt: Date = Date(),
-        recipe: ProximitySharedRecipe
+        recipe: ProximitySharedRecipe,
+        imageJPEGData: Data? = nil
     ) {
         self.format = format
         self.version = version
         self.id = id
         self.sentAt = sentAt
         self.recipe = recipe
+        self.imageJPEGData = imageJPEGData
     }
 
     /// True when this payload carries sender-authored free text the "Include notes" toggle can withhold.
