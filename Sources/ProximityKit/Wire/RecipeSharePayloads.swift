@@ -61,6 +61,30 @@ public nonisolated struct ProximityRecipeSharePayload: Codable, Equatable, Ident
         }
     }
 
+    /// Returns a copy with the attached picture removed — the sender-side "Include picture"
+    /// toggle. The recipe's stored photo can be the user's own kitchen/home shot, which can carry
+    /// more identifying content than the notes the notes-toggle withholds, so the sender gets the
+    /// same per-share control over it (default ON, preserving the image-rides-the-share decision).
+    /// Independent of ``omittingShareNotes()``: picture and notes are separate decisions.
+    public func omittingImage() -> ProximityRecipeSharePayload {
+        var copy = self
+        copy.imageJPEGData = nil
+        return copy
+    }
+
+    /// Returns a copy safe to RETAIN on the receive side: an image above ``maxImageBytes`` —
+    /// bytes an honest sender can never produce, since senders downscale to fit or omit — is
+    /// dropped at the door, before the payload enters the pending queue, so a hostile-but-verified
+    /// peer cannot park multi-megabyte blobs in a receiver's memory while the share awaits review.
+    /// The recipe itself is kept (a bad image never fails an import; the app-side importer applies
+    /// the same cap again as defense in depth).
+    public func droppingOversizeImage() -> ProximityRecipeSharePayload {
+        guard let imageJPEGData, imageJPEGData.count > Self.maxImageBytes else { return self }
+        var copy = self
+        copy.imageJPEGData = nil
+        return copy
+    }
+
     /// Returns a copy with the sender's free text removed. For a LOCAL recipe this clears BOTH `notes`
     /// and the user-authored `steps` (F5: step text is free-form and can carry the same personal remarks
     /// the notes toggle exists to withhold). For a SAVED recipe it clears only the `summary` — its steps

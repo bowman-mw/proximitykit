@@ -274,9 +274,13 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         from peer: ProximityCoordinator.PeerIdentity?
     ) {
         guard envelope.payloadType == .recipeShare,
-              let payload = try? JSONDecoder().decode(ProximityRecipeSharePayload.self, from: plaintext),
-              payload.format == "fernlet.proximity.recipe",
-              payload.version == 1 else { return }
+              let decoded = try? JSONDecoder().decode(ProximityRecipeSharePayload.self, from: plaintext),
+              decoded.format == "fernlet.proximity.recipe",
+              decoded.version == 1 else { return }
+        // Enforce the wire image cap AT THE DOOR, not just at import time: the pending queue holds
+        // payloads until the user reviews them, and the sealed-frame layer alone would let a
+        // hostile peer park multi-MB images (bytes an honest sender never produces) in memory.
+        let payload = decoded.droppingOversizeImage()
 
         let senderFP = peer?.fingerprint ?? envelope.senderDisplayName
         let now = Date()
