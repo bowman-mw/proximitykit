@@ -291,7 +291,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let cacheURL = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!.appendingPathComponent("Fernlet/MeshPhotoCache.json")
-        self.photoCacheStore = PrivateMediaStore(indexURL: cacheURL)
+        // Phase-5 media-key split: the wall stays on the ORIGINAL, backup-restorable row
+        // (`Role.friendWall`) — stated explicitly rather than left to the default so a future
+        // reader can see which side of the split this store is on. Nothing about the wall changed:
+        // no re-encryption, no dual-open fallback, and delete-all still keeps both the photos and
+        // the key. The user's OWN photos moved to `Role.ownPhotos` in `FernletStore`.
+        self.photoCacheStore = PrivateMediaStore(
+            indexURL: cacheURL,
+            keyProvider: KeychainPrivateMediaKeyProvider(role: .friendWall)
+        )
         let preferencesURL = cacheURL.deletingLastPathComponent().appendingPathComponent("MeshPhotoWallPreferences.json")
         let preferencesStore = JSONSidecarFile<FriendPhotoWallPreferences>(fileURL: preferencesURL)
         self.photoWallPreferencesStore = preferencesStore
