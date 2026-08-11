@@ -112,25 +112,57 @@ public final class IdentityService {
         return try key.signature(for: data)
     }
 
-    /// Sealed-backup key derivation. ACCEPTED TRADE-OFF (explicit): backups are AES-GCM'd under a
-    /// STATIC key — HKDF-SHA256(backupEscrowPrivateKey) with empty salt and fixed info, no ECDH and no
-    /// ephemeral material — so there is NO forward secrecy. A single escrow-key compromise decrypts ALL
-    /// past and future backups. This is intentional for a single-user, private-DB, recoverable-by-design
-    /// backup: the escrow key itself is protected by iCloud Keychain end-to-end encryption, and a stable
-    /// (non-ephemeral) key is what makes cross-device restore possible. Optional future hardening: mix a
-    /// random per-generation salt (stored in the head chunk) into the HKDF to bound blast radius per backup.
+    /// Sealed-backup key derivation, **record-format v1** (the legacy static derivation).
+    ///
+    /// ACCEPTED TRADE-OFF (explicit): a v1 backup is AES-GCM'd under a STATIC key —
+    /// HKDF-SHA256(backupEscrowPrivateKey) with empty salt and fixed info, no ECDH and no ephemeral
+    /// material — so there is NO forward secrecy, and a single escrow-key compromise decrypts every v1
+    /// generation. That was intentional for a single-user, private-DB, recoverable-by-design backup: the
+    /// escrow key itself is protected by iCloud Keychain end-to-end encryption, and a stable
+    /// (non-ephemeral) key is what makes cross-device restore possible.
+    ///
+    /// **Record format v2 bounds that blast radius** (hardening #4): every backup generation mints its
+    /// own 32-byte random HKDF salt, so a compromised escrow key derives one key per generation instead
+    /// of one key for all of them. All new writes are v2 (``sealedBackupKey(formatVersion:salt:)``);
+    /// this no-argument entry point remains v1 **and must not change** — it is the derivation that opens
+    /// every v1 record already sitting in users' CloudKit databases, and its output is pinned by a
+    /// known-answer vector in `SealedBackupFormatPinTests`.
     public func sealedBackupKey() throws -> SymmetricKey {
-        guard let backupEscrowKey else { throw IdentityError.notProvisioned }
-        return Self.deriveSealedBackupKey(from: backupEscrowKey)
+        try sealedBackupKey(formatVersion: 1, salt: Data())
     }
 
-    /// The static HKDF derivation shared by `sealedBackupKey()` and `sealedBackupKeyCandidates()`. Pure
-    /// (reads only its parameter + CryptoKit), so it is `nonisolated`.
-    private nonisolated static func deriveSealedBackupKey(from privateKey: Curve25519.KeyAgreement.PrivateKey) -> SymmetricKey {
-        HKDF<SHA256>.deriveKey(
+    /// Sealed-backup key derivation for a specific record format.
+    ///
+    /// - Parameters:
+    ///   - formatVersion: The record's format version. `1` (or anything below 2) reproduces the legacy
+    ///     static derivation byte-for-byte — empty salt, info `com.fernlet.sealed-backup` — so records
+    ///     in the wild keep opening. `2` (and above) mixes `salt` into HKDF under the versioned info
+    ///     string `com.fernlet.sealed-backup.v2`.
+    ///   - salt: The record's per-generation salt. Ignored for v1; for v2 it is the 32 random bytes
+    ///     minted beside the generation counter and stamped on every chunk of that generation.
+    /// - Returns: The 32-byte AES-GCM key for records of that format.
+    /// - Throws: `IdentityError.notProvisioned` when no backup-escrow key has been adopted.
+    public func sealedBackupKey(formatVersion: Int, salt: Data) throws -> SymmetricKey {
+        guard let backupEscrowKey else { throw IdentityError.notProvisioned }
+        return Self.deriveSealedBackupKey(from: backupEscrowKey, formatVersion: formatVersion, salt: salt)
+    }
+
+    /// The HKDF derivation shared by `sealedBackupKey` and `sealedBackupKeyCandidates`. Pure (reads only
+    /// its parameters + CryptoKit), so it is `nonisolated`.
+    ///
+    /// The version selects **both** the salt and the info string. The versioned info string is
+    /// belt-and-suspenders on top of the salt: even a bug that produced an empty v2 salt could not
+    /// collide with a v1 key, because the two derivations are domain-separated regardless.
+    private nonisolated static func deriveSealedBackupKey(
+        from privateKey: Curve25519.KeyAgreement.PrivateKey,
+        formatVersion: Int,
+        salt: Data
+    ) -> SymmetricKey {
+        let isV2 = formatVersion >= 2
+        return HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: privateKey.rawRepresentation),
-            salt: Data(),
-            info: Data("com.fernlet.sealed-backup".utf8),
+            salt: isV2 ? salt : Data(),
+            info: Data((isV2 ? "com.fernlet.sealed-backup.v2" : "com.fernlet.sealed-backup").utf8),
             outputByteCount: 32
         )
     }
@@ -635,13 +667,33 @@ public final class IdentityService {
     /// SURVIVING-but-not-adopted key — e.g. during an as-yet-unresolved cross-device escrow conflict —
     /// still restores with no manual step. Content-addressing is what guarantees those keys coexist (rather
     /// than one having silently overwritten the other), which is the whole point of trying them.
+    ///
+    /// Derives under **record format v1** (static, empty salt). Use
+    /// ``sealedBackupKeyCandidates(formatVersion:salt:)`` to open a v2 record.
     public func sealedBackupKeyCandidates() -> [(publicKey: Data, key: SymmetricKey)] {
+        sealedBackupKeyCandidates(formatVersion: 1, salt: Data())
+    }
+
+    /// The same candidate set as ``sealedBackupKeyCandidates()``, derived under a specific record format.
+    ///
+    /// The format changes only the *derived key* of each pair, never **which** escrow identities exist:
+    /// the returned `publicKey` values (and therefore the count and order) are identical for every
+    /// version, so the identity-tag classification in the open path is version-independent.
+    ///
+    /// - Parameters:
+    ///   - formatVersion: The version of the record being opened (`1` legacy static, `2` salted).
+    ///   - salt: That record's per-generation salt; ignored for v1.
+    /// - Returns: (escrow public key, derived AES-GCM key) pairs, adopted key first.
+    public func sealedBackupKeyCandidates(formatVersion: Int, salt: Data) -> [(publicKey: Data, key: SymmetricKey)] {
         var pairs: [(publicKey: Data, key: SymmetricKey)] = []
         var seen = Set<Data>()
         func add(_ privateKey: Curve25519.KeyAgreement.PrivateKey) {
             let pub = privateKey.publicKey.rawRepresentation
             guard seen.insert(pub).inserted else { return }
-            pairs.append((publicKey: pub, key: Self.deriveSealedBackupKey(from: privateKey)))
+            pairs.append((
+                publicKey: pub,
+                key: Self.deriveSealedBackupKey(from: privateKey, formatVersion: formatVersion, salt: salt)
+            ))
         }
         if let adopted = backupEscrowKey { add(adopted) }
         for candidate in gatherEscrowCandidates() { add(candidate.key) }
