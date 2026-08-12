@@ -128,6 +128,7 @@ public final class HeartDropService {
         localDayKey: @escaping (Date) -> String,
         displayName: @escaping () -> String,
         identity: IdentityService = IdentityService(),
+        storage: HeartDropStorageScope = .production,
         prekeys: HeartPrekeyStore? = nil,
         peerBundles: HeartDropPeerBundleCache? = nil,
         outbox: HeartDropOutbox? = nil,
@@ -141,13 +142,22 @@ public final class HeartDropService {
         self.displayName = displayName
         self.identity = identity
         try? identity.ensureProvisioned()
-        self.prekeys = prekeys ?? HeartPrekeyStore(now: now)
-        // Production stores are sealed at rest (Increment 4); tests that inject their own
-        // stores choose their own seal (usually none, or a UUID-scoped keychain service).
+        self.prekeys = prekeys ?? HeartPrekeyStore(keychainService: storage.keychainService, now: now)
+        // Stores this service builds itself are ALWAYS sealed at rest (Increment 4) — `storage`
+        // moves which key seals them and where the files sit, never whether they are sealed. That
+        // distinction is the whole point of the scope: a test store keeps exercising the real
+        // `HeartDropSidecarSeal` key path, it just does so on a service no other suite's delete-all
+        // reaches. Tests that inject their own stores still choose their own seal (usually none).
+        let seal = HeartDropSidecarSeal.make(keychainService: storage.keychainService)
         self.peerBundles = peerBundles
-            ?? HeartDropPeerBundleCache(seal: HeartDropSidecarSeal.production(), now: now)
-        self.outbox = outbox ?? HeartDropOutbox(seal: HeartDropSidecarSeal.production(), now: now)
-        self.dedup = dedup ?? HeartDropDedupStore(seal: HeartDropSidecarSeal.production(), now: now)
+            ?? HeartDropPeerBundleCache(
+                fileURL: HeartDropPeerBundleCache.fileURL(in: storage.directory), seal: seal, now: now)
+        self.outbox = outbox
+            ?? HeartDropOutbox(
+                fileURL: HeartDropOutbox.fileURL(in: storage.directory), seal: seal, now: now)
+        self.dedup = dedup
+            ?? HeartDropDedupStore(
+                fileURL: HeartDropDedupStore.fileURL(in: storage.directory), seal: seal, now: now)
         self.now = now
     }
 

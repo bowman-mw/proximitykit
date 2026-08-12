@@ -96,7 +96,9 @@ public final class HeartPrekeyStore {
     static let spkRotation: TimeInterval = 7 * 24 * 3600
     public static let spkRetention: TimeInterval = 29 * 24 * 3600
 
-    public static let keychainService = "com.fernlet.heartdrop"
+    /// `nonisolated`: an inert constant, and ``HeartDropStorageScope/production`` (itself
+    /// nonisolated) is what names it for both this store and ``HeartDropSidecarSeal``.
+    public nonisolated static let keychainService = "com.fernlet.heartdrop"
     static let keychainAccount = "prekeyPrivateHalves"
 
     /// A minted bundle plus its private halves, as persisted in the keychain blob.

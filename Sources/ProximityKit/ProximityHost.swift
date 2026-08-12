@@ -29,8 +29,10 @@ public protocol ProximityHost: AnyObject {
     /// are `HeartDropService.queueHeart`/`syncNow`; the friend row's affordance decision takes it
     /// as an explicit parameter (`PresenceManager.heartAffordance`) rather than through this host.
     var heartsAwayDeliveryEnabled: Bool { get }
-    /// Root directory for the proximity subsystem's on-disk sidecars — today the friend photo-wall
-    /// cache (`MeshPhotoCache.json`) and its preferences (`MeshPhotoWallPreferences.json`).
+    /// Root directory for the proximity subsystem's on-disk sidecars — the friend photo-wall cache
+    /// (`MeshPhotoCache.json`) and its preferences (`MeshPhotoWallPreferences.json`), and the
+    /// heart-drop set the app hangs off the same root (`HeartLedger.json` plus the three sealed
+    /// sidecars named by ``HeartDropStorageScope``).
     ///
     /// Comes through the HOST rather than being a constant inside `MeshNetworkManager` because it is
     /// shared *mutable on-disk state*: `deletePhoto` / `deleteAllSessionPhotos` re-save the whole
@@ -40,6 +42,10 @@ public protocol ProximityHost: AnyObject {
     /// cross-suite race. Routing it through the host means the 49 `MeshNetworkManager(store:)` sites
     /// inherit their store's isolation for free. Same reasoning as
     /// `FernletStore.photoDocumentsDirectory`, for the corpus on the other side of the media-key split.
+    ///
+    /// The heart-drop sidecars share this root but need a second half the wall does not: they are
+    /// sealed, and their key is wiped by service, so isolating them means isolating a
+    /// ``HeartDropStorageScope`` (directory + keychain service), not just a directory.
     var proximitySupportDirectory: URL { get }
 }
 
@@ -58,9 +64,13 @@ public extension ProximityHost {
 /// initializer so the production path has ONE definition that both the app and the default
 /// ``ProximityHost/proximitySupportDirectory`` resolve to.
 public enum ProximitySupportLayout {
-    /// `Application Support/Fernlet` — unchanged from the path the mesh photo cache has always used,
-    /// so no shipped install is migrated by the seam that made this injectable.
-    public static var defaultDirectory: URL {
+    /// `Application Support/Fernlet` — unchanged from the path the mesh photo cache, the heart
+    /// ledger and the heart-drop sidecars have always used, so no shipped install is migrated by the
+    /// seams that made these injectable.
+    /// `nonisolated` against the target's `defaultIsolation(MainActor.self)`: a pure path
+    /// computation, read from the nonisolated stored properties and static defaults that resolve
+    /// production paths (`HeartDropStorageScope.production`, `FernletStore.proximitySupportRoot`).
+    public nonisolated static var defaultDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Fernlet", isDirectory: true)
     }

@@ -63,9 +63,7 @@ public final class HeartDropPeerBundleCache {
     ) {
         self.now = now
         self.sidecar = ProtectedSidecar(
-            fileURL: fileURL ?? FileManager.default
-                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("Fernlet/HeartDropPeerBundles.json"),
+            fileURL: fileURL ?? Self.fileURL(in: HeartDropStorageScope.production.directory),
             empty: [:],
             seal: seal,
             auditPrefix: "heartdrop.peerBundles",
@@ -75,6 +73,13 @@ public final class HeartDropPeerBundleCache {
             readData: readData,
             writeData: writeData
         )
+    }
+
+    /// This store's file inside a given heart-drop root — the ONE definition of its name, so the
+    /// production default and a scoped (per-store) root can never name different files. See
+    /// ``HeartDropStorageScope``.
+    public nonisolated static func fileURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("HeartDropPeerBundles.json")
     }
 
     public var isAvailable: Bool { sidecar.state == .ready }

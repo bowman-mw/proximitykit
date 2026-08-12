@@ -23,21 +23,23 @@ import FernletFoundation
 /// — no new wipe-manifest row (the service is a documented `knownKeychainServices` entry).
 public enum HeartDropSidecarSeal {
 
-    /// Same service as the prekey blob so both share the delete-all fate.
+    /// Same service as the prekey blob so both share the delete-all fate — the invariant
+    /// ``HeartDropStorageScope`` carries as a single value, and the reason a scope has to move the
+    /// key along with the files.
     public static let keychainService = HeartPrekeyStore.keychainService
     static let keychainAccount = "sidecarSealKey"
     /// Version prefix distinguishing a sealed file from a legacy plaintext v0 JSON file (which
     /// always starts with `[` or `{`). Bump the digit for any future format change.
     static let magic = Data("FSC1".utf8)
 
-    /// The production seal for the three heart-drop sidecars. Constructed per store; the key is
-    /// one shared keychain row, read on each use (no in-memory cache, so a wiped key can never
-    /// be resurrected by a stale copy).
-    public static func production() -> SidecarSeal {
-        make(keychainService: keychainService)
-    }
-
-    /// UUID-scoped-service variant for tests (IdentityServiceTests convention).
+    /// The seal for the three heart-drop sidecars, on whichever service the caller's
+    /// ``HeartDropStorageScope`` names — `com.fernlet.heartdrop` in production, a UUID-scoped
+    /// service for a test store (IdentityServiceTests convention). Constructed per store; the key
+    /// is one keychain row per service, read on each use (no in-memory cache, so a wiped key can
+    /// never be resurrected by a stale copy).
+    ///
+    /// There is deliberately no argument-less production variant: every caller states its scope, so
+    /// a store cannot end up with isolated files sealed by a key somebody else's wipe deletes.
     public static func make(keychainService service: String) -> SidecarSeal {
         SidecarSeal(
             isSealed: { $0.starts(with: magic) },

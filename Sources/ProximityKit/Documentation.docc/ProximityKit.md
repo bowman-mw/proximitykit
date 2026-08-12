@@ -106,6 +106,14 @@ which has one manager, and a live cross-suite race under the test runner, where 
 process. Routing the root through the host means every `MeshNetworkManager(store:)` inherits its
 store's isolation without naming a directory.
 
+The heart sidecars sit on the same root and need one thing more, which ``HeartDropStorageScope``
+carries: they are SEALED, and their key lives under the heart-drop keychain service so that
+`HeartDropService.wipeForDeleteAll()` takes files and key together. A scope that moved only the
+directory would be cosmetic — another store's wipe still deletes the shared key, and the isolated
+file then survives as ciphertext nothing can open, which the outbox quarantines and latches as data
+loss. So the scope is (directory, keychain service), always both, and scoping is never unsealing: a
+store on its own scope still seals through the real ``HeartDropSidecarSeal`` key path.
+
 Before changing anything here, read the wire-compatibility notes on the type you are touching:
 canonical signing bytes, sealed-payload framing (``SealedPayloadFraming``), the freeze/park
 handling of unknown payload types, and the additive-optional-key rule for intro payloads are all
@@ -223,6 +231,7 @@ compatibility contracts with in-field peers.
 - ``HeartDropSealer``
 - ``HeartPrekeyStore``
 - ``HeartDropPeerBundleCache``
+- ``HeartDropStorageScope``
 
 ### Protected sidecar persistence
 

@@ -83,7 +83,7 @@ public final class HeartDropOutbox {
     ) {
         self.now = now
         self.sidecar = ProtectedSidecar(
-            fileURL: fileURL ?? Self.defaultFileURL(),
+            fileURL: fileURL ?? Self.fileURL(in: HeartDropStorageScope.production.directory),
             empty: [],
             seal: seal,
             auditPrefix: "heartdrop.outbox",
@@ -291,9 +291,11 @@ public final class HeartDropOutbox {
         entry.createdAt.addingTimeInterval(Self.entryLifetime) < now()
     }
 
-    private static func defaultFileURL() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Fernlet/HeartDropOutbox.json")
+    /// This store's file inside a given heart-drop root — the ONE definition of its name, so the
+    /// production default and a scoped (per-store) root can never name different files. See
+    /// ``HeartDropStorageScope``.
+    public nonisolated static func fileURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("HeartDropOutbox.json")
     }
 
     /// Element-wise lossy decode for a corrupt outbox (locked decision O4): keep what parses,
@@ -362,9 +364,7 @@ public final class HeartDropDedupStore {
     ) {
         self.now = now
         self.sidecar = ProtectedSidecar(
-            fileURL: fileURL ?? FileManager.default
-                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("Fernlet/HeartDropDedup.json"),
+            fileURL: fileURL ?? Self.fileURL(in: HeartDropStorageScope.production.directory),
             empty: State(),
             seal: seal,
             auditPrefix: "heartdrop.dedup",
@@ -374,6 +374,13 @@ public final class HeartDropDedupStore {
             readData: readData,
             writeData: writeData
         )
+    }
+
+    /// This store's file inside a given heart-drop root — the ONE definition of its name, so the
+    /// production default and a scoped (per-store) root can never name different files. See
+    /// ``HeartDropStorageScope``.
+    public nonisolated static func fileURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("HeartDropDedup.json")
     }
 
     /// Result of the per-sender daily acceptance check — each case dictates a different caller
