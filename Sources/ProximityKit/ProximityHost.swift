@@ -29,6 +29,18 @@ public protocol ProximityHost: AnyObject {
     /// are `HeartDropService.queueHeart`/`syncNow`; the friend row's affordance decision takes it
     /// as an explicit parameter (`PresenceManager.heartAffordance`) rather than through this host.
     var heartsAwayDeliveryEnabled: Bool { get }
+    /// Root directory for the proximity subsystem's on-disk sidecars — today the friend photo-wall
+    /// cache (`MeshPhotoCache.json`) and its preferences (`MeshPhotoWallPreferences.json`).
+    ///
+    /// Comes through the HOST rather than being a constant inside `MeshNetworkManager` because it is
+    /// shared *mutable on-disk state*: `deletePhoto` / `deleteAllSessionPhotos` re-save the whole
+    /// index, and every manager loads that file at init. With one process-wide path, a manager built
+    /// in one test reads (and overwrites) the wall of every other live one — and under the test
+    /// runner, where XCTest and Swift Testing suites run in parallel in ONE process, that is a live
+    /// cross-suite race. Routing it through the host means the 49 `MeshNetworkManager(store:)` sites
+    /// inherit their store's isolation for free. Same reasoning as
+    /// `FernletStore.photoDocumentsDirectory`, for the corpus on the other side of the media-key split.
+    var proximitySupportDirectory: URL { get }
 }
 
 public extension ProximityHost {
@@ -37,4 +49,19 @@ public extension ProximityHost {
     var allowNearbyHearts: Bool { true }
     /// Default for hosts that predate away delivery (test doubles). The app overrides it.
     var heartsAwayDeliveryEnabled: Bool { false }
+    /// The production sidecar home, and the default for hosts that don't redirect it (test doubles
+    /// that never touch the wall). The app's `FernletStore` overrides it with a per-instance root.
+    var proximitySupportDirectory: URL { ProximitySupportLayout.defaultDirectory }
+}
+
+/// Where the proximity subsystem's on-disk sidecars live. Split out of `MeshNetworkManager`'s
+/// initializer so the production path has ONE definition that both the app and the default
+/// ``ProximityHost/proximitySupportDirectory`` resolve to.
+public enum ProximitySupportLayout {
+    /// `Application Support/Fernlet` — unchanged from the path the mesh photo cache has always used,
+    /// so no shipped install is migrated by the seam that made this injectable.
+    public static var defaultDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Fernlet", isDirectory: true)
+    }
 }

@@ -96,6 +96,16 @@ failures so a locked-device read can never be mistaken for "empty" and overwrite
 material lives in the keychain, ThisDeviceOnly, except the deliberately-synced backup-escrow key
 whose content-addressed slot lifecycle ``IdentityService`` reconciles non-silently.
 
+Where those sidecars live is the host's call, not a constant: the friend photo wall's index and
+preferences hang off ``ProximityHost/proximitySupportDirectory``, which defaults to
+``ProximitySupportLayout/defaultDirectory`` (`Application Support/Fernlet`, the path the cache has
+always used). The indirection exists because the wall's index is re-saved WHOLE on every keep or
+delete and re-read by every manager at init — on a single process-wide path, one live
+``MeshNetworkManager`` inherits and then overwrites another's album. That is invisible in the app,
+which has one manager, and a live cross-suite race under the test runner, where suites share a
+process. Routing the root through the host means every `MeshNetworkManager(store:)` inherits its
+store's isolation without naming a directory.
+
 Before changing anything here, read the wire-compatibility notes on the type you are touching:
 canonical signing bytes, sealed-payload framing (``SealedPayloadFraming``), the freeze/park
 handling of unknown payload types, and the additive-optional-key rule for intro payloads are all
@@ -106,6 +116,7 @@ compatibility contracts with in-field peers.
 ### Host seam and app integration
 
 - ``ProximityHost``
+- ``ProximitySupportLayout``
 
 ### Identity and signing
 

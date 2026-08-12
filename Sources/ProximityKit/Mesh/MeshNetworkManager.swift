@@ -288,9 +288,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         try? id.ensureProvisioned()
         self.identity = id
         self.activities = ProximityActivityManager(store: store, identity: id)
-        let cacheURL = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!.appendingPathComponent("Fernlet/MeshPhotoCache.json")
+        // Per-HOST root, not a process-wide constant — see `ProximityHost.proximitySupportDirectory`
+        // for why the wall's index cannot be shared across concurrently-live managers.
+        let cacheURL = store.proximitySupportDirectory
+            .appendingPathComponent("MeshPhotoCache.json")
         // Phase-5 media-key split: the wall stays on the ORIGINAL, backup-restorable row
         // (`Role.friendWall`) — stated explicitly rather than left to the default so a future
         // reader can see which side of the split this store is on. Nothing about the wall changed:
