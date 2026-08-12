@@ -25,15 +25,24 @@ import Foundation
 /// parent directory, then an atomic `.completeFileProtection` write — and, unlike
 /// ``ProtectedSidecar``'s writer, does NOT exclude the file from backup.
 struct JSONSidecarFile<State: Codable> {
-    /// The on-disk location of the sidecar (tests inject their own; production uses
-    /// `defaultFileURL(name:)`).
+    /// The on-disk location of the sidecar. Owners resolve it with `fileURL(in:name:)` against
+    /// their host's ``ProximityHost/proximitySupportDirectory``; tests inject their own.
     let fileURL: URL
 
-    /// The production sidecar home: `Application Support/Fernlet/<name>`.
-    nonisolated static func defaultFileURL(name: String) -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Fernlet/\(name)")
+    /// This sidecar's file inside a given proximity-sidecar root — the ONE definition of the layout,
+    /// so a scoped (per-store) root and the production default can never disagree.
+    ///
+    /// Every store here is shared MUTABLE on-disk state that some wipe reaches, and the test runner
+    /// puts many stores in one process, so the root has to be per-instance rather than constant —
+    /// see ``ProximityHost/proximitySupportDirectory`` for the full reasoning.
+    nonisolated static func fileURL(in directory: URL, name: String) -> URL {
+        directory.appendingPathComponent(name)
     }
+
+    // There is deliberately NO argument-less `defaultFileURL(name:)` any more. Every owner states its
+    // root, exactly as every heart-drop caller states its `HeartDropStorageScope` — a default that
+    // silently resolves to the process-wide `Application Support/Fernlet` is precisely how a store
+    // rejoins the shared-root race, and the omission compiles.
 
     /// Reads + decodes the sidecar. `nil` on ANY failure — absent, unreadable (including a
     /// locked-device read of a protected file), or undecodable.

@@ -123,7 +123,7 @@ public final class ProximityActivityManager {
     ) {
         self.store = store
         self.identity = identity
-        self.file = JSONSidecarFile(fileURL: fileURL ?? Self.defaultFileURL())
+        self.file = JSONSidecarFile(fileURL: fileURL ?? Self.fileURL(in: ProximitySupportLayout.defaultDirectory))
         self.now = now
         load()
         gcExpired()
@@ -624,7 +624,16 @@ public final class ProximityActivityManager {
         file.save(state)
     }
 
-    private nonisolated static func defaultFileURL() -> URL {
-        JSONSidecarFile<PersistedState>.defaultFileURL(name: "ActivityLedger.json")
+    /// This store's file inside a given proximity-sidecar root — the ONE definition of its name, so
+    /// the production default and a scoped (per-store) root can never name different files.
+    ///
+    /// Given a root rather than fixed because it is shared mutable on-disk state that a wipe reaches:
+    /// `clearAll()` removes this file, and `FernletStore.resetAll` calls it (hosted/joined group activities
+    /// must not outlive "Reset everything"). Under the test runner, where XCTest and Swift Testing
+    /// suites run in parallel in ONE process, a constant path means any wiping test deletes this for
+    /// every concurrently-live store. Unsealed, so — unlike the heart-drop sidecars — the root is the
+    /// whole fix and no keychain scoping is needed. See ``ProximityHost/proximitySupportDirectory``.
+    public nonisolated static func fileURL(in directory: URL) -> URL {
+        JSONSidecarFile<PersistedState>.fileURL(in: directory, name: "ActivityLedger.json")
     }
 }

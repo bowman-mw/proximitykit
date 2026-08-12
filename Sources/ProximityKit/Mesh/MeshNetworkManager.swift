@@ -287,7 +287,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let id = IdentityService()
         try? id.ensureProvisioned()
         self.identity = id
-        self.activities = ProximityActivityManager(store: store, identity: id)
+        // Per-HOST root like the photo wall below: `FernletStore.resetAll` calls
+        // `meshNetworkManager.activities.clearAll()`, which removes this sidecar.
+        self.activities = ProximityActivityManager(
+            store: store,
+            identity: id,
+            fileURL: ProximityActivityManager.fileURL(in: store.proximitySupportDirectory)
+        )
         // Per-HOST root, not a process-wide constant — see `ProximityHost.proximitySupportDirectory`
         // for why the wall's index cannot be shared across concurrently-live managers.
         let cacheURL = store.proximitySupportDirectory

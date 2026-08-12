@@ -96,8 +96,13 @@ failures so a locked-device read can never be mistaken for "empty" and overwrite
 material lives in the keychain, ThisDeviceOnly, except the deliberately-synced backup-escrow key
 whose content-addressed slot lifecycle ``IdentityService`` reconciles non-silently.
 
-Where those sidecars live is the host's call, not a constant: the friend photo wall's index and
-preferences hang off ``ProximityHost/proximitySupportDirectory``, which defaults to
+Where those sidecars live is the host's call, not a constant. EVERY device-local sidecar in this
+module hangs off ``ProximityHost/proximitySupportDirectory`` — the friend photo wall's index and
+preferences, ``ProximityHeartLedger``, the three sealed heart-drop stores, ``ModerationLedger``,
+``FriendStateCache``, ``ClosenessLedger`` and ``ProximityActivityManager``'s ledger. There is
+deliberately no argument-less default on ``JSONSidecarFile``: every owner states its root, because a
+default that silently resolves to the process-wide `Application Support/Fernlet` is exactly how a
+store rejoins the shared-root race, and the omission compiles. The root defaults to
 ``ProximitySupportLayout/defaultDirectory`` (`Application Support/Fernlet`, the path the cache has
 always used). The indirection exists because the wall's index is re-saved WHOLE on every keep or
 delete and re-read by every manager at init — on a single process-wide path, one live
@@ -105,6 +110,11 @@ delete and re-read by every manager at init — on a single process-wide path, o
 which has one manager, and a live cross-suite race under the test runner, where suites share a
 process. Routing the root through the host means every `MeshNetworkManager(store:)` inherits its
 store's isolation without naming a directory.
+
+The wall's whole-index re-save is the sharpest version of the hazard, but not the only one: `resetAll`
+calls `clearAll()` on the moderation, friend-state, closeness and activity ledgers, and turning
+fuzzy-state sharing off clears the friend-state cache on its own — so a plain settings toggle in one
+test, not just a wipe, used to empty another's cache.
 
 The heart sidecars sit on the same root and need one thing more, which ``HeartDropStorageScope``
 carries: they are SEALED, and their key lives under the heart-drop keychain service so that
