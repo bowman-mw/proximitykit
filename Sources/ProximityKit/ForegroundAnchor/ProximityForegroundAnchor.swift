@@ -3,6 +3,7 @@ import Foundation
 #if canImport(ActivityKit)
 import ActivityKit
 import FernletDomainModel
+import FernletFoundation
 #endif
 
 /// Seam for the "connection in progress" foreground anchor a ``ProximityCoordinator`` raises
@@ -91,7 +92,13 @@ final class ActivityKitProximityForegroundAnchor: ProximityForegroundAnchoring {
             lastBytesReceived = 0
             isActive = true
         } catch {
+            // Recovery is "no anchor this session" — the transfer still runs — but a rejected
+            // Live Activity request is named rather than invisible (R7).
             isActive = false
+            FernletAuditLog.log(
+                "proximity.liveActivity.requestFailed",
+                context: ["error": String(describing: error)]
+            )
         }
     }
 

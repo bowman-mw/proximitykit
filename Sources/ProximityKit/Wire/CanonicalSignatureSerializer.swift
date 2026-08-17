@@ -61,8 +61,11 @@ nonisolated struct CanonicalByteWriter {
     /// 8-byte big-endian. Endianness is pinned by `bigEndian`, so the on-wire bytes are identical
     /// regardless of host byte order.
     mutating func appendUInt64(_ value: UInt64) {
-        var bigEndian = value.bigEndian
-        withUnsafeBytes(of: &bigEndian) { bytes.append(contentsOf: $0) }
+        // Pure-Swift shift-out (R9: no pointer seam). Byte-identical to the previous
+        // `withUnsafeBytes(of: value.bigEndian)`: most-significant byte first.
+        for shift in stride(from: 56, through: 0, by: -8) {
+            bytes.append(UInt8(truncatingIfNeeded: value >> UInt64(shift)))
+        }
     }
 
     /// 8-byte big-endian two's-complement.
@@ -83,7 +86,13 @@ nonisolated struct CanonicalByteWriter {
 
     /// 16 raw bytes in network order (no length prefix — a UUID is always 16 bytes).
     mutating func appendUUID(_ uuid: UUID) {
-        withUnsafeBytes(of: uuid.uuid) { bytes.append(contentsOf: $0) }
+        // Same 16 network-order bytes as the previous `withUnsafeBytes(of: uuid.uuid)`, spelled
+        // without a pointer seam (R9). `uuid.uuid` is a 16-tuple in network order by definition.
+        let raw = uuid.uuid
+        bytes.append(contentsOf: [
+            raw.0, raw.1, raw.2, raw.3, raw.4, raw.5, raw.6, raw.7,
+            raw.8, raw.9, raw.10, raw.11, raw.12, raw.13, raw.14, raw.15
+        ])
     }
 
     /// Whole seconds since the Unix epoch, floored. Saturating: an out-of-range or non-finite value

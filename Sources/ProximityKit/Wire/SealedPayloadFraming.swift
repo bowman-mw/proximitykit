@@ -141,8 +141,14 @@ public nonisolated enum SealedPayloadFraming {
             streamPointer.pointee.dst_ptr = destinationBuffer
             streamPointer.pointee.dst_size = destinationCapacity
 
-            while true {
-                let status = compression_stream_process(streamPointer, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+            // R2 bound, visible at the loop: every iteration either consumes at least one source
+            // byte (≤ input.count iterations) or produces at least one output byte (≤ limit /
+            // destinationCapacity + 1 iterations, and `limit` is the inflate-bomb cap); an
+            // iteration that does neither throws below, so the loop cannot spin.
+            var status = COMPRESSION_STATUS_OK
+            while status != COMPRESSION_STATUS_END {
+                let sourceBefore = streamPointer.pointee.src_size
+                status = compression_stream_process(streamPointer, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
                 guard status != COMPRESSION_STATUS_ERROR else { throw FramingError.malformed }
                 let produced = destinationCapacity - streamPointer.pointee.dst_size
                 if produced > 0 {
@@ -151,10 +157,13 @@ public nonisolated enum SealedPayloadFraming {
                     streamPointer.pointee.dst_ptr = destinationBuffer
                     streamPointer.pointee.dst_size = destinationCapacity
                 }
-                if status == COMPRESSION_STATUS_END { break }
-                // OK status, nothing produced, source exhausted: a truncated/garbage stream that
-                // would otherwise spin — reject.
-                if produced == 0, streamPointer.pointee.src_size == 0 { throw FramingError.malformed }
+                // Non-terminal status that neither produced output nor consumed source: a
+                // truncated/garbage stream that would otherwise spin — reject.
+                guard status == COMPRESSION_STATUS_END
+                        || produced > 0
+                        || streamPointer.pointee.src_size < sourceBefore else {
+                    throw FramingError.malformed
+                }
             }
         }
         return output

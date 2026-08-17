@@ -281,7 +281,13 @@ final class MeshMultipeerSession: NSObject {
         let inviteID = UUID()
         pendingConnectionPeers[peerID] = inviteID
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(Self.connectingWindowSeconds))
+            // A cancelled expiry leaves the entry to the .connected/.notConnected transitions,
+            // which is the existing contract (R7: cancellation is the recovery, not a swallow).
+            do {
+                try await Task.sleep(for: .seconds(Self.connectingWindowSeconds))
+            } catch {
+                return
+            }
             guard self?.pendingConnectionPeers[peerID] == inviteID else { return }
             self?.pendingConnectionPeers.removeValue(forKey: peerID)
         }

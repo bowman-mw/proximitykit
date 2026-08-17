@@ -64,7 +64,11 @@ public nonisolated enum ProximityVerifyQR {
         bytes.append(UInt8(clamping: version))
         bytes.append(signingPublicKey)
         bytes.append(keyAgreementPublicKey)
-        withUnsafeBytes(of: timestamp.bigEndian) { bytes.append(contentsOf: $0) }
+        // 8-byte big-endian, shifted out in pure Swift (R9: no pointer seam). Byte-identical to
+        // the previous `withUnsafeBytes(of: timestamp.bigEndian)`.
+        for shift in stride(from: 56, through: 0, by: -8) {
+            bytes.append(UInt8(truncatingIfNeeded: timestamp >> UInt64(shift)))
+        }
         bytes.append(nonce)
         return bytes
     }

@@ -71,7 +71,8 @@ public enum ProximitySupportLayout {
     /// computation, read from the nonisolated stored properties and static defaults that resolve
     /// production paths (`HeartDropStorageScope.production`, `FernletStore.proximitySupportRoot`).
     public nonisolated static var defaultDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Fernlet", isDirectory: true)
+        // `URL.applicationSupportDirectory` is the non-optional accessor for exactly the path the
+        // optional `FileManager.urls(for:in:).first` resolved to (R5: no force unwrap).
+        URL.applicationSupportDirectory.appendingPathComponent("Fernlet", isDirectory: true)
     }
 }
