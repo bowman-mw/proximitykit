@@ -106,8 +106,9 @@ public final class HeartDropOutbox {
     /// Sticky: corrupt rows were discarded or an unopenable sealed file was quarantined.
     public var dataLossOccurred: Bool { sidecar.dataLossOccurred }
     public func acknowledgeDataLoss() { sidecar.acknowledgeDataLoss() }
-    @discardableResult
-    public func retryLoad() -> Bool { sidecar.retryLoad() }
+    /// Re-attempts the sidecar's pending recovery. Void (R7): the old Bool was exactly
+    /// ``isAvailable`` afterwards, which callers read directly.
+    public func retryLoad() { sidecar.retryLoad() }
 
     private var entries: [Entry]? { sidecar.read() }
 
@@ -148,7 +149,6 @@ public final class HeartDropOutbox {
 
     /// New hearts are accepted only when the sidecar is fully healthy AND the write lands —
     /// all-or-nothing, so `.queued` is never reported for a heart that exists only in memory.
-    @discardableResult
     public func enqueue(_ entry: Entry) -> EnqueueOutcome {
         guard sidecar.read() != nil, isAvailable else { return .storageUnavailable }
         guard hasCapacity(forFriendSigningKey: entry.friendSigningKey) else { return .backlogFull }
@@ -167,7 +167,6 @@ public final class HeartDropOutbox {
     /// either the write failed (the name is kept in memory as the truth and re-persisted by a
     /// later pass) or the entry is gone (wiped mid-flight). The record is on the public database
     /// either way, so the caller must treat false as a possible orphan, not continue silently.
-    @discardableResult
     public func markUploaded(id: UUID, recordName: String) -> Bool {
         guard let current = entries, current.contains(where: { $0.id == id }) else { return false }
         let outcome = sidecar.mutate { entries in
@@ -178,7 +177,7 @@ public final class HeartDropOutbox {
     }
 
     public func recordAttempt(id: UUID) {
-        sidecar.mutate { entries in
+        sidecar.mutateCommitting { entries in
             guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
             entries[index].attempts += 1
         }
@@ -197,7 +196,7 @@ public final class HeartDropOutbox {
         let removal = Set(ids)
         // Commit-on-failure: the caller already deleted these entries' server records, so the
         // removal must hold in memory even if the write is owed.
-        sidecar.mutate { $0.removeAll { removal.contains($0.id) } }
+        sidecar.mutateCommitting { $0.removeAll { removal.contains($0.id) } }
     }
 
     /// Removes exactly the captured entries that are STILL in the state they were captured in, and
@@ -223,7 +222,7 @@ public final class HeartDropOutbox {
         }
         let before = current.count
         var after = before
-        sidecar.mutate { entries in
+        sidecar.mutateCommitting { entries in
             entries.removeAll { entry in
                 guard let name = entry.recordName else { return capturedPending.contains(entry.id) }
                 return capturedNames[entry.id] == name
@@ -397,8 +396,8 @@ public final class HeartDropDedupStore {
     }
 
     public var isAvailable: Bool { sidecar.state == .ready }
-    @discardableResult
-    public func retryLoad() -> Bool { sidecar.retryLoad() }
+    /// Re-attempts the sidecar's pending recovery. Void (R7) — see ``isAvailable``.
+    public func retryLoad() { sidecar.retryLoad() }
 
     /// Records the envelope id; false when it was already seen (drop the record silently) OR the
     /// mark could not be durably persisted (drop stays on the server for a later pass).
@@ -414,7 +413,7 @@ public final class HeartDropDedupStore {
     /// Commit-on-failure: the mark leaves memory NOW (so the next fetch can re-deliver) and a
     /// later successful persist makes the removal durable.
     public func unrecord(envelopeID: UUID) {
-        sidecar.mutate { $0.seenEnvelopeIDs.removeValue(forKey: envelopeID) }
+        sidecar.mutateCommitting { $0.seenEnvelopeIDs.removeValue(forKey: envelopeID) }
     }
 
     /// Whether the sender still has acceptance budget for this UTC day epoch; increments on accept.

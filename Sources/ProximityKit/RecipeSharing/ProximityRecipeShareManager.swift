@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import UIKit
 import FernletDomainModel
+import FernletFoundation
 
 /// One live recipe-share pairing: the peer, its channel + coordinator, and (once the handshake
 /// completes) the verified fingerprint and KA key.
@@ -91,7 +92,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     public private(set) var nearbyRecipients: [ProximityRecipeShareRecipient] = []
     public private(set) var sendState: SendState = .idle
     public private(set) var diagnosticEvents: [ProximityRecipeShareDiagnosticEvent] = []
-    public var pendingRecipeShares: [PendingProximityRecipeShare] = []
+    /// R6: read-only outside this file — the cap (`maxPendingShares`) and the dedup live in this
+    /// file's writers, and the two `dismissRecipeShare` methods cover the external mutation need.
+    public private(set) var pendingRecipeShares: [PendingProximityRecipeShare] = []
     /// The recipient this manager is currently engaged with — connecting to, sending to, or
     /// holding the (hard-capped, one-at-a-time) verified connection with. The share sheet
     /// disables every other recipient row while this is set; nil when idle.
@@ -136,7 +139,14 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     public init(store: any ProximityHost) {
         self.store = store
         let id = IdentityService()
-        try? id.ensureProvisioned()
+        do {
+            try id.ensureProvisioned()
+        } catch {
+            // Benign: every session start re-attempts provisioning and fails visibly
+            // (`fail(error.localizedDescription)`) — but the FIRST failure must not vanish.
+            FernletAuditLog.log("recipeShare.identity.provisionFailed",
+                                context: ["error": String(describing: error)])
+        }
         self.identity = id
         setupSession()
     }
@@ -292,6 +302,11 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         guard pendingRecipeShares.count < Self.maxPendingShares else {
             recordDiagnostic("Dropped recipe share from \(envelope.senderDisplayName): queue full.")
             return
+        }
+        // R3: prune before inserting — entries older than the rate-limit window gate nothing, so
+        // without this the map grows one entry per distinct sender for the manager's lifetime.
+        lastAcceptedBySender = lastAcceptedBySender.filter {
+            now.timeIntervalSince($0.value) < Self.perSenderRateLimitSeconds
         }
         lastAcceptedBySender[senderFP] = now
 
@@ -565,8 +580,10 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         connectTimeoutTask?.cancel()
         let timeout = connectTimeoutSeconds
         connectTimeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(timeout))
-            guard !Task.isCancelled, let self else { return }
+            // Cancelled by `registerConnection`/`stop` ⇒ the connect stage succeeded or the
+            // session went away; not firing IS the recovery.
+            do { try await Task.sleep(for: .seconds(timeout)) } catch { return }
+            guard let self else { return }
             guard let outgoing = self.pendingOutgoing, outgoing.recipient.id == recipient.id else { return }
             // Belt-and-braces stage check (registerConnection already cancels this task): a
             // connection record means the connect stage succeeded — never fail or kick a
@@ -591,8 +608,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         guard parkedSweepTask == nil else { return }
         parkedSweepTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.parkedSweepIntervalSeconds))
-                guard !Task.isCancelled, let self else { return }
+                // Cancellation ends the sweep loop here rather than spinning one more iteration.
+                do { try await Task.sleep(for: .seconds(Self.parkedSweepIntervalSeconds)) } catch { return }
+                guard let self else { return }
                 self.sweepParkedConnections(now: Date())
                 if self.connections.isEmpty {
                     self.parkedSweepTask = nil
@@ -690,8 +708,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     private func scheduleStatusClear() {
         clearStatusTask?.cancel()
         clearStatusTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(2.5))
-            guard !Task.isCancelled else { return }
+            // A superseding `scheduleStatusClear` cancels this one — NOT clearing the status is
+            // the correct recovery, because the newer timer owns it.
+            do { try await Task.sleep(for: .seconds(2.5)) } catch { return }
             self?.sendState = .idle
         }
     }

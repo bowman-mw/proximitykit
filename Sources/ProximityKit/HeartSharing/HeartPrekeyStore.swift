@@ -156,7 +156,9 @@ public final class HeartPrekeyStore {
         // persist fails, this one (already durable) is what may be gossiped instead.
         let persistedSPK = currentSPK.flatMap { $0.prekey.expires > currentTime ? $0 : nil }
         var spkMinted = false
-        if currentSPK == nil || currentSPK!.prekey.expires <= currentTime {
+        // R5: no force unwrap — the optional carries its own default (nil ⇒ mint).
+        let needsFreshSPK = currentSPK.map { $0.prekey.expires <= currentTime } ?? true
+        if needsFreshSPK {
             let fresh = mintSignedPrekey(at: currentTime)
             signedPrekeys.append(fresh)
             currentSPK = fresh
@@ -299,7 +301,7 @@ public final class HeartPrekeyStore {
     }
 
     /// False when the write did not land — the caller must not treat the state as durable.
-    @discardableResult
+    /// No `@discardableResult` (R7): the Bool IS the durability signal every caller must consume.
     private func persist(_ state: StoredState) -> Bool {
         guard let data = try? JSONEncoder().encode(state) else { return false }
         let status = KeychainItem.store(

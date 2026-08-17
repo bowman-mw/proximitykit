@@ -3,6 +3,7 @@ import FernletUI
 import Photos
 import UIKit
 import FernletDomainModel
+import FernletFoundation
 import os
 
 /// One selectable photo thumbnail in the session-end review grid.
@@ -197,12 +198,21 @@ public enum FriendPhotoLibrarySaver {
         // Count creation requests inside the block: if every payload fails to decode we must
         // surface an error rather than report a false "saved".
         let savedCount = OSAllocatedUnfairLock(initialState: 0)
+        let skippedCount = OSAllocatedUnfairLock(initialState: 0)
         try await PHPhotoLibrary.shared().performChanges { @Sendable in
             for photo in photos {
-                guard let imgData = photo.imageData, let image = UIImage(data: imgData) else { continue }
+                guard let imgData = photo.imageData, let image = UIImage(data: imgData) else {
+                    skippedCount.withLock { $0 += 1 }
+                    continue
+                }
                 PHAssetChangeRequest.creationRequestForAsset(from: image)
                 savedCount.withLock { $0 += 1 }
             }
+        }
+        // R7: a partial save ("3 of 5") used to report as full success with nothing recorded.
+        let skipped = skippedCount.withLock { $0 }
+        if skipped > 0 {
+            FernletAuditLog.log("photoSave.partialDecodeFailure", context: ["skipped": "\(skipped)"])
         }
         guard savedCount.withLock({ $0 }) > 0 else { throw NothingSavedError() }
     }

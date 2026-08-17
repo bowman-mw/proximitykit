@@ -90,8 +90,12 @@ public enum HeartDropSidecarSeal {
         case .unreadable:
             throw SidecarSeal.SealError.keyTransientlyUnavailable
         case .absent:
-            let key = SymmetricKey(size: .bits256)
-            let keyData = key.withUnsafeBytes { Data($0) }
+            // R9: mint the raw bytes first and build the key from them, so the keychain row needs
+            // no `withUnsafeBytes` export of a CryptoKit key. `UInt8.random(in:)` draws from
+            // `SystemRandomNumberGenerator`, the platform CSPRNG — the same source `SymmetricKey`
+            // uses.
+            let keyData = Data((0..<32).map { _ in UInt8.random(in: UInt8.min...UInt8.max) })
+            let key = SymmetricKey(data: keyData)
             let status = KeychainItem.store(
                 keyData,
                 account: keychainAccount,

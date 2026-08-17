@@ -80,7 +80,9 @@ public final class ModerationLedger {
     /// Stores peers' already-verified report rows (from the one-hop relay). Upsert de-dupes by the
     /// deterministic id and keeps the higher `reporterSeq`, so re-delivery is idempotent.
     public func ingestForeign(_ entries: [ModerationLedgerEntry]) {
-        for entry in entries { upsert(entry) }
+        // R3: one peer delivery can never contribute more than one wire payload's worth of rows,
+        // so a flood cannot evict genuine older reports past the 512-row cap.
+        for entry in entries.prefix(ModerationReportPayload.maxReports) { upsert(entry) }
     }
 
     // MARK: - Reads

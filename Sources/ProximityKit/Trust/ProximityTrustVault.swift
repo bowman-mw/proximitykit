@@ -22,6 +22,10 @@ import FernletDomainModel
 @MainActor
 @Observable
 public final class ProximityTrustVault: ProximityTrustPolicy {
+    /// Newest-first cap on the retained audit trail — the ONE definition, applied wherever
+    /// events enter (init, snapshot apply, and each record).
+    public static let maxAuditEvents = 500
+
     public private(set) var trustedPeers: [ProximityTrustedPeerRecord] = []
     public private(set) var auditEvents: [TrainerAuditEvent] = []
 
@@ -34,7 +38,7 @@ public final class ProximityTrustVault: ProximityTrustPolicy {
         onChange: @escaping () -> Void = {}
     ) {
         self.trustedPeers = Self.normalized(initialPeers)
-        self.auditEvents = initialAudit
+        self.auditEvents = Array(initialAudit.prefix(Self.maxAuditEvents))
         self.onChange = onChange
     }
 
@@ -117,6 +121,9 @@ public final class ProximityTrustVault: ProximityTrustPolicy {
     }
 
     public func block(signingPublicKey: Data) {
+        // R5: the vault keys records on the FULL signing key, so an empty key would mint a stub
+        // keyed on nothing (and fingerprinted from nothing) that no real peer can ever match.
+        guard !signingPublicKey.isEmpty else { return }
         let now = Date()
         guard let index = trustedPeers.firstIndex(where: { $0.signingPublicKey == signingPublicKey }) else {
             let fingerprint = IdentityService.fingerprint(of: signingPublicKey)
@@ -168,6 +175,7 @@ public final class ProximityTrustVault: ProximityTrustPolicy {
     /// (the safe default) also blocks + revokes exactly like `block()`. Creates a blocked+reported stub
     /// when the key isn't already in the vault (a reported item's seller may not be a kept friend).
     public func report(signingPublicKey: Data, reason: String, blockAlso: Bool = true) {
+        guard !signingPublicKey.isEmpty else { return }   // R5 — see `block(signingPublicKey:)`
         let now = Date()
         guard let index = trustedPeers.firstIndex(where: { $0.signingPublicKey == signingPublicKey }) else {
             let fingerprint = IdentityService.fingerprint(of: signingPublicKey)
@@ -213,7 +221,9 @@ public final class ProximityTrustVault: ProximityTrustPolicy {
 
     public func apply(peers: [ProximityTrustedPeerRecord], audit: [TrainerAuditEvent]) {
         trustedPeers = Self.normalized(peers)
-        auditEvents = audit
+        // R3: the snapshot is external input, so the cap holds here too — not only after the
+        // next `recordAuditWithoutSaving`.
+        auditEvents = Array(audit.prefix(Self.maxAuditEvents))
     }
 
     private static func normalized(_ peers: [ProximityTrustedPeerRecord]) -> [ProximityTrustedPeerRecord] {
@@ -229,6 +239,6 @@ public final class ProximityTrustVault: ProximityTrustPolicy {
 
     private func recordAuditWithoutSaving(_ event: TrainerAuditEvent) {
         auditEvents.insert(event, at: 0)
-        auditEvents = Array(auditEvents.prefix(500))
+        auditEvents = Array(auditEvents.prefix(Self.maxAuditEvents))
     }
 }

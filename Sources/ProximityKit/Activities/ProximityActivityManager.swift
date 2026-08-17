@@ -24,6 +24,7 @@
 import Foundation
 import Observation
 import FernletDomainModel
+import FernletFoundation
 
 /// The state + logic brain for Group Activities (Phase 6): hosting, joining, offers, pending
 /// join requests, and host-authoritative roster convergence — riding the friend mesh with no
@@ -207,13 +208,23 @@ public final class ProximityActivityManager {
         guard hosted.participants.contains(where: { $0.fingerprint == fingerprint }) else { return }
         hosted.participants.removeAll { $0.fingerprint == fingerprint }
         hosted.version += 1
-        guard let snapshot = try? ActivityRosterSnapshot.signed(
-            activityID: activityID,
-            version: hosted.version,
-            participants: hosted.participants,
-            issuedAt: now(),
-            hostIdentity: identity
-        ) else { return }
+        let snapshot: ActivityRosterSnapshot
+        do {
+            snapshot = try ActivityRosterSnapshot.signed(
+                activityID: activityID,
+                version: hosted.version,
+                participants: hosted.participants,
+                issuedAt: now(),
+                hostIdentity: identity
+            )
+        } catch {
+            // R7: `host()`/`admitJoin()` surface signing failures; a silent no-op removal would
+            // leave the host believing the participant is gone.
+            FernletAuditLog.log("activity.removeParticipant.signFailed",
+                                context: ["error": String(describing: error)])
+            activityError = "Couldn't update the activity."
+            return
+        }
         hosted.currentSnapshot = snapshot
         hostedActivities[index] = hosted
         save()
@@ -282,16 +293,25 @@ public final class ProximityActivityManager {
     private func regrantExistingMember(_ member: ActivityParticipant, hostedIndex: Int) {
         guard let identity else { return }
         let hosted = hostedActivities[hostedIndex]
-        guard let token = try? ActivityJoinToken.signed(
-            activityID: hosted.descriptor.activityID,
-            activityParamsHash: ActivityParamsHash.of(hosted.descriptor),
-            joinerFingerprint: member.fingerprint,
-            joinerSigningPublicKey: member.signingPublicKey,
-            hostIdentity: identity,
-            grantedAt: now(),
-            expiresAt: hosted.descriptor.expiresAt,
-            rosterVersionAtGrant: hosted.version
-        ) else { return }
+        let token: ActivityJoinToken
+        do {
+            token = try ActivityJoinToken.signed(
+                activityID: hosted.descriptor.activityID,
+                activityParamsHash: ActivityParamsHash.of(hosted.descriptor),
+                joinerFingerprint: member.fingerprint,
+                joinerSigningPublicKey: member.signingPublicKey,
+                hostIdentity: identity,
+                grantedAt: now(),
+                expiresAt: hosted.descriptor.expiresAt,
+                rosterVersionAtGrant: hosted.version
+            )
+        } catch {
+            // R7: the orphaned member stays orphaned; say so instead of returning silently.
+            FernletAuditLog.log("activity.regrant.signFailed",
+                                context: ["error": String(describing: error)])
+            activityError = "Couldn't update the activity."
+            return
+        }
         let grant = ActivityJoinGrantPayload(token: token, snapshot: hosted.currentSnapshot)
         let recipient = member.fingerprint
         Task { [weak self] in await self?.send?(.activityJoinGrant, grant, recipient, true) }
