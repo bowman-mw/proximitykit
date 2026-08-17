@@ -132,6 +132,10 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// Total invite attempts before giving up (initial + 2 retries), mirroring the mesh re-invite
     /// pattern the recipe cap uses.
     static let maxHeartInviteAttempts = 3
+    /// R3 cap on the self-exclusion name ring: `start()` runs once per scene/tab/lock toggle, so
+    /// the set is fed by repeated user actions. Only the last few starts can still have a Bonjour
+    /// ghost on the air, so remembering 32 is generous.
+    static let maxRememberedEphemeralNames = 32
     static let heartReinviteDelaySeconds: TimeInterval = 2
 
     @ObservationIgnored private unowned let store: any ProximityHost
@@ -163,9 +167,12 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// Candidate token → friend fingerprint, spanning epoch −1…+1 for EVERY eligible friend
     /// (matching is uncapped; only the advertised set is capped). Internal for tests.
     @ObservationIgnored private(set) var candidateTokens: [String: String] = [:]
-    /// Display names of every ephemeral peer ID this manager generated this launch — exact
+    /// Display names of the most recent ephemeral peer IDs this manager generated — exact
     /// recognition of our own previous-start ghost advertisements (self-exclusion layer 1).
+    /// Bounded: see ``rememberOwnEphemeralPeerName(_:)``.
     @ObservationIgnored private var ownEphemeralPeerNames: Set<String> = []
+    /// Insertion order for `ownEphemeralPeerNames`, so the cap evicts the OLDEST name.
+    @ObservationIgnored private var ownEphemeralPeerNameOrder: [String] = []
 
     /// Matched friend fingerprints per discovered peer (peers currently contributing to the
     /// nearby set — including peers within the lost-grace window).
@@ -178,6 +185,8 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     @ObservationIgnored private var currentEpoch: UInt64 = 0
     @ObservationIgnored private var epochRotationTask: Task<Void, Never>?
+    /// The single in-flight lost-peer sweep (see ``scheduleLostSweep()``) — nil when none is armed.
+    @ObservationIgnored private var lostSweepTask: Task<Void, Never>?
 
     /// Test seam: injectable clock (epoch derivation, lost-grace expiry). Production default.
     @ObservationIgnored var nowProvider: () -> Date = { Date() }
@@ -189,7 +198,16 @@ public final class PresenceManager: ProximityPayloadHandling {
             self.identity = identity
         } else {
             let id = IdentityService()
-            try? id.ensureProvisioned()
+            // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
+            // otherwise every later presence tag and heart send fails with no visible cause.
+            do {
+                try id.ensureProvisioned()
+            } catch {
+                FernletAuditLog.log(
+                    "presence.identity.provisionFailed",
+                    context: ["error": String(describing: error)]
+                )
+            }
             self.identity = id
         }
     }
@@ -204,7 +222,7 @@ public final class PresenceManager: ProximityPayloadHandling {
 
         // Fresh ephemeral MCPeerID per start (never persisted, never the shared archived ID).
         let session = MeshMultipeerSession(usesEphemeralPeerID: true)
-        ownEphemeralPeerNames.insert(session.localPeerID.displayName)
+        rememberOwnEphemeralPeerName(session.localPeerID.displayName)
         session.onPeerDiscovered = { [weak self] peer in
             self?.handleDiscoveredPeer(peer)
         }
@@ -240,6 +258,8 @@ public final class PresenceManager: ProximityPayloadHandling {
         isRunning = false
         epochRotationTask?.cancel()
         epochRotationTask = nil
+        lostSweepTask?.cancel()
+        lostSweepTask = nil
         teardownAllHeartConnections()
         heartObservationTask?.cancel()
         heartObservationTask = nil
@@ -285,10 +305,17 @@ public final class PresenceManager: ProximityPayloadHandling {
         currentEpoch = epoch
         let eligible = Self.eligibleFriends(in: store.proximityTrustVault.trustedPeers)
 
+        // A tag that fails to derive silently drops that friend from presence entirely, so the
+        // failures are counted and surfaced once per rebuild (R7) — count only, never an identity.
+        var derivationFailures = 0
         var own: Set<String> = []
         for friend in eligible.prefix(Self.maxAdvertisedTags) {
-            guard let tag = try? identity.presenceTag(for: friend.keyAgreementPublicKey, epoch: epoch) else { continue }
-            own.insert(tag.base64EncodedString())
+            do {
+                let tag = try identity.presenceTag(for: friend.keyAgreementPublicKey, epoch: epoch)
+                own.insert(tag.base64EncodedString())
+            } catch {
+                derivationFailures += 1
+            }
         }
         ownTagTokens = own
 
@@ -297,11 +324,18 @@ public final class PresenceManager: ProximityPayloadHandling {
         var candidates: [String: String] = [:]
         for friend in eligible {
             for candidateEpoch in [epoch &- 1, epoch, epoch &+ 1] {
-                guard let tag = try? identity.presenceTag(for: friend.keyAgreementPublicKey, epoch: candidateEpoch) else { continue }
-                candidates[tag.base64EncodedString()] = friend.fingerprint
+                do {
+                    let tag = try identity.presenceTag(for: friend.keyAgreementPublicKey, epoch: candidateEpoch)
+                    candidates[tag.base64EncodedString()] = friend.fingerprint
+                } catch {
+                    derivationFailures += 1
+                }
             }
         }
         candidateTokens = candidates
+        if derivationFailures > 0 {
+            recordDiagnostic("Skipped \(derivationFailures) presence tag(s) — derivation failed.")
+        }
     }
 
     /// The advertised TXT payload: version + own tags ONLY. No display name, no session id —
@@ -362,11 +396,42 @@ public final class PresenceManager: ProximityPayloadHandling {
         guard matchedFingerprintsByPeer[peer.id] != nil else { return }
         peerLostAt[peer.id] = nowProvider()
         // Debounce: the peer stays "nearby" through the grace window (epoch restart flap); the
-        // sweep below only removes peers still absent when it fires. Re-discovery clears the mark.
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(Self.lostGraceInterval + 1))
-            guard !Task.isCancelled else { return }
-            self?.sweepExpiredPeers()
+        // sweep only removes peers still absent when it fires. Re-discovery clears the mark.
+        scheduleLostSweep()
+    }
+
+    /// Arms the single lost-peer sweep, re-arming itself while any mark remains.
+    ///
+    /// R3 (bounded task fan-out): ONE in-flight sweep task per manager, not one 46-second sleeping
+    /// task per lost-peer event — a flapping advertiser used to accumulate tasks in proportion to
+    /// its event rate.
+    private func scheduleLostSweep() {
+        guard lostSweepTask == nil else { return }
+        lostSweepTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(Self.lostGraceInterval + 1))
+            } catch {
+                // Cancelled (stop/teardown): the marks are cleared by `stop()`; nothing to sweep.
+                self?.lostSweepTask = nil
+                return
+            }
+            guard let self else { return }
+            self.lostSweepTask = nil
+            self.sweepExpiredPeers()
+            // Peers marked after this task armed are still inside their grace window — re-arm so
+            // they expire too, and stop re-arming once no marks remain.
+            if !self.peerLostAt.isEmpty { self.scheduleLostSweep() }
+        }
+    }
+
+    /// Records one of our own ephemeral peer-ID display names, evicting the oldest past
+    /// ``maxRememberedEphemeralNames`` so repeated `start()` calls cannot grow the set unboundedly (R3).
+    private func rememberOwnEphemeralPeerName(_ name: String) {
+        guard ownEphemeralPeerNames.insert(name).inserted else { return }
+        ownEphemeralPeerNameOrder.append(name)
+        while ownEphemeralPeerNameOrder.count > Self.maxRememberedEphemeralNames {
+            let oldest = ownEphemeralPeerNameOrder.removeFirst()
+            ownEphemeralPeerNames.remove(oldest)
         }
     }
 
@@ -417,8 +482,12 @@ public final class PresenceManager: ProximityPayloadHandling {
                 // SCOPED strong bindings only — never hold `self` across the sleep (manager-Task
                 // lifetime rule; a strong capture would outlive the owning store and abort).
                 guard let delay = self?.delayToNextEpochBoundary() else { return }
-                try? await Task.sleep(for: .seconds(delay))
-                guard !Task.isCancelled else { return }
+                // Cancellation ends the rotation loop — that IS the recovery (R7).
+                do {
+                    try await Task.sleep(for: .seconds(delay))
+                } catch {
+                    return
+                }
                 if let self {
                     self.rotateEpochIfNeeded()
                 } else {
@@ -843,7 +912,12 @@ public final class PresenceManager: ProximityPayloadHandling {
         cancelHeartConnectTimeout(peerID: peerID)
         let timeout = heartConnectTimeoutSeconds
         heartConnectTimeoutTasks[peerID] = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(timeout))
+            // A cancelled timeout means the channel came up — it must not fire the retry (R7).
+            do {
+                try await Task.sleep(for: .seconds(timeout))
+            } catch {
+                return
+            }
             guard !Task.isCancelled, let self else { return }
             self.heartConnectTimeoutTasks.removeValue(forKey: peerID)
             self.handleHeartConnectTimeout(peerID: peerID, peer: peer, friend: friend)
@@ -867,7 +941,12 @@ public final class PresenceManager: ProximityPayloadHandling {
         session?.disconnectPeer(peer)
         recordDiagnostic("Retrying heart invite.")
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(Self.heartReinviteDelaySeconds))
+            // Cancelled re-invite delay: the send was abandoned, so do not invite (R7).
+            do {
+                try await Task.sleep(for: .seconds(Self.heartReinviteDelaySeconds))
+            } catch {
+                return
+            }
             guard !Task.isCancelled, let self else { return }
             guard self.pendingHeartSends[peerID]?.friend.fingerprint == friend.fingerprint,
                   !self.heartConnections.contains(where: { $0.id == peerID }) else { return }
@@ -961,8 +1040,12 @@ public final class PresenceManager: ProximityPayloadHandling {
     private func scheduleHeartStatusClear() {
         clearHeartStatusTask?.cancel()
         clearHeartStatusTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled else { return }
+            // Cancelled: a newer status replaced this one, so leave `heartSendState` alone (R7).
+            do {
+                try await Task.sleep(for: .seconds(3))
+            } catch {
+                return
+            }
             self?.heartSendState = .idle
         }
     }
@@ -1009,7 +1092,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     }
 
     func registerOwnEphemeralPeerNameForTesting(_ name: String) {
-        ownEphemeralPeerNames.insert(name)
+        rememberOwnEphemeralPeerName(name)
     }
 
     // MARK: - Heart test seams (no real radios)
@@ -1080,7 +1163,9 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// connection is dropped → `false`). Mirrors the deleted heart manager's
     /// `evaluateConnectedCoordinatorForTesting`. The production path is driven by a live
     /// `MeshMultipeerSession` a unit test cannot fake.
-    @discardableResult
+    ///
+    /// Deliberately NOT `@discardableResult` (R7): the `Bool` is the accept/reject signal, so a
+    /// caller that ignores it is ignoring the trust decision.
     func evaluateConnectedCoordinatorForTesting(
         _ coordinator: ProximityCoordinator,
         peer: MultipeerPeer,

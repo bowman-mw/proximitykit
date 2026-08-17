@@ -1,6 +1,7 @@
 import Foundation
 import MultipeerConnectivity
 import FernletDomainModel
+import FernletFoundation
 
 /// A discovered MultipeerConnectivity peer, wrapped with a stable per-discovery `UUID` identity
 /// and the parsed Bonjour discovery info (including the optional advertised fingerprint).
@@ -60,10 +61,10 @@ public struct FileMCPeerIDStore: MCPeerIDStoring {
     public nonisolated let fileURL: URL
 
     public nonisolated init(fileURL: URL? = nil) {
-        self.fileURL = fileURL ?? {
-            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            return support.appendingPathComponent("FernletPeerID.archive")
-        }()
+        // `URL.applicationSupportDirectory` is the non-optional Foundation accessor for the same
+        // path the optional `FileManager.urls(for:in:).first` used to produce (R5: no force unwrap).
+        self.fileURL = fileURL ?? URL.applicationSupportDirectory
+            .appendingPathComponent("FernletPeerID.archive")
     }
 
     public nonisolated func load() -> MCPeerID? {
@@ -72,7 +73,25 @@ public struct FileMCPeerIDStore: MCPeerIDStoring {
     }
 
     public nonisolated func save(_ peerID: MCPeerID) {
-        guard let data = try? NSKeyedArchiver.archivedData(withRootObject: peerID, requiringSecureCoding: true) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        // Best effort, but never silent: losing the archive costs MC peer-identity continuity
+        // (a fresh MCPeerID next launch), so both failure paths are named in the audit log.
+        let data: Data
+        do {
+            data = try NSKeyedArchiver.archivedData(withRootObject: peerID, requiringSecureCoding: true)
+        } catch {
+            FernletAuditLog.log(
+                "proximity.peerIDStore.archiveFailed",
+                context: ["error": String(describing: error)]
+            )
+            return
+        }
+        do {
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            FernletAuditLog.log(
+                "proximity.peerIDStore.saveFailed",
+                context: ["error": String(describing: error)]
+            )
+        }
     }
 }

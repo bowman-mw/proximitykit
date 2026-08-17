@@ -55,7 +55,9 @@ public final class NIRangingSession: NSObject, RangingProvider {
         let session = getOrCreateSession()
         // NISession.discoveryToken can be nil briefly after init; wait one tick for it to populate.
         if session.discoveryToken == nil {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            // This function throws, so cancellation propagates instead of being swallowed (R7):
+            // a cancelled handshake must not go on to archive a token for a session nobody awaits.
+            try await Task.sleep(nanoseconds: 100_000_000)
         }
         guard let token = session.discoveryToken else { throw RangingError.tokenUnavailable }
         return try NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)

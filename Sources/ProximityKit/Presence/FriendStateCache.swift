@@ -97,7 +97,11 @@ public final class FriendStateCache {
         states = states.filter { at.timeIntervalSince($0.value.capturedAt) <= Self.staleAfter }
         if states.count > Self.maxStates {
             let keep = states.values.sorted { $0.capturedAt > $1.capturedAt }.prefix(Self.maxStates)
-            states = Dictionary(uniqueKeysWithValues: keep.map { ($0.fingerprint, $0) })
+            // `uniquingKeysWith` rather than `uniqueKeysWithValues` (R5: no trap). The keys are
+            // unique today because every stored value's `fingerprint` equals its map key, but a
+            // duplicate must prune to the newest row, not crash — the newest wins because `keep`
+            // is sorted `capturedAt` descending.
+            states = Dictionary(keep.map { ($0.fingerprint, $0) }, uniquingKeysWith: { first, _ in first })
         }
         save()
     }
