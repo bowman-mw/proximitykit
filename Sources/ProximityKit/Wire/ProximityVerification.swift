@@ -146,11 +146,21 @@ public nonisolated enum ProximityVerifyQR {
             .replacingOccurrences(of: "=", with: "")
     }
 
+    /// The most `=` characters base64 padding can ever need: a quantum is four characters, so a
+    /// length that is 1, 2, or 3 short of a multiple of four is the worst case. R2: the bound of
+    /// the padding loop below, named at the loop, because the string being padded is untrusted
+    /// scanned/peer input.
+    private static let maxBase64PaddingCharacters = 3
+
     public static func base64URLDecode(_ string: String) -> Data? {
         var padded = string
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
-        while padded.count % 4 != 0 { padded.append("=") }
+        var appended = 0
+        while padded.count % 4 != 0, appended < maxBase64PaddingCharacters {
+            padded.append("=")
+            appended += 1
+        }
         return Data(base64Encoded: padded)
     }
 }

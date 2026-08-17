@@ -135,6 +135,10 @@ public final class ProximityActivityManager {
     /// Creates an activity this device hosts (host is the sole initial participant), signs the initial
     /// roster, persists, and offers it to every currently-committed `.activities` peer. Returns the
     /// descriptor, or nil (no identity / host cap reached / signing failed) with `activityError` set.
+    ///
+    /// Discardable by design (R7): the refusal is not carried by the return value alone — every nil
+    /// path sets the observable ``activityError``, which the hosting screen renders. A caller that
+    /// only needs the side effect is therefore not swallowing anything.
     @discardableResult
     public func host(
         title: String,

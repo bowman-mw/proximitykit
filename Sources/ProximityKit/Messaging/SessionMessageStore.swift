@@ -119,7 +119,6 @@ public final class SessionMessageStore {
     ///
     /// Applies, in order: dedup by id, per-sender rate limit, sanitize + length-cap (empty after
     /// sanitize is dropped). Returns true iff the message was appended (test seam).
-    @discardableResult
     func receiveIncoming(
         id: UUID,
         senderFingerprint: String,

@@ -142,9 +142,17 @@ public final class ModerationLedger {
         }
     }
 
+    /// Reads the sidecar, oldest-first.
+    ///
+    /// R3: the file is external input to this process — it can be larger than ``maxRows`` because a
+    /// build with a higher cap wrote it, or because it was tampered with — so the total cap is applied
+    /// on the way IN as well as in `upsert`. Without it, a single oversized file leaves the ledger
+    /// permanently over its bound: `upsert` only trims when it appends, and the reads that scan `rows`
+    /// would work over an unbounded array until the next report.
     private func load() {
         guard let state = file.load() else { return }
-        rows = state.rows.sorted { $0.createdAt < $1.createdAt }
+        let ordered = state.rows.sorted { $0.createdAt < $1.createdAt }
+        rows = Array(ordered.suffix(Self.maxRows))   // newest kept, matching upsert's eviction
     }
 
     private func save() {

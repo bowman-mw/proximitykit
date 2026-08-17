@@ -52,6 +52,10 @@ public enum IdentityError: Error, Equatable {
     /// Raised instead of caching an identity that exists only in memory: adopting one would mint a
     /// DIFFERENT identity on the next launch and silently break every trust relationship.
     case keychainWriteFailed
+    /// A keychain sweep the identity depends on did not land, carrying the failing `OSStatus`.
+    /// Raised by ``IdentityService/wipe()`` so a "your identity is gone" promise the keychain
+    /// refused is loud rather than silent — the private keys may still be on the device.
+    case keychainDeleteFailed(OSStatus)
 }
 
 // MARK: - IdentityService
@@ -862,11 +866,21 @@ public final class IdentityService {
     }
 
     /// Wipes identity. Breaks every existing trust relationship.
+    ///
+    /// R7: the sweep's `OSStatus` is checked, not dropped. The in-memory keys are cleared FIRST —
+    /// so this process holds no identity either way — and only then is a refusing keychain reported
+    /// as ``IdentityError/keychainDeleteFailed(_:)``. A caller that believed a silent wipe would
+    /// tell the user their identity was destroyed while the private keys sat in the keychain.
+    ///
+    /// - Throws: ``IdentityError/keychainDeleteFailed(_:)`` when the keychain rows survive.
     public func wipe() throws {
-        KeychainItem.deleteAll(service: keychainService)
+        let status = KeychainItem.deleteAllReportingStatus(service: keychainService)
         signingKey = nil
         keyAgreementKey = nil
         backupEscrowKey = nil
+        guard status != errSecSuccess else { return }
+        FernletAuditLog.log("identity.wipe.keychainDeleteFailed", context: ["status": "\(status)"])
+        throw IdentityError.keychainDeleteFailed(status)
     }
 
     /// 16-char lowercase hex prefix of SHA-256(publicKey). Suitable for user-facing display.

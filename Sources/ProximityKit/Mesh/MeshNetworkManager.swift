@@ -547,13 +547,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // Display name comes from the handshake-verified identity (peerIdentity.displayName),
             // NOT envelope.senderDisplayName — the latter is a per-message wire claim a committed
             // member could set to another member's name to impersonate them in the transcript.
-            self.sessionMessages.receiveIncoming(
+            // R7: `false` means the store refused the message (duplicate id, empty after
+            // sanitizing, or a per-sender flood cap). Nothing to retry — the sender is gone by now —
+            // but a message that silently never appears in the transcript must be attributable.
+            let accepted = self.sessionMessages.receiveIncoming(
                 id: payload.id,
                 senderFingerprint: fingerprint,
                 senderDisplayName: peerIdentity.displayName,
                 text: payload.text,
                 sentAt: payload.sentAt
             )
+            if !accepted {
+                FernletAuditLog.log("mesh.tempMessage.refused")
+            }
         }
     }
 
@@ -2088,7 +2094,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Scanner side: a `fernlet://verify` QR was scanned. Validates signature + freshness, binds
     /// it to the awaiting slot presenting the SAME signing key, and opens the sealed challenge
     /// round. Returns false when the QR is invalid/stale or no awaiting slot matches.
-    @discardableResult
+    ///
+    /// A rejected scan is the whole point of the ceremony, so the result is not discardable (R7):
+    /// the scanning row surfaces the refusal to the user rather than letting the sheet close as if
+    /// the code had been accepted.
     public func beginQRVerification(with url: URL) -> Bool {
         guard let payload = ProximityVerifyQR.parse(url), ProximityVerifyQR.isValid(payload) else {
             FernletAuditLog.log("mesh.verifyQR.invalidScanned")

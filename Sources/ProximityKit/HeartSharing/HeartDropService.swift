@@ -55,6 +55,11 @@ public final class HeartDropService {
         /// write, or an unrecoverable store that had to be quarantined). Track A's
         /// nothing-silent surface: queued hearts are not flowing and new ones are refused.
         case storageUnavailable
+        /// INCOMING hearts cannot be fetched: the dead-drop query has failed
+        /// ``HeartDropService/failingFetchThreshold`` consecutive passes. `since` is when the
+        /// outage started. The mirror image of ``uploadFailing(since:)`` — without it, a friend
+        /// who keeps sending sees delivery succeed while this device silently receives nothing.
+        case incomingUnreachable(since: Date)
     }
 
     /// Fetch looks back exactly as far as the sender keeps retrying, DERIVED from the outbox
@@ -77,6 +82,10 @@ public final class HeartDropService {
     public static let createdAtSkewTolerance: TimeInterval = 24 * 3600
     /// Upload retries on one heart before delivery is reported as failing.
     public static let failingAttemptThreshold = 3
+    /// Consecutive failed incoming-fetch passes before the outage is surfaced. Same shape (and
+    /// same value) as ``failingAttemptThreshold``: one failed query is a blip, three in a row —
+    /// each at least ``minimumSyncInterval`` apart — is an outage the user should be told about.
+    public static let failingFetchThreshold = 3
     /// Floor between unforced `syncNow()` passes. Drops are days-scale by nature, so a minute of
     /// staleness costs the user nothing, while the scene/tab listener that calls it can fire many
     /// times a minute.
@@ -120,6 +129,11 @@ public final class HeartDropService {
     @ObservationIgnored private var purgeGeneration = 0
     /// When the last pass actually started — the throttle floor for `syncNow()`.
     @ObservationIgnored private var lastSyncStartedAt: Date?
+    /// Consecutive failed incoming-fetch passes, and when the run of failures began. Process-local
+    /// for the same reason `undeliveredCount` is: a nudge, not a record. Reset by any successful
+    /// fetch, so a single blip never reaches ``failingFetchThreshold``.
+    @ObservationIgnored private var fetchFailureStreak = 0
+    @ObservationIgnored private var fetchFailingSince: Date?
 
     public init(
         ledger: ProximityHeartLedger,
@@ -514,6 +528,11 @@ public final class HeartDropService {
         } else if let failure = outbox.uploadFailureState(),
                   failure.maxAttempts >= Self.failingAttemptThreshold {
             deliveryProblem = .uploadFailing(since: failure.oldestCreatedAt)
+        } else if fetchFailureStreak >= Self.failingFetchThreshold, let since = fetchFailingSince {
+            // Ranked last: an outbound failure is about hearts the user themself sent, which is the
+            // more actionable of the two. This is the inbound half — nothing queued here is stuck,
+            // but hearts sent TO this device are not arriving, and that must not be silent.
+            deliveryProblem = .incomingUnreachable(since: since)
         } else {
             deliveryProblem = nil
         }
@@ -532,7 +551,8 @@ public final class HeartDropService {
             // The sticky data-loss marker is a nudge, not a record; seen = done. An actual
             // still-unavailable sidecar re-raises on the next sync regardless.
             outbox.acknowledgeDataLoss()
-        case .noAccount, .uploadFailing, nil:
+        case .noAccount, .uploadFailing, .incomingUnreachable, nil:
+            // Nothing sticky to clear: each re-derives from live state on the next sync.
             break
         }
         deliveryProblem = nil
@@ -578,11 +598,17 @@ public final class HeartDropService {
         do {
             records = try await transport.fetch(tags: Array(tagOwner.keys))
         } catch {
-            // Nothing-silent: a failing fetch means incoming hearts stop arriving. Counted so a
-            // persistent outage surfaces the same way a persistent upload failure does.
+            // Nothing-silent: a failing fetch means incoming hearts stop arriving. COUNTED, so a
+            // persistent outage surfaces the same way a persistent upload failure does — the log
+            // line alone was invisible to the person waiting for hearts that never came.
             FernletAuditLog.log("heartdrop.fetch.failed", context: ["error": String(describing: error)])
+            fetchFailureStreak += 1
+            if fetchFailingSince == nil { fetchFailingSince = now() }
             return
         }
+        // A pass that answered resets the run: one blip never reaches the threshold.
+        fetchFailureStreak = 0
+        fetchFailingSince = nil
         guard !Task.isCancelled, isEnabled() else { return }
         for record in records {
             openIncoming(record, expectedSender: tagOwner[record.tag])
@@ -746,7 +772,8 @@ public final class HeartDropService {
     ///
     /// Returns false when the remote delete did not succeed; the outbox is then KEPT so a later
     /// attempt can retry, since a public-DB record nobody can name is a record nobody can remove.
-    @discardableResult
+    /// The result is a success/failure signal, so it is not discardable (R7) — a caller that drops
+    /// it cannot tell "your hearts are off the server" from "they are still there".
     public func purgeDeadDrop() async -> Bool {
         cancelInFlightSync()
         // The consent-off path is also the retention tick for the local prekey material: a user who
