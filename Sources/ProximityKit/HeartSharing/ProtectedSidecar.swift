@@ -65,7 +65,8 @@ public struct SidecarSeal {
 ///
 /// Retry is driven both on access (with a floor, because `hasCapacity`-style accessors are read
 /// from view bodies every render) and proactively from
-/// `UIApplication.protectedDataDidBecomeAvailableNotification`.
+/// `UIApplication.protectedDataDidBecomeAvailableNotification` — via ``ProtectedDataRetrying``,
+/// so the hop never captures this class's generic metatype.
 @MainActor
 public final class ProtectedSidecar<Value: Codable> {
 
@@ -173,12 +174,16 @@ public final class ProtectedSidecar<Value: Codable> {
         #if canImport(UIKit)
         if observeProtectedData {
             // The block runs nonisolated under Swift 6 — never touch state directly; hop first.
+            // The hop goes through the non-generic `ProtectedDataRetrying` erasure of `self`: a
+            // `Task { @MainActor … }` closure that called `self?.retryLoad()` directly would
+            // capture `Value.Type`, which is not Sendable for a generic parameter (SE-0470).
+            let retrying: any ProtectedDataRetrying = self
             protectedDataObserver = NotificationCenter.default.addObserver(
                 forName: UIApplication.protectedDataDidBecomeAvailableNotification,
                 object: nil,
                 queue: nil
-            ) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.retryLoad() }
+            ) { [weak retrying] _ in
+                Task { @MainActor [weak retrying] in retrying?.retryLoad() }
             }
         }
         #endif
@@ -424,3 +429,25 @@ public final class ProtectedSidecar<Value: Codable> {
         }
     }
 }
+
+// MARK: - Unlock-notification hop seam
+
+/// The non-generic face of ``ProtectedSidecar`` that the protected-data-available notification
+/// hop calls through.
+///
+/// `Task { @MainActor … }` takes a `@Sendable` closure, and a closure that calls a method on the
+/// generic sidecar directly captures `Value.Type` — not Sendable for a generic parameter (SE-0470),
+/// and constraining `Value: SendableMetatype` would in turn reject every payload whose `Codable`
+/// conformance is main-actor isolated (all of them are: they are nested in `@MainActor` stores).
+/// Erasing `self` to this existential once, in the generic initializer, keeps the hop free of the
+/// metatype. `Sendable` so the erased reference can be weakly captured by the notification block;
+/// the conformer is `@MainActor` and therefore Sendable already.
+@MainActor
+private protocol ProtectedDataRetrying: AnyObject, Sendable {
+    /// Re-attempts a deferred load; see ``ProtectedSidecar/retryLoad()``. The result is
+    /// irrelevant to the notification hop, exactly as before the erasure.
+    @discardableResult
+    func retryLoad() -> Bool
+}
+
+extension ProtectedSidecar: ProtectedDataRetrying {}
