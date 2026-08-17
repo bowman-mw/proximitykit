@@ -1,4 +1,5 @@
 import Foundation
+import FernletFoundation
 
 /// Cached prekey bundles gossiped by friends, plus this device's per-friend consumed-prekey
 /// marking (bitchat adoptions Increment 3). Provenance: a bundle is only ever stored from a
@@ -50,6 +51,8 @@ public final class HeartDropPeerBundleCache {
     /// while. `HeartPrekeyStore.spkRetention` must exceed this + the outbox lifetime + skew
     /// (invariant test), or drops sealed near the end of the window silently fail to open.
     public static let maxSealSignedPrekeyAge: TimeInterval = 14 * 24 * 3600
+    /// Raw X25519 public-key length — the entry validation a peer-supplied bundle must satisfy.
+    static let rawCurve25519KeyByteCount = 32
 
     private let sidecar: ProtectedSidecar<[String: PeerState]>
     private let now: () -> Date
@@ -83,8 +86,9 @@ public final class HeartDropPeerBundleCache {
     }
 
     public var isAvailable: Bool { sidecar.state == .ready }
-    @discardableResult
-    public func retryLoad() -> Bool { sidecar.retryLoad() }
+    /// Re-attempts the sidecar's pending recovery. Void (R7): the old Bool was exactly
+    /// ``isAvailable`` afterwards, which callers read directly.
+    public func retryLoad() { sidecar.retryLoad() }
 
     /// Stores/refreshes a friend's gossiped bundle. The two slots update INDEPENDENTLY
     /// (Track B Increment 6):
@@ -100,6 +104,18 @@ public final class HeartDropPeerBundleCache {
     /// never replace a newer one — doing so would also clear `consumedIDs` and re-enable prekeys
     /// we already sealed to, silently degrading forward secrecy toward the static key.
     public func store(bundle: HeartPrekeyStore.Bundle, forFriendSigningKey key: Data) {
+        // R5 (validate at entry): the bundle is peer-supplied. Key MATERIAL that is not a raw
+        // Curve25519 public key can never be sealed to — `HeartDropSealer.seal` throws
+        // `noRecipientKey` and `queueHeart` then returns `.failed` for EVERY heart to this friend
+        // instead of falling back to the static key. Reject the malformed bundle here so bad
+        // gossip cannot become a persistent send failure. (The map key is deliberately NOT
+        // length-checked: it is an opaque cache key, never key material.)
+        guard bundle.keys.allSatisfy({ $0.publicKey.count == Self.rawCurve25519KeyByteCount }),
+              bundle.signedPrekey.map({ $0.publicKey.count == Self.rawCurve25519KeyByteCount }) ?? true,
+              Set(bundle.keys.map(\.id)).count == bundle.keys.count else {
+            FernletAuditLog.log("heartdrop.peerBundles.rejectedMalformed")
+            return
+        }
         let currentTime = now()
         let hasStorableOneTime = !bundle.keys.isEmpty && bundle.keys.count <= Self.maxBundleKeys
             && bundle.expires > currentTime
@@ -109,7 +125,7 @@ public final class HeartDropPeerBundleCache {
         guard hasStorableOneTime || storableSPK != nil else { return }
         guard sidecar.read() != nil, isAvailable else { return }
         let mapKey = Self.mapKey(key)
-        sidecar.mutateIfPersisted { peers in
+        let stored = sidecar.mutateIfPersisted { peers in
             var state = peers[mapKey]
 
             if hasStorableOneTime {
@@ -154,6 +170,12 @@ public final class HeartDropPeerBundleCache {
             peers[mapKey] = updated
             Self.evictIfOverCap(&peers, at: currentTime)
         }
+        if !stored {
+            // Benign — the bundle re-gossips at the friend's next verified intro — but a bundle
+            // that silently never cached would degrade every heart to that friend to the static
+            // key with no trace (R7).
+            FernletAuditLog.log("heartdrop.peerBundles.storeNotPersisted")
+        }
     }
 
     /// Picks the best sealing key for the friend: a fresh unconsumed ONE-TIME prekey first
@@ -187,11 +209,14 @@ public final class HeartDropPeerBundleCache {
 
         if let spk = state.signedPrekey,
            currentTime.timeIntervalSince(spk.created) <= Self.maxSealSignedPrekeyAge {
-            sidecar.mutateIfPersisted { peers in
+            let touched = sidecar.mutateIfPersisted { peers in
                 guard var state = peers[mapKey] else { return }
                 state.lastUsedAt = currentTime
                 peers[mapKey] = state
             }
+            // The LRU touch is bookkeeping only — the signed prekey is reusable and nothing was
+            // burned — so the seal proceeds either way; the failure is named, not swallowed (R7).
+            if !touched { FernletAuditLog.log("heartdrop.peerBundles.lruTouchNotPersisted") }
             return (spk.id, spk.publicKey, false)
         }
         return nil
@@ -203,11 +228,16 @@ public final class HeartDropPeerBundleCache {
     /// the cached bundle still contains the id, so a rotation in between is a no-op.
     public func returnPrekey(id: UUID, forFriendSigningKey key: Data) {
         let mapKey = Self.mapKey(key)
-        sidecar.mutateIfPersisted { peers in
+        let returned = sidecar.mutateIfPersisted { peers in
             guard var state = peers[mapKey], state.consumedIDs.contains(id),
                   state.bundle.keys.contains(where: { $0.id == id }) else { return }
             state.consumedIDs.remove(id)
             peers[mapKey] = state
+        }
+        if !returned {
+            // The key stays burned: one fewer one-time prekey for this friend, never a
+            // correctness problem — but it is forward secrecy quietly lost, so name it (R7).
+            FernletAuditLog.log("heartdrop.peerBundles.returnNotPersisted")
         }
     }
 

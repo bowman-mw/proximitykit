@@ -138,7 +138,9 @@ public final class ProtectedSidecar<Value: Codable> {
     private let readData: (URL) throws -> Data
     private let writeData: (Data, URL) throws -> Void
     private var lastFailedLoadAt: Date?
-    private nonisolated(unsafe) var protectedDataObserver: (any NSObjectProtocol)?
+    /// R9: a plain isolated `var` — the `isolated deinit` below runs on the main actor, so the
+    /// token no longer needs `nonisolated(unsafe)` to be readable while tearing down.
+    private var protectedDataObserver: (any NSObjectProtocol)?
 
     public init(
         fileURL: URL,
@@ -161,6 +163,9 @@ public final class ProtectedSidecar<Value: Codable> {
         self.quarantinesUnreadableSealedData = quarantinesUnreadableSealedData
         self.now = now
         self.readData = readData ?? { try Data(contentsOf: $0) }
+        // Captured by value (not through `self`, which is still initializing) so the default
+        // writer can name the store in its audit line.
+        let auditPrefixForWrites = auditPrefix
         self.writeData = writeData ?? { data, url in
             try data.write(to: url, options: [.atomic, .completeFileProtection])
             // O1: the sidecars are device-scoped (their seal key is ThisDeviceOnly), so file and
@@ -168,7 +173,15 @@ public final class ProtectedSidecar<Value: Codable> {
             var values = URLResourceValues()
             values.isExcludedFromBackup = true
             var mutableURL = url
-            try? mutableURL.setResourceValues(values)
+            do {
+                try mutableURL.setResourceValues(values)
+            } catch {
+                // Benign — the bytes themselves are sealed (Increment 4), so the exclusion is
+                // defense in depth — but a sidecar that can ride into a backup must not do so
+                // silently.
+                FernletAuditLog.log("\(auditPrefixForWrites).backupExclusionFailed",
+                                    context: ["error": String(describing: error)])
+            }
         }
         performLoad()
         #if canImport(UIKit)
@@ -189,7 +202,7 @@ public final class ProtectedSidecar<Value: Codable> {
         #endif
     }
 
-    deinit {
+    isolated deinit {
         if let protectedDataObserver {
             NotificationCenter.default.removeObserver(protectedDataObserver)
         }
@@ -226,11 +239,14 @@ public final class ProtectedSidecar<Value: Codable> {
     /// failed write (the outbox's `markUploaded` record name is already on the server — losing
     /// it strands the record). On write failure the value stays in memory as the truth and the
     /// store goes `.unavailable` until a later persist lands it.
-    @discardableResult
+    /// No `@discardableResult` (R7): the outcome is a success/failure signal. Callers that
+    /// deliberately proceed regardless use ``mutateCommitting(_:)``, which names the ignore once.
     public func mutate(_ body: (inout Value) -> Void) -> MutateOutcome {
         retryLoadIfFloorAllows()
         switch storage {
         case .unloaded:
+            // Logged here so a dropped mutation is never silent, whichever caller hit it.
+            FernletAuditLog.log("\(auditPrefix).mutateRefused")
             return .refused
         case .ready(let value), .dirty(let value):
             var updated = value
@@ -240,8 +256,18 @@ public final class ProtectedSidecar<Value: Codable> {
                 return .persisted
             }
             storage = .dirty(updated)
-            FernletAuditLog.log("\(auditPrefix).writeFailed")
             return .appliedNotPersisted
+        }
+    }
+
+    /// ``mutate(_:)`` for the commit-on-failure call sites that have no further recovery: the
+    /// caller's own guards already proved the store is loaded, and BOTH non-`.persisted` outcomes
+    /// are audit-logged inside (`writeFailed` / `mutateRefused`). Exists so the "ignore the
+    /// outcome" decision lives in one named place instead of at every mutation site.
+    public func mutateCommitting(_ body: (inout Value) -> Void) {
+        switch mutate(body) {
+        case .persisted, .appliedNotPersisted, .refused:
+            break
         }
     }
 
@@ -250,7 +276,8 @@ public final class ProtectedSidecar<Value: Codable> {
     /// — the record stays on the server / the prekey stays unburned — but a mark that exists in
     /// memory and not on disk would lie. A `.dirty` store first tries to flush its pending
     /// value; if that write still fails, the mutation is refused.
-    @discardableResult
+    /// No `@discardableResult` (R7): false means the mutation did NOT commit, which every caller
+    /// has to act on (or name why it does not).
     public func mutateIfPersisted(_ body: (inout Value) -> Void) -> Bool {
         retryLoadIfFloorAllows()
         if case .dirty = storage { retryLoad() }
@@ -264,22 +291,19 @@ public final class ProtectedSidecar<Value: Codable> {
 
     /// Re-attempts whichever recovery the current state needs: a failed LOAD is re-read; a
     /// failed WRITE re-persists the in-memory truth (never re-reads — the disk copy is older).
-    /// Returns true when the store is `.ready` afterwards.
-    @discardableResult
-    public func retryLoad() -> Bool {
+    ///
+    /// Returns nothing (R7): the old `Bool` was exactly `state == .ready` afterwards, so callers
+    /// read ``state``/``isLoaded`` directly instead of discarding a success value. Every failure
+    /// path audit-logs inside (`writeFailed` from `attemptWrite`, `readDeferred` from the load).
+    public func retryLoad() {
         switch storage {
         case .ready:
-            return true
+            return
         case .dirty(let value):
-            if attemptWrite(value) {
-                storage = .ready(value)
-                return true
-            }
-            return false
+            if attemptWrite(value) { storage = .ready(value) }
         case .unloaded:
             performLoad()
             if isLoaded { onRecovery?() }
-            return state == .ready
         }
     }
 
@@ -290,8 +314,8 @@ public final class ProtectedSidecar<Value: Codable> {
     /// Delete-all seam: removes the primary file AND the quarantine file, and resets to a
     /// ready-empty state (after a wipe, empty IS the truth — even if the store was unavailable).
     public func wipe() {
-        try? FileManager.default.removeItem(at: fileURL)
-        try? FileManager.default.removeItem(at: quarantineURL)
+        removeItemLoggingFailure(at: fileURL, what: "primary")
+        removeItemLoggingFailure(at: quarantineURL, what: "quarantine")
         storage = .ready(empty())
         dataLossOccurred = false
         lastFailedLoadAt = nil
@@ -378,8 +402,24 @@ public final class ProtectedSidecar<Value: Codable> {
         }
         FernletAuditLog.log("\(auditPrefix).corrupt", context: ["salvaged": "0", "lost": "all"])
         dataLossOccurred = true
-        try? FileManager.default.removeItem(at: fileURL)
+        removeItemLoggingFailure(at: fileURL, what: "corruptDiscard")
         storage = .ready(empty())
+    }
+
+    /// Best-effort file removal that still names its failure (R7): "already absent" IS the goal,
+    /// anything else is logged, because a file that survives a wipe/discard must not do so
+    /// silently. Removal failure never changes the caller's state transition — the next persist
+    /// overwrites the file either way.
+    private func removeItemLoggingFailure(at url: URL, what: String) {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch CocoaError.fileNoSuchFile {
+            return
+        } catch {
+            FernletAuditLog.log("\(auditPrefix).removeFailed", context: [
+                "what": what, "error": String(describing: error)
+            ])
+        }
     }
 
     private func deferLoad(reason: String) {
@@ -393,11 +433,19 @@ public final class ProtectedSidecar<Value: Codable> {
         if quarantinesUnreadableSealedData {
             // Ciphertext without its key is privacy-inert; parking it preserves a durable
             // marker that data was lost (and the wipe owns the quarantine path).
-            try? FileManager.default.removeItem(at: quarantineURL)
-            try? FileManager.default.moveItem(at: fileURL, to: quarantineURL)
-            FernletAuditLog.log("\(auditPrefix).quarantined")
+            removeItemLoggingFailure(at: quarantineURL, what: "staleQuarantine")
+            do {
+                try FileManager.default.moveItem(at: fileURL, to: quarantineURL)
+                FernletAuditLog.log("\(auditPrefix).quarantined")
+            } catch {
+                // The durable marker could not be parked: the unopenable bytes stay at fileURL
+                // and the next persist overwrites them (the delete policy's outcome). Say so
+                // rather than logging "quarantined" for something that never moved.
+                FernletAuditLog.log("\(auditPrefix).quarantineFailed",
+                                    context: ["error": String(describing: error)])
+            }
         } else {
-            try? FileManager.default.removeItem(at: fileURL)
+            removeItemLoggingFailure(at: fileURL, what: "unopenableDiscard")
             FernletAuditLog.log("\(auditPrefix).unopenableDiscarded")
         }
         storage = .ready(empty())
@@ -425,6 +473,10 @@ public final class ProtectedSidecar<Value: Codable> {
             try writeData(fileBytes, fileURL)
             return true
         } catch {
+            // Logged at the seam, so every write failure is named once regardless of which
+            // mutation path hit it (`mutate`, `mutateIfPersisted`, or a `.dirty` re-persist).
+            FernletAuditLog.log("\(auditPrefix).writeFailed",
+                                context: ["error": String(describing: error)])
             return false
         }
     }
@@ -444,10 +496,8 @@ public final class ProtectedSidecar<Value: Codable> {
 /// the conformer is `@MainActor` and therefore Sendable already.
 @MainActor
 private protocol ProtectedDataRetrying: AnyObject, Sendable {
-    /// Re-attempts a deferred load; see ``ProtectedSidecar/retryLoad()``. The result is
-    /// irrelevant to the notification hop, exactly as before the erasure.
-    @discardableResult
-    func retryLoad() -> Bool
+    /// Re-attempts a deferred load; see ``ProtectedSidecar/retryLoad()``.
+    func retryLoad()
 }
 
 extension ProtectedSidecar: ProtectedDataRetrying {}

@@ -36,6 +36,18 @@ public nonisolated struct ModerationReportPayload: Codable, Equatable, Sendable 
     public init(reports: [SignedModerationReport]) {
         self.reports = Array(reports.prefix(Self.maxReports))
     }
+
+    /// Hand-written so the cap holds on the RECEIVE path too (R3): the synthesized `Decodable`
+    /// bypassed `init(reports:)`, so a peer could ship thousands of self-signed rows and have
+    /// every one signature-verified and upserted.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        format = try container.decodeIfPresent(String.self, forKey: .format)
+            ?? "fernlet.proximity.moderation.report"
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        let decoded = try container.decodeIfPresent([SignedModerationReport].self, forKey: .reports) ?? []
+        reports = Array(decoded.prefix(Self.maxReports))
+    }
 }
 
 /// Builds and verifies the one-hop moderation-report wire (Phase 3b): a reporter hands only rows
@@ -71,7 +83,8 @@ public enum ModerationReportRelay {
     /// signed one). `reporterSeq` is preserved so a retract still supersedes its report.
     public static func verifiedRows(from payload: ModerationReportPayload, senderSigningKey: Data, now: Date) -> [ModerationLedgerEntry] {
         let senderFingerprint = IdentityService.fingerprint(of: senderSigningKey)
-        return payload.reports.compactMap { signed in
+        // R3: the cap is applied where the input ENTERS, not only in the memberwise init.
+        return payload.reports.prefix(ModerationReportPayload.maxReports).compactMap { signed in
             let entry = signed.entry
             guard entry.reporterSigningPublicKey == senderSigningKey else { return nil }       // one-hop
             guard entry.kind == .report || entry.kind == .retract else { return nil }

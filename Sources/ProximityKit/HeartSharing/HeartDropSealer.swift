@@ -135,7 +135,13 @@ public nonisolated enum HeartDropSealer {
     // MARK: - UUID ↔ bytes
 
     static func uuidData(_ id: UUID) -> Data {
-        withUnsafeBytes(of: id.uuid) { Data($0) }
+        // R9: the tuple form, not `withUnsafeBytes(of:)` — `uuid_t` is 16 `UInt8` in wire order,
+        // so this is byte-identical to the pointer walk and mirrors `uuid(from:)` below.
+        let raw = id.uuid
+        return Data([
+            raw.0, raw.1, raw.2, raw.3, raw.4, raw.5, raw.6, raw.7,
+            raw.8, raw.9, raw.10, raw.11, raw.12, raw.13, raw.14, raw.15
+        ])
     }
 
     static func uuid(from data: Data) -> UUID? {

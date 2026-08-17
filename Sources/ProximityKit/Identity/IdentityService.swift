@@ -48,6 +48,10 @@ public enum IdentityError: Error, Equatable {
     case invalidKeyData
     case sealFailed
     case openFailed
+    /// A keychain write that the identity depends on did not land (`OSStatus != errSecSuccess`).
+    /// Raised instead of caching an identity that exists only in memory: adopting one would mint a
+    /// DIFFERENT identity on the next launch and silently break every trust relationship.
+    case keychainWriteFailed
 }
 
 // MARK: - IdentityService
@@ -248,6 +252,13 @@ public final class IdentityService {
 
     // MARK: - Heart drops (bitchat adoptions Increment 3)
 
+    /// Big-endian (MSB-first) serialization of a 64-bit counter for the domain-separated HMAC
+    /// messages below — the R9-safe replacement for `withUnsafeBytes(of: value.bigEndian)`,
+    /// byte-identical to it, so every pinned tag vector still matches.
+    private nonisolated static func bigEndianBytes(_ value: UInt64) -> [UInt8] {
+        (0..<8).map { UInt8(truncatingIfNeeded: value >> (56 - 8 * $0)) }
+    }
+
     /// UTC day index for heart-drop tag rotation (bitchat's day-rotating courier recipient tags).
     public nonisolated static func heartDropDayEpoch(at date: Date) -> UInt64 {
         UInt64(max(0, date.timeIntervalSince1970) / 86_400)
@@ -280,7 +291,7 @@ public final class IdentityService {
         senderKeyAgreementPublicKey: Data
     ) -> String {
         var message = Data("fernlet.heartdrop.day.v1".utf8)
-        withUnsafeBytes(of: dayEpoch.bigEndian) { message.append(contentsOf: $0) }
+        message.append(contentsOf: Self.bigEndianBytes(dayEpoch))
         message.append(senderKeyAgreementPublicKey)
         let mac = HMAC<SHA256>.authenticationCode(for: message, using: pairSecret)
         return Data(mac).prefix(16).map { String(format: "%02x", $0) }.joined()
@@ -345,7 +356,7 @@ public final class IdentityService {
     public func presenceTag(for friendKeyAgreementPublicKey: Data, epoch: UInt64) throws -> Data {
         let secret = try presencePairSecret(with: friendKeyAgreementPublicKey)
         var message = Data("fernlet.presence.epoch.v1".utf8)
-        withUnsafeBytes(of: epoch.bigEndian) { message.append(contentsOf: $0) }
+        message.append(contentsOf: Self.bigEndianBytes(epoch))
         let mac = HMAC<SHA256>.authenticationCode(for: message, using: secret)
         return Data(Data(mac).prefix(Self.presenceTagByteCount))
     }
@@ -372,7 +383,9 @@ public final class IdentityService {
 
         var bundle = Data()
         bundle.append(ephemeralKey.publicKey.rawRepresentation)          // 32 B
-        gcmNonce.withUnsafeBytes { bundle.append(contentsOf: $0) }      // 12 B
+        // R9: `AES.GCM.Nonce` is a `Sequence` of `UInt8`, so the raw-pointer walk is unnecessary;
+        // same 12 bytes, same order, unchanged 92-byte wire layout.
+        bundle.append(contentsOf: gcmNonce)                              // 12 B
         bundle.append(sealedBox.ciphertext)                              // 32 B
         bundle.append(sealedBox.tag)                                     // 16 B
         return bundle
@@ -429,24 +442,13 @@ public final class IdentityService {
         let deviceOnly = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as CFString
 
         // Case 1: Signing + proximity KA keys present on this device (normal relaunch).
-        if let sigData = KeychainItem.load(account: IdentityKeychainKey.signingPrivateKey.rawValue, service: keychainService),
-           let kaData  = KeychainItem.load(account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue, service: keychainService),
-           let loadedSigning = try? Curve25519.Signing.PrivateKey(rawRepresentation: sigData),
-           let loadedKA      = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: kaData) {
-
-            signingKey      = loadedSigning
-            keyAgreementKey = loadedKA
-
+        if let existing = loadExistingDeviceIdentity() {
+            signingKey      = existing.signing
+            keyAgreementKey = existing.keyAgreement
             // Adopt an existing backup escrow key if one is present (synced preferred). Do NOT mint one
             // here — escrow generation is deferred to sealed-backup-enable time (WS-1).
             backupEscrowKey = loadExistingEscrowKey()
-
-            // Migrate proximity KA key to device-only (removes synchronizable flag if set).
-            KeychainItem.store(loadedKA.rawRepresentation,
-                               account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue,
-                               service: keychainService,
-                               accessibility: deviceOnly,
-                               synchronizable: false)
+            migrateKeyAgreementKeyToDeviceOnly(existing.keyAgreement, accessibility: deviceOnly)
             return
         }
 
@@ -458,18 +460,7 @@ public final class IdentityService {
         if let loadedEscrow = loadExistingEscrowKey() {
             let newSigning = Curve25519.Signing.PrivateKey()
             let newKA      = Curve25519.KeyAgreement.PrivateKey()
-            KeychainItem.store(newSigning.rawRepresentation,
-                               account: IdentityKeychainKey.signingPrivateKey.rawValue,
-                               service: keychainService, accessibility: deviceOnly)
-            KeychainItem.store(newSigning.publicKey.rawRepresentation,
-                               account: IdentityKeychainKey.signingPublicKeyCache.rawValue,
-                               service: keychainService, accessibility: deviceOnly)
-            KeychainItem.store(newKA.rawRepresentation,
-                               account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue,
-                               service: keychainService, accessibility: deviceOnly)
-            KeychainItem.store(newKA.publicKey.rawRepresentation,
-                               account: IdentityKeychainKey.keyAgreementPublicKeyCache.rawValue,
-                               service: keychainService, accessibility: deviceOnly)
+            try persistFreshDeviceIdentity(signing: newSigning, keyAgreement: newKA, accessibility: deviceOnly)
             signingKey      = newSigning
             keyAgreementKey = newKA
             backupEscrowKey = loadedEscrow
@@ -485,23 +476,8 @@ public final class IdentityService {
            let loadedKA = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: kaData) {
             let newSigning = Curve25519.Signing.PrivateKey()
             let newKA      = Curve25519.KeyAgreement.PrivateKey()
-            KeychainItem.store(loadedKA.rawRepresentation,
-                               account: Self.escrowKeychainAccount(forPublicKey: loadedKA.publicKey.rawRepresentation),
-                               service: keychainService,
-                               accessibility: kSecAttrAccessibleAfterFirstUnlock,
-                               synchronizable: true)
-            KeychainItem.store(newSigning.rawRepresentation,
-                               account: IdentityKeychainKey.signingPrivateKey.rawValue,
-                               service: keychainService, accessibility: deviceOnly)
-            KeychainItem.store(newSigning.publicKey.rawRepresentation,
-                               account: IdentityKeychainKey.signingPublicKeyCache.rawValue,
-                               service: keychainService, accessibility: deviceOnly)
-            KeychainItem.store(newKA.rawRepresentation,
-                               account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue,
-                               service: keychainService, accessibility: deviceOnly)
-            KeychainItem.store(newKA.publicKey.rawRepresentation,
-                               account: IdentityKeychainKey.keyAgreementPublicKeyCache.rawValue,
-                               service: keychainService, accessibility: deviceOnly)
+            try promoteLegacyKeyAgreementKeyToEscrow(loadedKA)
+            try persistFreshDeviceIdentity(signing: newSigning, keyAgreement: newKA, accessibility: deviceOnly)
             signingKey      = newSigning
             keyAgreementKey = newKA
             backupEscrowKey = loadedKA
@@ -512,21 +488,83 @@ public final class IdentityService {
         // enable time (WS-1), so a fresh device never publishes a divergent synchronizable escrow key.
         let newSigning = Curve25519.Signing.PrivateKey()
         let newKA      = Curve25519.KeyAgreement.PrivateKey()
-        KeychainItem.store(newSigning.rawRepresentation,
-                           account: IdentityKeychainKey.signingPrivateKey.rawValue,
-                           service: keychainService, accessibility: deviceOnly)
-        KeychainItem.store(newKA.rawRepresentation,
-                           account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue,
-                           service: keychainService, accessibility: deviceOnly)
-        KeychainItem.store(newSigning.publicKey.rawRepresentation,
-                           account: IdentityKeychainKey.signingPublicKeyCache.rawValue,
-                           service: keychainService, accessibility: deviceOnly)
-        KeychainItem.store(newKA.publicKey.rawRepresentation,
-                           account: IdentityKeychainKey.keyAgreementPublicKeyCache.rawValue,
-                           service: keychainService, accessibility: deviceOnly)
+        try persistFreshDeviceIdentity(signing: newSigning, keyAgreement: newKA, accessibility: deviceOnly)
         signingKey      = newSigning
         keyAgreementKey = newKA
         backupEscrowKey = nil
+    }
+
+    /// The device identity already on this device (Case 1), or nil when either private-key row is
+    /// missing or unparseable — in which case provisioning falls through to the mint cases.
+    private func loadExistingDeviceIdentity()
+    -> (signing: Curve25519.Signing.PrivateKey, keyAgreement: Curve25519.KeyAgreement.PrivateKey)? {
+        guard let sigData = KeychainItem.load(account: IdentityKeychainKey.signingPrivateKey.rawValue, service: keychainService),
+              let kaData  = KeychainItem.load(account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue, service: keychainService),
+              let loadedSigning = try? Curve25519.Signing.PrivateKey(rawRepresentation: sigData),
+              let loadedKA      = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: kaData) else {
+            return nil
+        }
+        return (loadedSigning, loadedKA)
+    }
+
+    /// Re-stores the loaded proximity KA key device-only (dropping a legacy synchronizable flag).
+    /// LOGS rather than throws on failure: the loaded key is already valid in memory and this is a
+    /// migration, so refusing to provision would be a worse outcome than an un-migrated row.
+    private func migrateKeyAgreementKeyToDeviceOnly(
+        _ keyAgreement: Curve25519.KeyAgreement.PrivateKey,
+        accessibility: CFString
+    ) {
+        let status = KeychainItem.store(keyAgreement.rawRepresentation,
+                                        account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue,
+                                        service: keychainService,
+                                        accessibility: accessibility,
+                                        synchronizable: false)
+        guard status != errSecSuccess else { return }
+        FernletAuditLog.log("identity.keychain.storeFailed", context: [
+            "row": IdentityKeychainKey.keyAgreementPrivateKey.rawValue,
+            "stage": "deviceOnlyMigration",
+            "status": "\(status)"
+        ])
+    }
+
+    /// Publishes a legacy already-synced KA key into its content-addressed escrow slot (Case 3).
+    /// Throws on a failed write so the caller does not adopt an escrow key that is not on disk —
+    /// sealing under a key nothing persisted makes those backups permanently unrecoverable.
+    private func promoteLegacyKeyAgreementKeyToEscrow(_ legacyKey: Curve25519.KeyAgreement.PrivateKey) throws {
+        let status = KeychainItem.store(legacyKey.rawRepresentation,
+                                        account: Self.escrowKeychainAccount(forPublicKey: legacyKey.publicKey.rawRepresentation),
+                                        service: keychainService,
+                                        accessibility: kSecAttrAccessibleAfterFirstUnlock,
+                                        synchronizable: true)
+        guard status != errSecSuccess else { return }
+        FernletAuditLog.log("identity.escrow.legacyPromoteFailed", context: ["status": "\(status)"])
+        throw IdentityError.keychainWriteFailed
+    }
+
+    /// Writes a freshly minted device identity — both private keys and both public-key caches —
+    /// checking every `OSStatus`. Throws on the first failure so `ensureProvisioned` never adopts
+    /// an identity that exists only in memory (the next launch would mint a DIFFERENT one and every
+    /// trust relationship would break with no trace).
+    private func persistFreshDeviceIdentity(
+        signing: Curve25519.Signing.PrivateKey,
+        keyAgreement: Curve25519.KeyAgreement.PrivateKey,
+        accessibility: CFString
+    ) throws {
+        let rows: [(account: String, data: Data)] = [
+            (IdentityKeychainKey.signingPrivateKey.rawValue, signing.rawRepresentation),
+            (IdentityKeychainKey.signingPublicKeyCache.rawValue, signing.publicKey.rawRepresentation),
+            (IdentityKeychainKey.keyAgreementPrivateKey.rawValue, keyAgreement.rawRepresentation),
+            (IdentityKeychainKey.keyAgreementPublicKeyCache.rawValue, keyAgreement.publicKey.rawRepresentation)
+        ]
+        for row in rows {
+            let status = KeychainItem.store(row.data, account: row.account,
+                                            service: keychainService, accessibility: accessibility)
+            guard status == errSecSuccess else {
+                FernletAuditLog.log("identity.keychain.storeFailed",
+                                    context: ["row": row.account, "status": "\(status)"])
+                throw IdentityError.keychainWriteFailed
+            }
+        }
     }
 
     // MARK: - Backup escrow key lifecycle (WS-1/WS-2/WS-3)
@@ -641,11 +679,25 @@ public final class IdentityService {
         if backupEscrowKey == nil { backupEscrowKey = loadExistingEscrowKey() }
         if backupEscrowKey == nil {
             let minted = Curve25519.KeyAgreement.PrivateKey()
-            KeychainItem.store(minted.rawRepresentation,
-                               account: Self.escrowKeychainAccount(forPublicKey: minted.publicKey.rawRepresentation),
-                               service: keychainService,
-                               accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-                               synchronizable: false)
+            let account = Self.escrowKeychainAccount(forPublicKey: minted.publicKey.rawRepresentation)
+            let status = KeychainItem.store(minted.rawRepresentation,
+                                            account: account,
+                                            service: keychainService,
+                                            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                                            synchronizable: false)
+            // Adopt the minted key ONLY once it is provably on disk. Adopting an unwritten key
+            // seals every backup generation under a key that exists nowhere after relaunch —
+            // permanently unrecoverable records. Empty return = "no escrow key", which the seal
+            // path already treats as refuse-to-seal (`sealedBackupKey` throws `notProvisioned`).
+            guard status == errSecSuccess else {
+                FernletAuditLog.log("identity.escrow.mintFailed", context: ["status": "\(status)"])
+                return Data()
+            }
+            guard KeychainItem.load(account: account, service: keychainService, synchronizable: .local)
+                    == minted.rawRepresentation else {
+                FernletAuditLog.log("identity.escrow.mintVerifyFailed")
+                return Data()
+            }
             backupEscrowKey = minted
             FernletAuditLog.log("identity.escrow.mintedLocal")
         }
@@ -655,7 +707,6 @@ public final class IdentityService {
     /// OPEN/restore path. Loads an existing escrow key (canonical, synced preferred) into memory; NEVER
     /// mints. Returns whether a key is present — `false` means "not synced yet", which the restore flow
     /// surfaces as a retryable state (WS-4) rather than fabricating a new identity.
-    @discardableResult
     public func loadBackupEscrowKeyForOpen() -> Bool {
         if backupEscrowKey == nil { backupEscrowKey = loadExistingEscrowKey() }
         return backupEscrowKey != nil
@@ -725,7 +776,6 @@ public final class IdentityService {
     /// keys survive, the origin's backups are always recoverable and restore can try every key (decrypt-
     /// first, `sealedBackupKeyCandidates`). WS-2's withhold-then-promote is kept (mint ThisDeviceOnly, publish
     /// on a later launch only when no other key is present) to minimize needless key proliferation.
-    @discardableResult
     public func reconcileBackupEscrowKey() -> BackupEscrowReconcileOutcome {
         let candidates = gatherEscrowCandidates()
         switch candidates.count {
@@ -750,22 +800,36 @@ public final class IdentityService {
                 // raises no false conflict and preserves zero-config recovery. Idempotent: once a CA row
                 // exists, `only.contentAddressed` is true and this no-ops.
                 if !only.contentAddressed {
-                    KeychainItem.store(only.data,
-                                       account: Self.escrowKeychainAccount(forPublicKey: only.publicKey),
-                                       service: keychainService,
-                                       accessibility: kSecAttrAccessibleAfterFirstUnlock,
-                                       synchronizable: true, replacing: .local)
-                    FernletAuditLog.log("identity.escrow.migratedLegacyToContentAddressed")
+                    let status = KeychainItem.store(only.data,
+                                                    account: Self.escrowKeychainAccount(forPublicKey: only.publicKey),
+                                                    service: keychainService,
+                                                    accessibility: kSecAttrAccessibleAfterFirstUnlock,
+                                                    synchronizable: true, replacing: .local)
+                    // Log what actually happened: the pre-fix code logged the migration as done
+                    // even when nothing was written.
+                    if status == errSecSuccess {
+                        FernletAuditLog.log("identity.escrow.migratedLegacyToContentAddressed")
+                    } else {
+                        FernletAuditLog.log("identity.escrow.migrateFailed", context: ["status": "\(status)"])
+                    }
                 }
                 return .usingSynced
             }
             // Only a device-only key exists → promote (publish) it to synchronizable at its CONTENT-
-            // ADDRESSED account. `replacing: .local` removes only this key's device-only row; the target
-            // account is unique to this key, so the publish cannot clobber a genuine key under any account.
+            // ADDRESSED account. ADD-THEN-DELETE: the synced row is written first (`replacing: .synced`
+            // can only ever displace an identical copy of THIS key, since the account is a hash of its
+            // own public key), and the device-only row — potentially the last copy of the key — is
+            // removed only after the publish is confirmed. The old delete-then-add order meant a failed
+            // publish destroyed that last copy.
             let account = Self.escrowKeychainAccount(forPublicKey: only.publicKey)
-            KeychainItem.store(only.data, account: account, service: keychainService,
-                               accessibility: kSecAttrAccessibleAfterFirstUnlock,
-                               synchronizable: true, replacing: .local)
+            let status = KeychainItem.store(only.data, account: account, service: keychainService,
+                                            accessibility: kSecAttrAccessibleAfterFirstUnlock,
+                                            synchronizable: true, replacing: .synced)
+            guard status == errSecSuccess else {
+                FernletAuditLog.log("identity.escrow.promoteFailed", context: ["status": "\(status)"])
+                return .promotedLocal
+            }
+            KeychainItem.delete(account: account, service: keychainService, synchronizable: .local)
             FernletAuditLog.log("identity.escrow.promotedLocal")
             return .promotedLocal
         default:
@@ -785,7 +849,6 @@ public final class IdentityService {
     /// escrow public key, or nil if no synced key is present. (Only this device's local-only content-
     /// addressed rows are removed; synced keys are never deleted, so nothing is destroyed cross-device — a
     /// deeper conflict between two SYNCED keys keeps surfacing until the devices converge.)
-    @discardableResult
     public func adoptSyncedBackupEscrowKey() -> Data? {
         let candidates = gatherEscrowCandidates()
         guard let chosen = candidates.first(where: { $0.synced }) else { return nil }

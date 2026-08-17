@@ -152,11 +152,11 @@ public final class ProximityHeartLedger {
     /// sends and receives are refused fail-closed; `HeartDropService` surfaces the outage and
     /// leaves drop records on the server for a later pass.
     public var isLoaded: Bool { sidecar.isLoaded }
-    @discardableResult
-    public func retryLoad() -> Bool {
-        let recovered = sidecar.retryLoad()
+    /// Re-attempts the sidecar's pending recovery and republishes the mirror. Void (R7): the old
+    /// Bool was exactly ``isLoaded`` afterwards, which callers read directly.
+    public func retryLoad() {
+        sidecar.retryLoad()
         refreshMirror()
-        return recovered
     }
 
     // MARK: - Rate limit (one heart per friend per 5 minutes, each direction)
@@ -176,7 +176,7 @@ public final class ProximityHeartLedger {
     /// the send already happened, so the gate must stay armed in memory regardless.
     public func recordHeartSent(to fingerprint: String) {
         let at = now()
-        sidecar.mutate { state in
+        sidecar.mutateCommitting { state in
             state.lastSentAt[fingerprint] = at
             Self.prune(&state, at: at)
         }
@@ -188,7 +188,6 @@ public final class ProximityHeartLedger {
     /// envelope ReplayCache; this covers a re-send after relaunch) or a second heart from the
     /// same friend inside the 5-minute receive window. Duplicates are dropped silently by design.
     /// Also false while the ledger is unloaded (fail-closed — nothing to check the window against).
-    @discardableResult
     public func recordReceivedHeart(id: UUID, senderDisplayName: String, senderFingerprint: String) -> Bool {
         guard let state = sidecar.read() else { return false }
         guard !state.receivedHearts.contains(where: { $0.id == id }) else { return false }
@@ -197,7 +196,7 @@ public final class ProximityHeartLedger {
            at.timeIntervalSince(last) < Self.rateLimitInterval {
             return false
         }
-        sidecar.mutate { state in
+        sidecar.mutateCommitting { state in
             state.lastReceivedAt[senderFingerprint] = at
             state.receivedHearts.append(ReceivedHeartRecord(
                 id: id,
@@ -218,12 +217,11 @@ public final class ProximityHeartLedger {
     ///
     /// It also does not ARM that window (`lastReceivedAt`), which is the live path's key: picking
     /// up a days-old drop must not swallow the next in-person heart from the same friend.
-    @discardableResult
     public func recordReceivedDropHeart(id: UUID, senderDisplayName: String, senderFingerprint: String) -> Bool {
         guard let state = sidecar.read() else { return false }
         guard !state.receivedHearts.contains(where: { $0.id == id }) else { return false }
         let at = now()
-        sidecar.mutate { state in
+        sidecar.mutateCommitting { state in
             state.receivedHearts.append(ReceivedHeartRecord(
                 id: id,
                 senderDisplayName: senderDisplayName,
@@ -252,7 +250,7 @@ public final class ProximityHeartLedger {
               let index = state.receivedHearts.firstIndex(where: { $0.id == id }),
               state.receivedHearts[index].bubbleDismissedAt == nil else { return }
         let at = now()
-        sidecar.mutate { state in
+        sidecar.mutateCommitting { state in
             guard let index = state.receivedHearts.firstIndex(where: { $0.id == id }) else { return }
             state.receivedHearts[index].bubbleDismissedAt = at
             Self.prune(&state, at: at)

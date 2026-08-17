@@ -81,6 +81,8 @@ public final class SessionMessageStore {
 
     /// Dedup set across incoming AND outgoing ids — a reflected/duplicate id is never appended twice.
     @ObservationIgnored private var seenIDs: Set<UUID> = []
+    /// Insertion order for `seenIDs`, so the set can evict oldest-first at its cap.
+    @ObservationIgnored private var seenOrder: [UUID] = []
     /// Per-verified-sender token-bucket state for the receive flood guard.
     @ObservationIgnored private var rateBucketBySender: [String: (tokens: Double, updated: Date)] = [:]
 
@@ -97,7 +99,8 @@ public final class SessionMessageStore {
         text: String,
         sentAt: Date
     ) {
-        guard seenIDs.insert(id).inserted else { return }
+        guard !seenIDs.contains(id) else { return }
+        rememberSeen(id)
         append(Message(
             id: id,
             senderFingerprint: senderFingerprint,
@@ -144,7 +147,7 @@ public final class SessionMessageStore {
 
         // Only record dedup + bucket state once the message is actually accepted, so a dropped
         // (empty/rate-limited) message never poisons a later legitimate one from the same sender.
-        seenIDs.insert(id)
+        rememberSeen(id)
         rateBucketBySender[senderFingerprint] = (available - 1, now)
 
         append(Message(
@@ -189,6 +192,7 @@ public final class SessionMessageStore {
     public func clear() {
         messages.removeAll()
         seenIDs.removeAll()
+        seenOrder.removeAll()
         rateBucketBySender.removeAll()
         // Reset the badge, but leave `isViewing` to the panel's own onAppear/onDisappear — a session may
         // clear (formation / end) while the panel is still on screen, and forcing it false there would
@@ -221,6 +225,20 @@ public final class SessionMessageStore {
             + "\u{2060}\u{2066}\u{2067}\u{2068}\u{2069}\u{FEFF}")
 
     // MARK: - Private
+
+    /// R3: the dedup set is fed by peer messages, so it needs its own explicit cap — the 500-row
+    /// transcript cap does not bound it (dropped ids are deliberately kept so a re-send cannot
+    /// resurrect them). An id older than `maxSeenIDs` messages is past any realistic re-send window.
+    static let maxSeenIDs = maxMessages * 4
+
+    private func rememberSeen(_ id: UUID) {
+        guard seenIDs.insert(id).inserted else { return }
+        seenOrder.append(id)
+        guard seenOrder.count > Self.maxSeenIDs else { return }
+        let evicted = seenOrder.prefix(seenOrder.count - Self.maxSeenIDs)
+        for old in evicted { seenIDs.remove(old) }
+        seenOrder.removeFirst(evicted.count)
+    }
 
     private func append(_ message: Message) {
         messages.append(message)

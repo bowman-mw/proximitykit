@@ -58,12 +58,19 @@ extension ProximityInspectorRecording {
 /// default no-op.
 @MainActor
 public final class ProximityInspectorEventRecorder: ProximityInspectorRecording {
+    /// R3 (bounded growth): coordinator events are driven by peer envelopes and transport chatter,
+    /// so the log is input-fed and must not be append-only. Oldest-out at the cap.
+    public static let maxEvents = 500
+
     public private(set) var events: [String] = []
 
     public init() {}
 
     public func recordCoordinatorEvent(_ message: String) {
         events.append(message)
+        if events.count > Self.maxEvents {
+            events.removeFirst(events.count - Self.maxEvents)
+        }
     }
 }
 
@@ -198,6 +205,11 @@ public final class ProximityCoordinator {
     @ObservationIgnored private var pendingHeartbeatSentAtByID: [UUID: Date] = [:]
     @ObservationIgnored private var autoReconnect = false
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+    /// The single in-flight cleanup task spawned by ``fail(_:)``. R3 (bounded task fan-out): a
+    /// peer that keeps sending malformed envelopes after the first failure would otherwise drive
+    /// one unstructured teardown Task per message. The work (stop ranging, disconnect, stop the
+    /// anchor) is idempotent, so coalescing onto the in-flight one is behavior-preserving.
+    @ObservationIgnored private var teardownTask: Task<Void, Never>?
     // Ephemeral per-session random ID advertised in Bonjour TXT instead of the persistent fingerprint.
     @ObservationIgnored private var sessionID = UUID().uuidString
 
@@ -247,6 +259,7 @@ public final class ProximityCoordinator {
     deinit {
         timeoutTask?.cancel()
         heartbeatTask?.cancel()
+        teardownTask?.cancel()
     }
 
     func attachPayloadHandler(_ payloadHandler: any ProximityPayloadHandling) {
@@ -507,22 +520,7 @@ public final class ProximityCoordinator {
             if isSessionLive { return }
             transition(to: .discovering)
         case .discovered(let peers):
-            if isSessionLive { return }
-            guard let peer = peers.first else {
-                transition(to: .discovering)
-                return
-            }
-            currentTransportPeer = peer
-            updateInspectorPeer(transportPeer: peer)
-            transition(to: .peerInRange(peer: peer, distance: .unknown))
-            guard currentRole == .browser else { return }
-            guard shouldInviteDiscoveredPeer(peer) else { return }
-            do {
-                try await transport.invite(peer)
-                inspector?.recordCoordinatorEvent("invite sent to \(peer.displayName)")
-            } catch {
-                fail(error.localizedDescription)
-            }
+            await handleDiscoveredPeers(peers)
         case .awaitingPeerAcceptance(let peer):
             currentTransportPeer = peer
             updateInspectorPeer(transportPeer: peer)
@@ -538,50 +536,9 @@ public final class ProximityCoordinator {
                 transition(to: .pendingInvite(invite))
             }
         case .connecting(let peer):
-            currentTransportPeer = peer
-            updateInspectorPeer(transportPeer: peer)
-            updateInspectorTransport(state: "connecting")
-            if case .awaitingTapConfirmation = state { return }
-            if case .awaitingIdentityIntroduction = state { return }
-            if case .awaitingProximityCommit = state { return }
-            if case .awaitingManualCommit = state { return }
-            if case .connected = state { return }
-            transition(to: .awaitingTapConfirmation(peer: peer))
+            handleTransportConnecting(peer)
         case .connected(let peer):
-            currentTransportPeer = peer
-            updateInspectorPeer(transportPeer: peer)
-            updateInspectorTransport(state: "connected")
-            if case .connected = state { return }
-            if case .awaitingTapConfirmation(let waiting) = state {
-                // Increment 10 (coach path, Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26):
-                // the pre-identity tap gate could never fire on ANY hardware — the distance
-                // stream needs an NI ranging session, which only starts after the identity
-                // exchange this gate blocks (`startRangingIfPossible` runs in
-                // `handleIdentityEnvelope`), and `tapToConfirm()` has no production caller —
-                // so every trainer session hung here to timeout. Once the transport is actually
-                // connected, auto-advance to the identity exchange; the human gate is the
-                // explicit post-identity confirmation (plus the verification ceremony on a
-                // first pairing), mirroring the friend path's identity-first architecture.
-                if currentMode == .trainer {
-                    inspector?.recordCoordinatorEvent("tap gate auto-advanced on connect — explicit confirmation gates the session")
-                    await finishTapConfirmation(for: waiting)
-                }
-                return
-            }
-            if case .awaitingIdentityIntroduction = state { return }
-            if case .awaitingProximityCommit = state { return }
-            if case .awaitingManualCommit = state { return }
-            // Friend mode: skip the tap gate; send identity intro immediately so ranging
-            // can start before the commit, and the 15 cm dwell drives auto-connect.
-            if currentMode == .friend {
-                transition(to: .awaitingIdentityIntroduction(peer: peer))
-                await sendIdentityIntroduction(to: peer)
-                return
-            }
-            transition(to: .awaitingTapConfirmation(peer: peer))
-            // Same auto-advance for the fresh entry (see above).
-            inspector?.recordCoordinatorEvent("tap gate auto-advanced on connect — explicit confirmation gates the session")
-            await finishTapConfirmation(for: peer)
+            await handleTransportConnected(peer)
         case .disconnected:
             updateInspectorTransport(state: "notConnected", disconnected: true)
             await end(.transportLost)
@@ -592,6 +549,79 @@ public final class ProximityCoordinator {
         case .idle:
             break
         }
+    }
+
+    /// `.discovered`: adopt the first peer, publish it to the inspector, and — as the browser —
+    /// invite it when the deterministic single-inviter rule selects us.
+    private func handleDiscoveredPeers(_ peers: [MultipeerPeer]) async {
+        if isSessionLive { return }
+        guard let peer = peers.first else {
+            transition(to: .discovering)
+            return
+        }
+        currentTransportPeer = peer
+        updateInspectorPeer(transportPeer: peer)
+        transition(to: .peerInRange(peer: peer, distance: .unknown))
+        guard currentRole == .browser else { return }
+        guard shouldInviteDiscoveredPeer(peer) else { return }
+        do {
+            try await transport.invite(peer)
+            inspector?.recordCoordinatorEvent("invite sent to \(peer.displayName)")
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    /// `.connecting`: record the peer, and only enter the tap gate when the handshake has not
+    /// already moved past it (a late transport callback must never rewind the state machine).
+    private func handleTransportConnecting(_ peer: MultipeerPeer) {
+        currentTransportPeer = peer
+        updateInspectorPeer(transportPeer: peer)
+        updateInspectorTransport(state: "connecting")
+        if case .awaitingTapConfirmation = state { return }
+        if case .awaitingIdentityIntroduction = state { return }
+        if case .awaitingProximityCommit = state { return }
+        if case .awaitingManualCommit = state { return }
+        if case .connected = state { return }
+        transition(to: .awaitingTapConfirmation(peer: peer))
+    }
+
+    /// `.connected`: the mode-specific advance into the identity exchange.
+    ///
+    /// Increment 10 (coach path, Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26): the pre-identity
+    /// tap gate could never fire on ANY hardware — the distance stream needs an NI ranging session,
+    /// which only starts after the identity exchange this gate blocks (`startRangingIfPossible`
+    /// runs in `handleIdentityEnvelope`), and `tapToConfirm()` has no production caller — so every
+    /// trainer session hung here to timeout. Once the transport is actually connected,
+    /// auto-advance to the identity exchange; the human gate is the explicit post-identity
+    /// confirmation (plus the verification ceremony on a first pairing), mirroring the friend
+    /// path's identity-first architecture.
+    private func handleTransportConnected(_ peer: MultipeerPeer) async {
+        currentTransportPeer = peer
+        updateInspectorPeer(transportPeer: peer)
+        updateInspectorTransport(state: "connected")
+        if case .connected = state { return }
+        if case .awaitingTapConfirmation(let waiting) = state {
+            if currentMode == .trainer {
+                inspector?.recordCoordinatorEvent("tap gate auto-advanced on connect — explicit confirmation gates the session")
+                await finishTapConfirmation(for: waiting)
+            }
+            return
+        }
+        if case .awaitingIdentityIntroduction = state { return }
+        if case .awaitingProximityCommit = state { return }
+        if case .awaitingManualCommit = state { return }
+        // Friend mode: skip the tap gate; send identity intro immediately so ranging
+        // can start before the commit, and the 15 cm dwell drives auto-connect.
+        if currentMode == .friend {
+            transition(to: .awaitingIdentityIntroduction(peer: peer))
+            await sendIdentityIntroduction(to: peer)
+            return
+        }
+        transition(to: .awaitingTapConfirmation(peer: peer))
+        // Same auto-advance for the fresh entry (see above).
+        inspector?.recordCoordinatorEvent("tap gate auto-advanced on connect — explicit confirmation gates the session")
+        await finishTapConfirmation(for: peer)
     }
 
     private func shouldInviteDiscoveredPeer(_ peer: MultipeerPeer) -> Bool {
@@ -746,109 +776,31 @@ public final class ProximityCoordinator {
 
     private func handleInbound(_ message: MultipeerInboundMessage) async {
         currentTransportPeer = message.peer
-
-        // Increment 10 (coach path): hard wire-size gate BEFORE the envelope is decoded,
-        // decrypted, or inflated — the hearts ordering (`HeartDropSealer.open` gates size before
-        // key agreement). `TrainerExportPayload.isWellFormed` can only run after decrypt+inflate,
-        // which is the wrong layer for a bound: coach payloads are ~1000× a heart, so the
-        // inflate-bomb exposure is correspondingly worse. Trainer-scoped: the friend channel
-        // legitimately carries 10 MB photo payloads under its own receiver cap.
-        if currentMode == .trainer, message.data.count > TrainerExportPayload.maxTrainerWireBytes {
-            trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
-                kind: .envelopeRejected,
-                peerFingerprint: message.peer.advertisedFingerprint,
-                peerDisplayName: message.peer.displayName,
-                message: "Rejected oversized inbound blob (\(message.data.count) bytes) before decode"
-            ))
-            inspector?.recordError(domain: "Envelope", message: "oversized inbound blob", recoverable: false)
-            fail("oversized inbound payload")
-            return
-        }
-
-        // SEALED-INTRODUCTION rule (Phase 4b): on a presence-heart connection the identity
-        // intro/ack arrives sealed to us. Open it first; a wrapper we cannot decrypt is a
-        // tag-replay forger (no matching KA private key) — fail with NO identity emitted and no
-        // further intro. A plain envelope (a post-commit heartbeat) passes straight through.
-        var envelopeData = message.data
-        var cameFromSealedWrapper = false
-        if usesSealedIntroduction {
-            switch unwrapSealedIntroduction(message.data) {
-            case .notWrapped:
-                break
-            case .opened(let inner):
-                envelopeData = inner
-                cameFromSealedWrapper = true
-            case .failed:
-                inspector?.recordCoordinatorEvent("sealed introduction could not be opened — failing")
-                fail("sealed introduction open failed")
-                return
-            }
-        }
+        if rejectsOversizedTrainerBlob(message) { return }
+        guard let unwrapped = unwrapInboundEnvelopeData(message) else { return }
 
         do {
-            let envelope = try JSONDecoder().decode(FernletIdentityEnvelope.self, from: envelopeData)
+            let envelope = try JSONDecoder().decode(FernletIdentityEnvelope.self, from: unwrapped.data)
 
             // On a sealed-introduction connection an identity intro/ack MUST arrive sealed. A PLAIN
             // identity envelope (a forger sending their own intro to bait a cleartext ack) is
             // rejected outright — the sealed wrapper is the only channel for identity here.
-            if usesSealedIntroduction, !cameFromSealedWrapper,
+            if usesSealedIntroduction, !unwrapped.cameFromSealedWrapper,
                let plainType = envelope.payloadType,
                plainType == .identityIntroduction || plainType == .identityAcknowledge {
                 inspector?.recordCoordinatorEvent("rejected unsealed identity envelope on a sealed connection")
                 fail("unsealed identity envelope on a sealed-introduction connection")
                 return
             }
+            if isRejectedByTrustPolicy(envelope) { return }
 
-            if trustPolicy?.isRevokedProximitySigningKey(envelope.senderSigningPublicKey) == true {
-                let fingerprint = IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
-                trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
-                    kind: .revokedPeerBlocked,
-                    peerFingerprint: fingerprint,
-                    peerDisplayName: envelope.senderDisplayName,
-                    payloadType: envelope.payloadType,
-                    message: "Blocked envelope from revoked key"
-                ))
-                fail("revokedKey")
-                return
-            }
-            if trustPolicy?.isBlockedProximitySigningKey(envelope.senderSigningPublicKey) == true {
-                return  // silent drop — no audit entry visible to sender
-            }
             let plaintext = try envelope.verify(
                 identityService: identity,
                 replayCache: replayCache,
                 sealedPayloadFormat: peerSealedPayloadFormat
             )
-            recordEnvelope(envelope, direction: .received, byteCount: message.bytesReceived, signatureVerified: true)
-            bytesReceived += message.bytesReceived
-            await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
-            inspector?.recordCoordinatorEvent("envelope received \(envelope.payloadTypeToken)")
-            trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
-                kind: .envelopeReceived,
-                peerFingerprint: IdentityService.fingerprint(of: envelope.senderSigningPublicKey),
-                peerDisplayName: envelope.senderDisplayName,
-                payloadType: envelope.payloadType,
-                message: "Received \(envelope.payloadTypeToken)"
-            ))
-
-            // Phase 1 forward tolerance: a payload type only a NEWER build knows arrived on a live
-            // session. The envelope authenticated (schema/expiry/signature/replay were all enforced
-            // by `verify` above), so this is a well-behaved future peer, not an attack — park it
-            // and keep the session alive. Never dispatched to the payload handler, never `fail()`.
-            guard let payloadType = envelope.payloadType else {
-                inspector?.recordCoordinatorEvent("parked unknown payload type \(envelope.payloadTypeToken)")
-                return
-            }
-
-            switch payloadType {
-            case .identityIntroduction, .identityAcknowledge:
-                try await handleIdentityEnvelope(envelope, plaintext: plaintext, from: message.peer)
-            case .sessionHeartbeat:
-                await handleHeartbeat(envelope, plaintext: plaintext, from: message.peer)
-            default:
-                inspector?.recordCoordinatorEvent("envelope verified \(envelope.payloadTypeToken)")
-                payloadHandler?.proximityCoordinator(self, didReceive: envelope, plaintext: plaintext, from: connectedIdentity ?? pendingPeerIdentity)
-            }
+            await recordVerifiedInbound(envelope, byteCount: message.bytesReceived)
+            try await dispatchVerified(envelope, plaintext: plaintext, from: message.peer)
         } catch {
             trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
                 kind: .envelopeRejected,
@@ -858,6 +810,107 @@ public final class ProximityCoordinator {
             ))
             inspector?.recordError(domain: "Envelope", message: String(describing: error), recoverable: false)
             fail("Envelope verification failed: \(error)")
+        }
+    }
+
+    /// Increment 10 (coach path): hard wire-size gate BEFORE the envelope is decoded, decrypted, or
+    /// inflated — the hearts ordering (`HeartDropSealer.open` gates size before key agreement).
+    /// `TrainerExportPayload.isWellFormed` can only run after decrypt+inflate, which is the wrong
+    /// layer for a bound: coach payloads are ~1000× a heart, so the inflate-bomb exposure is
+    /// correspondingly worse. Trainer-scoped: the friend channel legitimately carries 10 MB photo
+    /// payloads under its own receiver cap. True when the session was failed and the caller stops.
+    private func rejectsOversizedTrainerBlob(_ message: MultipeerInboundMessage) -> Bool {
+        guard currentMode == .trainer,
+              message.data.count > TrainerExportPayload.maxTrainerWireBytes else { return false }
+        trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+            kind: .envelopeRejected,
+            peerFingerprint: message.peer.advertisedFingerprint,
+            peerDisplayName: message.peer.displayName,
+            message: "Rejected oversized inbound blob (\(message.data.count) bytes) before decode"
+        ))
+        inspector?.recordError(domain: "Envelope", message: "oversized inbound blob", recoverable: false)
+        fail("oversized inbound payload")
+        return true
+    }
+
+    /// SEALED-INTRODUCTION rule (Phase 4b): on a presence-heart connection the identity intro/ack
+    /// arrives sealed to us. Open it first; a wrapper we cannot decrypt is a tag-replay forger (no
+    /// matching KA private key) — fail with NO identity emitted and no further intro. A plain
+    /// envelope (a post-commit heartbeat) passes straight through. Nil = already failed.
+    private func unwrapInboundEnvelopeData(_ message: MultipeerInboundMessage)
+    -> (data: Data, cameFromSealedWrapper: Bool)? {
+        guard usesSealedIntroduction else { return (message.data, false) }
+        switch unwrapSealedIntroduction(message.data) {
+        case .notWrapped:
+            return (message.data, false)
+        case .opened(let inner):
+            return (inner, true)
+        case .failed:
+            inspector?.recordCoordinatorEvent("sealed introduction could not be opened — failing")
+            fail("sealed introduction open failed")
+            return nil
+        }
+    }
+
+    /// Trust gate on a decoded (not yet verified) envelope: a revoked key hard-fails the session
+    /// with an audit entry, a blocked key is dropped silently (no signal back to the sender).
+    private func isRejectedByTrustPolicy(_ envelope: FernletIdentityEnvelope) -> Bool {
+        if trustPolicy?.isRevokedProximitySigningKey(envelope.senderSigningPublicKey) == true {
+            let fingerprint = IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
+            trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+                kind: .revokedPeerBlocked,
+                peerFingerprint: fingerprint,
+                peerDisplayName: envelope.senderDisplayName,
+                payloadType: envelope.payloadType,
+                message: "Blocked envelope from revoked key"
+            ))
+            fail("revokedKey")
+            return true
+        }
+        if trustPolicy?.isBlockedProximitySigningKey(envelope.senderSigningPublicKey) == true {
+            return true  // silent drop — no audit entry visible to sender
+        }
+        return false
+    }
+
+    /// Byte/inspector/audit bookkeeping for an envelope that passed `verify`.
+    private func recordVerifiedInbound(_ envelope: FernletIdentityEnvelope, byteCount: Int) async {
+        recordEnvelope(envelope, direction: .received, byteCount: byteCount, signatureVerified: true)
+        bytesReceived += byteCount
+        await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
+        inspector?.recordCoordinatorEvent("envelope received \(envelope.payloadTypeToken)")
+        trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+            kind: .envelopeReceived,
+            peerFingerprint: IdentityService.fingerprint(of: envelope.senderSigningPublicKey),
+            peerDisplayName: envelope.senderDisplayName,
+            payloadType: envelope.payloadType,
+            message: "Received \(envelope.payloadTypeToken)"
+        ))
+    }
+
+    /// Routes a verified envelope to the coordinator's own handlers or the payload handler.
+    ///
+    /// Phase 1 forward tolerance: a payload type only a NEWER build knows arrived on a live
+    /// session. The envelope authenticated (schema/expiry/signature/replay were all enforced by
+    /// `verify`), so this is a well-behaved future peer, not an attack — park it and keep the
+    /// session alive. Never dispatched to the payload handler, never `fail()`.
+    private func dispatchVerified(
+        _ envelope: FernletIdentityEnvelope,
+        plaintext: Data,
+        from peer: MultipeerPeer
+    ) async throws {
+        guard let payloadType = envelope.payloadType else {
+            inspector?.recordCoordinatorEvent("parked unknown payload type \(envelope.payloadTypeToken)")
+            return
+        }
+        switch payloadType {
+        case .identityIntroduction, .identityAcknowledge:
+            try await handleIdentityEnvelope(envelope, plaintext: plaintext, from: peer)
+        case .sessionHeartbeat:
+            await handleHeartbeat(envelope, plaintext: plaintext, from: peer)
+        default:
+            inspector?.recordCoordinatorEvent("envelope verified \(envelope.payloadTypeToken)")
+            payloadHandler?.proximityCoordinator(self, didReceive: envelope, plaintext: plaintext, from: connectedIdentity ?? pendingPeerIdentity)
         }
     }
 
@@ -1064,7 +1117,7 @@ public final class ProximityCoordinator {
             fingerprint: fingerprint,
             rangingMode: rangingMode,
             firstSeenAt: now(),
-            capabilities: rangingPayload?.capabilities
+            capabilities: Self.clamped(rangingPayload?.capabilities)
         )
         updateInspectorPeer(identity: peerIdentity, transportPeer: peer)
 
@@ -1102,14 +1155,31 @@ public final class ProximityCoordinator {
         }
     }
 
+    /// Upper bound on peer-advertised capability tokens kept from an intro (R3/R5): the friend
+    /// channel has no wire-size gate at this layer, and `PeerIdentity.supports(_:)` scans the list
+    /// linearly on every gate. Twice the known capability count leaves room for a newer build.
+    static let maxAdvertisedCapabilities = ProximityCapability.allCases.count * 2
+    /// Longest capability token retained — no real token is anywhere near this.
+    static let maxCapabilityTokenLength = 32
+
+    /// Clamps a peer-supplied capability list at the boundary (count and per-token length), so a
+    /// hostile intro cannot inflate a `PeerIdentity` that every later gate walks.
+    private static func clamped(_ capabilities: [String]?) -> [String]? {
+        capabilities.map { tokens in
+            tokens.prefix(maxAdvertisedCapabilities).map { String($0.prefix(maxCapabilityTokenLength)) }
+        }
+    }
+
     private func transitionToProximityGate(peerIdentity: PeerIdentity) {
         // Identity is verified — cancel the short connection-phase timeout and replace it with a
         // generous proximity-gate timeout so the coordinator doesn't evict before the peer's
         // first heartbeat (sent immediately on commit) has a chance to arrive.
         timeoutTask?.cancel()
         timeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
-            guard !Task.isCancelled, let self else { return }
+            // A thrown CancellationError IS the recovery: the gate timer was cancelled by identity
+            // confirmation, a fail, or the session ending — there is nothing left to time out.
+            do { try await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000) } catch { return }
+            guard let self else { return }
             switch self.state {
             case .idle, .connected, .transferring, .ended, .failed: break
             default:
@@ -1212,10 +1282,12 @@ public final class ProximityCoordinator {
             message: reason
         ))
         inspector?.endSession(endState: "failed")
-        Task { [weak self] in
+        guard teardownTask == nil else { return }   // R3: at most one teardown in flight
+        teardownTask = Task { [weak self] in
             await self?.ranging.stop()
             await self?.transport.disconnect()
             await self?.foregroundAnchor.stop()
+            self?.teardownTask = nil
         }
     }
 
@@ -1239,8 +1311,9 @@ public final class ProximityCoordinator {
             inspector?.endSession(endState: "reconnecting")
             transition(to: .discovering)
             reconnectTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard !Task.isCancelled, let self, self.autoReconnect,
+                // Cancelled (by `cancel()`) ⇒ no reconnect, which is exactly the intended recovery.
+                do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
+                guard let self, self.autoReconnect,
                       case .discovering = self.state else { return }
                 await self.beginFriendJoin()
             }
@@ -1257,12 +1330,12 @@ public final class ProximityCoordinator {
             while !Task.isCancelled {
                 let interval = await MainActor.run { self?.heartbeatInterval ?? 0 }
                 guard interval > 0 else {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    // Cancellation ends the loop here rather than spinning one more iteration.
+                    do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
                     continue
                 }
                 let nanoseconds = UInt64(interval * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: nanoseconds)
-                guard !Task.isCancelled else { return }
+                do { try await Task.sleep(nanoseconds: nanoseconds) } catch { return }
                 await self?.heartbeatTick()
             }
         }
@@ -1338,8 +1411,9 @@ public final class ProximityCoordinator {
         let timeoutSeconds = self.timeoutSeconds
         // Task inherits @MainActor from the calling context — no MainActor.run hop needed.
         timeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-            guard !Task.isCancelled, let self else { return }
+            // A cancelled timeout is the recovery — the phase it guarded already advanced.
+            do { try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000)) } catch { return }
+            guard let self else { return }
             switch self.state {
             case .idle, .connected, .transferring, .ended, .failed:
                 break

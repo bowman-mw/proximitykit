@@ -141,7 +141,16 @@ public final class HeartDropService {
         self.localDayKey = localDayKey
         self.displayName = displayName
         self.identity = identity
-        try? identity.ensureProvisioned()
+        do {
+            try identity.ensureProvisioned()
+        } catch {
+            // Benign here: every later identity use (`FernletIdentityEnvelope.signed`,
+            // `heartDropPairSecret`, `heartDropStaticAgreement`) throws and maps to `.failed`
+            // or a skip — but the ROOT cause has to be recorded, or a service that fails every
+            // send looks unexplained.
+            FernletAuditLog.log("heartdrop.identity.provisionFailed",
+                                context: ["error": String(describing: error)])
+        }
         self.prekeys = prekeys ?? HeartPrekeyStore(keychainService: storage.keychainService, now: now)
         // Stores this service builds itself are ALWAYS sealed at rest (Increment 4) — `storage`
         // moves which key seals them and where the files sit, never whether they are sealed. That
@@ -190,45 +199,19 @@ public final class HeartDropService {
     public func queueHeart(to friend: ProximityTrustedPeerRecord) -> QueueOutcome {
         guard isEnabled(), friend.blockedAt == nil, friend.revokedAt == nil,
               !friend.keyAgreementPublicKey.isEmpty else { return .disabled }
-        // Storage health BEFORE anything irreversible (Track A): an outbox that cannot durably
-        // record the heart, or a ledger whose 5-minute gate cannot be checked or armed, refuses
-        // the heart honestly instead of promising a delivery nothing can keep. Retried on access
-        // and by every sync pass; the peer-bundle cache is deliberately NOT gated — its failure
-        // mode is the static-key fallback, availability over FS.
-        guard outbox.retryLoad(), ledger.isLoaded || ledger.retryLoad() else {
-            refreshStorageProblemNow()
-            return .storageUnavailable
-        }
         let sentAt = now()
-        // The daily cap is checked BEFORE the 5-minute gate on purpose: when both apply, "your
-        // hearts for today are sent" is the state that actually persists, and telling the user to
-        // wait five minutes for a heart that will still be refused afterwards is the lie.
-        guard outbox.hasDailyCapacity(forFriendSigningKey: friend.signingPublicKey, at: sentAt) else {
-            return .dailyLimitReached
+        if let refusal = queuePreflight(for: friend, at: sentAt) { return refusal }
+
+        guard let envelopeJSON = signedHeartEnvelopeJSON(for: friend, sentAt: sentAt) else {
+            return .failed
         }
-        guard ledger.canSendHeart(to: friend.fingerprint) else { return .rateLimited }
-        // Capacity FIRST, before anything irreversible is spent: a one-time prekey consumed for a
-        // heart that is then refused never returns to the pool, and repeated refusals would drain
-        // the friend's 16-key bundle into permanent static-key fallback — losing forward secrecy
-        // for no delivered heart at all. Same for the ledger's 5-minute cooldown.
-        guard outbox.hasCapacity(forFriendSigningKey: friend.signingPublicKey) else { return .backlogFull }
-
-        let payload = HeartPayload(sentAtDayKey: localDayKey(sentAt))
-        guard let payloadData = try? JSONEncoder().encode(payload),
-              let envelope = try? FernletIdentityEnvelope.signed(
-                  identityService: identity,
-                  senderDisplayName: displayName(),
-                  recipientFingerprint: friend.fingerprint,
-                  payloadType: .friendHeartDrop,
-                  payloadEncryption: .none, // the outer HeartDropSealer seal IS the confidentiality
-                  payloadSummary: PayloadSummary(title: PayloadType.friendHeartDrop.rawValue),
-                  payload: payloadData,
-                  createdAt: sentAt,
-                  expiresAt: sentAt.addingTimeInterval(HeartDropOutbox.entryLifetime)
-              ),
-              let envelopeJSON = try? JSONEncoder().encode(envelope) else { return .failed }
-
-        guard let pairSecret = try? identity.heartDropPairSecret(with: friend.keyAgreementPublicKey) else {
+        let pairSecret: SymmetricKey
+        do {
+            pairSecret = try identity.heartDropPairSecret(with: friend.keyAgreementPublicKey)
+        } catch {
+            FernletAuditLog.log("heartdrop.queue.failed", context: [
+                "stage": "pairSecret", "error": String(describing: error)
+            ])
             return .failed
         }
 
@@ -244,11 +227,8 @@ public final class HeartDropService {
             peerBundles.returnPrekey(id: prekey.id, forFriendSigningKey: friend.signingPublicKey)
         }
 
-        guard let wire = try? HeartDropSealer.seal(
-            innerEnvelopeJSON: envelopeJSON,
-            toPrekey: prekey.map { (id: $0.id, publicKey: $0.publicKey) },
-            orStaticKey: friend.keyAgreementPublicKey
-        ) else {
+        guard let wire = sealedHeartWire(envelopeJSON: envelopeJSON, prekey: prekey,
+                                         staticKey: friend.keyAgreementPublicKey) else {
             returnPrekey()
             return .failed
         }
@@ -278,16 +258,97 @@ public final class HeartDropService {
         }
         outboxRevision += 1
         ledger.recordHeartSent(to: friend.fingerprint) // consume-on-queue keeps the 5-min gate honest
-        // The fallback mix ("signed" vs "static" especially) is the field telemetry that would
-        // ever justify reopening per-friend prekey sets — keep the three cases distinguishable.
+        logQueued(prekey: prekey)
+        scheduleSync()
+        return .queued
+    }
+
+    /// The outer seal for one heart — to the chosen prekey when there is one, else the friend's
+    /// static key. Nil with the failing stage audit-logged, so a malformed friend key reads
+    /// differently from a transient failure.
+    private func sealedHeartWire(
+        envelopeJSON: Data,
+        prekey: (id: UUID, publicKey: Data, isOneTime: Bool)?,
+        staticKey: Data
+    ) -> Data? {
+        do {
+            return try HeartDropSealer.seal(
+                innerEnvelopeJSON: envelopeJSON,
+                toPrekey: prekey.map { (id: $0.id, publicKey: $0.publicKey) },
+                orStaticKey: staticKey
+            )
+        } catch {
+            FernletAuditLog.log("heartdrop.queue.failed", context: [
+                "stage": "seal", "error": String(describing: error)
+            ])
+            return nil
+        }
+    }
+
+    /// Every refusal that must happen BEFORE anything irreversible is spent, in the order the user
+    /// copy depends on. Returns the outcome to hand back, or nil when the send may proceed.
+    private func queuePreflight(for friend: ProximityTrustedPeerRecord, at sentAt: Date) -> QueueOutcome? {
+        // Storage health BEFORE anything irreversible (Track A): an outbox that cannot durably
+        // record the heart, or a ledger whose 5-minute gate cannot be checked or armed, refuses
+        // the heart honestly instead of promising a delivery nothing can keep. Retried on access
+        // and by every sync pass; the peer-bundle cache is deliberately NOT gated — its failure
+        // mode is the static-key fallback, availability over FS.
+        outbox.retryLoad()
+        if !ledger.isLoaded { ledger.retryLoad() }
+        guard outbox.isAvailable, ledger.isLoaded else {
+            refreshStorageProblemNow()
+            return .storageUnavailable
+        }
+        // The daily cap is checked BEFORE the 5-minute gate on purpose: when both apply, "your
+        // hearts for today are sent" is the state that actually persists, and telling the user to
+        // wait five minutes for a heart that will still be refused afterwards is the lie.
+        guard outbox.hasDailyCapacity(forFriendSigningKey: friend.signingPublicKey, at: sentAt) else {
+            return .dailyLimitReached
+        }
+        guard ledger.canSendHeart(to: friend.fingerprint) else { return .rateLimited }
+        // Capacity FIRST, before anything irreversible is spent: a one-time prekey consumed for a
+        // heart that is then refused never returns to the pool, and repeated refusals would drain
+        // the friend's 16-key bundle into permanent static-key fallback — losing forward secrecy
+        // for no delivered heart at all. Same for the ledger's 5-minute cooldown.
+        guard outbox.hasCapacity(forFriendSigningKey: friend.signingPublicKey) else { return .backlogFull }
+        return nil
+    }
+
+    /// The signed inner envelope's JSON, or nil with the failing stage audit-logged — so a
+    /// persistent cause (an unprovisioned identity) is distinguishable from a transient one.
+    private func signedHeartEnvelopeJSON(for friend: ProximityTrustedPeerRecord, sentAt: Date) -> Data? {
+        do {
+            let payload = HeartPayload(sentAtDayKey: localDayKey(sentAt))
+            let payloadData = try JSONEncoder().encode(payload)
+            let envelope = try FernletIdentityEnvelope.signed(
+                identityService: identity,
+                senderDisplayName: displayName(),
+                recipientFingerprint: friend.fingerprint,
+                payloadType: .friendHeartDrop,
+                payloadEncryption: .none, // the outer HeartDropSealer seal IS the confidentiality
+                payloadSummary: PayloadSummary(title: PayloadType.friendHeartDrop.rawValue),
+                payload: payloadData,
+                createdAt: sentAt,
+                expiresAt: sentAt.addingTimeInterval(HeartDropOutbox.entryLifetime)
+            )
+            return try JSONEncoder().encode(envelope)
+        } catch {
+            FernletAuditLog.log("heartdrop.queue.failed", context: [
+                "stage": "sign", "error": String(describing: error)
+            ])
+            return nil
+        }
+    }
+
+    /// The fallback mix ("signed" vs "static" especially) is the field telemetry that would ever
+    /// justify reopening per-friend prekey sets — keep the three cases distinguishable.
+    private func logQueued(prekey: (id: UUID, publicKey: Data, isOneTime: Bool)?) {
         let prekeyKind: String
         switch prekey {
         case nil: prekeyKind = "static"
         case .some(let used): prekeyKind = used.isOneTime ? "one-time" : "signed"
         }
         FernletAuditLog.log("heartdrop.queued", context: ["prekey": prekeyKind])
-        scheduleSync()
-        return .queued
     }
 
     /// Hearts waiting for this friend (drives the "will be delivered" row state).
@@ -492,7 +553,17 @@ public final class HeartDropService {
         var tagOwner: [String: ProximityTrustedPeerRecord] = [:]
         let today = IdentityService.heartDropDayEpoch(at: now())
         for friend in friends {
-            guard let pairSecret = try? identity.heartDropPairSecret(with: friend.keyAgreementPublicKey) else { continue }
+            let pairSecret: SymmetricKey
+            do {
+                pairSecret = try identity.heartDropPairSecret(with: friend.keyAgreementPublicKey)
+            } catch {
+                // A friend whose KA key cannot derive a pair secret is skipped EVERY sync — their
+                // hearts would never be fetched, with nothing to explain it.
+                FernletAuditLog.log("heartdrop.fetch.pairSecretFailed", context: [
+                    "friend": friend.fingerprint, "error": String(describing: error)
+                ])
+                continue
+            }
             for offset in 0...Self.pickupWindowDays where today >= offset {
                 // Expected INCOMING tags use the FRIEND as the sender term.
                 let tag = IdentityService.heartDropTag(
@@ -503,7 +574,15 @@ public final class HeartDropService {
                 tagOwner[tag] = friend
             }
         }
-        guard let records = try? await transport.fetch(tags: Array(tagOwner.keys)) else { return }
+        let records: [HeartDropRecord]
+        do {
+            records = try await transport.fetch(tags: Array(tagOwner.keys))
+        } catch {
+            // Nothing-silent: a failing fetch means incoming hearts stop arriving. Counted so a
+            // persistent outage surfaces the same way a persistent upload failure does.
+            FernletAuditLog.log("heartdrop.fetch.failed", context: ["error": String(describing: error)])
+            return
+        }
         guard !Task.isCancelled, isEnabled() else { return }
         for record in records {
             openIncoming(record, expectedSender: tagOwner[record.tag])
@@ -526,24 +605,18 @@ public final class HeartDropService {
             ])
             return
         }
-        guard let inner = try? HeartDropSealer.open(
-            record.payload,
-            prekeyPrivateKey: { [prekeys] id in prekeys.privateKey(forPrekeyID: id) },
-            staticAgreement: { [identity] eph in try identity.heartDropStaticAgreement(withEphemeralPublicKey: eph) },
-            staticPublicKey: identity.localKeyAgreementPublicKey
-        ), let envelope = try? JSONDecoder().decode(FernletIdentityEnvelope.self, from: inner) else { return }
+        guard let envelope = openSealedRecord(record) else { return }
 
         guard envelope.payloadType == .friendHeartDrop else { return }
         // The tag binds the pair; the signature must match the SAME friend (an attacker knowing a
         // tag still can't impersonate — the inner envelope is signed by the sender's identity key).
         guard let sender = expectedSender,
               envelope.senderSigningPublicKey == sender.signingPublicKey,
-              sender.blockedAt == nil, sender.revokedAt == nil else { return }
-        // nil replay cache: drops are legitimately older than the 24 h cache window; the durable
-        // dedup below replaces it. Signature/schema/expiry/recipient checks all still run.
-        guard let plaintext = try? envelope.verify(identityService: identity, replayCache: nil),
-              let heart = try? JSONDecoder().decode(HeartPayload.self, from: plaintext),
-              HeartPayload.isValidDayKey(heart.sentAtDayKey) else { return }
+              sender.blockedAt == nil, sender.revokedAt == nil else {
+            FernletAuditLog.log("heartdrop.rejected", context: ["reason": "senderMismatch"])
+            return
+        }
+        guard let heart = verifiedHeartPayload(of: envelope) else { return }
 
         // Receive-side flood bound: a malicious client could ignore its 5-min consume-on-send.
         // The bucket is a RECEIVER-side day. `heart.sentAtDayKey` stays display-only — it is
@@ -592,6 +665,47 @@ public final class HeartDropService {
         }
     }
 
+    /// Opens the outer seal and decodes the inner envelope, naming the rejection reason (R7): a
+    /// stuck hostile or corrupt record is re-fetched and re-rejected on EVERY sync, so a silent
+    /// drop here is a permanently invisible failure. No identifying context beyond the reason.
+    private func openSealedRecord(_ record: HeartDropRecord) -> FernletIdentityEnvelope? {
+        do {
+            let inner = try HeartDropSealer.open(
+                record.payload,
+                prekeyPrivateKey: { [prekeys] id in prekeys.privateKey(forPrekeyID: id) },
+                staticAgreement: { [identity] eph in try identity.heartDropStaticAgreement(withEphemeralPublicKey: eph) },
+                staticPublicKey: identity.localKeyAgreementPublicKey
+            )
+            return try JSONDecoder().decode(FernletIdentityEnvelope.self, from: inner)
+        } catch {
+            FernletAuditLog.log("heartdrop.rejected", context: [
+                "reason": "openFailed", "error": String(describing: error)
+            ])
+            return nil
+        }
+    }
+
+    /// Verifies the envelope and decodes its heart payload, or nil with the reason logged.
+    ///
+    /// nil replay cache: drops are legitimately older than the 24 h cache window; the durable
+    /// dedup replaces it. Signature/schema/expiry/recipient checks all still run.
+    private func verifiedHeartPayload(of envelope: FernletIdentityEnvelope) -> HeartPayload? {
+        do {
+            let plaintext = try envelope.verify(identityService: identity, replayCache: nil)
+            let heart = try JSONDecoder().decode(HeartPayload.self, from: plaintext)
+            guard HeartPayload.isValidDayKey(heart.sentAtDayKey) else {
+                FernletAuditLog.log("heartdrop.rejected", context: ["reason": "invalidDayKey"])
+                return nil
+            }
+            return heart
+        } catch {
+            FernletAuditLog.log("heartdrop.rejected", context: [
+                "reason": "verifyFailed", "error": String(describing: error)
+            ])
+            return nil
+        }
+    }
+
     private func cleanup(_ transport: any HeartDropTransporting) async {
         let expired = outbox.expiredEntries()
         guard !expired.isEmpty else { return }
@@ -600,7 +714,16 @@ public final class HeartDropService {
         let neverUploaded = expired.filter { $0.recordName == nil }.count
         let uploadedNames = expired.compactMap(\.recordName)
         if !uploadedNames.isEmpty {
-            guard (try? await transport.deleteOwnRecords(recordNames: uploadedNames)) != nil else { return }
+            do {
+                try await transport.deleteOwnRecords(recordNames: uploadedNames)
+            } catch {
+                // Retried on the next pass; logged so a permanently failing cleanup is visible,
+                // exactly as the purge path already logs its own delete failure.
+                FernletAuditLog.log("heartdrop.cleanup.deleteFailed", context: [
+                    "records": "\(uploadedNames.count)", "error": String(describing: error)
+                ])
+                return
+            }
         }
         guard !Task.isCancelled, isEnabled() else { return }
         outbox.remove(ids: expired.map(\.id))
@@ -645,8 +768,11 @@ public final class HeartDropService {
         // a write is owed) DOES purge: the user withdrew consent, so getting the records off the
         // public database now outranks waiting for the write to recover — the removal commits in
         // memory and re-persists with the dirty value (review finding, 2026-07-26).
-        _ = outbox.retryLoad()
-        guard outbox.isLoaded, let doomed = outbox.snapshot() else { return false }
+        outbox.retryLoad()
+        guard outbox.isLoaded, let doomed = outbox.snapshot() else {
+            FernletAuditLog.log("heartdrop.purge.outboxUnavailable")
+            return false
+        }
         let recordNames = doomed.compactMap(\.recordName)
         guard !recordNames.isEmpty else {
             // No await between the capture and here, so nothing can have raced in.
@@ -656,8 +782,12 @@ public final class HeartDropService {
             return true
         }
         guard let transport else { return false }
-        guard (try? await transport.deleteOwnRecords(recordNames: recordNames)) != nil else {
-            FernletAuditLog.log("heartdrop.purge.failed", context: ["records": "\(recordNames.count)"])
+        do {
+            try await transport.deleteOwnRecords(recordNames: recordNames)
+        } catch {
+            FernletAuditLog.log("heartdrop.purge.failed", context: [
+                "records": "\(recordNames.count)", "error": String(describing: error)
+            ])
             return false
         }
         // Exactly what we captured, and only where it is unchanged. Hearts enqueued during the
@@ -710,7 +840,15 @@ public final class HeartDropService {
         peerBundles.wipeForDeleteAll()
         outbox.wipeForDeleteAll()
         dedup.wipeForDeleteAll()
-        try? identity.wipe() // the service's own live IdentityService cache (4th instance)
+        do {
+            // The service's own live IdentityService cache (4th instance).
+            try identity.wipe()
+        } catch {
+            // Delete-all must never fail silently: proximity keys surviving "delete everything"
+            // is exactly the state the wipe coverage doc exists to prevent.
+            FernletAuditLog.log("heartdrop.wipe.identityWipeFailed",
+                                context: ["error": String(describing: error)])
+        }
         undeliveredCount = 0
         deliveryProblem = nil
         outboxRevision += 1

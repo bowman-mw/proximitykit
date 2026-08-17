@@ -174,7 +174,7 @@ public final class ModerationBanStore {
             lastCheckMonotonic: clock.seconds, lastCheckWall: nowWall,
             maxObservedWall: nowWall, tamperCount: 0,
             handledContentHashes: merged.isEmpty ? nil : Array(merged))
-        save(record, account: account)
+        guard save(record, account: account) else { return }   // R7: never report an unwritten ban as applied
         FernletAuditLog.log("storeBan.applied", context: ["subject": subject, "days": "\(durationDays)"])
     }
 
@@ -211,7 +211,9 @@ public final class ModerationBanStore {
 
         record.lastCheckMonotonic = nowMono
         record.lastCheckWall = nowWall
-        save(record, account: account)
+        // The countdown bookkeeping is re-derived from the record on every read, so a failed write
+        // costs at most this tick's credit; `save` has already logged it (R7).
+        _ = save(record, account: account)
 
         let credited = record.creditedMonotonic + record.creditedWall
         if credited >= record.durationSeconds && !inRegression {
@@ -222,13 +224,31 @@ public final class ModerationBanStore {
 
     private func load(account: String) -> BanRecord? {
         guard let data = KeychainItem.load(account: account, service: service) else { return nil }
-        return try? JSONDecoder().decode(BanRecord.self, from: data)
+        do {
+            return try JSONDecoder().decode(BanRecord.self, from: data)
+        } catch {
+            // Every caller reads nil as "not banned", so a corrupt row silently LIFTS a ban.
+            // It still lifts (there is nothing left to enforce against), but not silently.
+            FernletAuditLog.log("storeBan.corruptRecord", context: ["account": account])
+            return nil
+        }
     }
 
-    private func save(_ record: BanRecord, account: String) {
-        guard let data = try? JSONEncoder().encode(record) else { return }
-        _ = KeychainItem.store(
+    /// False when the record did not reach the keychain — a ban that never persisted takes no
+    /// effect at all, so the caller must not report it as applied (R7).
+    private func save(_ record: BanRecord, account: String) -> Bool {
+        guard let data = try? JSONEncoder().encode(record) else {
+            FernletAuditLog.log("storeBan.encodeFailed", context: ["account": account])
+            return false
+        }
+        let status = KeychainItem.store(
             data, account: account, service: service,
             accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, synchronizable: false)
+        guard status == errSecSuccess else {
+            FernletAuditLog.log("storeBan.saveFailed",
+                                context: ["account": account, "status": "\(status)"])
+            return false
+        }
+        return true
     }
 }
