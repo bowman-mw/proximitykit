@@ -1283,10 +1283,20 @@ public final class ProximityCoordinator {
         ))
         inspector?.endSession(endState: "failed")
         guard teardownTask == nil else { return }   // R3: at most one teardown in flight
+        // The collaborators are captured STRONGLY on purpose. The `.failed` transition above wakes
+        // the owning manager's observation loop, whose stale sweep may drop this coordinator's last
+        // reference in the same main-actor turn — before this task runs. Reaching them through
+        // `self?` then skipped every stop: the Live Activity anchor stayed live system-side for the
+        // OS maximum lifetime, ranging was never invalidated. All three are `let`s that never
+        // reference the coordinator, so this cannot form a cycle; they live only until the
+        // (fast, idempotent) teardown completes.
+        let ranging = self.ranging
+        let transport = self.transport
+        let anchor = self.foregroundAnchor
         teardownTask = Task { [weak self] in
-            await self?.ranging.stop()
-            await self?.transport.disconnect()
-            await self?.foregroundAnchor.stop()
+            await ranging.stop()
+            await transport.disconnect()
+            await anchor.stop()
             self?.teardownTask = nil
         }
     }

@@ -82,8 +82,15 @@ signatures verified off the main actor (the WI-9 convention). The managers that 
 coordinator state into their own observable properties (``MeshNetworkManager``,
 ``ProximityRecipeShareManager``, ``PresenceManager``) drive that mirroring through the internal
 `ObservationLoop` helper (`Engine/ObservationLoop.swift`), which owns the shared
-`withObservationTracking` re-arm machinery and holds its owner weakly so the loop ends when the
-manager deallocates. Framework delegate callbacks (MCSession, NearbyInteraction, ActivityKit)
+`withObservationTracking` re-arm machinery and holds its owner weakly — including across the
+suspension — so the loop can never pin the manager. Every long-running task those three managers
+own is also cancelled in an `isolated deinit`, and every record-drop path (stop, refresh, MC
+disconnect, stale/parked sweeps, slot eviction) runs the dropped ``ProximityCoordinator``'s own
+`cancel()` so ranging and the Live Activity anchor stop with it; the mesh manager additionally
+kicks an evicted peer's MC link (`MeshMultipeerSession.disconnectPeer`) so no zombie link
+survives a slot (`Tests/FernletTests/MemoryLifecycleTests` + `MemoryLifecycleBoundaryTests` are
+the enforcement; see Docs/Memory-Leak-Review-2026-08-17.md). Framework delegate callbacks
+(MCSession, NearbyInteraction, ActivityKit)
 transfer non-Sendable objects across the main-actor
 hop via documented `nonisolated(unsafe)` locals. Signing inputs come from the deterministic
 binary serializer in `CanonicalSignatureSerializer.swift` (domain-tagged per signed type,
@@ -179,6 +186,8 @@ compatibility contracts with in-field peers.
 ### Foreground anchor
 
 - ``ProximityForegroundAnchoring``
+- ``ProximityLiveActivityReaper`` — launch-time reaper for proximity Live Activities a killed
+  previous process stranded; `FernletStoreLoader.startIfNeeded()` calls `endOrphans()` once per process, before the store exists.
 
 ### Trust and verification
 

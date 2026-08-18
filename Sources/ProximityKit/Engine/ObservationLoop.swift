@@ -14,10 +14,12 @@ import Observation
 ///
 /// Each iteration registers the caller's tracked reads, suspends until Observation reports a
 /// change, then runs the caller's check on the main actor and re-arms. The owner is held
-/// **weakly** by the loop task and strongly only for the duration of one iteration, so the
-/// loop terminates on owner deallocation instead of suspending forever — do not replace the
-/// owner parameter with weak-self caller closures, which would reintroduce the suspended-task
-/// leak documented below.
+/// **weakly** by the loop task and strongly only while arming the reads and while running the
+/// check — never across the suspension — so the loop terminates on owner deallocation instead
+/// of pinning the owner until a change that can no longer come. Do not replace the owner
+/// parameter with weak-self caller closures, which would reintroduce the suspended-task leak
+/// documented below; and do not hoist a `guard let owner` above the await, which reintroduces
+/// the pin (``MemoryLifecycleTests`` covers both).
 @MainActor
 enum ObservationLoop {
 
@@ -39,25 +41,42 @@ enum ObservationLoop {
     ) -> Task<Void, Never> {
         Task { @MainActor [weak owner] in
             while !Task.isCancelled {
-                guard let owner else { return }
                 // AsyncStream does not finish automatically when its consumer task is
                 // cancelled. Finish the continuation explicitly so repeated discovery
                 // sessions do not leave suspended observer tasks behind.
                 let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-                withObservationTracking {
-                    tracking(owner)
-                } onChange: {
-                    continuation.yield(())
-                }
+                // The strong reference lives only inside `arm` — never across the await below.
+                // A `guard let owner` at the top of the iteration pinned the owner (and every
+                // slot, coordinator and transport it owns) for the whole suspension, and the
+                // suspension ends only when a tracked property changes — which, once the owner's
+                // last other reference is gone, is never. The header's "loop ends on owner
+                // dealloc" guarantee was void; this makes it true.
+                guard arm(owner, tracking: tracking, continuation: continuation) else { return }
                 await withTaskCancellationHandler {
                     for await _ in stream { break }
                 } onCancel: {
                     continuation.finish()
                 }
                 continuation.finish()
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, let owner else { return }
                 onChange(owner)
             }
         }
+    }
+
+    /// Registers one round of tracked reads for `owner`, holding it strongly only for the call.
+    /// Returns `false` (and registers nothing) once the owner has been deallocated, which ends the loop.
+    private static func arm<Owner: AnyObject>(
+        _ owner: Owner?,
+        tracking: @escaping @MainActor (Owner) -> Void,
+        continuation: AsyncStream<Void>.Continuation
+    ) -> Bool {
+        guard let owner else { return false }
+        withObservationTracking {
+            tracking(owner)
+        } onChange: {
+            continuation.yield(())
+        }
+        return true
     }
 }

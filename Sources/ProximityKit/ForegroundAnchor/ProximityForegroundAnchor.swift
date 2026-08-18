@@ -155,4 +155,43 @@ final class ActivityKitProximityForegroundAnchor: ProximityForegroundAnchoring {
         await liveActivity.end(content, dismissalPolicy: .immediate)
     }
 }
+
+/// Ends every proximity-connection Live Activity left system-side by a PREVIOUS process.
+///
+/// Each ``ActivityKitProximityForegroundAnchor`` holds its `Activity` in a private property, and
+/// the only code that ends it is that same anchor's `stop()`. A process kill/crash while a session
+/// was live (a mesh session is deliberately kept alive in the background) strands the activity:
+/// no relaunched object holds a handle to it, and nothing else ever enumerated
+/// `Activity<ProximityConnectionActivityAttributes>.activities` — so it lingered until ActivityKit's
+/// own maximum-lifetime auto-end (hours), counting toward the per-app Live Activity ceiling that a
+/// later workout/cooking `Activity.request` needs.
+///
+/// Call `endOrphans()` ONCE per launch, from the composition root, BEFORE any proximity manager can
+/// start a coordinator — never on scene activation, where it would end the activities of anchors
+/// still live in this process. The workout/cooking kinds have their own relaunch reapers
+/// (`LiveActivityStarter`); this one touches only the proximity kind.
+@MainActor
+public enum ProximityLiveActivityReaper {
+    /// Ends every stranded proximity activity with `.immediate` dismissal. Bounded by the OS
+    /// per-app Live Activity cap (R2); a no-op — no awaits — when there is nothing to reap.
+    public static func endOrphans() async {
+        let content = ActivityContent(
+            state: ProximityConnectionActivityAttributes.ContentState(bytesSent: 0, bytesReceived: 0, status: "Ended"),
+            staleDate: nil
+        )
+        for orphan in Activity<ProximityConnectionActivityAttributes>.activities {
+            // non-Sendable Activity across nonisolated async end(_:); same note as `stop()`.
+            nonisolated(unsafe) let activity = orphan
+            await activity.end(content, dismissalPolicy: .immediate)
+        }
+    }
+}
+#else
+/// Platform twin of the ActivityKit reaper so the composition root compiles everywhere; there are
+/// no Live Activities to reap without ActivityKit.
+@MainActor
+public enum ProximityLiveActivityReaper {
+    /// No-op: nothing to reap on a platform without ActivityKit.
+    public static func endOrphans() async {}
+}
 #endif

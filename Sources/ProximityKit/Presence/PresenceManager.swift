@@ -214,6 +214,18 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     // MARK: - Lifecycle
 
+    /// Ends every long-running task the manager owns if it is released without `stop()` (the
+    /// production instance never is — process-lifetime on the store — but tasks must not outlive
+    /// their owner: the observation loop would stay parked, the timers spin one more tick).
+    /// `isolated`: the handles are main-actor state.
+    isolated deinit {
+        heartObservationTask?.cancel()
+        clearHeartStatusTask?.cancel()
+        epochRotationTask?.cancel()
+        lostSweepTask?.cancel()
+        for task in heartConnectTimeoutTasks.values { task.cancel() }
+    }
+
     public func start() {
         guard !isRunning else { return }
         isRunning = true
@@ -521,6 +533,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// changed). Peers that no longer match anything are removed immediately — their tags are
     /// provably not a current friend's (blocked/removed friends must disappear promptly).
     private func reevaluateDiscoveredPeers() {
+        var dropped: [UUID] = []
         for (id, tokens) in tokensByPeer {
             var matched: Set<String> = []
             for token in tokens {
@@ -529,11 +542,14 @@ public final class PresenceManager: ProximityPayloadHandling {
             if matched.count == 1 {
                 matchedFingerprintsByPeer[id] = matched
             } else {
-                matchedFingerprintsByPeer.removeValue(forKey: id)
-                tokensByPeer.removeValue(forKey: id)
-                peerLostAt.removeValue(forKey: id)
+                dropped.append(id)
             }
         }
+        // Same release path as a lost/self-excluded peer (R3): `removePeer` also drops the
+        // `discoveredPeers` entry — unless a live heart connection still holds the peer, whose
+        // teardown prunes it. Removing only the match bookkeeping here orphaned the peer object
+        // (a later `lostPeer` found no `tokensByPeer` entry, so the entry lived until `stop()`).
+        for id in dropped { removePeer(id) }
         recomputeNearby()
     }
 
@@ -816,6 +832,11 @@ public final class PresenceManager: ProximityPayloadHandling {
             if connection.intendedFriend != nil, isHeartSendInProgress {
                 failHeart("No heart was sent — the connection dropped.")
             }
+            // Every record drop runs the coordinator's own teardown. Idempotent for `.ended`
+            // (its `end()` already stopped everything); for `.failed` it is what guarantees the
+            // ranging + Live Activity anchor stop even if `fail()`'s own teardown task has not run.
+            let coordinator = connection.coordinator
+            Task { await coordinator.cancel() }
             // A failed handshake never fires an MC disconnect — best-effort kick the zombie.
             session?.disconnectPeer(connection.peer)
             heartConnections.removeAll { $0.id == connection.id }
@@ -887,14 +908,22 @@ public final class PresenceManager: ProximityPayloadHandling {
     }
 
     private func removeHeartConnection(matching peer: MultipeerPeer) {
-        let before = heartConnections.count
-        var droppedOutbound = false
-        heartConnections.removeAll { conn in
-            let match = conn.peer.id == peer.id || conn.peer.underlying == peer.underlying
-            if match, conn.intendedFriend != nil { droppedOutbound = true }
-            return match
+        let dropped = heartConnections.filter { conn in
+            conn.peer.id == peer.id || conn.peer.underlying == peer.underlying
         }
-        guard heartConnections.count != before else { return }
+        guard !dropped.isEmpty else { return }
+        let droppedIDs = Set(dropped.map(\.id))
+        heartConnections.removeAll { droppedIDs.contains($0.id) }
+        // The MC channel is already gone, but the coordinator's OWN teardown has not run: its
+        // `.disconnected` hop is a weak-self Task that finds nothing once the record (the only
+        // strong owner) is dropped. `cancel()` → `end()` still stops ranging and the foreground
+        // anchor (the Live Activity) — without it every heart ended by a transport drop leaves an
+        // orphaned Live Activity until the system's time cap. Mirrors `teardownHeartConnection`.
+        for connection in dropped {
+            let coordinator = connection.coordinator
+            Task { await coordinator.cancel() }
+        }
+        let droppedOutbound = dropped.contains { $0.intendedFriend != nil }
         pendingHeartSends.removeValue(forKey: peer.id)
         // The heart channel's MC disconnect does not mean the peer left presence — it may still be
         // advertising. Keep it in discoveredPeers so reachable and sendable agree; prune only if it
@@ -1093,6 +1122,17 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     func registerOwnEphemeralPeerNameForTesting(_ name: String) {
         rememberOwnEphemeralPeerName(name)
+    }
+
+    /// `discoveredPeers.count` — so a test can prove the peer-object map shrinks with the match map
+    /// (a re-evaluation that drops a match must release the peer, not orphan it until `stop()`).
+    var discoveredPeerCountForTesting: Int { discoveredPeers.count }
+
+    /// Drives the production MC-disconnect removal path (`removeHeartConnection(matching:)`)
+    /// exactly as the transport's `onPeerDisconnected` would — the writer needs a live radio a
+    /// unit test must never start.
+    func simulateHeartPeerDisconnectForTesting(_ peer: MultipeerPeer) {
+        removeHeartConnection(matching: peer)
     }
 
     // MARK: - Heart test seams (no real radios)

@@ -157,6 +157,17 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         try identity.wipe()
     }
 
+    /// Ends every long-running task the manager owns if it is released without `stop()` (the
+    /// production instance never is — process-lifetime on the store — but tasks must not outlive
+    /// their owner: the observation loop would stay parked, the timers spin one more tick).
+    /// `isolated`: the handles are main-actor state.
+    isolated deinit {
+        observationTask?.cancel()
+        clearStatusTask?.cancel()
+        connectTimeoutTask?.cancel()
+        parkedSweepTask?.cancel()
+    }
+
     public func start() {
         guard !isRunning else { return }
         isRunning = true
@@ -179,6 +190,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         parkedSweepTask?.cancel()
         parkedSweepTask = nil
         parkedSince.removeAll()
+        cancelCoordinators(of: connections)
         session.stop()
         nearbyRecipients.removeAll()
         pendingOutgoing = nil
@@ -208,6 +220,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         parkedSweepTask?.cancel()
         parkedSweepTask = nil
         parkedSince.removeAll()
+        cancelCoordinators(of: connections)
         session.stop()
         nearbyRecipients.removeAll()
         pendingOutgoing = nil
@@ -521,6 +534,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             }
         }
         let before = connections.count
+        cancelCoordinators(of: stale)
         for connection in stale {
             // A coordinator can fail/end without MC ever reporting a disconnect (a failed
             // handshake never fires one) — best-effort kick so the MC link doesn't linger as
@@ -534,12 +548,30 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     private func removeConnections(matching peer: MultipeerPeer) {
         let before = connections.count
-        connections.removeAll { connection in
-            let matches = connection.peer.id == peer.id || connection.peer.underlying == peer.underlying
-            if matches { parkedSince.removeValue(forKey: connection.id) }
-            return matches
+        let evicted = connections.filter { connection in
+            connection.peer.id == peer.id || connection.peer.underlying == peer.underlying
         }
+        cancelCoordinators(of: evicted)
+        for connection in evicted { parkedSince.removeValue(forKey: connection.id) }
+        let evictedIDs = Set(evicted.map(\.id))
+        connections.removeAll { evictedIDs.contains($0.id) }
         finalizeConnectionRemovals(previousCount: before)
+    }
+
+    /// Runs the coordinators' OWN teardown for records being evicted. A `RecipeShareConnection`
+    /// is the only strong owner of its ``ProximityCoordinator``; dropping the record without
+    /// `cancel()` frees the Swift graph but skips `end()` — the NISession invalidate, the
+    /// foreground anchor's Live Activity end, and the `.sessionEnded` audit — because the
+    /// coordinator's own `.disconnected` hop is a weak-self Task that finds nothing. Every drop
+    /// path (stop, refresh, MC disconnect, parked sweep, stale sweep) funnels here. For an
+    /// `.ended` record `cancel()` is idempotent; for a `.failed` one it is what guarantees the
+    /// teardown runs (`fail()` only enqueues it, and this sweep can drop the last reference
+    /// first). Capturing the whole record keeps the coordinator's weak trust policy alive for the
+    /// audit; the Task releases it afterwards.
+    private func cancelCoordinators(of evicted: [RecipeShareConnection]) {
+        for connection in evicted {
+            Task { [connection] in await connection.coordinator.cancel() }
+        }
     }
 
     /// Every connection-record removal funnels through here. Reopening the radio is keyed on
@@ -645,6 +677,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         }
         guard !evicted.isEmpty else { return }
         let before = connections.count
+        cancelCoordinators(of: evicted)
         for connection in evicted {
             // Same zombie caveat as the stale sweep: the MC link may still be up even though
             // the coordinator stalled — kick it best-effort.

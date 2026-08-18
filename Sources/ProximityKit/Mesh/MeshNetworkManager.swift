@@ -42,7 +42,7 @@ public struct FriendPhotoWallPost: Identifiable {
 /// `.completeFileProtection`); lives beside the photo cache, never in the synced snapshot. A
 /// failed load falls back to empty preferences; a failed save is silently dropped — wall
 /// cosmetics, not data of record.
-private struct FriendPhotoWallPreferences: Codable {
+private struct FriendPhotoWallPreferences: Codable, Equatable {
     var aggregatedSessionIDs: Set<UUID> = []
     var coverPhotoIDsBySession: [UUID: UUID] = [:]
     var favoritePhotoIDsBySession: [UUID: UUID] = [:]
@@ -208,6 +208,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var vouchCache: [String: MeshFriendVouchListPayload] = [:]
     // Retry counts for failed proximity-join MC connections (peer.id → attempts)
     @ObservationIgnored private var peerRetryCount: [UUID: Int] = [:]
+    /// Peers this manager kicked itself (`kickEvictedPeer`) whose `.notConnected` has not arrived yet.
+    /// `onPeerDisconnected` reads that event as our own eviction — never as the transient socket loss
+    /// its re-invite retry exists for. Consumed on the disconnect callback, cleared in
+    /// `stopSearching()`; bounded by MC's 8-peer cap in practice and hard-capped by
+    /// ``maxLocallyKickedPeers`` (R3).
+    @ObservationIgnored private var locallyKickedPeerIDs: Set<UUID> = []
     /// Slots the local shop catalog was already sent to (belt-and-braces once-per-slot guard — the
     /// commit transition in checkCoordinatorStates fires once per fingerprint change already). Pruned
     /// per-slot on eviction (removeSlot/disconnectSlot) so a rejoining friend re-exchanges — the
@@ -241,6 +247,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var approvedRemovalProposalIDs: Set<UUID> = []
     @ObservationIgnored private var sessionID = UUID().uuidString
     private static let maxPeerRetries = 3
+    private static let maxLocallyKickedPeers = 32
 
     // MARK: - Phase 3 Group Encryption State
 
@@ -353,6 +360,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         self.photoWallPreferencesStore = preferencesStore
         self.photoWallPreferences = preferencesStore.load() ?? FriendPhotoWallPreferences()
         meshPhotos = photoCacheStore.load()
+        prunePhotoWallPreferences()
         setupMeshSession()
         registerClothingShopHandler()
         registerSessionMessageHandler()
@@ -368,6 +376,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         activities.committedActivityPeerFingerprints = { [weak self] in
             self?.committedActivityPeerFingerprints() ?? []
         }
+    }
+
+    /// Ends every long-running task the manager owns if it is released without `stopSearching()`
+    /// (today it never is — it is a process-lifetime `lazy var` on the store — but the tasks must
+    /// not outlive their owner: the observation loop would stay parked and the `[weak self]` timers
+    /// would each spin one more tick). `isolated`: the handles are main-actor state.
+    isolated deinit {
+        observationTask?.cancel()
+        rotationTimer?.cancel()
+        beaconTimer?.cancel()
+        rotationSyncTask?.cancel()
+        sessionHeartStateClearTask?.cancel()
     }
 
     /// Phase 3a: the shop rides the friend mesh as registered feature payloads. The dispatch default's
@@ -886,6 +906,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         sessionPhotos.removeAll()
         photoCacheStore.save(meshPhotos)
+        prunePhotoWallPreferences()
     }
 
     public func deleteAllSessionPhotos() {
@@ -899,20 +920,33 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let existed = meshPhotos.contains { $0.id == photoID }
         meshPhotos.removeAll { $0.id == photoID }
         sessionPhotos.removeAll { $0.id == photoID }
-
-        var preferencesChanged = false
-        for (sessionID, favoriteID) in photoWallPreferences.favoritePhotoIDsBySession where favoriteID == photoID {
-            photoWallPreferences.favoritePhotoIDsBySession.removeValue(forKey: sessionID)
-            preferencesChanged = true
-        }
-        for (sessionID, coverID) in photoWallPreferences.coverPhotoIDsBySession where coverID == photoID {
-            photoWallPreferences.coverPhotoIDsBySession.removeValue(forKey: sessionID)
-            preferencesChanged = true
-        }
-        if preferencesChanged { persistPhotoWallPreferences() }
+        // Drops the favorite / aggregated-cover entries that pointed at the photo (and any other
+        // entry the cache no longer backs).
+        prunePhotoWallPreferences()
 
         guard existed else { return }
         photoCacheStore.save(meshPhotos)
+    }
+
+    /// Drops wall-preference entries whose session or photo no longer exists in `meshPhotos`
+    /// (FIFO eviction past the 1000-photo cap, session discard, single-photo delete, or a favorite
+    /// on a photo that was never kept). The sidecar is install-lifetime and survives delete-all
+    /// (the wall is deliberately kept), so without this it accumulated one `aggregatedSessionIDs`
+    /// + cover entry per aggregated session forever while the photos themselves rolled off (R3).
+    /// Three filters over finite collections; persists only when something actually changed. Never
+    /// called from `photoWallPosts` — that getter must stay mutation-free.
+    private func prunePhotoWallPreferences() {
+        let liveSessionIDs = Set(meshPhotos.compactMap { $0.session?.id })
+        let livePhotoIDs = Set(meshPhotos.map(\.id))
+        var pruned = photoWallPreferences
+        pruned.aggregatedSessionIDs = pruned.aggregatedSessionIDs.filter { liveSessionIDs.contains($0) }
+        pruned.coverPhotoIDsBySession = pruned.coverPhotoIDsBySession
+            .filter { liveSessionIDs.contains($0.key) && livePhotoIDs.contains($0.value) }
+        pruned.favoritePhotoIDsBySession = pruned.favoritePhotoIDsBySession
+            .filter { liveSessionIDs.contains($0.key) && livePhotoIDs.contains($0.value) }
+        guard pruned != photoWallPreferences else { return }
+        photoWallPreferences = pruned
+        persistPhotoWallPreferences()
     }
 
     // MARK: - Public API
@@ -1656,6 +1690,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         meshSession.onPeerDisconnected = { [weak self] peer, _ in
             guard let self else { return }
+            // Read BEFORE removeSlot (whose no-op kick of an already-dropped peer records the id
+            // too), then clear both records: a deliberate local eviction must not be retried.
+            let wasKickedLocally = self.locallyKickedPeerIDs.contains(peer.id)
             let matchingSlot = self.slots.first {
                 $0.peer.id == peer.id || $0.peer.underlying == peer.underlying
             }
@@ -1663,11 +1700,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             if let slot = matchingSlot {
                 self.removeSlot(slot)
             }
+            self.locallyKickedPeerIDs.remove(peer.id)
             // In proximity join: if the MC connection dropped before the peer committed and we
             // are the designated inviter (higher fingerprint), retry up to maxPeerRetries times.
             // Without this, a transient socket failure permanently strands the session because
             // the browser won't re-fire onPeerDiscovered for a peer it already found.
-            guard self.isProximityJoin, self.isSessionOpen, !wasCommitted else { return }
+            guard self.isProximityJoin, self.isSessionOpen, !wasCommitted, !wasKickedLocally else { return }
             guard self.shouldInitiateInvite(to: peer) else { return }
             let retryCount = self.peerRetryCount[peer.id, default: 0]
             guard retryCount < Self.maxPeerRetries else { return }
@@ -1720,6 +1758,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         discoveryError = nil
         isProximityJoin = false
         peerRetryCount.removeAll()
+        locallyKickedPeerIDs.removeAll()
         sentShopCatalogSlotIDs.removeAll()
         shopCatalogRequestResponseAt.removeAll()
         meshSession.stop()
@@ -1816,8 +1855,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     private func handleChannelReady(_ channel: PeerChannelTransport) {
-        guard !isProximityJoin || isSessionOpen else { return }
-        guard slots.count < Self.maxSlotsDuringOverflowEvaluation else { return }
+        // A connected MC peer this manager refuses to seat would otherwise hold a zombie link
+        // (channel with no owner, one of the 8 MC peer slots) until the search stops — kick it.
+        // The duplicate guard is different: that peer already owns a live slot.
+        guard !isProximityJoin || isSessionOpen else { kickEvictedPeer(channel.peer); return }
+        guard slots.count < Self.maxSlotsDuringOverflowEvaluation else { kickEvictedPeer(channel.peer); return }
         guard !slots.contains(where: { $0.peer.id == channel.peer.id }) else { return }
 
         let isOverflowCandidate = slots.count >= Self.maxTotalSlots
@@ -1859,6 +1901,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func removeSlot(_ slot: PeerSlot) {
         Task { await slot.coordinator.cancel() }
+        kickEvictedPeer(slot.peer)
         clearActiveVerifyQRIfBound(to: slot.id)
         // Entries die with their slot (R3): a scanned-but-unanswered round would otherwise leak
         // one entry for the manager's lifetime, and survive into a reused slot id.
@@ -1877,6 +1920,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         Task { [weak self] in
             await self?.sendEnvelope(.sessionGoodbye, encodable: PayloadSummary(title: "Session ended"), via: slot)
             await slot.coordinator.cancel()
+            // Kick only once the goodbye is on the wire — the peer's own removal path reads it.
+            self?.kickEvictedPeer(slot.peer)
         }
         clearActiveVerifyQRIfBound(to: slot.id)
         // Entries die with their slot (R3): a scanned-but-unanswered round would otherwise leak
@@ -1890,6 +1935,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         promoteRosterToPendingReviewIfSessionEnded()
         openShopWindowIfSessionEnded()
         clearSessionMessagesIfSessionEnded()
+    }
+
+    /// Frees the MC link of a peer whose slot this manager is evicting itself. `removeSlot` /
+    /// `disconnectSlot` drop the record and cancel the coordinator, but nothing in that chain
+    /// touches the MCSession (`PeerChannelTransport.disconnect()` only publishes `.idle` locally),
+    /// so the link lingered as a zombie until `stopSearching()`: it held one of the 8 MC peer slots
+    /// on both devices, kept the peer's `PeerChannelTransport` in the transport's `channels`, and —
+    /// because `invite` refuses connected peers and `.connected` never re-fires — made re-forming a
+    /// slot with that peer impossible for the rest of the search. Best-effort with the same caveat
+    /// as the sibling managers (see `MeshMultipeerSession.disconnectPeer`); a no-op for a peer MC
+    /// already reported gone. Records the id so `onPeerDisconnected` does not treat the resulting
+    /// `.notConnected` as a transient drop to retry.
+    private func kickEvictedPeer(_ peer: MultipeerPeer) {
+        if locallyKickedPeerIDs.count < Self.maxLocallyKickedPeers {
+            locallyKickedPeerIDs.insert(peer.id)
+        }
+        meshSession.disconnectPeer(peer)
     }
 
     /// Slot eviction prunes the shop send-tracking so a REJOINING friend re-exchanges catalogs: the
@@ -2624,8 +2686,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Metadata-only entries (no image bytes), so the in-memory list can mirror the disk cap.
         // Keeping it at the spec's 1000 makes the FIFO cap and the 900-photo soft-warning real;
         // the full-resolution bytes stay on disk and rehydrate on demand.
+        let evictedByCap = meshPhotos.count > PrivateMediaStore.maxCachedPhotos
         meshPhotos = Array(meshPhotos.prefix(PrivateMediaStore.maxCachedPhotos))
         photoCacheStore.save(meshPhotos.map { $0.id == cachedPhoto.id ? cachedPhoto : $0 })
+        if evictedByCap { prunePhotoWallPreferences() }
         if includeInSession {
             // Store metadata only; the full-resolution bytes were just persisted to the disk
             // cache above and are rehydrated on demand (see sendRequestedPhotos / imageData()).
@@ -3646,6 +3710,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func evictSlotForTesting(peerID: UUID) {
         guard let slot = slots.first(where: { $0.id == peerID }) else { return }
         removeSlot(slot)
+    }
+
+    /// Observes the transport's per-peer MC kick (`MeshMultipeerSession.disconnectPeer`) so a test
+    /// can assert every local eviction path frees the MC link instead of leaving a zombie.
+    func setDisconnectPeerObserverForTesting(_ handler: ((MultipeerPeer) -> Void)?) {
+        meshSession.onDisconnectPeerRequestedForTesting = handler
+    }
+
+    /// Total wall-preference entries (aggregated sessions + covers + favorites) — the number the
+    /// prune must drive back to zero once the photos they describe have left the cache.
+    var photoWallPreferenceEntryCountForTesting: Int {
+        photoWallPreferences.aggregatedSessionIDs.count
+            + photoWallPreferences.coverPhotoIDsBySession.count
+            + photoWallPreferences.favoritePhotoIDsBySession.count
     }
 
     /// Builds AND retains a slot coordinator exactly as `handleChannelReady` does — creating the
