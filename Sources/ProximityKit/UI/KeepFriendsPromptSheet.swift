@@ -66,11 +66,7 @@ private struct KeepFriendRow: View {
                 Text(displayName)
                     .font(.fernlet(.headerMedium))
                     .foregroundStyle(Color.bark)
-                Text(candidate.fingerprint)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(Color.slate)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                FingerprintText(candidate.fingerprint)
             }
 
             Spacer(minLength: 12)
@@ -118,8 +114,10 @@ public struct KeepFriendsPromptSheet: View {
                 .padding(.bottom, 10)
             }
 
+            // "Done" finishes the flow (and mints the keeps), so it is a call-to-action pill, not a
+            // 34pt selection chip.
             Button("Done") { done() }
-                .buttonStyle(ChipButtonStyle(selected: true))
+                .buttonStyle(ActionPillButtonStyle(.primary))
                 .frame(maxWidth: .infinity)
                 .padding(16)
                 .background(Color.parchment)

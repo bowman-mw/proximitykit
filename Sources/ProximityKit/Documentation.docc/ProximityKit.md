@@ -310,3 +310,4 @@ compatibility contracts with in-field peers.
 - ``FriendPhotoReviewSheet``
 - ``FriendPhotoLibrarySaver``
 - ``PhotoSaveFailure``
+- ``FingerprintText``

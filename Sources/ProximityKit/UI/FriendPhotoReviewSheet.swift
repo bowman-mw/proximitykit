@@ -44,6 +44,8 @@ struct FriendPhotoTile: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(selected ? Color.moss : Color.bark.opacity(0.08), lineWidth: selected ? 2 : 1)
         )
+        // Selection was conveyed by a moss checkmark alone — say it out loud too.
+        .accessibilityAddTraits(selected ? .isSelected : [])
         .task(id: photo.id) {
             guard photo.imageData == nil else { return }
             loadedImageData = loadImageData?()
@@ -74,6 +76,9 @@ public struct FriendPhotoReviewSheet: View {
     /// payload carries no image data — session photos are stored metadata-only to bound memory.
     var loadImageData: ((FriendPhotoPayload) -> Data?)? = nil
     @State private var isSaving = false
+    /// "Delete all" discards every shared picture from this device and leaves the session — on a
+    /// sheet that (in the disconnect flow) can't even be swiped away. It asks first.
+    @State private var askingToDeleteAll = false
 
     public init(
         photos: [FriendPhotoPayload],
@@ -93,66 +98,93 @@ public struct FriendPhotoReviewSheet: View {
         self.loadImageData = loadImageData
     }
 
+    /// The explainer, the selectable photo grid, and the keep-friends section.
+    private var reviewScrollContent: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Review pictures")
+                .font(.fernlet(.displayMedium))
+                .foregroundStyle(Color.bark)
+
+            Text("Choose which shared pictures to save. Everything else is deleted from this device's temporary cache.")
+                .font(.fernlet(.body))
+                .foregroundStyle(Color.slate)
+                .fernletWrappingText()
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 10)], spacing: 10) {
+                ForEach(photos) { photo in
+                    Button {
+                        toggle(photo.id)
+                    } label: {
+                        FriendPhotoTile(
+                            photo: photo,
+                            selected: selectedIDs.contains(photo.id),
+                            loadImageData: loadImageData.map { load in { load(photo) } }
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if !friendCandidates.isEmpty {
+                Divider().overlay(Color.bark.opacity(0.08))
+                KeepFriendsSection(
+                    candidates: friendCandidates,
+                    keptFingerprints: keptFriendFingerprints
+                )
+            }
+        }
+        .padding(20)
+        .padding(.bottom, 10)
+    }
+
+    /// The pinned action bar: discard everything, or save what was picked.
+    private var actionBar: some View {
+        AdaptiveStack(spacing: 10) {
+            Button(deleteAllLabel) {
+                askingToDeleteAll = true
+            }
+            .buttonStyle(ActionPillButtonStyle(.destructive))
+            .disabled(isSaving)
+            .accessibilityIdentifier("friends.review.deleteAll")
+            Button("Save selected") {
+                isSaving = true
+                Task { @MainActor in
+                    await saveSelected()
+                    isSaving = false
+                }
+            }
+            .buttonStyle(ActionPillButtonStyle(.primary))
+            .disabled(selectedIDs.isEmpty || isSaving)
+            .accessibilityIdentifier("friends.review.saveSelected")
+        }
+        .padding(16)
+        .background(Color.parchment)
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("Review pictures")
-                        .font(.fernlet(.displayMedium))
-                        .foregroundStyle(Color.bark)
-
-                    Text("Choose which shared pictures to save. Everything else is deleted from this device's temporary cache.")
-                        .font(.fernlet(.body))
-                        .foregroundStyle(Color.slate)
-                        .fernletWrappingText()
-
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 10)], spacing: 10) {
-                        ForEach(photos) { photo in
-                            Button {
-                                toggle(photo.id)
-                            } label: {
-                                FriendPhotoTile(
-                                    photo: photo,
-                                    selected: selectedIDs.contains(photo.id),
-                                    loadImageData: loadImageData.map { load in { load(photo) } }
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-
-                    if !friendCandidates.isEmpty {
-                        Divider().overlay(Color.bark.opacity(0.08))
-                        KeepFriendsSection(
-                            candidates: friendCandidates,
-                            keptFingerprints: keptFriendFingerprints
-                        )
-                    }
-                }
-                .padding(20)
-                .padding(.bottom, 10)
+                reviewScrollContent
             }
 
-            HStack(spacing: 10) {
-                Button("Delete all", role: .destructive) {
-                    discardAll()
-                }
-                .buttonStyle(ChipButtonStyle(selected: false))
-                .disabled(isSaving)
-                Button("Save selected") {
-                    isSaving = true
-                    Task { @MainActor in
-                        await saveSelected()
-                        isSaving = false
-                    }
-                }
-                .buttonStyle(ChipButtonStyle(selected: true))
-                .disabled(selectedIDs.isEmpty || isSaving)
-            }
-            .padding(16)
-            .background(Color.parchment)
+            actionBar
         }
         .background(Color.parchment)
+        .confirmDestructive(
+            photos.count == 1 ? "Delete this shared picture?" : "Delete \(photos.count) shared pictures?",
+            isPresented: $askingToDeleteAll,
+            message: "They'll be removed from this phone. Friends keep their own copies.",
+            confirmLabel: deleteAllLabel
+        ) {
+            // Wrapped rather than passed directly: `discardAll` is explicitly `@MainActor`-typed and
+            // the modifier's parameter is a plain function type.
+            discardAll()
+        }
+    }
+
+    /// "Delete all 12" — the count is what turns a mis-tap into a visible amount of loss.
+    private var deleteAllLabel: String {
+        photos.count == 1 ? "Delete it" : "Delete all \(photos.count)"
     }
 
     private func toggle(_ id: UUID) {

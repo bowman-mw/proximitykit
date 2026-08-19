@@ -17,7 +17,11 @@ extension ProximityHost {
     /// whitespace, falling back to the device name when the user hasn't set one. The single home
     /// of the three previously identical private `displayName` vars in `MeshNetworkManager`,
     /// `ProximityRecipeShareManager`, and `PresenceManager`.
-    var resolvedProximityDisplayName: String {
+    ///
+    /// Public because the UI has to be able to SAY the resolved name: the Friends surfaces show it
+    /// as the "You appear as" placeholder/hint so an unset name doesn't silently broadcast "iPhone".
+    /// Re-deriving that fallback app-side would be a second copy of the wire's rule.
+    public var resolvedProximityDisplayName: String {
         let name = proximityDisplayName.trimmingCharacters(in: .whitespaces)
         return name.isEmpty ? UIDevice.current.name : name
     }
