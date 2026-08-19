@@ -163,6 +163,22 @@ public final class ProximityCoordinator {
     public private(set) var state: State = .idle
     public private(set) var lastKnownDistance: RangingDistance?
 
+    /// When our OWN ranging last saw the peer inside ``friendCommitThresholdMeters``.
+    ///
+    /// This is the local-evidence half of the peer-heartbeat auto-commit: a peer's message is not
+    /// consent, so only a sample THIS device observed may ratify a commit. Cleared on fail/end so
+    /// evidence never survives a session.
+    @ObservationIgnored private var lastCloseRangingSampleAt: Date?
+
+    /// Friend-mode proximity-commit distance (metres). Single source of truth: `commitDetector` is
+    /// constructed with it, and `handleDistance` records local closeness evidence against it.
+    static let friendCommitThresholdMeters = 0.15
+
+    /// How recently our own ranging must have seen the peer close for an inbound heartbeat to
+    /// ratify a commit. Three seconds: longer than the 0.8 s commit dwell, far shorter than the
+    /// 30 s heartbeat interval, so a stale sample can never authorize a commit.
+    static let peerHeartbeatCommitEvidenceWindow: TimeInterval = 3.0
+
     @ObservationIgnored private let identity: IdentityService
     @ObservationIgnored private let transport: any MultipeerTransport
     @ObservationIgnored private let ranging: any RangingProvider
@@ -250,7 +266,9 @@ public final class ProximityCoordinator {
         self.timeoutSeconds = timeoutSeconds
         self.now = now
         self.tapDetector = ProximityCommitDetector(proximityThreshold: 0.05, dwellSeconds: 1.0, minimumSamples: 3)
-        self.commitDetector = ProximityCommitDetector(proximityThreshold: 0.15, dwellSeconds: 0.8, minimumSamples: 3)
+        self.commitDetector = ProximityCommitDetector(proximityThreshold: Self.friendCommitThresholdMeters,
+                                                      dwellSeconds: 0.8,
+                                                      minimumSamples: 3)
         self.rangingMode = ranging.isHardwareSupported ? .uwb : .rssi
         subscribeToTransport()
         subscribeToRanging()
@@ -668,6 +686,12 @@ public final class ProximityCoordinator {
         }
         guard ranging.isHardwareSupported, case .meters(let meters, _) = distance else { return }
 
+        // Local proximity EVIDENCE, recorded independently of the dwell detector: this is the only
+        // thing that may later authorize an auto-commit triggered by a peer's heartbeat.
+        if meters < Self.friendCommitThresholdMeters {
+            lastCloseRangingSampleAt = now()
+        }
+
         // Friend mode: 15 cm / 0.8 s average dwell commits the connection.
         if case .awaitingProximityCommit(let peerIdentity) = state {
             if commitDetector.ingest(distanceMeters: meters, at: now()) {
@@ -737,10 +761,16 @@ public final class ProximityCoordinator {
 
     /// On a sealed-introduction coordinator, an inbound identity intro/ack arrives as a
     /// `SealedIntroductionEnvelope`. Open it with the local KA private key, expecting the friend's
-    /// KA key the coordinator was created with (that expectation is what a forger cannot satisfy —
-    /// `open` is cryptographically bound to the sender's KA key via the HKDF sharedInfo). A plain
-    /// envelope (no `sealedIntroduction` key) returns `.notWrapped`; a wrapper we cannot decrypt
-    /// returns `.failed`.
+    /// KA key the coordinator was created with.
+    ///
+    /// WHAT `.opened` DOES AND DOES NOT PROVE: `open` is ephemeral-static ECIES, so a successful
+    /// open proves only that the sealer knew OUR public KA key — the friend's static key enters
+    /// as a public HKDF `sharedInfo`/AAD input, never as a key-agreement input. Anyone holding our
+    /// published KA key can mint a wrapper that opens here. Authenticating the SENDER is the
+    /// caller's job: `handleIdentityEnvelope` requires the inner envelope's
+    /// `senderKeyAgreementPublicKey` to equal `sealedIntroductionPeerKey`. A plain envelope (no
+    /// `sealedIntroduction` key) returns `.notWrapped`; a wrapper we cannot decrypt returns
+    /// `.failed`.
     private func unwrapSealedIntroduction(_ data: Data) -> SealedIntroUnwrap {
         guard let wrapper = try? JSONDecoder().decode(SealedIntroductionEnvelope.self, from: data) else {
             return .notWrapped
@@ -800,7 +830,10 @@ public final class ProximityCoordinator {
                 sealedPayloadFormat: peerSealedPayloadFormat
             )
             await recordVerifiedInbound(envelope, byteCount: message.bytesReceived)
-            try await dispatchVerified(envelope, plaintext: plaintext, from: message.peer)
+            try await dispatchVerified(envelope,
+                                       plaintext: plaintext,
+                                       from: message.peer,
+                                       cameFromSealedWrapper: unwrapped.cameFromSealedWrapper)
         } catch {
             trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
                 kind: .envelopeRejected,
@@ -817,8 +850,10 @@ public final class ProximityCoordinator {
     /// inflated — the hearts ordering (`HeartDropSealer.open` gates size before key agreement).
     /// `TrainerExportPayload.isWellFormed` can only run after decrypt+inflate, which is the wrong
     /// layer for a bound: coach payloads are ~1000× a heart, so the inflate-bomb exposure is
-    /// correspondingly worse. Trainer-scoped: the friend channel legitimately carries 10 MB photo
-    /// payloads under its own receiver cap. True when the session was failed and the caller stops.
+    /// correspondingly worse. Trainer-scoped: this is the MODE-SPECIFIC tightening on top of the
+    /// uniform floor every radio already gets from `MeshMultipeerSession.maxInboundWireBytes`
+    /// (16 MiB, dropped before the frame ever reaches a channel). 4 MB ≪ 16 MiB, so the trainer
+    /// bound still binds. True when the session was failed and the caller stops.
     private func rejectsOversizedTrainerBlob(_ message: MultipeerInboundMessage) -> Bool {
         guard currentMode == .trainer,
               message.data.count > TrainerExportPayload.maxTrainerWireBytes else { return false }
@@ -834,9 +869,12 @@ public final class ProximityCoordinator {
     }
 
     /// SEALED-INTRODUCTION rule (Phase 4b): on a presence-heart connection the identity intro/ack
-    /// arrives sealed to us. Open it first; a wrapper we cannot decrypt is a tag-replay forger (no
-    /// matching KA private key) — fail with NO identity emitted and no further intro. A plain
-    /// envelope (a post-commit heartbeat) passes straight through. Nil = already failed.
+    /// arrives sealed to us. Open it first; a wrapper we cannot decrypt is a forger who does not
+    /// hold our KA PUBLIC key — fail with NO identity emitted and no further intro. A forger who
+    /// DOES hold it can still produce an openable wrapper (ephemeral-static ECIES authenticates
+    /// nobody), which is why `handleIdentityEnvelope` additionally binds the inner envelope's
+    /// sender KA key to `sealedIntroductionPeerKey`. A plain envelope (a post-commit heartbeat)
+    /// passes straight through. Nil = already failed.
     private func unwrapInboundEnvelopeData(_ message: MultipeerInboundMessage)
     -> (data: Data, cameFromSealedWrapper: Bool)? {
         guard usesSealedIntroduction else { return (message.data, false) }
@@ -860,7 +898,7 @@ public final class ProximityCoordinator {
             trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
                 kind: .revokedPeerBlocked,
                 peerFingerprint: fingerprint,
-                peerDisplayName: envelope.senderDisplayName,
+                peerDisplayName: envelope.sanitizedSenderDisplayName,
                 payloadType: envelope.payloadType,
                 message: "Blocked envelope from revoked key"
             ))
@@ -882,7 +920,7 @@ public final class ProximityCoordinator {
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .envelopeReceived,
             peerFingerprint: IdentityService.fingerprint(of: envelope.senderSigningPublicKey),
-            peerDisplayName: envelope.senderDisplayName,
+            peerDisplayName: envelope.sanitizedSenderDisplayName,
             payloadType: envelope.payloadType,
             message: "Received \(envelope.payloadTypeToken)"
         ))
@@ -897,7 +935,8 @@ public final class ProximityCoordinator {
     private func dispatchVerified(
         _ envelope: FernletIdentityEnvelope,
         plaintext: Data,
-        from peer: MultipeerPeer
+        from peer: MultipeerPeer,
+        cameFromSealedWrapper: Bool
     ) async throws {
         guard let payloadType = envelope.payloadType else {
             inspector?.recordCoordinatorEvent("parked unknown payload type \(envelope.payloadTypeToken)")
@@ -905,7 +944,10 @@ public final class ProximityCoordinator {
         }
         switch payloadType {
         case .identityIntroduction, .identityAcknowledge:
-            try await handleIdentityEnvelope(envelope, plaintext: plaintext, from: peer)
+            try await handleIdentityEnvelope(envelope,
+                                             plaintext: plaintext,
+                                             from: peer,
+                                             cameFromSealedWrapper: cameFromSealedWrapper)
         case .sessionHeartbeat:
             await handleHeartbeat(envelope, plaintext: plaintext, from: peer)
         default:
@@ -976,7 +1018,9 @@ public final class ProximityCoordinator {
         // signing/KA keys + display name in the CLEAR, and a connected tag-replay forger (who can't
         // complete the sealed handshake) could otherwise ping us in `awaitingIdentityIntroduction`
         // and read that ack — deanonymizing us. Once `pendingPeerIdentity`/`connectedPeerIdentity`
-        // is set, the peer is provably the real friend (only a valid sealed intro sets it).
+        // is set, the peer is the real friend — resting on `sealedIntroductionSenderMatches`, which
+        // is what makes "only a valid sealed intro sets it" true: opening the wrapper alone proves
+        // nothing about the sender, so the inner envelope's KA key is bound to the expected friend.
         if usesSealedIntroduction, pendingPeerIdentity == nil, connectedPeerIdentity == nil {
             inspector?.recordCoordinatorEvent("dropped a heartbeat before sealed identity verification")
             return
@@ -984,21 +1028,13 @@ public final class ProximityCoordinator {
         lastInboundHeartbeatAt = now()
         inspector?.recordCoordinatorEvent("heartbeat received")
 
-        // Heartbeats are only sent after the remote peer commits. If we receive one while
-        // still waiting to commit (e.g. the other side used Force), auto-confirm our side —
-        // identity is already verified and the remote has accepted the connection.
-        if currentMode == .friend {
-            switch state {
-            case .awaitingProximityCommit(let peerIdentity), .awaitingManualCommit(let peerIdentity):
-                inspector?.recordCoordinatorEvent("auto-commit triggered by peer heartbeat")
-                pendingPeerIdentity = peerIdentity
-                await confirmPeerIdentity()
-            default:
-                break
-            }
-        }
-
         guard let heartbeat = try? JSONDecoder().decode(SessionHeartbeatPayload.self, from: plaintext) else { return }
+
+        // A peer heartbeat can only RATIFY a commit our own ranging already justifies; the manual
+        // gate is the user's tap alone. Runs after the decode so an undecodable heartbeat — bytes
+        // any connected peer can emit — can never commit anything.
+        await autoCommitOnPeerHeartbeatIfLocallyEvidenced()
+
         switch heartbeat.kind {
         case .ping:
             await sendHeartbeatAcknowledgement(for: heartbeat.heartbeatID, to: peer)
@@ -1012,6 +1048,32 @@ public final class ProximityCoordinator {
             }
             inspector?.recordCoordinatorEvent(String(format: "heartbeat rtt %.0fms", rttMs))
         }
+    }
+
+    /// Ratifies a pending friend commit when — and only when — THIS device's ranging saw the peer
+    /// close moments ago.
+    ///
+    /// Heartbeats are only sent after the remote peer commits, so an inbound one used to
+    /// auto-confirm our side outright. But a peer's message is not the local user's consent: a
+    /// connected peer could commit itself and drive us into `.connected` with no user action and
+    /// no proximity of any kind. So the `.awaitingManualCommit` arm is gone entirely — its only
+    /// exit is the on-screen confirm (`commitManualProximity`) — and the `.awaitingProximityCommit`
+    /// arm (the asymmetric-UWB robustness path, where one side's dwell fires and the other's does
+    /// not) survives only behind locally observed closeness.
+    ///
+    /// A missing-evidence heartbeat is DROPPED with an inspector event, never `fail()`ed: a
+    /// legitimate peer whose dwell fired a moment before ours would otherwise kill the session.
+    private func autoCommitOnPeerHeartbeatIfLocallyEvidenced() async {
+        guard currentMode == .friend else { return }
+        guard case .awaitingProximityCommit(let peerIdentity) = state else { return }
+        guard let closeAt = lastCloseRangingSampleAt,
+              now().timeIntervalSince(closeAt) <= Self.peerHeartbeatCommitEvidenceWindow else {
+            inspector?.recordCoordinatorEvent("dropped peer-heartbeat commit: no local proximity evidence")
+            return
+        }
+        inspector?.recordCoordinatorEvent("auto-commit triggered by peer heartbeat (locally evidenced)")
+        pendingPeerIdentity = peerIdentity
+        await confirmPeerIdentity()
     }
 
     private func sendHeartbeatAcknowledgement(for heartbeatID: UUID, to peer: MultipeerPeer) async {
@@ -1099,11 +1161,43 @@ public final class ProximityCoordinator {
         inspector?.updateRangingMode(mode)
     }
 
-    private func handleIdentityEnvelope(_ envelope: FernletIdentityEnvelope, plaintext: Data, from peer: MultipeerPeer) async throws {
+    /// SEALED-INTRODUCTION binding. ``IdentityService/open(_:from:)`` is ephemeral-static ECIES:
+    /// a successful open proves only that the sealer knew OUR public KA key, because the sender's
+    /// static key is a public HKDF `sharedInfo`/AAD input, NOT a key-agreement input. Anyone
+    /// holding our published KA key can therefore mint a wrapper that opens. The sender is
+    /// authenticated only by this equality — the inner envelope must be signed by the friend whose
+    /// KA key this coordinator was created for, and it must have arrived inside the wrapper.
+    ///
+    /// False means hostile: a wrapper that opens but carries a foreign identity has nothing
+    /// salvageable in it, so the caller fails the whole session (matching the sibling fail-closed
+    /// branches in `handleInbound` and `unwrapInboundEnvelopeData`).
+    private func sealedIntroductionSenderMatches(
+        _ envelope: FernletIdentityEnvelope,
+        cameFromSealedWrapper: Bool
+    ) -> Bool {
+        guard usesSealedIntroduction else { return true }
+        guard cameFromSealedWrapper, let expected = sealedIntroductionPeerKey else { return false }
+        return envelope.senderKeyAgreementPublicKey == expected
+    }
+
+    private func handleIdentityEnvelope(
+        _ envelope: FernletIdentityEnvelope,
+        plaintext: Data,
+        from peer: MultipeerPeer,
+        cameFromSealedWrapper: Bool
+    ) async throws {
         let fingerprint = IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
         if let advertised = peer.advertisedFingerprint,
            !IdentityService.fingerprintsMatch(advertised, fingerprint) {
             throw CoordinatorError.fingerprintMismatch
+        }
+        // Bind the INNER identity to the friend this sealed coordinator exists for. Placed at the
+        // top so it covers the acknowledge branch as well as the introduction branch, and so it
+        // runs before ranging starts and before any prekey bundle is ingested.
+        guard sealedIntroductionSenderMatches(envelope, cameFromSealedWrapper: cameFromSealedWrapper) else {
+            inspector?.recordCoordinatorEvent("sealed introduction sender key mismatch — failing")
+            fail("sealed introduction sender key mismatch")
+            return
         }
 
         let rangingPayload = try? JSONDecoder().decode(IdentityRangingPayload.self, from: plaintext)
@@ -1111,7 +1205,7 @@ public final class ProximityCoordinator {
 
         let peerIdentity = PeerIdentity(
             id: peer.id,
-            displayName: envelope.senderDisplayName,
+            displayName: envelope.sanitizedSenderDisplayName,
             signingPublicKey: envelope.senderSigningPublicKey,
             keyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
             fingerprint: fingerprint,
@@ -1273,6 +1367,7 @@ public final class ProximityCoordinator {
         timeoutTask?.cancel()
         heartbeatTask?.cancel()
         lastKnownDistance = nil
+        lastCloseRangingSampleAt = nil
         transition(to: .failed(reason: reason))
         inspector?.recordCoordinatorEvent("failed: \(reason)")
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
@@ -1305,6 +1400,7 @@ public final class ProximityCoordinator {
         timeoutTask?.cancel()
         heartbeatTask?.cancel()
         lastKnownDistance = nil
+        lastCloseRangingSampleAt = nil
         await ranging.stop()
         await transport.disconnect()
         await foregroundAnchor.stop()

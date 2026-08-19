@@ -203,7 +203,7 @@ public nonisolated struct MeshAdmissionGrantPayload: Codable, Equatable, Sendabl
 /// key to a mesh id, with a 2-hour default expiry.
 ///
 /// Minted via ``signed(meshID:joinerFingerprint:joinerSigningPublicKey:admitterIdentity:grantedAt:expiresAt:)``
-/// and checked via ``verify(joinerSigningPublicKey:expectedMeshID:now:)``, which requires the
+/// and checked via ``verify(joinerSigningPublicKey:expectedMeshID:expectedAdmitterSigningPublicKey:now:)``, which requires the
 /// locally-held key to equal the bound joiner key (defeating fingerprint-collision
 /// impersonation) and the signed meshID to equal the grant's claimed mesh. Verification accepts
 /// both the v2 cross-platform canonical bytes and the legacy encoder — a documented permanent
@@ -386,6 +386,7 @@ extension MeshAdmissionToken {
         case joinerKeyMismatch
         case signatureInvalid
         case meshMismatch
+        case admitterKeyMismatch
     }
 
     /// `@MainActor`: signs with the `@MainActor` admitter IdentityService private key state.
@@ -418,9 +419,25 @@ extension MeshAdmissionToken {
     /// preventing a fingerprint-collision attack from impersonating the intended joiner.
     /// `expectedMeshID` must match the signed `meshID`, so a token issued for one mesh cannot be
     /// replayed inside a grant claiming a different mesh (the grant's outer meshID is unsigned).
+    ///
+    /// `expectedAdmitterSigningPublicKey` must match `admitterSigningPublicKey`. WITHOUT IT THIS
+    /// FUNCTION PROVES NOTHING ABOUT AUTHORIZATION: the token's signature root is the admitter key
+    /// carried INSIDE the token, so a self-signed token minted by a total stranger verifies
+    /// perfectly. The caller supplies the key it independently authenticated (the envelope sender)
+    /// and this equality is what turns "well-formed" into "granted by someone entitled to grant".
+    /// The parameter has NO default value on purpose — a default is how a caller silently skips
+    /// the binding, which is exactly how this bug was born.
+    ///
     /// `nonisolated` (WI-9): pure signature math (`IdentityService.verify`/`fingerprint` statics +
     /// `canonicalBytes`), touching no actor state — so a token can be verified off the main actor.
-    nonisolated public func verify(joinerSigningPublicKey presentedKey: Data, expectedMeshID: UUID, now: Date = Date()) throws {
+    nonisolated public func verify(joinerSigningPublicKey presentedKey: Data,
+                                   expectedMeshID: UUID,
+                                   expectedAdmitterSigningPublicKey: Data?,
+                                   now: Date = Date()) throws {
+        guard let expectedAdmitter = expectedAdmitterSigningPublicKey,
+              expectedAdmitter == admitterSigningPublicKey else {
+            throw VerifyError.admitterKeyMismatch
+        }
         guard meshID == expectedMeshID else { throw VerifyError.meshMismatch }
         guard expiresAt >= now else { throw VerifyError.expired }
         guard presentedKey == joinerSigningPublicKey else { throw VerifyError.joinerKeyMismatch }

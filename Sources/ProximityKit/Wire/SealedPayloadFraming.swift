@@ -37,12 +37,14 @@ public nonisolated enum SealedPayloadFormat: Equatable, Sendable {
 /// 0x01 or 0x02.
 ///
 /// Senders must respect payload caps upstream (e.g. the 10 MB friend-photo receiver cap):
-/// `frame(_:)` accepts any size, but `unframe(_:)` rejects anything that would inflate past
-/// `maxInflatedByteCount`.
+/// `frame(_:)` accepts any size, but `unframe(_:)` rejects anything that would inflate past the
+/// ceiling the CALLER names — `maxInflatedByteCount` (16 MiB) by default. A caller whose payload
+/// is small by construction should pass its own, much lower, ceiling: the wire-byte cap alone does
+/// not bound inflation, because DEFLATE reaches ~1032:1.
 public nonisolated enum SealedPayloadFraming {
 
     /// Unframe failures: structurally invalid frame bytes, or a compressed body that would
-    /// inflate past `maxInflatedByteCount` (the inflate-bomb guard).
+    /// inflate past the caller's ceiling (the inflate-bomb guard).
     public enum FramingError: Error, Equatable {
         case malformed
         case inflatedTooLarge
@@ -55,7 +57,9 @@ public nonisolated enum SealedPayloadFraming {
     /// (bitchat uses 100 B; tiny bodies pad to the 256 bucket either way).
     static let compressionThresholdBytes = 128
 
-    /// Inflate bomb guard — comfortably above the 10 MB friend-photo receiver cap.
+    /// Default inflate-bomb guard — comfortably above the 10 MB friend-photo receiver cap. It is
+    /// the ceiling for a caller that does not name a tighter one; it is NOT a claim that 16 MiB of
+    /// main-actor inflation is acceptable on every path.
     public static let maxInflatedByteCount = 16 * 1024 * 1024
 
     /// Smallest bucket that fits `frameLength`: 256/512/1024/2048/4096, then next 4 KiB multiple.
@@ -90,7 +94,11 @@ public nonisolated enum SealedPayloadFraming {
 
     /// Strict inverse of `frame(_:)`. Callers gate on the sender's advertised `wire2` capability
     /// plus `hasFrameTag(_:)` — a legacy body must never reach this.
-    public static func unframe(_ framed: Data) throws -> Data {
+    ///
+    /// - Parameter maxInflated: ceiling on the inflated body, defaulting to `maxInflatedByteCount`.
+    ///   A caller whose plaintext is bounded by construction (the heart dead-drop, say) passes its
+    ///   own, so a hostile record cannot buy ~1000× its wire size in main-actor inflation.
+    public static func unframe(_ framed: Data, maxInflated: Int = maxInflatedByteCount) throws -> Data {
         guard framed.count >= 3 else { throw FramingError.malformed }
         let bytes = Data(framed) // normalize slice indices
         let tag = bytes[0]
@@ -100,7 +108,7 @@ public nonisolated enum SealedPayloadFraming {
         let body = bytes.subdata(in: 1..<(bytes.count - 2 - padCount))
         if tag == rawTag { return body }
         guard !body.isEmpty else { throw FramingError.malformed }
-        return try stream(COMPRESSION_STREAM_DECODE, input: body, limit: maxInflatedByteCount)
+        return try stream(COMPRESSION_STREAM_DECODE, input: body, limit: maxInflated)
     }
 
     /// Whether a sealed plaintext opens with a wire2 frame tag. Used by the tolerant receive path

@@ -20,18 +20,35 @@ import FernletDomainModel
 /// report via a higher `reporterSeq`; upsert keeps the higher-seq row, making re-delivery
 /// idempotent. Persistence is a JSON sidecar in Application Support
 /// (`.completeFileProtection`), deliberately NEVER in the synced snapshot — who reported whom is
-/// sensitive social data. Bounded at `maxRows` (oldest evicted); `clearAll` is wired from
-/// reset-everything. `@MainActor @Observable`: rows drive moderation UI.
+/// sensitive social data.
+///
+/// Bounded MAX-MIN FAIRLY, not by age alone (R3): at most `maxRowsPerReporter` rows per reporter
+/// fingerprint and `maxRows` overall, and when the total would overflow the per-reporter allowance is
+/// lowered uniformly until it fits — so a flooding reporter is drained down to everyone else's level
+/// before a quiet reporter loses a single row. That is what keeps a hostile peer from evicting THIS
+/// device's own reports, without the ledger ever needing to know its own signing key. The same rule is
+/// applied on the way in from disk. `clearAll` is wired from reset-everything.
+/// `@MainActor @Observable`: rows drive moderation UI.
 @MainActor
 @Observable
 public final class ModerationLedger {
-    /// All stored rows (reports + retracts), most recent last. Bounded by `maxRows`.
+    /// All stored rows (reports + retracts), oldest first. Bounded by `maxRows` overall and
+    /// `maxRowsPerReporter` per reporter — see `bounded` for the fair-eviction rule.
     public private(set) var rows: [ModerationLedgerEntry] = []
 
     @ObservationIgnored private let file: JSONSidecarFile<PersistedState>
     @ObservationIgnored private let now: () -> Date
 
+    /// Hard ceiling on the whole ledger.
     static let maxRows = 512
+
+    /// A single reporter fingerprint may hold at most this many rows. Generous for a real user — each
+    /// reported artwork costs at most two rows, a report and its retract — and it is `bounded`'s fair
+    /// allocation, not this cap, that is load-bearing against a flood. Deliberately not lower: this
+    /// cap also applies to the LOCAL user's own rows, and past it their oldest own reports are evicted
+    /// (a previously hidden item would reappear in the shop grid), so it must sit well above plausible
+    /// real use.
+    static let maxRowsPerReporter = 128
 
     public init(fileURL: URL? = nil, now: @escaping () -> Date = Date.init) {
         self.file = JSONSidecarFile(fileURL: fileURL ?? Self.fileURL(in: ProximitySupportLayout.defaultDirectory))
@@ -77,12 +94,19 @@ public final class ModerationLedger {
         return entry
     }
 
-    /// Stores peers' already-verified report rows (from the one-hop relay). Upsert de-dupes by the
+    /// Stores peers' already-verified report rows (from the one-hop relay). Merge de-dupes by the
     /// deterministic id and keeps the higher `reporterSeq`, so re-delivery is idempotent.
+    ///
+    /// R3: one peer delivery can never contribute more than one wire payload's worth of rows, and the
+    /// batch is bounded ONCE at the end — `maxRowsPerReporter` per reporter, `maxRows` overall, evicted
+    /// max-min fairly (see `bounded`), so however long a hostile peer keeps delivering it can only ever
+    /// drain its own bucket, never anyone else's. Bounding once per batch also means one file write per
+    /// envelope instead of one per row; a crash mid-batch loses the whole batch rather than a prefix,
+    /// which is safe because peers re-deliver on the next slot commit and merging is idempotent.
     public func ingestForeign(_ entries: [ModerationLedgerEntry]) {
-        // R3: one peer delivery can never contribute more than one wire payload's worth of rows,
-        // so a flood cannot evict genuine older reports past the 512-row cap.
-        for entry in entries.prefix(ModerationReportPayload.maxReports) { upsert(entry) }
+        for entry in entries.prefix(ModerationReportPayload.maxReports) { merge(entry) }
+        rows = Self.bounded(rows)
+        save()
     }
 
     // MARK: - Reads
@@ -115,16 +139,50 @@ public final class ModerationLedger {
     }
 
     private func upsert(_ entry: ModerationLedgerEntry) {
+        merge(entry)
+        rows = Self.bounded(rows)
+        save()
+    }
+
+    /// Inserts or supersedes ONE row without bounding or saving, so a batch pays for one bound and one
+    /// file write rather than one of each per row. Every caller must bound + save afterwards.
+    private func merge(_ entry: ModerationLedgerEntry) {
         if let index = rows.firstIndex(where: { $0.id == entry.id }) {
             // Same deterministic id: keep the higher-seq row (idempotent re-record).
             if entry.reporterSeq >= rows[index].reporterSeq { rows[index] = entry }
         } else {
             rows.append(entry)
         }
-        if rows.count > Self.maxRows {
-            rows = Array(rows.sorted { $0.createdAt < $1.createdAt }.suffix(Self.maxRows))
+    }
+
+    /// Max-min-fair ("water-filling") bound over the whole row set: no reporter keeps more than
+    /// ``maxRowsPerReporter``, the total never exceeds ``maxRows``, and when the total would overflow
+    /// the per-reporter allowance is lowered UNIFORMLY until it fits. A reporter that floods therefore
+    /// gets drained down to everyone else's level before any quieter reporter loses a row — which is
+    /// what protects this device's own reports without the ledger knowing its own signing key.
+    private static func bounded(_ rows: [ModerationLedgerEntry]) -> [ModerationLedgerEntry] {
+        var buckets: [String: [ModerationLedgerEntry]] = [:]
+        for row in rows {
+            buckets[IdentityService.fingerprint(of: row.reporterSigningPublicKey), default: []].append(row)
         }
-        save()
+        var capped: [String: [ModerationLedgerEntry]] = [:]
+        for (key, bucket) in buckets { capped[key] = Array(sortedByAge(bucket).suffix(maxRowsPerReporter)) }
+        // R2: bounded by maxRowsPerReporter — `allowance` starts there, strictly decreases, stops at 1.
+        var allowance = maxRowsPerReporter
+        while allowance > 1, total(of: capped, under: allowance) > maxRows { allowance -= 1 }
+        let trimmed = capped.keys.sorted().flatMap { Array((capped[$0] ?? []).suffix(allowance)) }
+        return Array(sortedByAge(trimmed).suffix(maxRows))
+    }
+
+    /// How many rows survive if every reporter is capped at `allowance` — the water-filling probe.
+    private static func total(of buckets: [String: [ModerationLedgerEntry]], under allowance: Int) -> Int {
+        buckets.values.reduce(0) { $0 + min($1.count, allowance) }
+    }
+
+    /// Oldest-first with the row id as tie-break. Swift's sort is NOT stable, so without the tie-break
+    /// two calls over the same set could return different orders and churn every `@Observable` reader.
+    private static func sortedByAge(_ rows: [ModerationLedgerEntry]) -> [ModerationLedgerEntry] {
+        rows.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
     }
 
     /// Versioned on-disk shape; tolerant of missing keys so older files keep decoding.
@@ -145,14 +203,15 @@ public final class ModerationLedger {
     /// Reads the sidecar, oldest-first.
     ///
     /// R3: the file is external input to this process — it can be larger than ``maxRows`` because a
-    /// build with a higher cap wrote it, or because it was tampered with — so the total cap is applied
-    /// on the way IN as well as in `upsert`. Without it, a single oversized file leaves the ledger
-    /// permanently over its bound: `upsert` only trims when it appends, and the reads that scan `rows`
-    /// would work over an unbounded array until the next report.
+    /// build with a higher cap wrote it, or because it was tampered with — so `bounded` is applied on
+    /// the way IN as well as in `upsert`, and applied identically: the SAME max-min-fair rule, not a
+    /// plain oldest-first trim. A flat trim here was its own bug, because a file stuffed with one
+    /// reporter's rows would evict every other reporter (including this device's own) at startup.
+    /// Without any bound the ledger would stay permanently over its cap: `upsert` only re-bounds when
+    /// it writes, and every read that scans `rows` would work over an unbounded array until then.
     private func load() {
         guard let state = file.load() else { return }
-        let ordered = state.rows.sorted { $0.createdAt < $1.createdAt }
-        rows = Array(ordered.suffix(Self.maxRows))   // newest kept, matching upsert's eviction
+        rows = Self.bounded(state.rows)
     }
 
     private func save() {

@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import FernletDomainModel
 
 /// Outer seal for offline heart drops (bitchat adoptions Increment 3,
 /// Docs/Plan-Bitchat-Adoptions-2026-07-25.md).
@@ -39,9 +40,16 @@ public nonisolated enum HeartDropSealer {
     /// Hard cap on a drop's wire size, enforced on BOTH ends (bitchat caps courier ciphertext at
     /// 16 KiB the same way). A heart is ~256 B of payload by construction — no free text, no
     /// numbers — and the framed inner envelope pads to the 1–2 KiB bucket, so 8 KiB leaves roughly
-    /// 4× headroom for envelope growth while keeping a hostile public-DB record far away from the
-    /// 16 MiB inflate guard `SealedPayloadFraming` would otherwise allow on the main actor.
-    public static let maxWireByteCount = 8 * 1024
+    /// 4× headroom for envelope growth.
+    ///
+    /// The wire cap does NOT bound the receiver's work on its own: DEFLATE reaches ~1032:1, so
+    /// 8 KiB of ciphertext could still inflate to ~8 MB under the framing's 16 MiB default guard.
+    /// `open` therefore hands `SealedPayloadFraming.unframe` the matching
+    /// `HeartDropWireLimits.maxInflatedByteCount` instead of relying on that default.
+    ///
+    /// Aliased to `HeartDropWireLimits` so the ProximityKit sealer, the receiver's pre-decrypt gate
+    /// and the CloudKitSync ferry cannot drift apart — CloudKitSync may not import this module.
+    public static let maxWireByteCount = HeartDropWireLimits.maxRecordByteCount
 
     static let wireVersion: UInt8 = 1
     static let headerLength = 1 + 16
@@ -124,7 +132,10 @@ public nonisolated enum HeartDropSealer {
         do {
             let box = try ChaChaPoly.SealedBox(combined: combined)
             let framed = try ChaChaPoly.open(box, using: symmetricKey, authenticating: header)
-            return try SealedPayloadFraming.unframe(framed)
+            // Tight, drop-specific inflate ceiling: the 8 KiB wire cap above admits ~8 MB of
+            // inflation under the framing's 16 MiB default, and this runs on the main actor.
+            return try SealedPayloadFraming.unframe(
+                framed, maxInflated: HeartDropWireLimits.maxInflatedByteCount)
         } catch let error as SealedPayloadFraming.FramingError {
             throw error == .inflatedTooLarge ? SealError.malformed : SealError.openFailed
         } catch {

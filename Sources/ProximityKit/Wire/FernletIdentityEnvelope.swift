@@ -145,6 +145,17 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
         self.expiresAt = expiresAt
         self.signature = signature
     }
+
+    /// `senderDisplayName` coerced for display or persistence: control/zero-width/bidi scalars
+    /// out, whitespace collapsed, capped at 24 characters.
+    ///
+    /// The RAW field stays untouched because it is SIGNATURE-COVERED — `verify` recomputes the
+    /// canonical bytes from the decoded fields, so sanitizing in `init(from:)` or before
+    /// `canonicalBytes` would invalidate every signature over a name that changes under
+    /// sanitisation. Every render and every persist site must read THIS instead.
+    public var sanitizedSenderDisplayName: String {
+        ItemNameModeration.moderatedPeerDisplayName(senderDisplayName)
+    }
 }
 
 // MARK: - Schema versions

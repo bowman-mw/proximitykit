@@ -5,8 +5,8 @@ import FernletFoundation
 /// Docs/Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26.md).
 ///
 /// The friend mesh's QR ceremony is structurally bound to `PeerSlot`s
-/// (`MeshNetworkManager.beginQRVerification` matches `awaitingManualCommit` slots and keys
-/// `pendingQRVerifications` by slot id) — a coach session has no slot, so this is a fresh
+/// (`MeshNetworkManager.beginQRVerification` takes the scanning row's slot id and keys
+/// `pendingQRVerifications` by it) — a coach session has no slot, so this is a fresh
 /// implementation over the SAME wire primitives (`ProximityVerifyQR`, `VerifyChallengePayload`,
 /// `VerifyResponsePayload`, `ProximityVerifySignature` — all slot-independent, and the
 /// `.verifyChallenge`/`.verifyResponse` payload types already exist and are sealing-required).

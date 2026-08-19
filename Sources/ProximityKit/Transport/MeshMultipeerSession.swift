@@ -4,6 +4,7 @@ import Combine
 import UIKit
 import os
 import FernletDomainModel
+import FernletFoundation
 
 // MARK: - PeerChannelTransport
 
@@ -88,6 +89,17 @@ final class PeerChannelTransport: MultipeerTransport {
 final class MeshMultipeerSession: NSObject {
 
     nonisolated static let friendServiceType   = "fernlet-friend"
+
+    /// Hard ceiling on ONE inbound MC frame, enforced before the bytes reach any channel or
+    /// decoder — the same ordering the trainer gate uses, applied uniformly to every radio
+    /// (friend, recipe, presence), so no radio depends on a mode-specific cap for its floor.
+    /// Pinned to ``SealedPayloadFraming/maxInflatedByteCount``: nothing past this layer can
+    /// legitimately be larger, since that is the inflate ceiling every sealed body already obeys.
+    /// The largest honest frame is a friend photo (1400 px JPEG @ q0.82, sealed, base64 in JSON),
+    /// roughly two orders of magnitude smaller. If the friend-photo ceiling is ever raised toward
+    /// `PrivateMediaStore.maxIncomingPhotoBytes` (10 MB), note that 10 MB base64'd is ~13.3 MB and
+    /// would approach this bound — the two caps must be moved together.
+    nonisolated static let maxInboundWireBytes = SealedPayloadFraming.maxInflatedByteCount
 
     // Discovery-failure surfacing (Phase 1): the empty didNotStart* delegates are how the
     // missing-NSBonjourServices bug shipped invisibly — a service type absent from Info.plist
@@ -401,6 +413,13 @@ extension MeshMultipeerSession: MCSessionDelegate {
     }
 
     nonisolated func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
+        // Transport floor: drop an oversized frame HERE, before the @MainActor hop, so a hostile
+        // peer cannot queue arbitrarily large blobs onto the main actor. Drop only — never
+        // disconnect at this layer, or any peer could kill any session with one large frame.
+        guard data.count <= Self.maxInboundWireBytes else {
+            FernletAuditLog.log("mesh.transport.droppedOversizedFrame", context: ["bytes": "\(data.count)"])
+            return
+        }
         nonisolated(unsafe) let peerID = peerID  // non-Sendable MCPeerID across the @MainActor hop
         Task { @MainActor [weak self] in
             guard let self, let channel = self.channels[peerID] else { return }

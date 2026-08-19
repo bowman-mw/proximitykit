@@ -296,24 +296,39 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         plaintext: Data,
         from peer: ProximityCoordinator.PeerIdentity?
     ) {
-        guard envelope.payloadType == .recipeShare,
-              let decoded = try? JSONDecoder().decode(ProximityRecipeSharePayload.self, from: plaintext),
+        guard envelope.payloadType == .recipeShare else { return }
+        // Size gate BEFORE the decoder: the transport floor is 16 MiB, and JSONDecoder on a
+        // multi-megabyte body is itself the denial-of-service. An honest share is far under 1 MiB
+        // (see ProximityRecipeSharePayload.maxWireBytes for the derivation).
+        // Peer-supplied name, rendered in the review sheet and every diagnostic below: coerce ONCE
+        // here (control/zero-width/bidi out, 24-char cap). Never coerce it before `verify` — the
+        // raw field is signature-covered.
+        let senderName = ItemNameModeration.moderatedPeerDisplayName(envelope.senderDisplayName)
+        guard plaintext.count <= ProximityRecipeSharePayload.maxWireBytes else {
+            recordDiagnostic("Dropped an oversized recipe share from \(senderName).")
+            return
+        }
+        guard let decoded = try? JSONDecoder().decode(ProximityRecipeSharePayload.self, from: plaintext),
               decoded.format == "fernlet.proximity.recipe",
               decoded.version == 1 else { return }
         // Enforce the wire image cap AT THE DOOR, not just at import time: the pending queue holds
         // payloads until the user reviews them, and the sealed-frame layer alone would let a
         // hostile peer park multi-MB images (bytes an honest sender never produces) in memory.
-        let payload = decoded.droppingOversizeImage()
+        // clampedForReview() bounds the strings the review sheet renders for the same reason.
+        let payload = decoded.droppingOversizeImage().clampedForReview()
 
+        // DELIBERATELY RAW: this is the per-sender RATE-LIMIT key, never rendered. Sanitizing it
+        // would collapse distinct unfingerprinted senders — names differing only by a zero-width
+        // character — into one bucket, which is the opposite of what the limiter is for.
         let senderFP = peer?.fingerprint ?? envelope.senderDisplayName
         let now = Date()
         if let lastAccepted = lastAcceptedBySender[senderFP],
            now.timeIntervalSince(lastAccepted) < Self.perSenderRateLimitSeconds {
-            recordDiagnostic("Rate-limited recipe share from \(envelope.senderDisplayName).")
+            recordDiagnostic("Rate-limited recipe share from \(senderName).")
             return
         }
         guard pendingRecipeShares.count < Self.maxPendingShares else {
-            recordDiagnostic("Dropped recipe share from \(envelope.senderDisplayName): queue full.")
+            recordDiagnostic("Dropped recipe share from \(senderName): queue full.")
             return
         }
         // R3: prune before inserting — entries older than the rate-limit window gate nothing, so
@@ -324,7 +339,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         lastAcceptedBySender[senderFP] = now
 
         let pending = PendingProximityRecipeShare(
-            senderDisplayName: envelope.senderDisplayName,
+            senderDisplayName: senderName,
             senderFingerprint: peer?.fingerprint,
             receivedAt: now,
             payload: payload
@@ -334,7 +349,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         if pendingRecipeShares.count > Self.maxPendingShares {
             pendingRecipeShares = Array(pendingRecipeShares.prefix(Self.maxPendingShares))
         }
-        recordDiagnostic("Received recipe share from \(envelope.senderDisplayName).")
+        recordDiagnostic("Received recipe share from \(senderName).")
     }
 
     private func setupSession() {
@@ -400,7 +415,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         discoveredPeers[peer.id] = peer
         let recipient = ProximityRecipeShareRecipient(
             id: peer.id,
-            displayName: peer.discoveryInfo?["name"] ?? peer.displayName,
+            // Pre-handshake label straight off the wire — the picker, the browse list and the
+            // diagnostics all read it back from here, so this is the one ingest to coerce.
+            displayName: ItemNameModeration.moderatedPeerDisplayName(peer.discoveryInfo?["name"] ?? peer.displayName),
             fingerprint: nil
         )
         nearbyRecipients.removeAll { $0.id == recipient.id }
@@ -600,7 +617,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     private func displayName(for connection: RecipeShareConnection) -> String {
-        nearbyRecipients.first { $0.id == connection.id }?.displayName ?? connection.peer.displayName
+        nearbyRecipients.first { $0.id == connection.id }?.displayName
+            ?? ItemNameModeration.moderatedPeerDisplayName(connection.peer.displayName)
     }
 
     /// Arms the sender-side connect timeout for the PRE-CONNECT stage only. Under the hard

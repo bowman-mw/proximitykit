@@ -610,8 +610,16 @@ public final class HeartDropService {
         fetchFailureStreak = 0
         fetchFailingSince = nil
         guard !Task.isCancelled, isEnabled() else { return }
-        for record in records {
+        for (index, record) in records.enumerated() {
             openIncoming(record, expectedSender: tagOwner[record.tag])
+            // Each open is an ECDH + ChaChaPoly + inflate on the main actor. The transport bounds
+            // how many can arrive, but a full budget's worth back-to-back still holds the UI, so
+            // give the actor a breath. The guard is re-checked because a yield is a suspension
+            // point across which consent can be withdrawn — same reason as the guard above.
+            if index % 25 == 24 {
+                await Task.yield()
+                guard !Task.isCancelled, isEnabled() else { return }
+            }
         }
     }
 

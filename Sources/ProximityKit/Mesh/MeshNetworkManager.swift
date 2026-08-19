@@ -252,6 +252,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     // MARK: - Phase 3 Group Encryption State
 
     // Current symmetric group key. nil = epoch 0 (unencrypted). Never persisted.
+    /// `slot.id` → the `meshID` we asked to join on that slot.
+    ///
+    /// An admission grant is only ever accepted as the answer to a request WE sent on THAT slot.
+    /// Without this record a grant is unsolicited wire input that hands us a group key, which is
+    /// how a non-member can push its own key onto a joiner. Written by `sendAdmissionRequest`,
+    /// consumed single-use by `handleAdmissionGrant`, pruned in `removeSlot`, cleared wholesale by
+    /// `clearGroupKeyState` (R3: bounded by ``maxOutstandingAdmissionRequests``).
+    @ObservationIgnored private var outstandingAdmissionRequestBySlot: [UUID: UUID] = [:]
+
+    /// Photo AUTHORS announced in manifests this session, after the block filter.
+    ///
+    /// A one-hop relay (`sendRequestedPhotos`) can legitimately carry a third peer's photo before
+    /// that peer appears in our mesh descriptor or session roster — the manifest entry is our only
+    /// advance notice of the author. `photoAuthorIsAcceptable` treats that notice as "known", which
+    /// keeps the relay working while staying attacker-bounded (we asked for these ids).
+    /// Bounded by ``maxSessionPhotos``; cleared with the roster at new-session reset (R3).
+    @ObservationIgnored private var manifestAnnouncedPhotoAuthors: Set<String> = []
+
     @ObservationIgnored private(set) var currentGroupKey: MeshGroupKey?
     // Task that fires at nextRotationAt to drive the rotation protocol as coordinator.
     @ObservationIgnored private var rotationTimer: Task<Void, Never>?
@@ -300,6 +318,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private static let maxSessionRosterEntries = 32
     /// R3 cap on the observed pending-admission queue (wire input, rendered by the UI).
     private static let maxPendingAdmissionRequests = 8
+    /// R3 cap on `outstandingAdmissionRequestBySlot`: at most one entry per slot, so it can never
+    /// exceed the slot cap. Enforced explicitly rather than merely implied, because the writer
+    /// sits on a wire-driven path.
+    private static let maxOutstandingAdmissionRequests = maxTotalSlots
     /// Wall-post count at which older multi-photo sessions start collapsing into one aggregated
     /// post — the bound of the aggregation loop in `progressivelyAggregatePhotoSessions`.
     private static let maxUnaggregatedWallPosts = 24
@@ -776,7 +798,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 guard let fingerprint = slot.fingerprint else { return nil }
                 return MeshSessionParticipant(
                     fingerprint: fingerprint,
-                    displayName: slot.peer.displayName,
+                    // MCPeerID display names have no other entry point, so this is the ingest
+                    // equivalent for the transport name (R5).
+                    displayName: ItemNameModeration.moderatedPeerDisplayName(slot.peer.displayName),
                     isLocal: false
                 )
             }
@@ -804,8 +828,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Belt-and-braces: a peer the session voted out (or the user asked to remove) is never
         // re-recorded, so it can never be offered by the keep-as-friend prompt.
         guard !removedMemberFingerprints.contains(fingerprint) else { return }
+        // Single ingest for the roster, so BOTH callers (the verified PeerIdentity path and
+        // promoteToMesh's raw `slot.peer.displayName`) are covered by one coercion. Nothing keys
+        // off the roster display name — lookups and removal key on fingerprint — so rewriting an
+        // existing entry to the sanitized form is safe.
+        let name = ItemNameModeration.moderatedPeerDisplayName(displayName)
         if let index = sessionRoster.firstIndex(where: { $0.fingerprint == fingerprint }) {
-            sessionRoster[index].displayName = displayName
+            sessionRoster[index].displayName = name
         } else {
             // R3: one entry per distinct fingerprint, but a peer that regenerates its identity and
             // re-commits (auto-dwell in proximity join) would otherwise add one entry per commit.
@@ -814,7 +843,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 return
             }
             sessionRoster.append(MeshSessionRosterEntry(
-                displayName: displayName,
+                displayName: name,
                 fingerprint: fingerprint,
                 signingPublicKey: signingPublicKey,
                 keyAgreementPublicKey: keyAgreementPublicKey
@@ -841,6 +870,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// (`noteSlotCommittedForShop`).
     func resetSessionRosterForNewSession() {
         sessionRoster.removeAll()
+        // Manifest-announced authors are session-scoped evidence, exactly like the roster (R3).
+        manifestAnnouncedPhotoAuthors.removeAll()
     }
 
     /// Scoped roster consume for the in-session camera review flow: removes ONLY the presented
@@ -1073,6 +1104,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func clearGroupKeyState() {
         currentGroupKey = nil
+        // An outstanding join request only authorizes a grant for the session that issued it.
+        outstandingAdmissionRequestBySlot.removeAll()
         rotationTimer?.cancel()
         rotationTimer = nil
         beaconTimer?.cancel()
@@ -1194,7 +1227,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard var mesh = currentMesh, mesh.meshID == request.meshID else { return }
         let newMember = MeshMember(
             fingerprint: request.requesterFingerprint,
-            displayName: request.requesterDisplayName,
+            // Belt and braces: this method is `public` and accepts an arbitrary payload, so it must
+            // not rely on `handleAdmissionRequest` having sanitized the queued copy. Idempotent.
+            displayName: ItemNameModeration.moderatedPeerDisplayName(request.requesterDisplayName),
             signingPublicKey: request.requesterSigningPublicKey,
             keyAgreementPublicKey: request.requesterKeyAgreementPublicKey,
             joinedAt: Date()
@@ -1334,6 +1369,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) {
         switch type {
         case .meshDescriptor:
+            // A descriptor adopts a whole mesh identity, so it is member business: require a
+            // COMMITTED slot. `peer` is the coordinator's connected-OR-PENDING identity, so a
+            // merely-pending peer would otherwise reach `handleMeshDescriptor` with a fingerprint.
+            // A descriptor dropped in a commit-timing race is re-sent: `onSlotConnected` sends one
+            // post-commit and `promoteToMesh` re-broadcasts.
+            guard slot?.fingerprint != nil else {
+                FernletAuditLog.log("mesh.meshDescriptor.droppedUncommittedSlot")
+                return
+            }
             if let payload = try? decoder.decode(MeshStateChangePayload.self, from: plaintext) {
                 handleMeshDescriptor(payload.descriptor, from: peer?.fingerprint)
             }
@@ -1344,7 +1388,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             }
         case .meshAdmissionGrant:
             if let payload = try? decoder.decode(MeshAdmissionGrantPayload.self, from: plaintext) {
-                handleAdmissionGrant(payload)
+                // `peer?.signingPublicKey`, NOT `slot?.verifiedSigningPublicKey`: a grant answers
+                // our join request, which by design arrives BEFORE our slot commits, so the slot's
+                // verified key is still nil on the legitimate path. `peer` is set only from a
+                // signature-verified intro, so it is envelope-authenticated either way.
+                handleAdmissionGrant(payload, slot: slot, senderSigningPublicKey: peer?.signingPublicKey)
             }
         default:
             break
@@ -1360,6 +1408,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         peer: ProximityCoordinator.PeerIdentity?,
         slot: PeerSlot?
     ) {
+        // Photos are the PERSISTENT wall, so the whole family is member business: require a
+        // COMMITTED slot, the same boundary `dispatchRemovalPayload` and `dispatchRegistryPayload`
+        // enforce. `peer` is the coordinator's connected-OR-PENDING identity, so without this a
+        // peer that has only introduced itself — no commit, no user action — can write the wall.
+        // Drop only, never fail the session: a peer must not be able to get itself disconnected
+        // by mistiming a photo.
+        guard slot?.fingerprint != nil else {
+            FernletAuditLog.log("mesh.photoPayload.droppedUncommittedSlot", context: ["type": type.rawValue])
+            return
+        }
         switch type {
         case .friendPhoto:
             if let payload = try? decoder.decode(FriendPhotoPayload.self, from: plaintext) {
@@ -1380,12 +1438,53 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// Receives one peer photo: block check, per-sender quota, epoch decrypt, cache, closeness hook.
+    /// Authorizes a photo's CLAIMED author before it reaches the persistent wall.
+    ///
+    /// The envelope signature authenticates only the RELAYER — `sendRequestedPhotos` re-sends other
+    /// peers' cached photos by design, so `senderName`/`senderFingerprint`/`senderSigningPublicKey`
+    /// are an unsigned claim about a third party. Four independent checks make the claim usable:
+    /// neither party blocked, the claim present at all, the claim self-consistent (fingerprint ==
+    /// hash of the claimed key), and the claimed author known to THIS session (the relayer itself,
+    /// a mesh member, a session-roster participant, or an author announced in a manifest we already
+    /// accepted). An un-attributable photo is rejected outright: it can be neither blocked nor
+    /// honestly displayed. Do NOT "fix" this by stamping the relayer over the attribution fields —
+    /// that mis-attributes every legitimately relayed photo on the wall.
+    private func photoAuthorIsAcceptable(_ payload: FriendPhotoPayload, relayer: String?) -> Bool {
+        guard let relayer, !store.isBlockedFingerprint(relayer) else {
+            FernletAuditLog.log("mesh.friendPhoto.droppedUnattributedRelayer")
+            return false
+        }
+        guard let claimed = payload.senderFingerprint, let claimedKey = payload.senderSigningPublicKey else {
+            FernletAuditLog.log("mesh.friendPhoto.droppedMissingAuthor")
+            return false
+        }
+        guard !store.isBlockedFingerprint(claimed) else {
+            FernletAuditLog.log("mesh.friendPhoto.droppedBlockedAuthor")
+            return false
+        }
+        // The same binding `handleAdmissionRequest` applies — reuse it, don't reinvent it.
+        guard IdentityService.fingerprintsMatch(IdentityService.fingerprint(of: claimedKey), claimed) else {
+            FernletAuditLog.log("mesh.friendPhoto.droppedKeyFingerprintMismatch")
+            return false
+        }
+        let known = claimed == relayer
+            || currentMesh?.members.contains { $0.fingerprint == claimed } == true
+            || sessionRoster.contains { $0.fingerprint == claimed }
+            || manifestAnnouncedPhotoAuthors.contains(claimed)
+        guard known else {
+            FernletAuditLog.log("mesh.friendPhoto.droppedUnknownAuthor")
+            return false
+        }
+        return true
+    }
+
+    /// Receives one peer photo: author authorization, per-sender quota, epoch decrypt, cache,
+    /// closeness hook.
     ///
     /// The payload's peer-supplied display fields are sanitized and capped here (R3/R5) — this is
     /// where untrusted photo metadata enters the PERSISTENT wall cache.
     private func handleFriendPhotoEnvelope(_ payload: FriendPhotoPayload, from senderFingerprint: String?) {
-        if let fingerprint = payload.senderFingerprint, store.isBlockedFingerprint(fingerprint) { return }
+        guard photoAuthorIsAcceptable(payload, relayer: senderFingerprint) else { return }
         guard allowIncomingPhoto(payload.id, from: senderFingerprint) else { return }
         // The payload must carry an image in the shape its epoch claims (R5) — an empty or
         // mismatched payload would otherwise occupy a wall slot and a per-sender quota unit.
@@ -1778,11 +1877,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         clearSessionMessagesIfSessionEnded()
     }
 
+    /// The advertised TXT payload: version + the per-launch session id, plus the mesh identifiers
+    /// when an OPEN mesh is up.
+    ///
+    /// Deliberately NO display name. Nothing on this radio ever read `discoveryInfo["name"]` — the
+    /// recipe radio's recipient picker is the only reader anywhere, and it runs on
+    /// `fernlet-recipe` — and unlike `sid`, a per-launch random UUID, a proximity display name is
+    /// stable across launches and locations, so a passive Bonjour scanner could link sightings of
+    /// one person. A peer learns our name only inside the signed identity introduction, after a
+    /// connection. Same hygiene rule as `PresenceManager.discoveryInfo()`.
+    ///
+    /// `meshName`/`memberCount` STAY: advertising an open mesh to nearby devices is the product
+    /// behaviour of open mode, and closed mode already suppresses all three (that toggle is the
+    /// user-facing control). Removing them would be a product decision, not a hygiene fix.
     public func currentDiscoveryInfo() -> [String: String] {
         var info: [String: String] = [
             "v": "1",
-            "sid": sessionID,
-            "name": String(displayName.prefix(32))
+            "sid": sessionID
         ]
         if let mesh = currentMesh, mesh.mode == .open {
             info["meshID"] = mesh.meshID.uuidString
@@ -1906,6 +2017,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Entries die with their slot (R3): a scanned-but-unanswered round would otherwise leak
         // one entry for the manager's lifetime, and survive into a reused slot id.
         pendingQRVerifications.removeValue(forKey: slot.id)
+        // Same rule for the outstanding join request: it dies with its slot, so it can neither
+        // leak for the manager's lifetime nor authorize a grant on a reused slot id (R3).
+        outstandingAdmissionRequestBySlot.removeValue(forKey: slot.id)
         photoSendsInFlight.remove(slot.id)
         slots.removeAll { $0.id == slot.id }
         slotTrustPolicies.removeValue(forKey: slot.id)
@@ -1927,6 +2041,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Entries die with their slot (R3): a scanned-but-unanswered round would otherwise leak
         // one entry for the manager's lifetime, and survive into a reused slot id.
         pendingQRVerifications.removeValue(forKey: slot.id)
+        // Same rule for the outstanding join request: it dies with its slot, so it can neither
+        // leak for the manager's lifetime nor authorize a grant on a reused slot id (R3).
+        outstandingAdmissionRequestBySlot.removeValue(forKey: slot.id)
         photoSendsInFlight.remove(slot.id)
         slots.removeAll { $0.id == slot.id }
         slotTrustPolicies.removeValue(forKey: slot.id)
@@ -2021,6 +2138,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Creates a MeshDescriptor in-place and broadcasts it to all committed slots
     /// without restarting search. Called on the 2nd proximity commit.
     private func promoteToMesh() {
+        // A mesh we CREATE starts at epoch 0 by definition. Any key state surviving from the
+        // pre-mesh pairwise phase is, by construction, not this mesh's key — clearing it here
+        // removes the key-survival leg of the admission-grant attack independently of the
+        // authorization guards in `handleAdmissionGrant`. Deliberately just the two fields, not
+        // `clearGroupKeyState()` — no rotation/beacon timer is running pre-mesh, and cancelling
+        // them here would be an unrelated behaviour change.
+        currentGroupKey = nil
+        localJoinedEpoch = 0
         let now = Date()
         let localFP = identity.localFingerprint
         let localMember = MeshMember(
@@ -2153,21 +2278,31 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// Scanner side: a `fernlet://verify` QR was scanned. Validates signature + freshness, binds
-    /// it to the awaiting slot presenting the SAME signing key, and opens the sealed challenge
-    /// round. Returns false when the QR is invalid/stale or no awaiting slot matches.
+    /// Scanner side: a `fernlet://verify` QR was scanned. Validates signature + freshness, then
+    /// opens the sealed challenge round ONLY against `slotID` — the row the sheet was opened from.
+    ///
+    /// The round is never SEARCHED for: a code that is perfectly valid but belongs to a different
+    /// nearby peer is refused, not silently redirected. That is the same property the displayer
+    /// half already enforces (`makeLocalVerifyQRURL(slotID:)` / the `activeVerifyQR` binding), and
+    /// without it "verify the person in front of you" degrades to "verify whoever is nearby".
+    /// Returns false when the QR is invalid/stale, the row is gone or no longer awaiting, or the
+    /// code belongs to someone else.
     ///
     /// A rejected scan is the whole point of the ceremony, so the result is not discardable (R7):
     /// the scanning row surfaces the refusal to the user rather than letting the sheet close as if
     /// the code had been accepted.
-    public func beginQRVerification(with url: URL) -> Bool {
+    public func beginQRVerification(with url: URL, slotID: UUID) -> Bool {
         guard let payload = ProximityVerifyQR.parse(url), ProximityVerifyQR.isValid(payload) else {
             FernletAuditLog.log("mesh.verifyQR.invalidScanned")
             return false
         }
-        guard let slot = slots.first(where: { manualCommitPeer(of: $0)?.signingPublicKey == payload.signingPublicKey }),
+        guard let slot = slots.first(where: { $0.id == slotID }),
               let peer = manualCommitPeer(of: slot) else {
             FernletAuditLog.log("mesh.verifyQR.noAwaitingSlotMatch")
+            return false
+        }
+        guard peer.signingPublicKey == payload.signingPublicKey else {
+            FernletAuditLog.log("mesh.verifyQR.qrPeerMismatch")
             return false
         }
         let challengeNonce = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })
@@ -2496,6 +2631,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             requesterKeyAgreementPublicKey: identity.localKeyAgreementPublicKey
         )
         for slot in slots {
+            // Record what we asked for, on the slot we asked it on: `handleAdmissionGrant` accepts
+            // a grant ONLY as the answer to this. Bounded by the slot cap (R3).
+            if outstandingAdmissionRequestBySlot.count < Self.maxOutstandingAdmissionRequests
+                || outstandingAdmissionRequestBySlot[slot.id] != nil {
+                outstandingAdmissionRequestBySlot[slot.id] = mesh.meshID
+            }
             Task { [weak self] in await self?.sendEnvelope(.meshAdmissionRequest, encodable: request, via: slot) }
         }
     }
@@ -2587,6 +2728,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Bind key ↔ fingerprint UNCONDITIONALLY (R5): pre-commit the slot has no verified signing
         // key, so without this a peer whose pending fingerprint matches could append one row per
         // bogus signing key it invents. Dedup on the fingerprint too, and cap the queue (R3).
+        //
+        // DELIBERATE PRE-COMMIT EXCEPTION: `.meshAdmissionRequest` is the ONE member-family payload
+        // accepted from an uncommitted slot — asking to join is precisely what a peer does before
+        // it commits, so `dispatchMembershipPayload` does not gate it the way it gates
+        // `.meshDescriptor`. Do NOT "fix" that asymmetry by symmetry: the binding, dedup and queue
+        // cap below are what make pre-commit acceptance safe, and gating it would break every join.
         guard IdentityService.fingerprintsMatch(
             IdentityService.fingerprint(of: request.requesterSigningPublicKey),
             request.requesterFingerprint
@@ -2603,18 +2750,83 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 || $0.requesterFingerprint == request.requesterFingerprint
         }
         if !isKnown {
-            pendingAdmissionRequests.append(request)
+            // Wire boundary: `requesterDisplayName` is peer-supplied and reaches the ADMISSION
+            // PROMPT — the one screen where the user decides to admit a stranger. Sanitize HERE
+            // (control/zero-width/bidi scalars out, 24-char cap) so neither the prompt nor the
+            // admitter's roster can be spoofed by a homoglyph or reversed by an RLO override.
+            // Safe to rebuild the payload: `allowAdmission`/`declineAdmission` match on
+            // `requesterSigningPublicKey`, never on the name, so dedup and removal are unaffected.
+            pendingAdmissionRequests.append(MeshAdmissionRequestPayload(
+                meshID: request.meshID,
+                requesterFingerprint: request.requesterFingerprint,
+                requesterDisplayName: ItemNameModeration.moderatedPeerDisplayName(request.requesterDisplayName),
+                requesterSigningPublicKey: request.requesterSigningPublicKey,
+                requesterKeyAgreementPublicKey: request.requesterKeyAgreementPublicKey
+            ))
         }
     }
 
-    private func handleAdmissionGrant(_ grant: MeshAdmissionGrantPayload) {
+    /// Authorizes an inbound admission grant against state we can vouch for LOCALLY.
+    ///
+    /// The token itself proves only that somebody minted it: `admitterSigningPublicKey` is the
+    /// token's own root, so a self-signed token from a total stranger verifies. Three independent
+    /// checks close that: the grant must answer a request WE sent on THIS slot, the admitter must
+    /// be the authenticated sender of the envelope that carried it, and — once we have a mesh —
+    /// a current member of it. Returns false with an audit entry, never silently.
+    private func admissionGrantIsAuthorized(_ grant: MeshAdmissionGrantPayload,
+                                            slot: PeerSlot?,
+                                            senderSigningPublicKey: Data?) -> Bool {
+        guard let slot, let senderKey = senderSigningPublicKey else {
+            FernletAuditLog.log("mesh.admissionGrant.droppedUnattributed")
+            return false
+        }
+        guard outstandingAdmissionRequestBySlot[slot.id] == grant.meshID else {
+            FernletAuditLog.log("mesh.admissionGrant.droppedUnsolicited")
+            return false
+        }
+        guard grant.token.admitterSigningPublicKey == senderKey else {
+            FernletAuditLog.log("mesh.admissionGrant.droppedAdmitterNotSender")
+            return false
+        }
+        if let mesh = currentMesh {
+            guard mesh.members.contains(where: { $0.signingPublicKey == senderKey }) else {
+                FernletAuditLog.log("mesh.admissionGrant.droppedAdmitterNotMember")
+                return false
+            }
+        }
+        return true
+    }
+
+    private func handleAdmissionGrant(_ grant: MeshAdmissionGrantPayload,
+                                      slot: PeerSlot?,
+                                      senderSigningPublicKey: Data?) {
         guard currentMesh == nil || currentMesh?.meshID == grant.meshID else { return }
+        guard admissionGrantIsAuthorized(grant, slot: slot, senderSigningPublicKey: senderSigningPublicKey) else {
+            return
+        }
         // Bind the signed token.meshID to the mesh being joined so a valid token for another
-        // mesh cannot be wrapped in a grant claiming this one (grant.meshID is unsigned).
-        do { try grant.token.verify(joinerSigningPublicKey: identity.localSigningPublicKey, expectedMeshID: grant.meshID) } catch { return }
+        // mesh cannot be wrapped in a grant claiming this one (grant.meshID is unsigned), and bind
+        // the token's admitter root to the authenticated sender so a self-signed token is inert.
+        do {
+            try grant.token.verify(joinerSigningPublicKey: identity.localSigningPublicKey,
+                                   expectedMeshID: grant.meshID,
+                                   expectedAdmitterSigningPublicKey: senderSigningPublicKey)
+        } catch {
+            FernletAuditLog.log("mesh.admissionGrant.droppedTokenVerifyFailed")
+            return
+        }
 
         // A negative epoch is malformed wire input and would poison every later epoch comparison.
         guard grant.currentKeyEpoch >= 0 else { return }
+        // Epochs only move FORWARD, exactly as `handleKeyRotation` requires — otherwise a grant
+        // replaying an old epoch would roll a joined member back onto a retired key.
+        guard grant.currentKeyEpoch > (currentGroupKey?.epoch ?? -1),
+              grant.currentKeyEpoch >= localJoinedEpoch else {
+            FernletAuditLog.log("mesh.admissionGrant.droppedStaleEpoch")
+            return
+        }
+        // Single use: the request it answered is now spent.
+        if let slot { outstandingAdmissionRequestBySlot.removeValue(forKey: slot.id) }
 
         // Phase 3: unwrap the group key if one was included.
         if let bundle = grant.encryptedCurrentKey,
@@ -2624,8 +2836,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             localJoinedEpoch = grant.currentKeyEpoch
             recordEpoch(grant.currentKeyEpoch, since: newKey.activeSince)
         } else {
-            // No key included — we start at epoch 0 (unencrypted).
-            localJoinedEpoch = 0
+            // No key included — adopt the grant's epoch, which the monotonicity guard above has
+            // already proved never decreases. Resetting to 0 here let any keyless grant rewind the
+            // `localJoinedEpoch` manifest filter and re-open retired epochs.
+            localJoinedEpoch = grant.currentKeyEpoch
         }
         startBeaconLoop()
     }
@@ -2887,10 +3101,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.photoManifest.droppedOversized")
             return
         }
+        // The entry filter below already skips a blocked AUTHOR; this is the reciprocal check on
+        // the RELAYER, so a blocked peer cannot drive our request traffic at all.
+        guard !store.isBlockedFingerprint(slot.fingerprint ?? "") else {
+            FernletAuditLog.log("mesh.photoManifest.droppedBlockedRelayer")
+            return
+        }
         let haveIDs = Set(meshPhotos.map { $0.id })
-        let missing = manifest.entries
-            .filter { !haveIDs.contains($0.id) }
+        let announced = manifest.entries
             .filter { !store.isBlockedFingerprint($0.senderFingerprint) }
+            .prefix(Self.maxSessionPhotos)
+        // Remember the authors we accepted here so a legitimately relayed photo whose author has
+        // not yet reached our descriptor or roster is still attributable (R3: bounded above).
+        for entry in announced where manifestAnnouncedPhotoAuthors.count < Self.maxSessionPhotos {
+            manifestAnnouncedPhotoAuthors.insert(entry.senderFingerprint)
+        }
+        let missing = announced
+            .filter { !haveIDs.contains($0.id) }
             .filter { $0.keyEpoch >= localJoinedEpoch }   // epoch guard: skip photos we can't decrypt
             .map(\.id)
             .prefix(Self.maxSessionPhotos)
@@ -3306,7 +3533,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             }
         case .meshAdmissionGrant:
             if let payload = try? decoder.decode(MeshAdmissionGrantPayload.self, from: data) {
-                handleAdmissionGrant(payload)
+                // Same authorization binding as the plaintext dispatch at `handleInbound`: holding
+                // the group key proves mesh membership, never the authority to admit, so an
+                // encrypted-metadata wrapper must not become a way around the grant guards.
+                handleAdmissionGrant(payload, slot: slot,
+                                     senderSigningPublicKey: peer?.signingPublicKey)
             }
         default:
             break
@@ -3766,6 +3997,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: - UI test injection
 
+    #if DEBUG
     /// `AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE`, spelled with the non-optional `UUID(uuid:)`
     /// initialiser so the fixture needs no force unwrap (R5).
     private static let uiTestOpenMeshID = UUID(uuid: (
@@ -3777,8 +4009,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         0xAA, 0xAA, 0xAA, 0xAA, 0xBB, 0xBB, 0xCC, 0xCC,
         0xDD, 0xDD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
     ))
+    // Kept inside the DEBUG region with their only readers: private statics left visible in Release
+    // would be unused, and warnings are errors on every target.
+    #endif
 
+    /// Seeds a canned mesh (and, optionally, a pending admission request) from `FERNLET_UI_TEST_MESH_*`
+    /// so the UI suites can drive the mesh surfaces without a second device.
+    ///
+    /// The BODY is `#if DEBUG`, not the signature: a configuration skew between the app target and
+    /// this local package would turn a wrapped signature into a hard "cannot find member" error,
+    /// whereas an empty body cannot. In Release the fabricated ``MeshDescriptor`` — and the whole
+    /// environment-flag read — is absent from the binary, so no shipped build can be talked into a
+    /// synthetic mesh state.
     public func injectUITestStateIfNeeded() {
+        #if DEBUG
         let env = ProcessInfo.processInfo.environment
         let now = Date()
         let hostFP = "aa:bb:cc:dd:00:11:test"
@@ -3828,5 +4072,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 requesterKeyAgreementPublicKey: Data()
             )]
         }
+        #endif
     }
 }

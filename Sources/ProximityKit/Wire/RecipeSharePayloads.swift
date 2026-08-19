@@ -15,6 +15,12 @@ public nonisolated struct ProximityRecipeSharePayload: Codable, Equatable, Ident
     /// under the friend channel's 10 MB envelope bound, so a recipe-with-picture always fits.
     public static let maxImageBytes = 512 * 1024
 
+    /// Ceiling on a decoded recipe-share plaintext, enforced BEFORE `JSONDecoder`. Derived, never
+    /// hand-picked: ``maxImageBytes`` (512 KB) inflates to ~683 KB as base64 inside the JSON, plus
+    /// a generous ~340 KB for the recipe text itself — an honest share is far under 1 MiB. The
+    /// image cap alone is not enough: it only applies AFTER a multi-megabyte body has been decoded.
+    public static let maxWireBytes = 1024 * 1024
+
     public var format = "fernlet.proximity.recipe"
     public var version = 1
     public var id = UUID()
@@ -82,6 +88,34 @@ public nonisolated struct ProximityRecipeSharePayload: Codable, Equatable, Ident
         guard let imageJPEGData, imageJPEGData.count > Self.maxImageBytes else { return self }
         var copy = self
         copy.imageJPEGData = nil
+        return copy
+    }
+
+    /// Returns a copy whose rendered strings and lists are bounded for the review sheet.
+    ///
+    /// ``maxWireBytes`` bounds the TOTAL bytes; this bounds what the sheet has to LAY OUT, so a
+    /// share carrying a hundred ten-kilobyte ingredient names cannot stall the review UI while
+    /// still fitting comfortably under the wire cap. The local variant is already bounded by
+    /// `SharedRecipePayload.init(from:)`; the saved variant has no custom decode, so it is clamped
+    /// here — at the door — to the same ``SharedRecipeLimits`` the import path already enforces.
+    public func clampedForReview() -> ProximityRecipeSharePayload {
+        guard case .saved = recipe.kind, var saved = recipe.saved else { return self }
+        saved.name = String(saved.name.prefix(SharedRecipeLimits.maxNameCharacters))
+        saved.summary = String(saved.summary.prefix(SharedRecipeLimits.maxNotesCharacters))
+        saved.sourceURLString = String(saved.sourceURLString.prefix(SharedRecipeLimits.maxNotesCharacters))
+        saved.servings = min(max(saved.servings, 1), SharedRecipeLimits.maxServings)
+        saved.ingredients = saved.ingredients
+            .prefix(SharedRecipeLimits.maxIngredients)
+            .map { String($0.prefix(SharedRecipeLimits.maxNameCharacters)) }
+        if let steps = saved.steps {
+            saved.steps = steps.prefix(SharedRecipeLimits.maxSteps).map {
+                RecipeStep(id: $0.id,
+                           text: String($0.text.prefix(SharedRecipeLimits.maxNotesCharacters)),
+                           durationSeconds: $0.durationSeconds)
+            }
+        }
+        var copy = self
+        copy.recipe.saved = saved
         return copy
     }
 
@@ -210,6 +244,66 @@ public nonisolated struct SharedSavedRecipePayload: Codable, Equatable, Sendable
         self.fat = fat
         self.micronutrients = micronutrients
         self.steps = steps
+    }
+
+    /// Bounded decode (R3/R5), mirroring `SharedRecipePayload.init(from:)` on the local arm. This
+    /// type is built from UNTRUSTED bytes — a mesh recipe envelope — and import writes its name,
+    /// ingredient lines, summary and steps straight into the synced snapshot, so every string and
+    /// collection is capped where the bytes enter. The macro `Int`s are bounded here too because
+    /// the review sheet sums and renders them BEFORE the store's own clamps ever run, and the
+    /// micronutrients are sanitized because a non-finite amount would reach a trapping `Int(_:)`
+    /// in a day-detail row.
+    ///
+    /// WIRE CONTRACT UNCHANGED: every key except `steps` stays REQUIRED and `steps` stays optional,
+    /// exactly as the synthesized decode had it — an older peer that sends no `steps` key must
+    /// still round-trip (see the note on ``steps``).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try Self.bounded(c.decode(String.self, forKey: .name),
+                                limit: SharedRecipeLimits.maxNameCharacters)
+        sourceURLString = try Self.bounded(c.decode(String.self, forKey: .sourceURLString),
+                                           limit: SharedRecipeLimits.maxSourceURLCharacters)
+        summary = try Self.bounded(c.decode(String.self, forKey: .summary),
+                                   limit: SharedRecipeLimits.maxSummaryCharacters)
+        let decodedIngredients = try c.decode([String].self, forKey: .ingredients)
+        guard decodedIngredients.count <= SharedRecipeLimits.maxIngredients,
+              decodedIngredients.allSatisfy({ $0.count <= SharedRecipeLimits.maxIngredientLineCharacters }) else {
+            throw RecipeImportError.invalidPayload
+        }
+        ingredients = decodedIngredients
+        servings = min(max(try c.decode(Int.self, forKey: .servings), 1), SharedRecipeLimits.maxServings)
+        protein = try Self.boundedMacro(c.decode(Int.self, forKey: .protein))
+        carbs = try Self.boundedMacro(c.decode(Int.self, forKey: .carbs))
+        fat = try Self.boundedMacro(c.decode(Int.self, forKey: .fat))
+        micronutrients = try c.decode(Micronutrients.self, forKey: .micronutrients).sanitizedForImport()
+        let decodedSteps = try c.decodeIfPresent([RecipeStep].self, forKey: .steps)
+        guard (decodedSteps?.count ?? 0) <= SharedRecipeLimits.maxSavedSteps,
+              (decodedSteps ?? []).allSatisfy({ $0.text.count <= SharedRecipeLimits.maxStepTextCharacters }) else {
+            throw RecipeImportError.invalidPayload
+        }
+        steps = decodedSteps
+    }
+
+    /// Rejects an over-long free-text field rather than silently truncating it — a truncated recipe
+    /// name, summary or source link is a quiet corruption of the sender's content.
+    private static func bounded(_ value: String, limit: Int) throws -> String {
+        guard value.count <= limit else { throw RecipeImportError.invalidPayload }
+        return value
+    }
+
+    /// Rejects a macro gram value outside `[0, SharedRecipeLimits.maxMacroGrams]`, so no peer-chosen
+    /// `Int` can reach the trapping arithmetic in `Macros.calories` or the review sheet.
+    private static func boundedMacro(_ value: Int) throws -> Int {
+        guard value >= 0, value <= SharedRecipeLimits.maxMacroGrams else {
+            throw RecipeImportError.invalidPayload
+        }
+        return value
+    }
+
+    /// Wire JSON keys for a shared saved (web-imported) recipe payload.
+    private enum CodingKeys: String, CodingKey {
+        case name, sourceURLString, ingredients, summary, servings, protein, carbs, fat
+        case micronutrients, steps
     }
 }
 
