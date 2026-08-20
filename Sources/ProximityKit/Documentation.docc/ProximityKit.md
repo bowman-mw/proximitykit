@@ -136,6 +136,24 @@ canonical signing bytes, sealed-payload framing (``SealedPayloadFraming``), the 
 handling of unknown payload types, and the additive-optional-key rule for intro payloads are all
 compatibility contracts with in-field peers.
 
+### Localization: nothing on the wire is display copy
+
+This module ships English sentences that a bulk localization pass will read as UI strings and that
+must never become `String(localized:)`. Every ``PayloadSummary`` title — "Recipe share",
+"Session ended", "Clothing catalog request", "Hello from …", "Identity acknowledged", "Heartbeat",
+"Heartbeat ack", "Good vibes" — is written into the Ed25519 canonical signing bytes by
+`CanonicalSignatureSerializer`, so localizing one makes the signed bytes depend on the sender's
+locale; it is also the text a *different* device shows in its Connection Inspector, so a translated
+sender writes its own language into a stranger's audit log. Both halves are silent: no crash, no
+log, just an audit row in the wrong language and a future cross-stack signature mismatch nobody can
+reproduce in English.
+
+The localized inspector is still reachable, and the wire already carries what it needs. Every
+envelope has `payloadTypeToken`, a stable enum rawValue identical on every device. Localize on the
+RECEIVING side: map that token to a `String(localized:)` label at render time, and fall back to the
+raw summary for tokens this build has no case for (`isUnknownPayloadType` — a newer peer's payload
+type has no local label). Senders keep emitting frozen English forever.
+
 ## Topics
 
 ### Host seam and app integration

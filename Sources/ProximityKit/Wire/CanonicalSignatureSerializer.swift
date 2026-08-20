@@ -197,6 +197,16 @@ private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ 
     }
 }
 
+/// Writes a `PayloadSummary` into the canonical signing bytes.
+///
+/// **DO NOT LOCALIZE ANY STRING THAT REACHES THIS FUNCTION.** `title`, `subtitle`, and every
+/// `extraDetails` key and value are hashed into the Ed25519 signature below. They read like UI copy
+/// ("Recipe share", "Session ended", "Good vibes") but they are wire bytes: a `String(localized:)`
+/// anywhere upstream makes the canonical bytes locale-dependent, which is exactly the class of
+/// cross-stack divergence this whole serializer exists to eliminate (see the WHY THIS EXISTS header).
+/// The failure mode is a `signatureInvalid` on a legitimately signed envelope, reproducible only on
+/// a device set to the other language — no crash, no log, just a peer that silently cannot connect.
+/// The receiver-side localization plan is documented on `FernletIdentityEnvelope.payloadSummary`.
 private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ summary: PayloadSummary) {
     writer.appendString(summary.title)
     writer.appendOptional(summary.subtitle)

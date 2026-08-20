@@ -433,6 +433,14 @@ public final class ProximityCoordinator {
         transition(to: .connected(peer: identity))
     }
 
+    /// Signs and sends one payload to the connected peer.
+    ///
+    /// **`summary` must be built from frozen English literals — never `String(localized:)`.** Every
+    /// caller (recipe share, good vibes, clothing catalog, session goodbye) hands in a
+    /// human-sounding title that is nonetheless a wire token: it is folded into the Ed25519
+    /// canonical bytes AND surfaced in the RECEIVING device's Connection Inspector. The rationale,
+    /// and the receiver-side plan for a localized inspector, live on
+    /// `FernletIdentityEnvelope.payloadSummary`.
     func sendPayload(type: PayloadType, summary: PayloadSummary, payload: Data, sealed: Bool = false) async throws {
         guard currentTransportPeer != nil else { throw CoordinatorError.notConnected }
         let (finalPayload, encryption) = try sealIfNeeded(payload, sealed: sealed)
@@ -790,6 +798,10 @@ public final class ProximityCoordinator {
                 senderDisplayName: displayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadType: .identityIntroduction,
+                // DO NOT LOCALIZE this title — it is signed wire bytes, and it is rendered in the
+                // RECEIVER's Connection Inspector, so a translated sender writes its own language
+                // into a stranger's audit log. (`displayName` is user-authored, not a UI string, so
+                // interpolating it is fine.) Full rationale: `FernletIdentityEnvelope.payloadSummary`.
                 payloadSummary: PayloadSummary(title: "Hello from \(displayName)"),
                 payload: try await makeIdentityRangingPayload(),
                 createdAt: sentAt,
@@ -987,6 +999,8 @@ public final class ProximityCoordinator {
                 senderDisplayName: displayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadType: .identityAcknowledge,
+                // DO NOT LOCALIZE — signed wire bytes, rendered in the receiver's Inspector.
+                // See `FernletIdentityEnvelope.payloadSummary`.
                 payloadSummary: PayloadSummary(title: "Identity acknowledged"),
                 payload: try await makeIdentityRangingPayload(),
                 createdAt: sentAt,
@@ -1090,6 +1104,8 @@ public final class ProximityCoordinator {
                 senderDisplayName: displayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadType: .sessionHeartbeat,
+                // DO NOT LOCALIZE — signed wire bytes, rendered in the receiver's Inspector.
+                // See `FernletIdentityEnvelope.payloadSummary`.
                 payloadSummary: PayloadSummary(title: "Heartbeat ack"),
                 payload: try JSONEncoder().encode(payload),
                 createdAt: now,
@@ -1127,6 +1143,17 @@ public final class ProximityCoordinator {
             timestamp: now(),
             signatureVerified: signatureVerified,
             encrypted: encrypted,
+            // This is THE seam where a sender-authored English string becomes text a (possibly
+            // different-locale) receiving user reads. It stays frozen English on purpose.
+            //
+            // HOW TO LOCALIZE THE INSPECTOR LATER, without touching the wire: both branches below
+            // already have `envelope.payloadTypeToken` in hand — a stable enum rawValue, the same on
+            // every device and in every language. Localize on the RECEIVING side by mapping that
+            // token to a `String(localized:)` label at render time (a `PayloadType` → label switch in
+            // the Inspector view), and keep `summary` as the raw fallback for tokens this build does
+            // not know (`isUnknownPayloadType` — a newer peer's payload type has no local label).
+            // The sender must keep sending frozen English so signatures and cross-build audit rows
+            // stay comparable; nothing here should ever call `String(localized:)`.
             summary: encrypted ? envelope.payloadTypeToken : envelope.payloadSummary.title
         ))
     }
@@ -1487,6 +1514,8 @@ public final class ProximityCoordinator {
                 senderDisplayName: displayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadType: .sessionHeartbeat,
+                // DO NOT LOCALIZE — signed wire bytes, rendered in the receiver's Inspector.
+                // See `FernletIdentityEnvelope.payloadSummary`.
                 payloadSummary: PayloadSummary(title: "Heartbeat"),
                 payload: try JSONEncoder().encode(payload),
                 createdAt: sentAt,

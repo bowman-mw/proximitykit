@@ -340,6 +340,10 @@ public final class HeartDropService {
                 recipientFingerprint: friend.fingerprint,
                 payloadType: .friendHeartDrop,
                 payloadEncryption: .none, // the outer HeartDropSealer seal IS the confidentiality
+                // Frozen by construction: the summary title is the payload-type rawValue, never
+                // prose. Keep it that way and never localize it — the summary is signed into the
+                // envelope's canonical bytes, and a dead-drop envelope is verified on a device whose
+                // locale the sender cannot know. See `FernletIdentityEnvelope.payloadSummary`.
                 payloadSummary: PayloadSummary(title: PayloadType.friendHeartDrop.rawValue),
                 payload: payloadData,
                 createdAt: sentAt,

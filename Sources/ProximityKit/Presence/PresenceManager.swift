@@ -864,6 +864,11 @@ public final class PresenceManager: ProximityPayloadHandling {
             // pinned to `friend`, so a heart can never land on a different device.
             try await connection.coordinator.sendPayload(
                 type: .friendHeart,
+                // DO NOT LOCALIZE "Good vibes". It reads like the friendliest possible display
+                // string, and it is — on the RECIPIENT's Connection Inspector, not the sender's.
+                // It is also folded into the Ed25519 canonical bytes. The user-facing copy for this
+                // feature is the `heartSendState` text a few lines below, which IS display and may
+                // localize freely. See `FernletIdentityEnvelope.payloadSummary`.
                 summary: PayloadSummary(title: "Good vibes"),
                 payload: payloadData,
                 sealed: true

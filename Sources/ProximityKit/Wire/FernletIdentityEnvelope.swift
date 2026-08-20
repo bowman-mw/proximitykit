@@ -45,6 +45,27 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
     /// `payloadType == nil` / `isUnknownPayloadType`, and never dispatched to payload handlers.
     public let payloadTypeToken: String
     public let payloadEncryption: PayloadEncryption
+    /// The sender-authored disclosure summary. **DO NOT LOCALIZE — this is a wire token, not UI copy.**
+    ///
+    /// `PayloadSummary.title` looks exactly like a display string ("Recipe share", "Session ended",
+    /// "Heartbeat"), and it is one — but on the RECEIVER's screen, not the sender's. Two independent
+    /// reasons it is frozen English:
+    ///
+    /// 1. **It is inside the signature.** `CanonicalSignatureSerializer.appendCanonical(_:_:)` writes
+    ///    `summary.title` (and `subtitle`, and every `extraDetails` key/value) into the canonical
+    ///    signing bytes. Localizing the title changes those bytes, so the same logical envelope signs
+    ///    differently per device locale. `verify` re-derives the bytes from the DECODED envelope, so
+    ///    an es-MX sender and an en-US receiver would still agree today — but any future
+    ///    normalization, cross-stack port (the planned Kotlin serializer), or re-sign-on-relay turns
+    ///    a locale difference into a `signatureInvalid` that nobody can reproduce in English.
+    /// 2. **The sender's locale would leak onto the receiver's phone.** `ProximityCoordinator`'s
+    ///    `recordEnvelope` feeds this exact title into the Connection Inspector log the RECEIVING
+    ///    user reads. A localized sender would put Spanish rows in an English user's audit trail —
+    ///    the opposite of what localizing was supposed to buy.
+    ///
+    /// A localized inspector is still possible later, and the mechanism is already on the wire:
+    /// render `payloadTypeToken` through a receiver-side lookup table instead of showing this string.
+    /// See the note at `ProximityCoordinator.recordEnvelope`.
     public let payloadSummary: PayloadSummary
     public let payload: Data
     public let createdAt: Date

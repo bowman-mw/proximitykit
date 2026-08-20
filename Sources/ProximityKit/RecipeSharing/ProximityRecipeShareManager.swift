@@ -727,6 +727,11 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         sendState = .sending(recipientName: outgoing.recipient.displayName)
         recordDiagnostic("Sending \(outgoing.payload.recipe.title) to \(outgoing.recipient.displayName).")
         do {
+            // DO NOT LOCALIZE "Recipe share" — it is signed into the envelope's canonical bytes and
+            // rendered in the RECEIVING device's Connection Inspector, so translating it here would
+            // put the sender's language in a stranger's audit log. The recipient-facing consent copy
+            // is built on the receiving side and is free to localize; this is not it. See
+            // `FernletIdentityEnvelope.payloadSummary`.
             let summary = PayloadSummary(
                 title: "Recipe share",
                 subtitle: nil,

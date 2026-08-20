@@ -924,6 +924,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Notify connected peers before tearing down transport so they can review their session photos.
     public func leaveSessionAfterNotifyingPeers() async {
         for slot in slots {
+            // DO NOT LOCALIZE "Session ended" — for `.sessionGoodbye` the summary IS the whole body,
+            // so this literal is signed wire bytes AND the row every peer sees in its Connection
+            // Inspector. See `FernletIdentityEnvelope.payloadSummary`.
             await sendEnvelope(.sessionGoodbye, encodable: PayloadSummary(title: "Session ended"), via: slot)
         }
         leaveSession()
@@ -2032,6 +2035,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func disconnectSlot(_ slot: PeerSlot) {
         Task { [weak self] in
+            // DO NOT LOCALIZE "Session ended" — signed wire bytes and the receiver's Inspector row;
+            // for `.sessionGoodbye` the summary is the entire payload. See
+            // `FernletIdentityEnvelope.payloadSummary`.
             await self?.sendEnvelope(.sessionGoodbye, encodable: PayloadSummary(title: "Session ended"), via: slot)
             await slot.coordinator.cancel()
             // Kick only once the goodbye is on the wire — the peer's own removal path reads it.
@@ -3249,6 +3255,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Signed like every control payload but not sealed: it carries nothing (the summary is the whole
     /// body, mirroring `.sessionGoodbye`), and it is deliberately NOT in `sealingRequiredTypes`.
     private func sendShopCatalogRequest(to slot: PeerSlot) async {
+        // DO NOT LOCALIZE "Clothing catalog request" — as the doc comment above says, the summary is
+        // the whole body here, so this literal is signed wire bytes AND the receiving peer's
+        // Inspector row. See `FernletIdentityEnvelope.payloadSummary`.
         await sendEnvelope(.clothingCatalogRequest, encodable: PayloadSummary(title: "Clothing catalog request"), via: slot)
         onShopCatalogRequestSendForTesting?(slot.id)
     }
@@ -3397,6 +3406,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             recipientFingerprint: fingerprint,
             payloadType: type,
             payloadEncryption: encryption,
+            // The mesh path deliberately uses the payload-type rawValue as the summary title rather
+            // than prose — it is the ideal shape for localization later, because the receiver can map
+            // this token to a `String(localized:)` label without the sender's locale entering the
+            // signed bytes. DO NOT "improve" this into a friendly sentence, and never localize it.
             payloadSummary: PayloadSummary(title: type.rawValue),
             payload: finalPayload
         ) else {
