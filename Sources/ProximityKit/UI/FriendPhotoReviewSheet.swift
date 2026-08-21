@@ -60,6 +60,9 @@ struct FriendPhotoTile: View {
 /// Presented by the app's session-end flow off the promoted review state; the host supplies the
 /// save/discard actions (explicitly `@MainActor`-typed so their bodies stay on the main actor
 /// after `await` resumes) and the optional disk-cache rehydrator for metadata-only photos.
+/// A host that also passes `saveToPhotos` gets the split (FRND-12) action bar: keeping to the
+/// in-app wall is the primary action and the system photo-library export is a separate,
+/// strictly optional button — so a Photos permission denial can never cost the user the keep.
 public struct FriendPhotoReviewSheet: View {
     let photos: [FriendPhotoPayload]
     @Binding var selectedIDs: Set<UUID>
@@ -71,6 +74,12 @@ public struct FriendPhotoReviewSheet: View {
     // @State) run on the main actor even after an `await` resume, not the module's default
     // (which erases to a bare function value that can resume off-main).
     let saveSelected: @MainActor () async -> Void
+    /// FRND-12: when non-nil the pinned bar splits in two — the primary action becomes
+    /// "Keep selected" (`saveSelected`, in-app wall only, no Photos authorization involved) and
+    /// this closure runs behind a secondary "Also save to Photos" button, so a photo-library
+    /// permission denial can never cost the user the keep. When nil the bar keeps the single
+    /// legacy "Save selected" primary and the host owns the whole save flow.
+    var saveToPhotos: (@MainActor () async -> Void)? = nil
     let discardAll: @MainActor () -> Void
     /// Rehydrates a photo's bytes on demand (from the disk cache) for tiles whose in-memory
     /// payload carries no image data — session photos are stored metadata-only to bound memory.
@@ -86,6 +95,7 @@ public struct FriendPhotoReviewSheet: View {
         friendCandidates: [MeshSessionRosterEntry] = [],
         keptFriendFingerprints: Binding<Set<String>> = .constant([]),
         saveSelected: @escaping @MainActor () async -> Void,
+        saveToPhotos: (@MainActor () async -> Void)? = nil,
         discardAll: @escaping @MainActor () -> Void,
         loadImageData: ((FriendPhotoPayload) -> Data?)? = nil
     ) {
@@ -94,6 +104,7 @@ public struct FriendPhotoReviewSheet: View {
         self.friendCandidates = friendCandidates
         self.keptFriendFingerprints = keptFriendFingerprints
         self.saveSelected = saveSelected
+        self.saveToPhotos = saveToPhotos
         self.discardAll = discardAll
         self.loadImageData = loadImageData
     }
@@ -105,7 +116,7 @@ public struct FriendPhotoReviewSheet: View {
                 .font(.fernlet(.displayMedium))
                 .foregroundStyle(Color.bark)
 
-            Text("Choose which shared pictures to save. Everything else is deleted from this device's temporary cache.")
+            Text(explainerText)
                 .font(.fernlet(.body))
                 .foregroundStyle(Color.slate)
                 .fernletWrappingText()
@@ -137,28 +148,60 @@ public struct FriendPhotoReviewSheet: View {
         .padding(.bottom, 10)
     }
 
-    /// The pinned action bar: discard everything, or save what was picked.
+    /// The pinned action bar. Legacy form: discard everything, or save what was picked. Split
+    /// (FRND-12) form: the optional "Also save to Photos" export rides above the decisive pair,
+    /// and the primary keeps to the in-app wall with no Photos-library involvement.
     private var actionBar: some View {
-        AdaptiveStack(spacing: 10) {
-            Button(deleteAllLabel) {
-                askingToDeleteAll = true
-            }
-            .buttonStyle(ActionPillButtonStyle(.destructive))
-            .disabled(isSaving)
-            .accessibilityIdentifier("friends.review.deleteAll")
-            Button("Save selected") {
-                isSaving = true
-                Task { @MainActor in
-                    await saveSelected()
-                    isSaving = false
+        VStack(spacing: 10) {
+            if let saveToPhotos {
+                Button("Also save to Photos") {
+                    runExclusively { await saveToPhotos() }
                 }
+                .buttonStyle(ActionPillButtonStyle(.secondary))
+                .disabled(selectedIDs.isEmpty || isSaving)
+                .accessibilityIdentifier("friends.review.alsoSaveToPhotos")
             }
-            .buttonStyle(ActionPillButtonStyle(.primary))
-            .disabled(selectedIDs.isEmpty || isSaving)
-            .accessibilityIdentifier("friends.review.saveSelected")
+            AdaptiveStack(spacing: 10) {
+                Button(deleteAllLabel) {
+                    askingToDeleteAll = true
+                }
+                .buttonStyle(ActionPillButtonStyle(.destructive))
+                .disabled(isSaving)
+                .accessibilityIdentifier("friends.review.deleteAll")
+                Button(primaryActionLabel) {
+                    runExclusively { await saveSelected() }
+                }
+                .buttonStyle(ActionPillButtonStyle(.primary))
+                .disabled(selectedIDs.isEmpty || isSaving)
+                .accessibilityIdentifier("friends.review.saveSelected")
+            }
         }
         .padding(16)
         .background(Color.parchment)
+    }
+
+    /// Runs one bar action at a time: `isSaving` disables every button until the closure resumes.
+    private func runExclusively(_ action: @escaping @MainActor () async -> Void) {
+        isSaving = true
+        Task { @MainActor in
+            await action()
+            isSaving = false
+        }
+    }
+
+    /// The affirmative button's label. The split (FRND-12) bar keeps to the in-app wall — "Keep
+    /// selected", no Photos authorization involved; the legacy single-action bar keeps its
+    /// original "Save selected".
+    private var primaryActionLabel: LocalizedStringKey {
+        saveToPhotos == nil ? "Save selected" : "Keep selected"
+    }
+
+    /// The explainer under the title — the split (FRND-12) bar talks about keeping, because its
+    /// primary action no longer touches the system photo library.
+    private var explainerText: LocalizedStringKey {
+        saveToPhotos == nil
+            ? "Choose which shared pictures to save. Everything else is deleted from this device's temporary cache."
+            : "Choose which shared pictures to keep. Everything else is deleted from this device's temporary cache."
     }
 
     public var body: some View {
