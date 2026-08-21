@@ -7,9 +7,12 @@
 //
 //  * Reinstall-proof: the ban record lives in the Keychain under a DEDICATED service
 //    (`com.fernlet.moderation`, ThisDeviceOnly, non-synchronizable). Data-protection keychain items
-//    survive app uninstall, and this service is never wiped by the app lock reset or identity wipe.
-//    The self-ban is keyed to a CONSTANT device account (not the identity pubkey), so minting a fresh
-//    identity does not clear it.
+//    survive app uninstall, and the SELF-ban row is never wiped by the app lock reset, identity wipe,
+//    or "Delete everything" (2026-07-17 decision: a ban a wipe could clear is a ban-evasion tool).
+//    It is keyed to a CONSTANT device account (not the identity pubkey), so minting a fresh identity
+//    does not clear it. PEER-ban rows are the opposite case — 30-day records about OTHER people,
+//    keyed to their identity fingerprints — and the delete-everything funnel clears them
+//    (`clearPeerBansForDeleteAll`): a wiped device must not keep data about others.
 //  * Clock-tamper-proof: a credited-time countdown reusing FernletLockService's monotonic-anchor
 //    pattern, with two deliberate upgrades — (1) `mach_continuous_time` (counts sleep) so a month-long
 //    ban accrues in real time, and (2) a persisted wall-clock high-water ratchet: rolling the clock
@@ -59,7 +62,13 @@ nonisolated struct BanRecord: Codable {
 /// almost nothing, and the reboot-gap credit is capped). `reconcile` applies bans the verified
 /// report set warrants, re-arming a served ban only on a NEW qualifying artwork. Enforcement
 /// here is honest-client compliance at list/broadcast time; the load-bearing enforcement is
-/// receiver-side. Deliberately NOT cleared by "Reset everything". `@MainActor @Observable`.
+/// receiver-side.
+///
+/// "Delete everything" splits the two record kinds: the SELF-ban is deliberately NOT cleared
+/// (2026-07-17 decision — a device ban must survive a wipe or the wipe is a ban-evasion tool),
+/// while PEER-ban rows — records about other people, keyed to identity fingerprints the wipe's
+/// identity rotation just disowned — are cleared via ``clearPeerBansForDeleteAll()``.
+/// `@MainActor @Observable`.
 @MainActor
 @Observable
 public final class ModerationBanStore {
@@ -152,6 +161,43 @@ public final class ModerationBanStore {
         return currentHex
     }
 
+    // MARK: - Delete-everything clear (peer records ONLY)
+
+    /// Removes every peer-ban record — the keychain rows keyed to OTHER designers' identity
+    /// fingerprints (`peerBan:` accounts) — for the "Delete everything" funnel. The SELF-ban row
+    /// in the same service deliberately survives (2026-07-17 decision: a device ban must outlive
+    /// a wipe or the wipe is a ban-evasion tool); peer rows are the opposite case — data about
+    /// other people, addressed to fingerprints the wipe's identity rotation just disowned — so
+    /// the wipe must take them.
+    ///
+    /// - Returns: false when any peer row survived its delete (R7: the funnel reports it as an
+    ///   incomplete store instead of promising a clean wipe over a record still in the keychain).
+    ///   The enumeration itself has no failure signal (`KeychainItem.loadAll` collapses errors
+    ///   into `[]`); the wipe runs post-unlock in the foreground, where the data-protection
+    ///   keychain is available, so the delete statuses carry the real signal.
+    public func clearPeerBansForDeleteAll() -> Bool {
+        // Bounded: one pass over the finite row set the keychain returned. Labeled-tuple member
+        // access, not destructuring — only the account names matter here.
+        let peerAccounts = KeychainItem.loadAll(service: service)
+            .map { $0.account }
+            .filter { $0.hasPrefix(Self.peerAccountPrefix) }
+        var failures = 0
+        for account in peerAccounts
+        where KeychainItem.deleteReportingStatus(account: account, service: service) != errSecSuccess {
+            // `deleteReportingStatus` normalizes not-found to success, so this is a genuine survivor.
+            failures += 1
+        }
+        guard failures == 0 else {
+            // Counts only — the fingerprint inside the account name is exactly the data being erased,
+            // so it must not ride into the audit trail.
+            FernletAuditLog.log("storeBan.peerClearFailed",
+                                context: ["failures": "\(failures)", "total": "\(peerAccounts.count)"])
+            return false
+        }
+        FernletAuditLog.log("storeBan.peerBansCleared", context: ["count": "\(peerAccounts.count)"])
+        return true
+    }
+
     /// Deliberately NOT called from "Reset everything": a self-ban must survive a data reset (that is
     /// the whole point). Exposed only for tests to clean up the shared keychain service.
     public func clearAllForTesting() {
@@ -160,7 +206,12 @@ public final class ModerationBanStore {
 
     // MARK: - Internals
 
-    private static func peerAccount(_ fingerprint: String) -> String { "peerBan:\(fingerprint)" }
+    /// Frozen persisted keychain-account prefix for peer-ban rows — the selector
+    /// ``clearPeerBansForDeleteAll()`` keys the peer/self split on. Never localized, never renamed:
+    /// existing records are filed under it.
+    @ObservationIgnored private static let peerAccountPrefix = "peerBan:"
+
+    private static func peerAccount(_ fingerprint: String) -> String { peerAccountPrefix + fingerprint }
 
     private func writeBanIfNotActive(account: String, subject: String, durationDays: Int,
                                      handledContentHashes: Set<String>) {

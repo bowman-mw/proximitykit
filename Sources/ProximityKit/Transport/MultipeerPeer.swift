@@ -57,6 +57,11 @@ public protocol MCPeerIDStoring {
 ///
 /// Best-effort file I/O — a failed load simply mints a fresh peer ID on the next launch.
 /// Shared by the stable radios (mesh, recipe share) so their MC peer identity is continuous.
+///
+/// That continuity is exactly why the archive is part of the delete-all identity rotation
+/// (``clearForDeleteAll()``): it holds `UIDevice.current.name` — in practice the user's own first
+/// name — and the stable `MCPeerID` the mesh advertises, so a wipe that kept it would hand a
+/// "brand-new Fernlet identity" the same name and the same on-air identifier as before.
 public struct FileMCPeerIDStore: MCPeerIDStoring {
     public nonisolated let fileURL: URL
 
@@ -92,6 +97,31 @@ public struct FileMCPeerIDStore: MCPeerIDStoring {
                 "proximity.peerIDStore.saveFailed",
                 context: ["error": String(describing: error)]
             )
+        }
+    }
+
+    /// Delete-all seam (Docs/PrivacyWipeCoverage.md): removes the archive so the next radio to
+    /// start mints a fresh `MCPeerID` — a new display name and a new on-air identifier — instead of
+    /// re-advertising the pre-wipe one.
+    ///
+    /// Safe to call with a live `MCSession`: `MeshMultipeerSession.localPeerID` is a `let` resolved
+    /// once at init, so removing the file cannot mutate or invalidate a session already using it;
+    /// the mint happens on the NEXT construction (see ``load()``, which returns nil for an absent
+    /// file and lets the caller mint and ``save(_:)`` a replacement).
+    ///
+    /// - Throws: the underlying `FileManager` error when the archive exists and cannot be removed —
+    ///   unlike ``save(_:)``, a wipe that silently left the identifier behind would make the
+    ///   delete-all dialog's promise false. An absent archive is success.
+    public nonisolated func clearForDeleteAll() throws {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+        } catch {
+            FernletAuditLog.log(
+                "proximity.peerIDStore.clearFailed",
+                context: ["error": String(describing: error)]
+            )
+            throw error
         }
     }
 }

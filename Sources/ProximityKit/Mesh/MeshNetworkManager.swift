@@ -185,6 +185,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private let photoCacheStore: PrivateMediaStore
     @ObservationIgnored private let photoWallPreferencesStore: JSONSidecarFile<FriendPhotoWallPreferences>
     @ObservationIgnored private var photoWallPreferences: FriendPhotoWallPreferences
+    /// True when the sealed photo index existed at init but could not be opened yet (a locked
+    /// keychain before the first post-boot unlock). While set, `persistPhotoIndex` refuses to write:
+    /// `meshPhotos` is empty for a reason that is NOT "the wall is empty", and the index is also the
+    /// file manifest the store sweeps against, so saving it would delete every kept photo's bytes.
+    /// Cleared by the first re-read that succeeds (inside `persistPhotoIndex`).
+    @ObservationIgnored private var photoIndexDeferred = false
     /// Observed proxy for favorite changes. `photoWallPreferences` itself is `@ObservationIgnored`
     /// because its `photoWallPosts` getter mutates it during view-body evaluation (plainly observing
     /// it would risk update loops). This counter is bumped ONLY from `toggleFavorite` (a tap handler,
@@ -381,7 +387,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let preferencesStore = JSONSidecarFile<FriendPhotoWallPreferences>(fileURL: preferencesURL)
         self.photoWallPreferencesStore = preferencesStore
         self.photoWallPreferences = preferencesStore.load() ?? FriendPhotoWallPreferences()
-        meshPhotos = photoCacheStore.load()
+        // `loadIndex`, not `load`: a DEFERRED read must not look like an empty wall (see
+        // `photoIndexDeferred` — the index is also the store's file manifest). An `.unrecoverable`
+        // index is different: nothing can bring those entries back, so the wall starts empty and
+        // saves proceed, letting the next one replace the dead file and sweep its orphans.
+        switch photoCacheStore.loadIndex() {
+        case .entries(let photos):
+            meshPhotos = photos
+        case .deferred:
+            photoIndexDeferred = true
+        case .unrecoverable:
+            FernletAuditLog.log("mesh.photoIndex.unrecoverable")
+        }
         prunePhotoWallPreferences()
         setupMeshSession()
         registerClothingShopHandler()
@@ -939,7 +956,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             sessionPhotoIDs.contains(photo.id) && !keptPhotoIDs.contains(photo.id)
         }
         sessionPhotos.removeAll()
-        photoCacheStore.save(meshPhotos)
+        persistPhotoIndex(meshPhotos)
         prunePhotoWallPreferences()
     }
 
@@ -959,7 +976,43 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         prunePhotoWallPreferences()
 
         guard existed else { return }
-        photoCacheStore.save(meshPhotos)
+        persistPhotoIndex(meshPhotos)
+    }
+
+    /// The one seam every wall save goes through, so the deferred-index rule is enforced in a
+    /// single place.
+    ///
+    /// While `photoIndexDeferred` holds, `meshPhotos` is empty because the index could not be READ
+    /// — and ``PrivateMediaStore/save(_:)`` is a full-index rewrite that deletes every photo file
+    /// the set omits, so writing it would destroy the wall this funnel deliberately keeps. Re-read
+    /// first: only a successful read clears the flag, and it brings the disk entries back into
+    /// `meshPhotos` (this session's arrivals win by id — they carry the bytes still to be written).
+    /// Nothing was deletable while the flag was set, so nothing can be resurrected by that merge.
+    private func persistPhotoIndex(_ photos: [FriendPhotoPayload]) {
+        guard photoIndexDeferred else {
+            photoCacheStore.save(photos)
+            return
+        }
+        guard case .entries(let recovered) = photoCacheStore.loadIndex() else {
+            FernletAuditLog.log("mesh.photoIndex.saveSkippedWhileDeferred")
+            return
+        }
+        photoIndexDeferred = false
+        let merged = Self.mergedPhotoIndex(session: photos, recovered: recovered)
+        meshPhotos = merged.map { $0.withoutImageData() }
+        photoCacheStore.save(merged)
+    }
+
+    /// Union of this session's index and the copy just recovered from disk: newest first, capped
+    /// like the store, session entries winning by id so a payload still carrying its bytes is not
+    /// replaced by the byte-less recovered row.
+    private static func mergedPhotoIndex(
+        session: [FriendPhotoPayload],
+        recovered: [FriendPhotoPayload]
+    ) -> [FriendPhotoPayload] {
+        let sessionIDs = Set(session.map(\.id))
+        let merged = session + recovered.filter { !sessionIDs.contains($0.id) }
+        return Array(merged.sorted { $0.addedAt > $1.addedAt }.prefix(PrivateMediaStore.maxCachedPhotos))
     }
 
     /// Drops wall-preference entries whose session or photo no longer exists in `meshPhotos`
@@ -970,6 +1023,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Three filters over finite collections; persists only when something actually changed. Never
     /// called from `photoWallPosts` — that getter must stay mutation-free.
     private func prunePhotoWallPreferences() {
+        // A deferred index means `meshPhotos` is empty because nothing could be READ, not because
+        // the wall is empty; pruning against it would drop the favorite and cover of every photo
+        // still on disk. Same fail-closed rule as `persistPhotoIndex`.
+        guard !photoIndexDeferred else { return }
         let liveSessionIDs = Set(meshPhotos.compactMap { $0.session?.id })
         let livePhotoIDs = Set(meshPhotos.map(\.id))
         var pruned = photoWallPreferences
@@ -2908,7 +2965,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // the full-resolution bytes stay on disk and rehydrate on demand.
         let evictedByCap = meshPhotos.count > PrivateMediaStore.maxCachedPhotos
         meshPhotos = Array(meshPhotos.prefix(PrivateMediaStore.maxCachedPhotos))
-        photoCacheStore.save(meshPhotos.map { $0.id == cachedPhoto.id ? cachedPhoto : $0 })
+        persistPhotoIndex(meshPhotos.map { $0.id == cachedPhoto.id ? cachedPhoto : $0 })
         if evictedByCap { prunePhotoWallPreferences() }
         if includeInSession {
             // Store metadata only; the full-resolution bytes were just persisted to the disk
@@ -3445,11 +3502,37 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Delete-all seam (bitchat adoptions Increment 1, Docs/PrivacyWipeCoverage.md): wipes the
     /// proximity identity keypairs + backup-escrow rows (this manager owns one of the three live
     /// `IdentityService` caches — presence and recipe share hold the others over the same
-    /// keychain rows) and drops the mesh photo cache's in-memory media key so a post-wipe write
-    /// can't use the orphaned key. Breaks every trust relationship on purpose.
+    /// keychain rows), removes the MC peer-identity archive, and drops the mesh photo cache's
+    /// in-memory media key so a post-wipe write can't use the orphaned key. Breaks every trust
+    /// relationship on purpose.
+    ///
+    /// The archive (`FernletPeerID.archive`) is the transport half of the same identity: the device
+    /// name — in practice the user's own first name — and the stable `MCPeerID` every stable radio
+    /// re-advertises. Kept, it would make a "brand-new Fernlet identity" recognizable on the air by
+    /// exactly the identifier the keypair rotation above just retired. Cleared through a store
+    /// pointed at the same default path `MeshMultipeerSession` loads from; the mint is lazy, so the
+    /// next session to start gets a fresh one. Safe even if the friend radio is still up — the
+    /// funnel stops the presence radio before this leg but not this one — because
+    /// `MeshMultipeerSession.localPeerID` is a `let` resolved at init from an already-read archive:
+    /// deleting the file cannot mutate or invalidate an `MCSession` that is running on it.
+    ///
+    /// Ordering: the archive clear runs FIRST — a keychain that refuses to delete must not leave the
+    /// identifier behind too — but its own failure is carried to the end and thrown there, so a
+    /// refusing file system cannot skip the keypair wipe or the media-key-cache drop.
+    /// - Throws: ``IdentityError/keychainDeleteFailed(_:)`` when the keypair rows survive, or the
+    ///   `FileManager` error when the peer-identity archive does — a wipe the user is told is
+    ///   complete must not silently leave either behind.
     public func wipeIdentityForDeleteAll() throws {
+        var archiveError: (any Error)?
+        do {
+            try FileMCPeerIDStore().clearForDeleteAll()
+        } catch {
+            archiveError = error
+        }
         try identity.wipe()
         photoCacheStore.invalidateEncryptionKeyCache()
+        guard let archiveError else { return }
+        throw archiveError
     }
 
     // MARK: - Phase 3: Static encrypt / decrypt helpers

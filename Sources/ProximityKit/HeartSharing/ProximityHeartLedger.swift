@@ -3,7 +3,7 @@
 //
 // Device-local persistence for the hearts feature: received hearts (for the Home bubble and
 // the 24h health-bar glow) plus the per-friend rate limit, enforced in BOTH directions.
-// Stored as a small JSON sidecar in Application Support (the same home as MeshPhotoCache.json /
+// Stored as a small JSON sidecar in Application Support (the same home as MeshPhotoCache.sealed /
 // MeshPhotoWallPreferences.json) — deliberately NEVER in the snapshot, so heart activity
 // (who, when) stays off every synced store. Ephemeral social warmth should not follow the user
 // into iCloud.

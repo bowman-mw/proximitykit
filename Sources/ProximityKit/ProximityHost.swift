@@ -29,8 +29,10 @@ public protocol ProximityHost: AnyObject {
     /// are `HeartDropService.queueHeart`/`syncNow`; the friend row's affordance decision takes it
     /// as an explicit parameter (`PresenceManager.heartAffordance`) rather than through this host.
     var heartsAwayDeliveryEnabled: Bool { get }
-    /// Root directory for the proximity subsystem's on-disk sidecars — the friend photo-wall cache
-    /// (`MeshPhotoCache.json`) and its preferences (`MeshPhotoWallPreferences.json`), and the
+    /// Root directory for the proximity subsystem's on-disk sidecars — the friend photo-wall index
+    /// (`MeshPhotoCache.sealed`, GCM-sealed under the friend-wall media key; a legacy plaintext
+    /// `MeshPhotoCache.json` is read once, resealed, and deleted by `PrivateMediaStore.loadIndex()`)
+    /// and its preferences (`MeshPhotoWallPreferences.json`), and the
     /// heart-drop set the app hangs off the same root (`HeartLedger.json` plus the three sealed
     /// sidecars named by ``HeartDropStorageScope``).
     ///
