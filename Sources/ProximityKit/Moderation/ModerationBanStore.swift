@@ -170,17 +170,30 @@ public final class ModerationBanStore {
     /// other people, addressed to fingerprints the wipe's identity rotation just disowned — so
     /// the wipe must take them.
     ///
-    /// - Returns: false when any peer row survived its delete (R7: the funnel reports it as an
-    ///   incomplete store instead of promising a clean wipe over a record still in the keychain).
-    ///   The enumeration itself has no failure signal (`KeychainItem.loadAll` collapses errors
-    ///   into `[]`); the wipe runs post-unlock in the foreground, where the data-protection
-    ///   keychain is available, so the delete statuses carry the real signal.
+    /// - Returns: false when the peer rows could not be enumerated at all, or when any enumerated
+    ///   row survived its delete (R7: the funnel reports it as an incomplete store instead of
+    ///   promising a clean wipe over a record still in the keychain). The enumeration leg matters
+    ///   as much as the delete leg: `KeychainItem.loadAll` collapses a failed enumeration into
+    ///   `[]`, which here would mean zero accounts to delete, zero failures, and a CLEAN result
+    ///   reported over surviving peer bans — so this goes through
+    ///   `KeychainItem.loadAllDistinguishingFailure` instead. `errSecItemNotFound` is not a
+    ///   failure: a service holding no rows is genuinely clear. In practice the wipe runs
+    ///   post-unlock in the foreground, where the data-protection keychain is available, so a real
+    ///   enumeration failure is rare — but "rare" is not "reported honestly".
     public func clearPeerBansForDeleteAll() -> Bool {
-        // Bounded: one pass over the finite row set the keychain returned. Labeled-tuple member
-        // access, not destructuring — only the account names matter here.
-        let peerAccounts = KeychainItem.loadAll(service: service)
-            .map { $0.account }
-            .filter { $0.hasPrefix(Self.peerAccountPrefix) }
+        let peerAccounts: [String]
+        switch KeychainItem.loadAllDistinguishingFailure(service: service) {
+        case .rows(let rows):
+            // Bounded: one pass over the finite row set the keychain returned. Labeled-tuple member
+            // access, not destructuring — only the account names matter here, and taking them now
+            // drops every row's sealed record payload rather than carrying it through the deletes.
+            peerAccounts = rows.map { $0.account }.filter { $0.hasPrefix(Self.peerAccountPrefix) }
+        case .unreadable(let status):
+            // No account names were read, so nothing identifying can reach the audit trail here even
+            // by accident — only the status that stopped the enumeration.
+            FernletAuditLog.log("storeBan.peerClearEnumerationFailed", context: ["status": "\(status)"])
+            return false
+        }
         var failures = 0
         for account in peerAccounts
         where KeychainItem.deleteReportingStatus(account: account, service: service) != errSecSuccess {
