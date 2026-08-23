@@ -138,6 +138,8 @@ compatibility contracts with in-field peers.
 
 ### Localization: nothing on the wire is display copy
 
+The module owns a `Localizable.xcstrings` (added by the 2026-08-22 accessibility review's §4.0) and one copy vault, `ProximityUICopy`, for the three SwiftUI surfaces it ships — the friend-photo review sheet, the keep-friends prompt, and the photo-save failure alert. Those were bare literals, and a `LocalizedStringKey` literal inside an SPM module resolves against `Bundle.main`, which never consults this module's catalog: untranslatable English with a clean build. Six of them were hiding inside ternaries (`Button(isKept ? "Keeping" : "Keep")`) or in `LocalizedStringKey`-typed properties, where no call-site scan could see them; `LocalizationBoundaryTests.packageDisplayLiteralsPassModuleBundle()` now catches both shapes. **The vault is display copy only.** Nothing below may go in it.
+
 This module ships English sentences that a bulk localization pass will read as UI strings and that
 must never become `String(localized:)`. Every ``PayloadSummary`` title — "Recipe share",
 "Session ended", "Clothing catalog request", "Hello from …", "Identity acknowledged", "Heartbeat",

@@ -1,0 +1,257 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "proximity.keepFriends.done" : {
+      "comment" : "Button that closes the end-of-session sheet and saves the keep-as-friend choices.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Done"
+          }
+        }
+      }
+    },
+    "proximity.keepFriends.explainer" : {
+      "comment" : "Body under the keep-as-friends heading. Must keep saying that the choice is private to this user and that the other person is never told either way.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Friends stay on your list for good vibes and future hangouts. This is just for you — they won't be notified either way."
+          }
+        }
+      }
+    },
+    "proximity.keepFriends.keep" : {
+      "comment" : "Chip beside one person met during the session, in its unselected state. Tapping it keeps them as a friend.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Keep"
+          }
+        }
+      }
+    },
+    "proximity.keepFriends.keeping" : {
+      "comment" : "The keep-as-friend chip in its selected state. Present participle: it describes what will happen, not a completed action.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Keeping"
+          }
+        }
+      }
+    },
+    "proximity.keepFriends.sectionTitle" : {
+      "comment" : "Heading of the list of people met during the session, each with a keep-or-not choice.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Keep as friends?"
+          }
+        }
+      }
+    },
+    "proximity.keepFriends.sessionTitle" : {
+      "comment" : "Warm title of the sheet shown when an in-person session ends without photos, asking whether to keep the people met as friends.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Nice hangout!"
+          }
+        }
+      }
+    },
+    "proximity.review.alsoSaveToPhotos" : {
+      "comment" : "Secondary button copying the selected pictures out to the system Photos library, in addition to keeping them inside Fernlet.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Also save to Photos"
+          }
+        }
+      }
+    },
+    "proximity.review.deleteAll" : {
+      "comment" : "Destructive button of the photo review sheet. The count is deliberate: it turns a mis-tap into a visible amount of loss.",
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Delete all %lld"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Delete all %lld"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "proximity.review.deleteOne" : {
+      "comment" : "Destructive button of the photo review sheet when there is exactly one picture.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Delete it"
+          }
+        }
+      }
+    },
+    "proximity.review.explainer.keep" : {
+      "comment" : "Explainer under the review sheet's title when the primary action only keeps pictures inside Fernlet. The cache deletion is the important half — say it plainly.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Choose which shared pictures to keep. Everything else is deleted from this device's temporary cache."
+          }
+        }
+      }
+    },
+    "proximity.review.explainer.save" : {
+      "comment" : "Explainer under the review sheet's title on the legacy single-action bar, where the primary action saves.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Choose which shared pictures to save. Everything else is deleted from this device's temporary cache."
+          }
+        }
+      }
+    },
+    "proximity.review.keepSelected" : {
+      "comment" : "Affirmative button of the photo review sheet when a separate 'Also save to Photos' button exists: this one only keeps pictures inside Fernlet.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Keep selected"
+          }
+        }
+      }
+    },
+    "proximity.review.saveSelected" : {
+      "comment" : "Affirmative button of the photo review sheet on the legacy single-action bar, where saving is the host's whole flow.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Save selected"
+          }
+        }
+      }
+    },
+    "proximity.review.title" : {
+      "comment" : "Title of the sheet shown after a shared photo session, where the user picks which pictures taken of them to keep.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Review pictures"
+          }
+        }
+      }
+    },
+    "proximity.saveFailure.corruptedMany" : {
+      "comment" : "Body of the photo-save failure alert when several pictures were being saved and every one failed to decode.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "None of the selected pictures could be saved. They may be corrupted — try choosing different ones."
+          }
+        }
+      }
+    },
+    "proximity.saveFailure.corruptedOne" : {
+      "comment" : "Body of the photo-save failure alert when exactly one picture was being saved and it failed to decode.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This picture couldn't be saved. It may be corrupted."
+          }
+        }
+      }
+    },
+    "proximity.saveFailure.generic" : {
+      "comment" : "Body of the photo-save failure alert when the cause is unknown, and also when a picture's bytes could not be read back from the encrypted cache at all.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Could not save to your photo library. Please try again."
+          }
+        }
+      }
+    },
+    "proximity.saveFailure.ok" : {
+      "comment" : "Cancel-role button dismissing the photo-save failure alert.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "OK"
+          }
+        }
+      }
+    },
+    "proximity.saveFailure.openSettings" : {
+      "comment" : "Button on the photo-save failure alert that opens the app's own page in the system Settings, where the Photos permission can be granted.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        }
+      }
+    },
+    "proximity.saveFailure.permissionDenied" : {
+      "comment" : "Body of the photo-save failure alert when the user denied add-only Photos access. This is the only failure that offers the Open Settings button.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Fernlet needs access to your Photo Library to save photos. Open Settings to grant access."
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

@@ -112,11 +112,11 @@ public struct FriendPhotoReviewSheet: View {
     /// The explainer, the selectable photo grid, and the keep-friends section.
     private var reviewScrollContent: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Review pictures")
+            Text(verbatim: ProximityUICopy.Review.title)
                 .font(.fernlet(.displayMedium))
                 .foregroundStyle(Color.bark)
 
-            Text(explainerText)
+            Text(verbatim: explainerText)
                 .font(.fernlet(.body))
                 .foregroundStyle(Color.slate)
                 .fernletWrappingText()
@@ -154,7 +154,7 @@ public struct FriendPhotoReviewSheet: View {
     private var actionBar: some View {
         VStack(spacing: 10) {
             if let saveToPhotos {
-                Button("Also save to Photos") {
+                Button(ProximityUICopy.Review.alsoSaveToPhotos) {
                     runExclusively { await saveToPhotos() }
                 }
                 .buttonStyle(ActionPillButtonStyle(.secondary))
@@ -192,16 +192,18 @@ public struct FriendPhotoReviewSheet: View {
     /// The affirmative button's label. The split (FRND-12) bar keeps to the in-app wall — "Keep
     /// selected", no Photos authorization involved; the legacy single-action bar keeps its
     /// original "Save selected".
-    private var primaryActionLabel: LocalizedStringKey {
-        saveToPhotos == nil ? "Save selected" : "Keep selected"
+    /// A resolved `String`, not a `LocalizedStringKey`: a key held in package source carries no
+    /// bundle, so SwiftUI resolves it against `Bundle.main` — the app's — which never consults this
+    /// module's catalog (review §4.0). Both words come from ``ProximityUICopy``.
+    private var primaryActionLabel: String {
+        saveToPhotos == nil ? ProximityUICopy.Review.saveSelected : ProximityUICopy.Review.keepSelected
     }
 
     /// The explainer under the title — the split (FRND-12) bar talks about keeping, because its
     /// primary action no longer touches the system photo library.
-    private var explainerText: LocalizedStringKey {
-        saveToPhotos == nil
-            ? "Choose which shared pictures to save. Everything else is deleted from this device's temporary cache."
-            : "Choose which shared pictures to keep. Everything else is deleted from this device's temporary cache."
+    /// Resolved here for the same reason as ``primaryActionLabel``.
+    private var explainerText: String {
+        saveToPhotos == nil ? ProximityUICopy.Review.explainerSave : ProximityUICopy.Review.explainerKeep
     }
 
     public var body: some View {
@@ -227,7 +229,7 @@ public struct FriendPhotoReviewSheet: View {
 
     /// "Delete all 12" — the count is what turns a mis-tap into a visible amount of loss.
     private var deleteAllLabel: String {
-        photos.count == 1 ? "Delete it" : "Delete all \(photos.count)"
+        photos.count == 1 ? ProximityUICopy.Review.deleteOne : ProximityUICopy.Review.deleteAll(photos.count)
     }
 
     private func toggle(_ id: UUID) {
@@ -310,10 +312,12 @@ public struct PhotoSaveFailure: Equatable {
     /// The catch-all failure ("Could not save to your photo library. Please try again."), also
     /// assigned directly by hosts as the pre-save guard when a photo's bytes could not be
     /// rehydrated from the encrypted disk cache at all.
-    public static let generic = PhotoSaveFailure(
-        message: "Could not save to your photo library. Please try again.",
-        offersSettings: false
-    )
+    /// A computed property, not a `static let`: the message resolves through this module's catalog
+    /// (`bundle: .module`, review §4.0), and a stored constant would freeze whichever language the
+    /// process launched in.
+    public static var generic: PhotoSaveFailure {
+        PhotoSaveFailure(message: ProximityUICopy.SaveFailure.generic, offersSettings: false)
+    }
 }
 
 extension FriendPhotoLibrarySaver {
@@ -327,15 +331,15 @@ extension FriendPhotoLibrarySaver {
     public static func userFacingFailure(for error: Error, photoCount: Int) -> PhotoSaveFailure {
         if (error as? CocoaError)?.code == .userCancelled {
             return PhotoSaveFailure(
-                message: "Fernlet needs access to your Photo Library to save photos. Open Settings to grant access.",
+                message: ProximityUICopy.SaveFailure.permissionDenied,
                 offersSettings: true
             )
         }
         if error is NothingSavedError {
             return PhotoSaveFailure(
                 message: photoCount == 1
-                    ? "This picture couldn't be saved. It may be corrupted."
-                    : "None of the selected pictures could be saved. They may be corrupted — try choosing different ones.",
+                    ? ProximityUICopy.SaveFailure.corruptedOne
+                    : ProximityUICopy.SaveFailure.corruptedMany,
                 offersSettings: false
             )
         }
@@ -357,16 +361,19 @@ extension View {
     ) -> some View {
         alert(title, isPresented: failure.isPresent()) {
             if failure.wrappedValue?.offersSettings == true {
-                Button("Open Settings") {
+                Button(ProximityUICopy.SaveFailure.openSettings) {
                     if let url = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(url)
                     }
                     failure.wrappedValue = nil
                 }
             }
-            Button("OK", role: .cancel) { failure.wrappedValue = nil }
+            Button(ProximityUICopy.SaveFailure.ok, role: .cancel) { failure.wrappedValue = nil }
         } message: {
-            Text(failure.wrappedValue?.message ?? "")
+            // `verbatim:` because `PhotoSaveFailure.message` is a caller-supplied, already-final
+            // sentence — the hosts assemble it. The label also states that plainly, which is what
+            // keeps the display-literal wall from having to guess about the `?? ""` fallback.
+            Text(verbatim: failure.wrappedValue?.message ?? "")
         }
     }
 }

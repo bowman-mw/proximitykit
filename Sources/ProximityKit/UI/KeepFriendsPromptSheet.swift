@@ -15,11 +15,11 @@ struct KeepFriendsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Keep as friends?")
+            Text(verbatim: ProximityUICopy.KeepFriends.sectionTitle)
                 .font(.fernlet(.headerMedium))
                 .foregroundStyle(Color.bark)
 
-            Text("Friends stay on your list for good vibes and future hangouts. This is just for you — they won't be notified either way.")
+            Text(verbatim: ProximityUICopy.KeepFriends.explainer)
                 .font(.fernlet(.bodySmall))
                 .foregroundStyle(Color.slate)
                 .fernletWrappingText()
@@ -71,7 +71,7 @@ private struct KeepFriendRow: View {
 
             Spacer(minLength: 12)
 
-            Button(isKept ? "Keeping" : "Keep") { toggle() }
+            Button(isKept ? ProximityUICopy.KeepFriends.keeping : ProximityUICopy.KeepFriends.keep) { toggle() }
                 .buttonStyle(ChipButtonStyle(selected: isKept))
                 .accessibilityIdentifier("friends.keepFriend.\(candidate.fingerprint)")
         }
@@ -104,7 +104,7 @@ public struct KeepFriendsPromptSheet: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text("Nice hangout!")
+                    Text(verbatim: ProximityUICopy.KeepFriends.sessionTitle)
                         .font(.fernlet(.displayMedium))
                         .foregroundStyle(Color.bark)
 
@@ -116,7 +116,7 @@ public struct KeepFriendsPromptSheet: View {
 
             // "Done" finishes the flow (and mints the keeps), so it is a call-to-action pill, not a
             // 34pt selection chip.
-            Button("Done") { done() }
+            Button(ProximityUICopy.KeepFriends.done) { done() }
                 .buttonStyle(ActionPillButtonStyle(.primary))
                 .frame(maxWidth: .infinity)
                 .padding(16)
