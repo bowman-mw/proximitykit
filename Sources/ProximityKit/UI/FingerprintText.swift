@@ -12,6 +12,14 @@ import FernletUI
 ///
 /// Middle truncation is deliberate: the head and tail of a fingerprint are what people compare, so a
 /// clipped tail would defeat the only thing the string is for.
+///
+/// The same argument decides the speech treatment (accessibility review T2-20): hex read as words
+/// ("ad be" for `adbe`) is unintelligible and unverifiable, so the view carries
+/// `.speechSpellsOutCharacters()`. It lives here, on the component, rather than at the four call
+/// sites, for exactly the reason the font treatment does — every place a fingerprint is shown is a
+/// place two people are reading it to each other character by character. Braille needs nothing: a
+/// braille display already mirrors the string literally, which is the one place the two assistive
+/// technologies genuinely diverge.
 public struct FingerprintText: View {
     private let fingerprint: String
     /// Ink colour; defaults to `slate` inside `body` — a `@MainActor` colour token can never be a
@@ -32,5 +40,6 @@ public struct FingerprintText: View {
             .foregroundStyle(color ?? Color.slate)
             .lineLimit(lineLimit)
             .truncationMode(.middle)
+            .speechSpellsOutCharacters()
     }
 }

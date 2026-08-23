@@ -18,18 +18,32 @@ struct FriendPhotoTile: View {
 
     @State private var loadedImageData: Data?
 
+    /// Tile height, scaled with Dynamic Type (accessibility wall rule A5-GRID-SCALES).
+    ///
+    /// `.body` because the tile carries no caption at all — the only things in it that respond to
+    /// Larger Text are two *unstyled* `Image(systemName:)` glyphs (the `photo` placeholder and the
+    /// selection checkmark), and an unstyled SF Symbol tracks the default font, which is `.body`.
+    /// Picking `.caption` here would grow the box more slowly than the checkmark growing inside it.
+    /// Paired with ``FriendPhotoReviewSheet``'s grid minimum on the same role and the same base
+    /// ratio, so the tile keeps its proportions instead of stretching into a letterbox at AX sizes.
+    @ScaledMetric(relativeTo: .body) private var tileHeight: CGFloat = 112
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             if let data = photo.imageData ?? loadedImageData, let image = UIImage(data: data) {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
-                    .frame(height: 112)
+                    .frame(height: tileHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                    // T2-10: the review grid is where the user decides which of a session's
+                    // photographs to keep. Judging that from colour negatives is not a decision.
+                    // The moss selection checkmark is a glyph and is left to invert with the chrome.
+                    .accessibilityIgnoresInvertColors()
             } else {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color.cream)
-                    .frame(height: 112)
+                    .frame(height: tileHeight)
                     .overlay(Image(systemName: "photo").foregroundStyle(Color.slate))
             }
 
@@ -88,6 +102,16 @@ public struct FriendPhotoReviewSheet: View {
     /// "Delete all" discards every shared picture from this device and leaves the session — on a
     /// sheet that (in the disconnect flow) can't even be swiped away. It asks first.
     @State private var askingToDeleteAll = false
+    /// Adaptive-grid cell minimum, scaled with Dynamic Type (accessibility wall rule
+    /// A5-GRID-SCALES). A bare `110` pins the cell while ``FriendPhotoTile``'s contents grow
+    /// inside it; this grows the column with them, so the grid reflows to fewer, larger tiles at
+    /// accessibility text sizes instead of crowding the selection checkmark against the edge.
+    ///
+    /// `.body` for the same reason the tile's own height uses it — see `FriendPhotoTile.tileHeight`
+    /// for the evidence. The two must stay on the same role: scaling one and not the other stretches
+    /// the tile out of proportion. At the default text size `@ScaledMetric` returns the base value,
+    /// so this is not a visual change for anyone who has not asked for one.
+    @ScaledMetric(relativeTo: .body) private var photoTileMinimum: CGFloat = 110
 
     public init(
         photos: [FriendPhotoPayload],
@@ -121,7 +145,7 @@ public struct FriendPhotoReviewSheet: View {
                 .foregroundStyle(Color.slate)
                 .fernletWrappingText()
 
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 10)], spacing: 10) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: photoTileMinimum), spacing: 10)], spacing: 10) {
                 ForEach(photos) { photo in
                     Button {
                         toggle(photo.id)
