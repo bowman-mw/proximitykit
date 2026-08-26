@@ -1,48 +1,6 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    "Also save to Photos" : {
-
-    },
-    "Choose which shared pictures to keep. Everything else is deleted from this device's temporary cache." : {
-
-    },
-    "Choose which shared pictures to save. Everything else is deleted from this device's temporary cache." : {
-
-    },
-    "Done" : {
-
-    },
-    "Friends stay on your list for good vibes and future hangouts. This is just for you — they won't be notified either way." : {
-
-    },
-    "Keep" : {
-
-    },
-    "Keep as friends?" : {
-
-    },
-    "Keep selected" : {
-
-    },
-    "Keeping" : {
-
-    },
-    "Nice hangout!" : {
-
-    },
-    "OK" : {
-
-    },
-    "Open Settings" : {
-
-    },
-    "Review pictures" : {
-
-    },
-    "Save selected" : {
-
-    },
     "proximity.keepFriends.done" : {
       "comment" : "Button that closes the end-of-session sheet and saves the keep-as-friend choices.",
       "extractionState" : "extracted_with_value",
