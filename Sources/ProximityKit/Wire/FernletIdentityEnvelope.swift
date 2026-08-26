@@ -5,6 +5,7 @@
 // Every envelope is Ed25519-signed over a deterministic canonical JSON encoding.
 
 import Foundation
+import FernletCrypto
 import FernletDomainModel
 
 // MARK: - Envelope
@@ -244,7 +245,10 @@ extension FernletIdentityEnvelope {
         let canon = schemaVersion == Self.legacySchemaVersion
             ? legacyCanonicalBytes(for: self)
             : canonicalBytes(for: self)
-        guard IdentityService.verify(signature, of: canon, by: senderSigningPublicKey) else {
+        let purpose = schemaVersion == Self.legacySchemaVersion
+            ? FernletCryptoPurpose.Signature.identityEnvelopeLegacyV1
+            : FernletCryptoPurpose.Signature.identityEnvelopeV2
+        guard IdentityService.verify(signature, of: canon, by: senderSigningPublicKey, purpose: purpose) else {
             throw VerifyError.signatureInvalid
         }
 
@@ -313,7 +317,8 @@ extension FernletIdentityEnvelope {
             expiresAt: expiresAt,
             signature: Data()
         )
-        envelope.signature = try identityService.sign(canonicalBytes(for: envelope))
+        envelope.signature = try identityService.sign(
+            canonicalBytes(for: envelope), purpose: FernletCryptoPurpose.Signature.identityEnvelopeV2)
         return envelope
     }
 }

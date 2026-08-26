@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import FernletCrypto
 
 /// QR verification ceremony (bitchat adoptions Increment 4,
 /// Docs/Plan-Bitchat-Adoptions-2026-07-25.md — bitchat's signed verify-QR + in-session
@@ -18,7 +19,7 @@ public nonisolated enum ProximityVerifyQR {
     /// Bounds replay of a photographed QR to minutes; both devices are physically together, so
     /// generous skew tolerance isn't needed.
     public static let freshnessWindow: TimeInterval = 5 * 60
-    static let signingDomain = Data("fernlet.verify.qr.v1".utf8)
+    static let signingDomain = FernletCryptoPurpose.Signature.proximityQRIdentityV1.data
 
     /// The self-signed content of a `fernlet://verify` QR: both public keys, a timestamp, a
     /// single-use display nonce, and the Ed25519 signature over their canonical bytes.
@@ -85,7 +86,7 @@ public nonisolated enum ProximityVerifyQR {
             keyAgreementPublicKey: identity.localKeyAgreementPublicKey,
             timestamp: timestamp,
             nonce: nonce
-        ))
+        ), purpose: FernletCryptoPurpose.Signature.proximityQRIdentityV1)
         let payload = Payload(
             version: 1,
             signingPublicKey: identity.localSigningPublicKey,
@@ -133,7 +134,8 @@ public nonisolated enum ProximityVerifyQR {
                 timestamp: payload.timestamp,
                 nonce: payload.nonce
             ),
-            by: payload.signingPublicKey
+            by: payload.signingPublicKey,
+            purpose: FernletCryptoPurpose.Signature.proximityQRIdentityV1
         )
     }
 
@@ -194,7 +196,7 @@ public nonisolated struct VerifyResponsePayload: Codable, Equatable, Sendable {
 /// length prefixes, which is why `isWellFormedChallenge` is mandatory before anything is signed
 /// with the long-term identity key.
 public nonisolated enum ProximityVerifySignature {
-    static let domain = Data("fernlet.verify.response.v1".utf8)
+    static let domain = FernletCryptoPurpose.Signature.proximityQRResponseV1.data
 
     /// Byte length every nonce in the ceremony must have. The transcript below concatenates its
     /// fields WITHOUT length prefixes, so it is unambiguous only while every field is fixed-length

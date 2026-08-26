@@ -39,6 +39,7 @@
 // The wire format remains the types' synthesized `Codable` conformance (unchanged).
 
 import Foundation
+import FernletCrypto
 import FernletDomainModel
 
 // WI-9: every declaration in this file is `nonisolated`. ProximityKit sets
@@ -150,16 +151,16 @@ nonisolated func canonicalUTF8Ordered(_ lhs: String, _ rhs: String) -> Bool {
 // MARK: - Domain tags
 
 // Distinct per signed type so a signature over one type cannot validate over the other.
-private nonisolated let canonicalEnvelopeDomain = Data("fernlet.canonical.identity-envelope.v2".utf8)
-private nonisolated let canonicalAdmissionTokenDomain = Data("fernlet.canonical.mesh-admission-token.v2".utf8)
+private nonisolated let canonicalEnvelopeDomain = FernletCryptoPurpose.Signature.identityEnvelopeV2.data
+private nonisolated let canonicalAdmissionTokenDomain = FernletCryptoPurpose.Signature.meshAdmissionTokenV2.data
 // Group Activities (Phase 6). Distinct tags so an activity descriptor hash, a join token, and a roster
 // snapshot can never cross-validate one another (or the mesh types above).
-private nonisolated let canonicalActivityDescriptorDomain = Data("fernlet.canonical.activity-descriptor.v2".utf8)
-private nonisolated let canonicalActivityJoinTokenDomain = Data("fernlet.canonical.activity-join-token.v2".utf8)
-private nonisolated let canonicalActivityRosterSnapshotDomain = Data("fernlet.canonical.activity-roster-snapshot.v2".utf8)
+private nonisolated let canonicalActivityDescriptorDomain = FernletCryptoPurpose.Signature.activityDescriptorV2.data
+private nonisolated let canonicalActivityJoinTokenDomain = FernletCryptoPurpose.Signature.activityJoinTokenV2.data
+private nonisolated let canonicalActivityRosterSnapshotDomain = FernletCryptoPurpose.Signature.activityRosterSnapshotV2.data
 // Moderation report row (Phase 3b). Distinct tag so a report signature can never cross-validate any
 // other signed type.
-private nonisolated let canonicalModerationReportDomain = Data("fernlet.canonical.moderation-report.v2".utf8)
+private nonisolated let canonicalModerationReportDomain = FernletCryptoPurpose.Signature.moderationReportV2.data
 
 // MARK: - Identity envelope
 

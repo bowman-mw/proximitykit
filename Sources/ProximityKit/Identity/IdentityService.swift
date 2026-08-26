@@ -16,6 +16,7 @@
 //        devices) but never written to by this build.
 
 import Foundation
+import FernletCrypto
 import FernletFoundation
 import CryptoKit
 import Security
@@ -82,6 +83,14 @@ public enum IdentityError: Error, Equatable {
 @MainActor
 public final class IdentityService {
 
+    /// Prefix on the current ephemeral-static transport seal. The legacy format starts directly
+    /// with the ephemeral public key and remains openable; all new writes authenticate a typed
+    /// AEAD purpose together with the sender's static key.
+    private nonisolated static let proximityTransportFormatV2 = Data("FPT2".utf8)
+    /// Prefix on the current group-key wrap. The prior 92-byte layout is read-only; the explicit
+    /// four-byte marker avoids treating a legacy ephemeral public key as a version byte.
+    private nonisolated static let groupKeyWrapFormatV2 = Data("FGK2".utf8)
+
     public let keychainService: String
 
     private var signingKey: Curve25519.Signing.PrivateKey?
@@ -115,9 +124,13 @@ public final class IdentityService {
         backupEscrowKey?.publicKey.rawRepresentation ?? Data()
     }
 
-    public func sign(_ data: Data) throws -> Data {
+    /// Signs an already domain-tagged transcript. The typed purpose is checked against the bytes at
+    /// this one raw Ed25519 boundary, so a new caller cannot accidentally turn the identity into an
+    /// unscoped signing oracle.
+    public func sign(_ data: Data, purpose: CryptographicPurpose) throws -> Data {
         guard let key = signingKey else { throw IdentityError.notProvisioned }
-        return try key.signature(for: data)
+        guard let signingBytes = purpose.signingBytes(data) else { throw IdentityError.invalidKeyData }
+        return try key.signature(for: signingBytes)
     }
 
     /// Sealed-backup key derivation, **record-format v1** (the legacy static derivation).
@@ -170,7 +183,9 @@ public final class IdentityService {
         return HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: privateKey.rawRepresentation),
             salt: isV2 ? salt : Data(),
-            info: Data((isV2 ? "com.fernlet.sealed-backup.v2" : "com.fernlet.sealed-backup").utf8),
+            info: (isV2
+                ? FernletCryptoPurpose.KeyDerivation.sealedBackupV2
+                : FernletCryptoPurpose.KeyDerivation.sealedBackupLegacyV1).data,
             outputByteCount: 32
         )
     }
@@ -178,9 +193,17 @@ public final class IdentityService {
     // WI-9: the three pure crypto statics below are `nonisolated` — they read no instance/actor state
     // (only their parameters + CryptoKit), so signature verification and fingerprinting can run off the
     // main actor. Required by the `nonisolated` `MeshAdmissionToken.verify` and the off-main verify path.
-    public nonisolated static func verify(_ signature: Data, of data: Data, by publicKeyData: Data) -> Bool {
+    /// Verifies an already domain-tagged transcript. Legacy read purposes are explicitly marked in
+    /// the registry; all current transcript purposes must be embedded in the supplied bytes.
+    public nonisolated static func verify(
+        _ signature: Data,
+        of data: Data,
+        by publicKeyData: Data,
+        purpose: CryptographicPurpose
+    ) -> Bool {
         guard let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData) else { return false }
-        return publicKey.isValidSignature(signature, for: data)
+        guard let signingBytes = purpose.signingBytes(data) else { return false }
+        return publicKey.isValidSignature(signature, for: signingBytes)
     }
 
     /// X25519 ECDH → HKDF-SHA256 → ChaCha20-Poly1305 seal with forward secrecy.
@@ -202,17 +225,15 @@ public final class IdentityService {
         let sharedSecret = try ephemeralKey.sharedSecretFromKeyAgreement(with: peerPubKey)
         let symKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: Data("fernlet.proximity.v1".utf8),
+            salt: FernletCryptoPurpose.KeyDerivation.proximityTransportV1.data,
             sharedInfo: senderKey.publicKey.rawRepresentation + peerKeyAgreementPublicKey,
             outputByteCount: 32
         )
 
-        let sealedBox = try ChaChaPoly.seal(
-            body,
-            using: symKey,
-            authenticating: senderKey.publicKey.rawRepresentation
-        )
-        return ephemeralKey.publicKey.rawRepresentation + sealedBox.combined
+        let aad = FernletCryptoPurpose.AEAD.proximityTransportV2.data
+            + senderKey.publicKey.rawRepresentation
+        let sealedBox = try ChaChaPoly.seal(body, using: symKey, authenticating: aad)
+        return Self.proximityTransportFormatV2 + ephemeralKey.publicKey.rawRepresentation + sealedBox.combined
     }
 
     /// Inverse of seal. `peerKeyAgreementPublicKey` is the sender's long-term X25519 public key.
@@ -221,11 +242,15 @@ public final class IdentityService {
     /// it learned our capabilities. Pass `.wire2` only when the SENDER advertised `wire2`.
     public func open(_ ciphertext: Data, from peerKeyAgreementPublicKey: Data, format: SealedPayloadFormat = .legacy) throws -> Data {
         guard let recipientKey = keyAgreementKey else { throw IdentityError.notProvisioned }
-        // Wire format: eskPub (32 B) || combined (nonce 12 B || ciphertext || tag 16 B)
-        guard ciphertext.count >= 32 + 12 + 16 else { throw IdentityError.openFailed }
+        // v2 wire format: `FPT2` || eskPub (32 B) || combined. Legacy starts directly at
+        // `eskPub`; it remains a read-only fallback because old in-person transfers may still be
+        // on disk/in-flight while every new write uses the typed AEAD purpose below.
+        let isV2 = ciphertext.starts(with: Self.proximityTransportFormatV2)
+        let offset = isV2 ? Self.proximityTransportFormatV2.count : 0
+        guard ciphertext.count >= offset + 32 + 12 + 16 else { throw IdentityError.openFailed }
 
-        let eskPubData = ciphertext.prefix(32)
-        let combined = ciphertext.dropFirst(32)
+        let eskPubData = ciphertext.dropFirst(offset).prefix(32)
+        let combined = ciphertext.dropFirst(offset + 32)
 
         guard let ephemeralPeerPubKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: eskPubData) else {
             throw IdentityError.openFailed
@@ -233,7 +258,7 @@ public final class IdentityService {
         let sharedSecret = try recipientKey.sharedSecretFromKeyAgreement(with: ephemeralPeerPubKey)
         let symKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: Data("fernlet.proximity.v1".utf8),
+            salt: FernletCryptoPurpose.KeyDerivation.proximityTransportV1.data,
             sharedInfo: peerKeyAgreementPublicKey + recipientKey.publicKey.rawRepresentation,
             outputByteCount: 32
         )
@@ -241,7 +266,10 @@ public final class IdentityService {
         let plaintext: Data
         do {
             let sealedBox = try ChaChaPoly.SealedBox(combined: combined)
-            plaintext = try ChaChaPoly.open(sealedBox, using: symKey, authenticating: peerKeyAgreementPublicKey)
+            let aad = isV2
+                ? FernletCryptoPurpose.AEAD.proximityTransportV2.data + peerKeyAgreementPublicKey
+                : peerKeyAgreementPublicKey // cryptographic-domain: legacy-read
+            plaintext = try ChaChaPoly.open(sealedBox, using: symKey, authenticating: aad)
         } catch {
             throw IdentityError.openFailed
         }
@@ -279,7 +307,7 @@ public final class IdentityService {
         let shared = try myKey.sharedSecretFromKeyAgreement(with: friendKey)
         return shared.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: Data("fernlet.heartdrop.v1".utf8),
+            salt: FernletCryptoPurpose.KeyDerivation.heartDropPairV1.data,
             sharedInfo: Data(),
             outputByteCount: 32
         )
@@ -294,7 +322,7 @@ public final class IdentityService {
         dayEpoch: UInt64,
         senderKeyAgreementPublicKey: Data
     ) -> String {
-        var message = Data("fernlet.heartdrop.day.v1".utf8)
+        var message = FernletCryptoPurpose.HMAC.heartDropDayTagV1.data
         message.append(contentsOf: Self.bigEndianBytes(dayEpoch))
         message.append(senderKeyAgreementPublicKey)
         let mac = HMAC<SHA256>.authenticationCode(for: message, using: pairSecret)
@@ -345,7 +373,7 @@ public final class IdentityService {
         let sharedSecret = try myKey.sharedSecretFromKeyAgreement(with: friendKey)
         return sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: Data("fernlet.presence.tag.v1".utf8),
+            salt: FernletCryptoPurpose.KeyDerivation.presencePairV1.data,
             sharedInfo: Data(),
             outputByteCount: 32
         )
@@ -359,7 +387,7 @@ public final class IdentityService {
     /// 15 minutes.
     public func presenceTag(for friendKeyAgreementPublicKey: Data, epoch: UInt64) throws -> Data {
         let secret = try presencePairSecret(with: friendKeyAgreementPublicKey)
-        var message = Data("fernlet.presence.epoch.v1".utf8)
+        var message = FernletCryptoPurpose.HMAC.presenceEpochTagV1.data
         message.append(contentsOf: Self.bigEndianBytes(epoch))
         let mac = HMAC<SHA256>.authenticationCode(for: message, using: secret)
         return Data(Data(mac).prefix(Self.presenceTagByteCount))
@@ -378,17 +406,22 @@ public final class IdentityService {
         let sharedSecret = try ephemeralKey.sharedSecretFromKeyAgreement(with: recipientKey)
         let symKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: Data("fernlet.mesh.groupkey.v1".utf8),
+            salt: FernletCryptoPurpose.KeyDerivation.meshGroupKeyWrapV1.data,
             sharedInfo: ephemeralKey.publicKey.rawRepresentation + recipientPublicKey,
             outputByteCount: 32
         )
         let gcmNonce = AES.GCM.Nonce()
-        let sealedBox = try AES.GCM.seal(key, using: symKey, nonce: gcmNonce)
+        let sealedBox = try AES.GCM.seal(
+            key,
+            using: symKey,
+            nonce: gcmNonce,
+            authenticating: FernletCryptoPurpose.AEAD.meshGroupKeyWrapV2.data
+        )
 
-        var bundle = Data()
+        var bundle = Self.groupKeyWrapFormatV2
         bundle.append(ephemeralKey.publicKey.rawRepresentation)          // 32 B
         // R9: `AES.GCM.Nonce` is a `Sequence` of `UInt8`, so the raw-pointer walk is unnecessary;
-        // same 12 bytes, same order, unchanged 92-byte wire layout.
+        // same 12 bytes, same order, after the explicit v2 format marker.
         bundle.append(contentsOf: gcmNonce)                              // 12 B
         bundle.append(sealedBox.ciphertext)                              // 32 B
         bundle.append(sealedBox.tag)                                     // 16 B
@@ -398,12 +431,15 @@ public final class IdentityService {
     /// Unwraps a group key bundle produced by `encryptGroupKey`.
     public func decryptGroupKey(_ bundle: Data) throws -> Data {
         guard let recipientKey = keyAgreementKey else { throw IdentityError.notProvisioned }
-        guard bundle.count == 92 else { throw IdentityError.openFailed }
+        let isV2 = bundle.count == 96 && bundle.starts(with: Self.groupKeyWrapFormatV2)
+        guard isV2 || bundle.count == 92 else { throw IdentityError.openFailed }
 
-        let ephPubData     = bundle[bundle.startIndex ..< bundle.startIndex + 32]
-        let nonceData      = bundle[bundle.startIndex + 32 ..< bundle.startIndex + 44]
-        let ciphertextData = bundle[bundle.startIndex + 44 ..< bundle.startIndex + 76]
-        let tagData        = bundle[bundle.startIndex + 76 ..< bundle.startIndex + 92]
+        let offset = isV2 ? Self.groupKeyWrapFormatV2.count : 0
+
+        let ephPubData     = bundle[bundle.startIndex + offset ..< bundle.startIndex + offset + 32]
+        let nonceData      = bundle[bundle.startIndex + offset + 32 ..< bundle.startIndex + offset + 44]
+        let ciphertextData = bundle[bundle.startIndex + offset + 44 ..< bundle.startIndex + offset + 76]
+        let tagData        = bundle[bundle.startIndex + offset + 76 ..< bundle.startIndex + offset + 92]
 
         guard let ephemeralPubKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephPubData) else {
             throw IdentityError.openFailed
@@ -412,7 +448,7 @@ public final class IdentityService {
         let recipientPublicKey = recipientKey.publicKey.rawRepresentation
         let symKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: Data("fernlet.mesh.groupkey.v1".utf8),
+            salt: FernletCryptoPurpose.KeyDerivation.meshGroupKeyWrapV1.data,
             sharedInfo: Data(ephPubData) + recipientPublicKey,
             outputByteCount: 32
         )
@@ -420,7 +456,14 @@ public final class IdentityService {
         do {
             let nonce = try AES.GCM.Nonce(data: nonceData)
             let sealedBox = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ciphertextData, tag: tagData)
-            return try AES.GCM.open(sealedBox, using: symKey)
+            if isV2 {
+                return try AES.GCM.open(
+                    sealedBox,
+                    using: symKey,
+                    authenticating: FernletCryptoPurpose.AEAD.meshGroupKeyWrapV2.data
+                )
+            }
+            return try AES.GCM.open(sealedBox, using: symKey) // cryptographic-domain: legacy-read
         } catch {
             throw IdentityError.openFailed
         }

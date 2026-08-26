@@ -8,6 +8,7 @@
 // which is the Sybil defense (2026-07-11 ban memo).
 
 import Foundation
+import FernletCrypto
 import FernletDomainModel
 import FernletFoundation
 
@@ -94,7 +95,8 @@ public enum ModerationReportRelay {
             .filter { $0.reporterSigningPublicKey == localKey && ($0.kind == .report || $0.kind == .retract) }
             .prefix(ModerationReportPayload.maxReports)
             .compactMap { entry in
-                guard let signature = try? identity.sign(canonicalBytes(for: entry)) else { return nil }
+                guard let signature = try? identity.sign(
+                    canonicalBytes(for: entry), purpose: FernletCryptoPurpose.Signature.moderationReportV2) else { return nil }
                 return SignedModerationReport(entry: entry, signature: signature)
             }
         return ModerationReportPayload(reports: signed)
@@ -126,7 +128,8 @@ public enum ModerationReportRelay {
                   entry.reasonToken.utf8.count <= ModerationReportPayload.maxReasonTokenBytes else { return nil }
             guard IdentityService.verify(signed.signature,
                                          of: canonicalBytes(for: entry),
-                                         by: senderSigningKey) else { return nil }
+                                         by: senderSigningKey,
+                                         purpose: FernletCryptoPurpose.Signature.moderationReportV2) else { return nil }
             var row = entry
             row.id = ModerationLedgerEntry.rowID(kind: entry.kind, reporterFingerprint: senderFingerprint, contentHash: row.contentHash)
             if row.createdAt > now { row.createdAt = now }

@@ -18,6 +18,7 @@
 
 import Foundation
 import CryptoKit
+import FernletCrypto
 import FernletDomainModel
 
 // MARK: - Params hash
@@ -187,7 +188,8 @@ extension ActivityJoinToken {
             rosterVersionAtGrant: rosterVersionAtGrant,
             hostSignature: Data()
         )
-        token.hostSignature = try hostIdentity.sign(canonicalBytes(for: token))
+        token.hostSignature = try hostIdentity.sign(
+            canonicalBytes(for: token), purpose: FernletCryptoPurpose.Signature.activityJoinTokenV2)
         return token
     }
 
@@ -219,7 +221,8 @@ extension ActivityJoinToken {
         guard IdentityService.fingerprintsMatch(
             IdentityService.fingerprint(of: hostSigningPublicKey), hostFingerprint
         ) else { throw VerifyError.fingerprintMismatch }
-        guard IdentityService.verify(hostSignature, of: canonicalBytes(for: self), by: hostSigningPublicKey) else {
+        guard IdentityService.verify(hostSignature, of: canonicalBytes(for: self), by: hostSigningPublicKey,
+                                     purpose: FernletCryptoPurpose.Signature.activityJoinTokenV2) else {
             throw VerifyError.signatureInvalid
         }
     }
@@ -265,7 +268,8 @@ extension ActivityRosterSnapshot {
             hostSigningPublicKey: hostIdentity.localSigningPublicKey,
             hostSignature: Data()
         )
-        snapshot.hostSignature = try hostIdentity.sign(canonicalBytes(for: snapshot))
+        snapshot.hostSignature = try hostIdentity.sign(
+            canonicalBytes(for: snapshot), purpose: FernletCryptoPurpose.Signature.activityRosterSnapshotV2)
         return snapshot
     }
 
@@ -287,7 +291,8 @@ extension ActivityRosterSnapshot {
                   participant.displayName.utf8.count <= Self.maxParticipantStringBytes
             else { throw VerifyError.participantFieldTooLarge }
         }
-        guard IdentityService.verify(hostSignature, of: canonicalBytes(for: self), by: hostSigningPublicKey) else {
+        guard IdentityService.verify(hostSignature, of: canonicalBytes(for: self), by: hostSigningPublicKey,
+                                     purpose: FernletCryptoPurpose.Signature.activityRosterSnapshotV2) else {
             throw VerifyError.signatureInvalid
         }
     }

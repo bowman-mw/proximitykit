@@ -1,4 +1,5 @@
 import Foundation
+import FernletCrypto
 import FernletFoundation
 
 /// Verification ceremony for the in-person coach session (Increment 10 of
@@ -107,7 +108,7 @@ public final class CoachVerificationCeremony {
             challengeNonce: payload.challengeNonce,
             qrNonce: payload.qrNonce
         )
-        guard let signature = try? identity.sign(message) else {
+        guard let signature = try? identity.sign(message, purpose: FernletCryptoPurpose.Signature.proximityQRResponseV1) else {
             FernletAuditLog.log("coach.verify.signFailed")
             return .droppedStale
         }
@@ -159,7 +160,8 @@ public final class CoachVerificationCeremony {
             challengeNonce: pending.challengeNonce,
             qrNonce: pending.qrNonce
         )
-        guard IdentityService.verify(payload.signature, of: message, by: pending.expectedSigningKey) else {
+        guard IdentityService.verify(payload.signature, of: message, by: pending.expectedSigningKey,
+                                     purpose: FernletCryptoPurpose.Signature.proximityQRResponseV1) else {
             pendingRound = nil
             FernletAuditLog.log("coach.verify.badResponseSignature")
             return false

@@ -1,4 +1,5 @@
 import Foundation
+import FernletCrypto
 import FernletDomainModel
 
 // WI-9: every wire payload below is marked `nonisolated, Sendable`. ProximityKit declares
@@ -410,7 +411,8 @@ extension MeshAdmissionToken {
             admitterSigningPublicKey: admitterIdentity.localSigningPublicKey,
             admitterSignature: Data()
         )
-        token.admitterSignature = try admitterIdentity.sign(canonicalBytes(for: token))
+        token.admitterSignature = try admitterIdentity.sign(
+            canonicalBytes(for: token), purpose: FernletCryptoPurpose.Signature.meshAdmissionTokenV2)
         return token
     }
 
@@ -466,8 +468,10 @@ extension MeshAdmissionToken {
         // field would be a downgrade-confusion vector; the only clean retirement is a future
         // wire-breaking, schema-versioned token format. Left as-is deliberately (no security impact).
         let signatureValid =
-            IdentityService.verify(admitterSignature, of: canonicalBytes(for: self), by: admitterSigningPublicKey)
-            || IdentityService.verify(admitterSignature, of: legacyCanonicalBytes(for: self), by: admitterSigningPublicKey)
+            IdentityService.verify(admitterSignature, of: canonicalBytes(for: self), by: admitterSigningPublicKey,
+                                   purpose: FernletCryptoPurpose.Signature.meshAdmissionTokenV2)
+            || IdentityService.verify(admitterSignature, of: legacyCanonicalBytes(for: self), by: admitterSigningPublicKey,
+                                      purpose: FernletCryptoPurpose.Signature.meshAdmissionTokenLegacyV1)
         guard signatureValid else {
             throw VerifyError.signatureInvalid
         }

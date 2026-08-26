@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import FernletCrypto
 import FernletDomainModel
 
 /// Outer seal for offline heart drops (bitchat adoptions Increment 3,
@@ -53,7 +54,7 @@ public nonisolated enum HeartDropSealer {
 
     static let wireVersion: UInt8 = 1
     static let headerLength = 1 + 16
-    private static let hkdfSalt = Data("fernlet.heartdrop.seal.v1".utf8)
+    private static let hkdfSalt = FernletCryptoPurpose.KeyDerivation.heartDropOuterSealV1.data
     private static let zeroPrekeyID = Data(count: 16)
 
     /// Seals `innerEnvelopeJSON` (a signed `friendHeartDrop` envelope) for the recipient.
@@ -78,7 +79,7 @@ public nonisolated enum HeartDropSealer {
         )
         var header = Data([wireVersion])
         header.append(prekey.map { uuidData($0.id) } ?? zeroPrekeyID)
-        let box = try ChaChaPoly.seal(framed, using: symmetricKey, authenticating: header)
+        let box = try ChaChaPoly.seal(framed, using: symmetricKey, authenticating: header) // cryptographic-domain: key-derived
         let wire = header + ephemeralPublic + box.combined
         guard wire.count <= maxWireByteCount else { throw SealError.oversized }
         return wire
@@ -131,7 +132,7 @@ public nonisolated enum HeartDropSealer {
         )
         do {
             let box = try ChaChaPoly.SealedBox(combined: combined)
-            let framed = try ChaChaPoly.open(box, using: symmetricKey, authenticating: header)
+            let framed = try ChaChaPoly.open(box, using: symmetricKey, authenticating: header) // cryptographic-domain: key-derived
             // Tight, drop-specific inflate ceiling: the 8 KiB wire cap above admits ~8 MB of
             // inflation under the framing's 16 MiB default, and this runs on the main actor.
             return try SealedPayloadFraming.unframe(

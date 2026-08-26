@@ -3,6 +3,7 @@ import MultipeerConnectivity
 import Observation
 import UIKit
 import CryptoKit
+import FernletCrypto
 import FernletDomainModel
 import FernletFoundation
 import PrivateMediaStore
@@ -2415,7 +2416,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         let signature: Data
         do {
-            signature = try identity.sign(message)
+            signature = try identity.sign(message, purpose: FernletCryptoPurpose.Signature.proximityQRResponseV1)
         } catch {
             // Recovery is "no response" — the scanner never commits — so name it (R7) instead of
             // leaving the ceremony to die silently.
@@ -2457,7 +2458,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             challengeNonce: pending.challengeNonce,
             qrNonce: pending.qrNonce
         )
-        guard IdentityService.verify(payload.signature, of: message, by: pending.expectedSigningKey) else {
+        guard IdentityService.verify(payload.signature, of: message, by: pending.expectedSigningKey,
+                                     purpose: FernletCryptoPurpose.Signature.proximityQRResponseV1) else {
             pendingQRVerifications[slot.id] = nil
             FernletAuditLog.log("mesh.verifyQR.badResponseSignature")
             return
@@ -3537,37 +3539,81 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: - Phase 3: Static encrypt / decrypt helpers
 
+    /// Prefixes select a typed AEAD purpose without overloading an unauthenticated metadata field.
+    /// The old unprefixed blobs are read-only compatibility formats.
+    private static let groupPhotoFormatV2 = Data("FMGP2".utf8)
+    private static let groupMetadataFormatV2 = Data("FMGM2".utf8)
+
     /// AES-256-GCM encrypt `imageData` using the group key.
     /// Returns (ciphertext + 16-byte tag, 12-byte nonce) stored separately in FriendPhotoPayload.
     public static func encryptPhoto(_ imageData: Data, key: MeshGroupKey) throws -> (ciphertext: Data, nonce: Data) {
         let symKey = SymmetricKey(data: key.keyBytes)
         let gcmNonce = AES.GCM.Nonce()
-        let sealedBox = try AES.GCM.seal(imageData, using: symKey, nonce: gcmNonce)
+        let sealedBox = try AES.GCM.seal(
+            imageData,
+            using: symKey,
+            nonce: gcmNonce,
+            authenticating: FernletCryptoPurpose.AEAD.meshGroupPhotoV2.data
+        )
         // `AES.GCM.Nonce` is a `Sequence` of `UInt8`, so the 12 bytes copy out without a pointer
         // seam (R9) — byte-identical to the previous `withUnsafeBytes` spelling.
         let nonce = Data(gcmNonce)
-        var ciphertextWithTag = Data(sealedBox.ciphertext)
+        var ciphertextWithTag = Self.groupPhotoFormatV2 + sealedBox.ciphertext
         ciphertextWithTag.append(sealedBox.tag)
         return (ciphertextWithTag, nonce)
     }
 
     public static func decryptPhoto(_ ciphertextWithTag: Data, nonce nonceData: Data, key: MeshGroupKey) throws -> Data {
-        guard ciphertextWithTag.count > 16 else { throw MeshEncryptionError.decryptionFailed }
+        let isV2 = ciphertextWithTag.starts(with: Self.groupPhotoFormatV2)
+        let prefixLength = isV2 ? Self.groupPhotoFormatV2.count : 0
+        guard ciphertextWithTag.count > prefixLength + 16 else { throw MeshEncryptionError.decryptionFailed }
         let symKey = SymmetricKey(data: key.keyBytes)
         let gcmNonce = try AES.GCM.Nonce(data: nonceData)
-        let ciphertext = ciphertextWithTag.dropLast(16)
+        let ciphertext = ciphertextWithTag.dropFirst(prefixLength).dropLast(16)
         let tag = ciphertextWithTag.suffix(16)
         let box = try AES.GCM.SealedBox(nonce: gcmNonce, ciphertext: ciphertext, tag: tag)
-        return try AES.GCM.open(box, using: symKey)
+        if isV2 {
+            return try AES.GCM.open(
+                box,
+                using: symKey,
+                authenticating: FernletCryptoPurpose.AEAD.meshGroupPhotoV2.data
+            )
+        }
+        return try AES.GCM.open(box, using: symKey) // cryptographic-domain: legacy-read
     }
 
     // Shared implementation used by closed-mode metadata wrapping.
     private static func encryptPayload(_ data: Data, key: MeshGroupKey) throws -> (ciphertext: Data, nonce: Data) {
-        try encryptPhoto(data, key: key)
+        let symKey = SymmetricKey(data: key.keyBytes)
+        let gcmNonce = AES.GCM.Nonce()
+        let sealedBox = try AES.GCM.seal(
+            data,
+            using: symKey,
+            nonce: gcmNonce,
+            authenticating: FernletCryptoPurpose.AEAD.meshEncryptedMetadataV2.data
+        )
+        var ciphertext = Self.groupMetadataFormatV2 + sealedBox.ciphertext
+        ciphertext.append(sealedBox.tag)
+        return (ciphertext, Data(gcmNonce))
     }
 
     private static func decryptPayload(_ ciphertextWithTag: Data, nonce: Data, key: MeshGroupKey) throws -> Data {
-        try decryptPhoto(ciphertextWithTag, nonce: nonce, key: key)
+        let isV2 = ciphertextWithTag.starts(with: Self.groupMetadataFormatV2)
+        let prefixLength = isV2 ? Self.groupMetadataFormatV2.count : 0
+        guard ciphertextWithTag.count > prefixLength + 16 else { throw MeshEncryptionError.decryptionFailed }
+        let symKey = SymmetricKey(data: key.keyBytes)
+        let gcmNonce = try AES.GCM.Nonce(data: nonce)
+        let ciphertext = ciphertextWithTag.dropFirst(prefixLength).dropLast(16)
+        let tag = ciphertextWithTag.suffix(16)
+        let box = try AES.GCM.SealedBox(nonce: gcmNonce, ciphertext: ciphertext, tag: tag)
+        if isV2 {
+            return try AES.GCM.open(
+                box,
+                using: symKey,
+                authenticating: FernletCryptoPurpose.AEAD.meshEncryptedMetadataV2.data
+            )
+        }
+        return try AES.GCM.open(box, using: symKey) // cryptographic-domain: legacy-read
     }
 
     // MARK: - Phase 3: Closed-mode metadata encryption

@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import FernletCrypto
 import Security
 import FernletFoundation
 
@@ -28,9 +29,11 @@ public enum HeartDropSidecarSeal {
     /// key along with the files.
     public static let keychainService = HeartPrekeyStore.keychainService
     static let keychainAccount = "sidecarSealKey"
-    /// Version prefix distinguishing a sealed file from a legacy plaintext v0 JSON file (which
-    /// always starts with `[` or `{`). Bump the digit for any future format change.
-    static let magic = Data("FSC1".utf8)
+    /// Read-only v1 prefix. Its box had no AAD, so it cannot be relabelled in place.
+    static let legacyMagic = Data("FSC1".utf8)
+    /// Current prefix. v2 authenticates a stable sidecar purpose, separating it from every other
+    /// blob that could ever be sealed under this service's reusable key.
+    static let magic = Data("FSC2".utf8)
 
     /// The seal for the three heart-drop sidecars, on whichever service the caller's
     /// ``HeartDropStorageScope`` names — `com.fernlet.heartdrop` in production, a UUID-scoped
@@ -42,12 +45,20 @@ public enum HeartDropSidecarSeal {
     /// a store cannot end up with isolated files sealed by a key somebody else's wipe deletes.
     public static func make(keychainService service: String) -> SidecarSeal {
         SidecarSeal(
-            isSealed: { $0.starts(with: magic) },
+            isSealed: { $0.starts(with: magic) || $0.starts(with: legacyMagic) },
             open: { data in
                 let key = try loadKeyForOpen(service: service)
                 do {
-                    let box = try ChaChaPoly.SealedBox(combined: data.dropFirst(magic.count))
-                    return try ChaChaPoly.open(box, using: key)
+                    if data.starts(with: magic) {
+                        let box = try ChaChaPoly.SealedBox(combined: data.dropFirst(magic.count))
+                        return try ChaChaPoly.open(
+                            box,
+                            using: key,
+                            authenticating: FernletCryptoPurpose.AEAD.heartDropSidecarV2.data
+                        )
+                    }
+                    let box = try ChaChaPoly.SealedBox(combined: data.dropFirst(legacyMagic.count))
+                    return try ChaChaPoly.open(box, using: key) // cryptographic-domain: legacy-read
                 } catch {
                     throw SidecarSeal.SealError.openFailed
                 }
@@ -55,7 +66,11 @@ public enum HeartDropSidecarSeal {
             seal: { plaintext in
                 let key = try loadOrMintKey(service: service)
                 do {
-                    let box = try ChaChaPoly.seal(plaintext, using: key)
+                    let box = try ChaChaPoly.seal(
+                        plaintext,
+                        using: key,
+                        authenticating: FernletCryptoPurpose.AEAD.heartDropSidecarV2.data
+                    )
                     return magic + box.combined
                 } catch {
                     throw SidecarSeal.SealError.sealFailed
