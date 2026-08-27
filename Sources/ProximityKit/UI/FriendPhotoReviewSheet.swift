@@ -278,8 +278,13 @@ public enum FriendPhotoLibrarySaver {
     /// session with zero pictures saved.
     public struct NothingSavedError: LocalizedError {
         public init() {}
+        /// Package source, so the lookup passes `bundle: .module`: without it the resolution goes
+        /// to `Bundle.main`, finds nothing, and silently renders the English `defaultValue` forever.
         public var errorDescription: String? {
-            "None of the selected pictures could be saved."
+            String(localized: "friendPhoto.error.nothingSaved",
+                   defaultValue: "None of the selected pictures could be saved.",
+                   bundle: .module,
+                   comment: "Shown after saving shared friend photos when every image failed to decode, so no asset was created. Reports the real outcome rather than a false success.")
         }
     }
 

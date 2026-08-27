@@ -1,6 +1,18 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "friendPhoto.error.nothingSaved" : {
+      "comment" : "Shown after saving shared friend photos when every image failed to decode, so no asset was created. Reports the real outcome rather than a false success.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "None of the selected pictures could be saved."
+          }
+        }
+      }
+    },
     "proximity.keepFriends.done" : {
       "comment" : "Button that closes the end-of-session sheet and saves the keep-as-friend choices.",
       "extractionState" : "extracted_with_value",
