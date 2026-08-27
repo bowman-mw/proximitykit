@@ -30,10 +30,12 @@ public enum HeartDropSidecarSeal {
     public static let keychainService = HeartPrekeyStore.keychainService
     static let keychainAccount = "sidecarSealKey"
     /// Read-only v1 prefix. Its box had no AAD, so it cannot be relabelled in place.
-    static let legacyMagic = Data("FSC1".utf8)
+    /// `nonisolated` so the format census — which classifies by these bytes without touching the
+    /// key or the main actor — can read the one authoritative spelling.
+    nonisolated static let legacyMagic = Data("FSC1".utf8)
     /// Current prefix. v2 authenticates a stable sidecar purpose, separating it from every other
     /// blob that could ever be sealed under this service's reusable key.
-    static let magic = Data("FSC2".utf8)
+    nonisolated static let magic = Data("FSC2".utf8)
 
     /// The seal for the three heart-drop sidecars, on whichever service the caller's
     /// ``HeartDropStorageScope`` names — `com.fernlet.heartdrop` in production, a UUID-scoped

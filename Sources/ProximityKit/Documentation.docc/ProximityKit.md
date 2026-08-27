@@ -277,6 +277,7 @@ type has no local label). Senders keep emitting frozen English forever.
 - ``ProtectedSidecar``
 - ``SidecarSeal``
 - ``HeartDropSidecarSeal``
+- ``HeartDropSidecarFormatCensus``
 
 ### Recipe sharing
 
