@@ -71,7 +71,7 @@ public nonisolated enum HeartDropSealer {
         let ephemeral = Curve25519.KeyAgreement.PrivateKey()
         let ephemeralPublic = ephemeral.publicKey.rawRepresentation
         let shared = try ephemeral.sharedSecretFromKeyAgreement(with: recipientKey)
-        let symmetricKey = shared.hkdfDerivedSymmetricKey(
+        let symmetricKey = shared.hkdfDerivedSymmetricKey( // cryptographic-domain: purpose-derived salt
             using: SHA256.self,
             salt: hkdfSalt,
             sharedInfo: ephemeralPublic + recipientPublicKeyData,
@@ -124,7 +124,7 @@ public nonisolated enum HeartDropSealer {
             recipientPublicKeyData = privateKey.publicKey.rawRepresentation
         }
 
-        let symmetricKey = shared.hkdfDerivedSymmetricKey(
+        let symmetricKey = shared.hkdfDerivedSymmetricKey( // cryptographic-domain: purpose-derived salt
             using: SHA256.self,
             salt: hkdfSalt,
             sharedInfo: ephemeralPublic + recipientPublicKeyData,
