@@ -42,6 +42,35 @@ public struct SidecarSeal {
     }
 }
 
+/// The ONE sidecar at-rest write: atomic + `.completeFileProtection` + backup exclusion, with
+/// the exclusion failure audited under the caller's prefix.
+///
+/// Extracted from ``ProtectedSidecar``'s default writer (byte-for-byte the same operations, same
+/// audit key) so the Phase 2.2 format migrator writes through the SAME path — the "share code"
+/// answer for the write path, mirroring the census's answer for the classify path.
+enum SidecarFileWriter {
+    /// Writes `data` to `url` atomically with `.completeFileProtection`, then best-effort
+    /// excludes the file from backups, auditing a failed exclusion as
+    /// `<auditPrefix>.backupExclusionFailed`.
+    ///
+    /// O1: the sidecars are device-scoped (their seal key is ThisDeviceOnly), so file and key
+    /// share one fate — and the cleartext friend graph stays out of iCloud backups. The
+    /// exclusion failure is benign — the bytes themselves are sealed (Increment 4), so it is
+    /// defense in depth — but a sidecar that can ride into a backup must not do so silently.
+    static func write(_ data: Data, to url: URL, auditPrefix: String) throws {
+        try data.write(to: url, options: [.atomic, .completeFileProtection])
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableURL = url
+        do {
+            try mutableURL.setResourceValues(values)
+        } catch {
+            FernletAuditLog.log("\(auditPrefix).backupExclusionFailed",
+                                context: ["error": String(describing: error)])
+        }
+    }
+}
+
 /// Load/persist state machine for the heart-sharing JSON sidecars (Track A of
 /// Docs/Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26.md).
 ///
@@ -167,21 +196,7 @@ public final class ProtectedSidecar<Value: Codable> {
         // writer can name the store in its audit line.
         let auditPrefixForWrites = auditPrefix
         self.writeData = writeData ?? { data, url in
-            try data.write(to: url, options: [.atomic, .completeFileProtection])
-            // O1: the sidecars are device-scoped (their seal key is ThisDeviceOnly), so file and
-            // key share one fate — and the cleartext friend graph stays out of iCloud backups.
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
-            var mutableURL = url
-            do {
-                try mutableURL.setResourceValues(values)
-            } catch {
-                // Benign — the bytes themselves are sealed (Increment 4), so the exclusion is
-                // defense in depth — but a sidecar that can ride into a backup must not do so
-                // silently.
-                FernletAuditLog.log("\(auditPrefixForWrites).backupExclusionFailed",
-                                    context: ["error": String(describing: error)])
-            }
+            try SidecarFileWriter.write(data, to: url, auditPrefix: auditPrefixForWrites)
         }
         performLoad()
         #if canImport(UIKit)
