@@ -131,20 +131,23 @@ file then survives as ciphertext nothing can open, which the outbox quarantines 
 loss. So the scope is (directory, keychain service), always both, and scoping is never unsealing: a
 store on its own scope still seals through the real ``HeartDropSidecarSeal`` key path.
 
-Those sealed sidecars are the module's one at-rest format surface, and Phase 2.2 of the
-crypto-standardization plan gave them ``HeartDropSidecarFormatMigrator`` — a `FormatMigrator`
-conformer on the shared `FernletCrypto` contract, whose scan **is**
-``HeartDropSidecarFormatCensus``'s own survey, so the converter and the number Phase 3's
-`FSC1`-reader delete is gated on can never disagree. Convert re-seals a legacy row through
-``HeartDropSidecarSeal``'s existing open/seal closures — binding the already-registered sidecar
-purpose without ever naming one — round-trip-verified before an atomic, fully-protected write and
-read back after, with the source bytes never deleted. Two properties are worth knowing before
-touching it: the corpus is the census's fixed four names, but only the three MAIN rows (outbox,
-peer bundles, dedup) are verdict inputs — the quarantine tombstone is *reported and never
-converted and never blocking*, because no reader ever opens that path again, so its marker bytes
-prove nothing about live data; and a set latch is **revalidated against the disk on every launch**
-with one marker-only survey, using exactly the predicate the latch itself refuses to set over, so
-a restore that re-introduces a blocking row un-latches rather than being silently outlived.
+Those sealed sidecars are the module's one at-rest format surface, and Phase 3 of the
+crypto-standardization plan **deleted its legacy reader**: ``HeartDropSidecarSeal`` requires the
+`FSC2` marker, and the Phase 2.2 migrator that converted `FSC1` rows went in the same stroke,
+because it converted *through* the branch that is now gone and a healer that can no longer heal is
+worse than either alone. An `FSC1` file is refused by name —
+``SidecarSeal/SealError/legacyFormatRetired``, audit-logged before it is thrown — and
+`ProtectedSidecar`'s unopenable-sealed policy then quarantines it and latches the data loss.
+
+The `FSC1` marker itself is **kept, and load-bearing**. `SidecarSeal.isSealed` still answers true
+for it, and must: that predicate is what splits a file into "sealed" and "legacy PLAINTEXT v0 —
+read it as JSON and re-seal it", so a marker that stopped classifying would send ciphertext down
+the plaintext branch, fail to decode, and be handled as *corrupt* — salvaged-or-discarded, i.e.
+destroyed. A refusal that cannot recognize what it is refusing is worse than the reader it
+replaced. ``HeartDropSidecarFormatCensus`` stays for the same reason: it classifies by marker
+bytes, holds no key, and counting rows nothing can open is still the only way to know they are
+there. Only the three MAIN rows (outbox, peer bundles, dedup) ever mattered to that count — the
+quarantine tombstone is reported and never blocking, because no reader ever opens that path.
 
 Before changing anything here, read the wire-compatibility notes on the type you are touching:
 canonical signing bytes, sealed-payload framing (``SealedPayloadFraming``), the freeze/park
@@ -293,12 +296,6 @@ type has no local label). Senders keep emitting frozen English forever.
 - ``SidecarSeal``
 - ``HeartDropSidecarSeal``
 - ``HeartDropSidecarFormatCensus``
-
-### Sidecar format migration (Phase 2.2)
-
-- ``HeartDropSidecarFormatMigrator``
-- ``HeartDropSidecarMigrationResult``
-- ``HeartDropSidecarMigrationLatch``
 
 ### Recipe sharing
 

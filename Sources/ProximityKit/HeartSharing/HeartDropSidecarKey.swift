@@ -29,7 +29,18 @@ public enum HeartDropSidecarSeal {
     /// key along with the files.
     public static let keychainService = HeartPrekeyStore.keychainService
     static let keychainAccount = "sidecarSealKey"
-    /// Read-only v1 prefix. Its box had no AAD, so it cannot be relabelled in place.
+    /// The v1 prefix — a CLASSIFIER, not a reader, since Phase 3 of the crypto standardization
+    /// round deleted the `FSC1` open. Its box had no AAD, so it could never be relabelled in
+    /// place; it is now refused by name (``SidecarSeal/SealError/legacyFormatRetired``) instead
+    /// of opened.
+    ///
+    /// **It must keep classifying, and `isSealed` must keep testing it.** `ProtectedSidecar`
+    /// splits a file on `isSealed`: false means "legacy PLAINTEXT v0 — read it as JSON and
+    /// re-seal it". If `FSC1` bytes stopped answering true, ciphertext would take that branch,
+    /// fail to decode, and be handled as *corrupt* — salvaged-or-discarded, i.e. destroyed —
+    /// instead of quarantined as unopenable sealed data. A refusal that cannot recognize what it
+    /// is refusing is worse than the reader it replaced.
+    ///
     /// `nonisolated` so the format census — which classifies by these bytes without touching the
     /// key or the main actor — can read the one authoritative spelling.
     nonisolated static let legacyMagic = Data("FSC1".utf8)
@@ -49,18 +60,21 @@ public enum HeartDropSidecarSeal {
         SidecarSeal(
             isSealed: { $0.starts(with: magic) || $0.starts(with: legacyMagic) },
             open: { data in
+                // Refuse the retired formats BEFORE the key is fetched: which format the bytes
+                // are in is a property of the bytes, and asking the keychain first would report
+                // a locked device (`keyTransientlyUnavailable`, which defers forever) for a file
+                // no key could open anyway.
+                guard data.starts(with: magic) else {
+                    throw refusal(for: data)
+                }
                 let key = try loadKeyForOpen(service: service)
                 do {
-                    if data.starts(with: magic) {
-                        let box = try ChaChaPoly.SealedBox(combined: data.dropFirst(magic.count))
-                        return try ChaChaPoly.open(
-                            box,
-                            using: key,
-                            authenticating: FernletCryptoPurpose.AEAD.heartDropSidecarV2.data
-                        )
-                    }
-                    let box = try ChaChaPoly.SealedBox(combined: data.dropFirst(legacyMagic.count))
-                    return try ChaChaPoly.open(box, using: key) // cryptographic-domain: legacy-read
+                    let box = try ChaChaPoly.SealedBox(combined: data.dropFirst(magic.count))
+                    return try ChaChaPoly.open(
+                        box,
+                        using: key,
+                        authenticating: FernletCryptoPurpose.AEAD.heartDropSidecarV2.data
+                    )
                 } catch {
                     throw SidecarSeal.SealError.openFailed
                 }
@@ -79,6 +93,19 @@ public enum HeartDropSidecarSeal {
                 }
             }
         )
+    }
+
+    /// Names why non-`FSC2` bytes are being refused, so the failure is a sentence rather than a
+    /// decrypt error.
+    ///
+    /// `FSC1` is the retired legacy generation (Phase 3 deleted its open); anything else never
+    /// claimed to be a sidecar seal at all and is an ordinary open failure. Audit-logged before
+    /// it is thrown, because `ProtectedSidecar`'s unopenable-sealed policy records that data was
+    /// lost but not which format lost it.
+    private static func refusal(for data: Data) -> SidecarSeal.SealError {
+        guard data.starts(with: legacyMagic) else { return .openFailed }
+        FernletAuditLog.log("heartdrop.sidecar.legacyFormatRefused")
+        return .legacyFormatRetired
     }
 
     // MARK: - Key management

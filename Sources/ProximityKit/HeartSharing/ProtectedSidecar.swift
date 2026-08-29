@@ -22,6 +22,17 @@ public struct SidecarSeal {
         case sealFailed
         /// Decryption/authentication failed on bytes that claimed to be sealed. Unrecoverable.
         case openFailed
+        /// The bytes are in a RETIRED sealed format this build no longer reads — for the
+        /// production seal, the `FSC1` no-AAD generation deleted in Phase 3 of the crypto
+        /// standardization round. Unrecoverable, and deliberately distinct from ``openFailed``:
+        /// nothing is wrong with the key or the ciphertext, so the honest report is "this build
+        /// stopped reading that format", not "authentication failed".
+        ///
+        /// Classified — never mistaken for a plaintext v0 file. ``SidecarSeal/isSealed`` still
+        /// recognizes the retired marker, so these bytes reach ``SidecarSeal/open`` and land on
+        /// the unopenable-sealed policy (quarantine or discard, with `dataLossOccurred` set)
+        /// rather than being read as JSON, failing to decode, and taking the *corrupt* path.
+        case legacyFormatRetired
     }
 
     /// Whether `bytes` are in this seal's on-disk format (vs a legacy plaintext v0 file).
