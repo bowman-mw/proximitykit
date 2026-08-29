@@ -1560,7 +1560,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // Encrypted photo: decrypt before caching.
             guard let key = currentGroupKey, key.epoch == photo.keyEpoch,
                   let ciphertext = photo.encryptedImageData, let nonce = photo.nonce,
-                  let decrypted = try? Self.decryptPhoto(ciphertext, nonce: nonce, key: key) else { return }
+                  let decrypted = Self.decryptedIncomingPhoto(ciphertext, nonce: nonce, key: key) else { return }
             cachePhoto(photo.withDecryptedImageData(decrypted), includeInSession: inSession)
         } else {
             cachePhoto(photo, includeInSession: inSession)   // epoch 0: unencrypted, accept as-is
@@ -1568,6 +1568,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // A photo shared with this friend in the current session feeds the closeness photo signal
         // (day-capped downstream, so multiple photos from one friend count once).
         if inSession, let fingerprint = senderFingerprint { onFriendPhotoSession?(fingerprint) }
+    }
+
+    /// Opens one inbound photo, naming the single failure that is NOT "wrong key, stale epoch or
+    /// tampered bytes": a payload carrying no `FMGP2` marker, i.e. the retired pre-marker format
+    /// whose reader Phase 4 deleted. Every drop on this path is invisible to the user, so the audit
+    /// line is the only place the reason exists, and "these bytes never reached the AEAD" has to be
+    /// separable from "the AEAD rejected them" for anyone diagnosing a friend who cannot share.
+    private static func decryptedIncomingPhoto(_ ciphertext: Data, nonce: Data, key: MeshGroupKey) -> Data? {
+        do {
+            return try decryptPhoto(ciphertext, nonce: nonce, key: key)
+        } catch MeshEncryptionError.legacyWireFormat {
+            FernletAuditLog.log("mesh.friendPhoto.droppedLegacyWireFormat")
+            return nil
+        } catch {
+            return nil
+        }
     }
 
     /// The two-party removal vote, gated at the wire boundary (R5).
@@ -2895,7 +2911,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
         // Phase 3: unwrap the group key if one was included.
         if let bundle = grant.encryptedCurrentKey,
-           let keyData = try? identity.decryptGroupKey(bundle) {
+           let keyData = unwrappedAdmissionGrantKey(bundle) {
             let newKey = MeshGroupKey(epoch: grant.currentKeyEpoch, keyBytes: keyData, activeSince: Date())
             currentGroupKey = newKey
             localJoinedEpoch = grant.currentKeyEpoch
@@ -3540,7 +3556,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     // MARK: - Phase 3: Static encrypt / decrypt helpers
 
     /// Prefixes select a typed AEAD purpose without overloading an unauthenticated metadata field.
-    /// The old unprefixed blobs are read-only compatibility formats.
+    /// They are REQUIRED on read: the old unprefixed blobs are no longer openable (Phase 4), and
+    /// the markers now serve only to tell a current payload from one an older build sent.
     private static let groupPhotoFormatV2 = Data("FMGP2".utf8)
     private static let groupMetadataFormatV2 = Data("FMGM2".utf8)
 
@@ -3563,23 +3580,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return (ciphertextWithTag, nonce)
     }
 
+    /// The `FMGP2` marker is REQUIRED, not preferred. The pre-marker photo — opened with no AAD at
+    /// all — was read here until the crypto standardization round's Phase 4; unmarked bytes are now
+    /// refused as ``MeshEncryptionError/legacyWireFormat`` so a peer on an older build fails by name
+    /// instead of failing as a generic decrypt error.
     public static func decryptPhoto(_ ciphertextWithTag: Data, nonce nonceData: Data, key: MeshGroupKey) throws -> Data {
-        let isV2 = ciphertextWithTag.starts(with: Self.groupPhotoFormatV2)
-        let prefixLength = isV2 ? Self.groupPhotoFormatV2.count : 0
+        guard ciphertextWithTag.starts(with: Self.groupPhotoFormatV2) else {
+            throw MeshEncryptionError.legacyWireFormat
+        }
+        let prefixLength = Self.groupPhotoFormatV2.count
         guard ciphertextWithTag.count > prefixLength + 16 else { throw MeshEncryptionError.decryptionFailed }
         let symKey = SymmetricKey(data: key.keyBytes)
         let gcmNonce = try AES.GCM.Nonce(data: nonceData)
         let ciphertext = ciphertextWithTag.dropFirst(prefixLength).dropLast(16)
         let tag = ciphertextWithTag.suffix(16)
         let box = try AES.GCM.SealedBox(nonce: gcmNonce, ciphertext: ciphertext, tag: tag)
-        if isV2 {
-            return try AES.GCM.open(
-                box,
-                using: symKey,
-                authenticating: FernletCryptoPurpose.AEAD.meshGroupPhotoV2.data
-            )
-        }
-        return try AES.GCM.open(box, using: symKey) // cryptographic-domain: legacy-read
+        return try AES.GCM.open(
+            box,
+            using: symKey,
+            authenticating: FernletCryptoPurpose.AEAD.meshGroupPhotoV2.data
+        )
     }
 
     // Shared implementation used by closed-mode metadata wrapping.
@@ -3597,23 +3617,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return (ciphertext, Data(gcmNonce))
     }
 
+    /// Mirror of ``decryptPhoto(_:nonce:key:)``: the `FMGM2` marker is required, and the pre-marker
+    /// unauthenticated form is refused by name rather than opened (Phase 4).
     private static func decryptPayload(_ ciphertextWithTag: Data, nonce: Data, key: MeshGroupKey) throws -> Data {
-        let isV2 = ciphertextWithTag.starts(with: Self.groupMetadataFormatV2)
-        let prefixLength = isV2 ? Self.groupMetadataFormatV2.count : 0
+        guard ciphertextWithTag.starts(with: Self.groupMetadataFormatV2) else {
+            throw MeshEncryptionError.legacyWireFormat
+        }
+        let prefixLength = Self.groupMetadataFormatV2.count
         guard ciphertextWithTag.count > prefixLength + 16 else { throw MeshEncryptionError.decryptionFailed }
         let symKey = SymmetricKey(data: key.keyBytes)
         let gcmNonce = try AES.GCM.Nonce(data: nonce)
         let ciphertext = ciphertextWithTag.dropFirst(prefixLength).dropLast(16)
         let tag = ciphertextWithTag.suffix(16)
         let box = try AES.GCM.SealedBox(nonce: gcmNonce, ciphertext: ciphertext, tag: tag)
-        if isV2 {
-            return try AES.GCM.open(
-                box,
-                using: symKey,
-                authenticating: FernletCryptoPurpose.AEAD.meshEncryptedMetadataV2.data
-            )
-        }
-        return try AES.GCM.open(box, using: symKey) // cryptographic-domain: legacy-read
+        return try AES.GCM.open(
+            box,
+            using: symKey,
+            authenticating: FernletCryptoPurpose.AEAD.meshEncryptedMetadataV2.data
+        )
     }
 
     // MARK: - Phase 3: Closed-mode metadata encryption
@@ -3654,8 +3675,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slot: PeerSlot
     ) async {
         guard wrapper.keyEpoch == currentGroupKey?.epoch, let key = currentGroupKey else { return }
-        guard let plaintext = try? Self.decryptPayload(wrapper.ciphertext, nonce: wrapper.nonce, key: key),
-              let inner = try? JSONDecoder().decode(EncryptedMetadataInner.self, from: plaintext),
+        let plaintext: Data
+        do {
+            plaintext = try Self.decryptPayload(wrapper.ciphertext, nonce: wrapper.nonce, key: key)
+        } catch MeshEncryptionError.legacyWireFormat {
+            // Mirrors `mesh.encryptedMetadata.sealFailed` on the send side (R7): the one open
+            // failure with a nameable cause is named, instead of joining the silent drop that also
+            // covers a wrong key and a tampered wrapper.
+            FernletAuditLog.log("mesh.encryptedMetadata.droppedLegacyWireFormat")
+            return
+        } catch {
+            return
+        }
+        guard let inner = try? JSONDecoder().decode(EncryptedMetadataInner.self, from: plaintext),
               let innerType = PayloadType(rawValue: inner.payloadType) else { return }
 
         let data = inner.payload
@@ -3885,6 +3917,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Apply new key locally (unwrap self-encrypted copy).
         applyRotatedKeyLocally(perMember[identity.localFingerprint], epoch: newEpoch)
         pendingRotationAcks.removeAll()
+    }
+
+    /// Unwraps a grant's group-key bundle. A generic failure still falls through to the keyless
+    /// branch exactly as before; a pre-`FGK2` bundle is logged first, because the keyless branch
+    /// would otherwise absorb "that phone is running an older Fernlet" into a silent epoch adoption
+    /// the user could never explain.
+    private func unwrappedAdmissionGrantKey(_ bundle: Data) -> Data? {
+        do {
+            return try identity.decryptGroupKey(bundle)
+        } catch IdentityError.legacyWireFormat {
+            FernletAuditLog.log("mesh.admissionGrant.droppedLegacyKeyWrap")
+            return nil
+        } catch {
+            return nil
+        }
     }
 
     /// Unwraps the coordinator's own copy of a freshly minted key. A failure here means the

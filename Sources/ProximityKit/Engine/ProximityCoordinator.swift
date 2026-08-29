@@ -765,6 +765,7 @@ public final class ProximityCoordinator {
         case notWrapped          // a plain envelope (e.g. a post-commit heartbeat) — process as-is
         case opened(Data)        // a sealed wrapper opened with the local KA private key
         case failed              // a wrapper we could NOT open (a tag-replay forger) — fail-closed
+        case legacyWireFormat    // a wrapper with no `FPT2` marker at all — never reached the AEAD
     }
 
     /// On a sealed-introduction coordinator, an inbound identity intro/ack arrives as a
@@ -778,16 +779,27 @@ public final class ProximityCoordinator {
     /// caller's job: `handleIdentityEnvelope` requires the inner envelope's
     /// `senderKeyAgreementPublicKey` to equal `sealedIntroductionPeerKey`. A plain envelope (no
     /// `sealedIntroduction` key) returns `.notWrapped`; a wrapper we cannot decrypt returns
-    /// `.failed`.
+    /// `.failed` — except a wrapper carrying no `FPT2` marker at all, which returns
+    /// `.legacyWireFormat`. That one never reached the AEAD, so it is a retired-format sender (or
+    /// junk) rather than the tag-replay forger `.failed` describes, and the Connection Inspector
+    /// says which instead of flattening both into "could not be opened".
     private func unwrapSealedIntroduction(_ data: Data) -> SealedIntroUnwrap {
         guard let wrapper = try? JSONDecoder().decode(SealedIntroductionEnvelope.self, from: data) else {
             return .notWrapped
         }
-        guard let key = sealedIntroductionPeerKey, !key.isEmpty,
-              let inner = try? identity.open(wrapper.sealedIntroduction, from: key) else {
+        guard let key = sealedIntroductionPeerKey, !key.isEmpty else { return .failed }
+        do {
+            return .opened(try identity.open(wrapper.sealedIntroduction, from: key))
+        } catch IdentityError.legacyWireFormat {
+            // The wrapper never reached the AEAD: it carries no `FPT2` marker, which is the shape
+            // of the retired transport format whose reader Phase 4 deleted (and, since that format
+            // had no marker of its own, of malformed bytes too). Separated from `.failed` — a
+            // wrapper that DID reach the AEAD and was rejected there, i.e. the tag-replay forger —
+            // so the Connection Inspector reports which of the two happened.
+            return .legacyWireFormat
+        } catch {
             return .failed
         }
-        return .opened(inner)
     }
 
     private func sendIdentityIntroduction(to peer: MultipeerPeer) async {
@@ -895,6 +907,10 @@ public final class ProximityCoordinator {
             return (message.data, false)
         case .opened(let inner):
             return (inner, true)
+        case .legacyWireFormat:
+            inspector?.recordCoordinatorEvent("sealed introduction carries no current wire-format marker — failing")
+            fail("sealed introduction in a retired or unrecognised wire format")
+            return nil
         case .failed:
             inspector?.recordCoordinatorEvent("sealed introduction could not be opened — failing")
             fail("sealed introduction open failed")

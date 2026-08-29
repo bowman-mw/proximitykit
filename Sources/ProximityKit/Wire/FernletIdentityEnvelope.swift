@@ -211,6 +211,13 @@ extension FernletIdentityEnvelope {
         case signatureInvalid
         case recipientMismatch
         case payloadDecryptionFailed
+        /// The sealed payload carries no `FPT2` marker — the shape of the retired transport
+        /// format, which this build no longer reads (crypto standardization Phase 4). Kept distinct
+        /// from ``payloadDecryptionFailed`` because `ProximityCoordinator.handleInbound` puts the
+        /// thrown error straight into the Connection Inspector and the trainer audit trail: a
+        /// payload that never reached the AEAD must read there as such, not as one the AEAD
+        /// rejected.
+        case payloadLegacyWireFormat
         case replayDetected
         case sealingRequired
     }
@@ -277,6 +284,8 @@ extension FernletIdentityEnvelope {
         case .sealedTo:
             do {
                 return try identityService.open(payload, from: senderKeyAgreementPublicKey, format: sealedPayloadFormat)
+            } catch IdentityError.legacyWireFormat {
+                throw VerifyError.payloadLegacyWireFormat
             } catch {
                 throw VerifyError.payloadDecryptionFailed
             }

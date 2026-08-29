@@ -57,6 +57,22 @@ public enum IdentityError: Error, Equatable {
     /// Raised by ``IdentityService/wipe()`` so a "your identity is gone" promise the keychain
     /// refused is loud rather than silent — the private keys may still be on the device.
     case keychainDeleteFailed(OSStatus)
+    /// The bytes carry no CURRENT format marker — a transport seal with no `FPT2` prefix, or a
+    /// 92-byte group-key wrap with no `FGK2` prefix. Both are the shapes a peer on a pre-marker
+    /// build sends, and the crypto standardization round's Phase 4 deleted the readers for them,
+    /// so they are now classified and refused rather than opened under an untyped AAD.
+    ///
+    /// Separate from ``openFailed`` because the cause and the remedy are different: `openFailed`
+    /// means the payload authenticated against nothing we hold (not for us, or tampered with),
+    /// while this one means the payload is not in a shape this build reads at all — most plausibly
+    /// a SENDER who needs to update Fernlet. The connection surface can say that only if the two
+    /// are distinguishable.
+    ///
+    /// What it does NOT prove: the retired transport format had no marker to check, so "no `FPT2`"
+    /// covers malformed or forged bytes as well as an older build. The 92-byte wrap is the sharper
+    /// of the two — that exact length IS a discriminator. Either way the outcome is fail-closed;
+    /// only the explanation differs.
+    case legacyWireFormat
 }
 
 // MARK: - IdentityService
@@ -83,12 +99,15 @@ public enum IdentityError: Error, Equatable {
 @MainActor
 public final class IdentityService {
 
-    /// Prefix on the current ephemeral-static transport seal. The legacy format starts directly
-    /// with the ephemeral public key and remains openable; all new writes authenticate a typed
-    /// AEAD purpose together with the sender's static key.
+    /// Prefix on the ephemeral-static transport seal, REQUIRED on both write and read. Every seal
+    /// authenticates a typed AEAD purpose together with the sender's static key; the pre-marker
+    /// format, which started directly with the ephemeral public key and bound no purpose, is no
+    /// longer opened (Phase 4) — its absence now only classifies bytes as
+    /// ``IdentityError/legacyWireFormat``.
     private nonisolated static let proximityTransportFormatV2 = Data("FPT2".utf8)
-    /// Prefix on the current group-key wrap. The prior 92-byte layout is read-only; the explicit
-    /// four-byte marker avoids treating a legacy ephemeral public key as a version byte.
+    /// Prefix on the group-key wrap, REQUIRED on both write and read. The explicit four-byte marker
+    /// avoids treating an ephemeral public key as a version byte; the prior 92-byte layout is
+    /// recognised by length only, so it can be refused by name rather than opened (Phase 4).
     private nonisolated static let groupKeyWrapFormatV2 = Data("FGK2".utf8)
 
     public let keychainService: String
@@ -240,13 +259,19 @@ public final class IdentityService {
     /// `format: .wire2` unframes tolerantly — a decrypted body without a frame tag passes through
     /// unchanged, covering the handshake race where a wire2-capable sender sealed legacy before
     /// it learned our capabilities. Pass `.wire2` only when the SENDER advertised `wire2`.
+    ///
+    /// - Throws: ``IdentityError/legacyWireFormat`` when the bytes carry no `FPT2` marker. That is
+    ///   the shape of the retired transport format, which is refused rather than opened — though
+    ///   the retired format carried no marker of its own, so malformed bytes land here too.
     public func open(_ ciphertext: Data, from peerKeyAgreementPublicKey: Data, format: SealedPayloadFormat = .legacy) throws -> Data {
         guard let recipientKey = keyAgreementKey else { throw IdentityError.notProvisioned }
-        // v2 wire format: `FPT2` || eskPub (32 B) || combined. Legacy starts directly at
-        // `eskPub`; it remains a read-only fallback because old in-person transfers may still be
-        // on disk/in-flight while every new write uses the typed AEAD purpose below.
-        let isV2 = ciphertext.starts(with: Self.proximityTransportFormatV2)
-        let offset = isV2 ? Self.proximityTransportFormatV2.count : 0
+        // Wire format: `FPT2` || eskPub (32 B) || combined. The pre-marker layout started directly
+        // at `eskPub` and authenticated only the sender's static key, with no typed AEAD purpose;
+        // Phase 4 deleted that read, so the marker's absence is a NAMED refusal, not a fallback.
+        guard ciphertext.starts(with: Self.proximityTransportFormatV2) else {
+            throw IdentityError.legacyWireFormat
+        }
+        let offset = Self.proximityTransportFormatV2.count
         guard ciphertext.count >= offset + 32 + 12 + 16 else { throw IdentityError.openFailed }
 
         let eskPubData = ciphertext.dropFirst(offset).prefix(32)
@@ -266,9 +291,7 @@ public final class IdentityService {
         let plaintext: Data
         do {
             let sealedBox = try ChaChaPoly.SealedBox(combined: combined)
-            let aad = isV2
-                ? FernletCryptoPurpose.AEAD.proximityTransportV2.data + peerKeyAgreementPublicKey
-                : peerKeyAgreementPublicKey // cryptographic-domain: legacy-read
+            let aad = FernletCryptoPurpose.AEAD.proximityTransportV2.data + peerKeyAgreementPublicKey
             plaintext = try ChaChaPoly.open(sealedBox, using: symKey, authenticating: aad)
         } catch {
             throw IdentityError.openFailed
@@ -429,12 +452,20 @@ public final class IdentityService {
     }
 
     /// Unwraps a group key bundle produced by `encryptGroupKey`.
+    ///
+    /// - Throws: ``IdentityError/legacyWireFormat`` for the pre-marker 92-byte bundle. That length
+    ///   is still RECOGNISED — it is the only thing that distinguishes an older build's wrap from
+    ///   malformed bytes — but it is no longer opened (Phase 4), so the refusal names the sender's
+    ///   build rather than reading as a failed unwrap.
     public func decryptGroupKey(_ bundle: Data) throws -> Data {
         guard let recipientKey = keyAgreementKey else { throw IdentityError.notProvisioned }
-        let isV2 = bundle.count == 96 && bundle.starts(with: Self.groupKeyWrapFormatV2)
-        guard isV2 || bundle.count == 92 else { throw IdentityError.openFailed }
+        // `FGK2` (4) + eph pub (32) + nonce (12) + ciphertext (32) + tag (16) = 96.
+        guard bundle.count == 96, bundle.starts(with: Self.groupKeyWrapFormatV2) else {
+            guard bundle.count == 92 else { throw IdentityError.openFailed }
+            throw IdentityError.legacyWireFormat
+        }
 
-        let offset = isV2 ? Self.groupKeyWrapFormatV2.count : 0
+        let offset = Self.groupKeyWrapFormatV2.count
 
         let ephPubData     = bundle[bundle.startIndex + offset ..< bundle.startIndex + offset + 32]
         let nonceData      = bundle[bundle.startIndex + offset + 32 ..< bundle.startIndex + offset + 44]
@@ -456,14 +487,11 @@ public final class IdentityService {
         do {
             let nonce = try AES.GCM.Nonce(data: nonceData)
             let sealedBox = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ciphertextData, tag: tagData)
-            if isV2 {
-                return try AES.GCM.open(
-                    sealedBox,
-                    using: symKey,
-                    authenticating: FernletCryptoPurpose.AEAD.meshGroupKeyWrapV2.data
-                )
-            }
-            return try AES.GCM.open(sealedBox, using: symKey) // cryptographic-domain: legacy-read
+            return try AES.GCM.open(
+                sealedBox,
+                using: symKey,
+                authenticating: FernletCryptoPurpose.AEAD.meshGroupKeyWrapV2.data
+            )
         } catch {
             throw IdentityError.openFailed
         }

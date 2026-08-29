@@ -3,11 +3,22 @@ import FernletDomainModel
 
 /// Failures of the mesh group-key photo/metadata AES-GCM crypto.
 ///
-/// Thrown by ``MeshNetworkManager``'s static encrypt/decrypt helpers; callers treat either case
+/// Thrown by ``MeshNetworkManager``'s static encrypt/decrypt helpers; callers treat every case
 /// as "drop the payload".
-enum MeshEncryptionError: Error {
+enum MeshEncryptionError: Error, Equatable {
     case decryptionFailed
     case encryptionFailed
+    /// The bytes carry no `FMGP2` / `FMGM2` format marker — the shape of the retired mesh wire
+    /// format a peer on an older build sends.
+    ///
+    /// Named separately from ``decryptionFailed`` on purpose: the crypto standardization round's
+    /// Phase 4 deleted the reader for that format, and a peer that still speaks it must be refused
+    /// with a reason the receiving surface can explain rather than folded into the generic "this
+    /// did not decrypt" that also covers a wrong key, a stale epoch and a tampered payload. The
+    /// retired format had no marker of its own, so this case cannot separate an older build from
+    /// malformed bytes — it separates both from a payload that reached the AEAD and was rejected
+    /// there, which is the distinction the audit trail actually needs.
+    case legacyWireFormat
 }
 
 /// A slot's traffic class in the capped mesh session.
