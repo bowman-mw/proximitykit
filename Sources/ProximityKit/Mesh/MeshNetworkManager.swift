@@ -1,5 +1,4 @@
 import Foundation
-import MultipeerConnectivity
 import Observation
 import UIKit
 import CryptoKit
@@ -818,7 +817,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                     fingerprint: fingerprint,
                     // MCPeerID display names have no other entry point, so this is the ingest
                     // equivalent for the transport name (R5).
-                    displayName: ItemNameModeration.moderatedPeerDisplayName(slot.peer.displayName),
+                    displayName: ItemNameModeration.moderatedPeerDisplayName(slot.peer.displayHint),
                     isLocal: false
                 )
             }
@@ -847,7 +846,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // re-recorded, so it can never be offered by the keep-as-friend prompt.
         guard !removedMemberFingerprints.contains(fingerprint) else { return }
         // Single ingest for the roster, so BOTH callers (the verified PeerIdentity path and
-        // promoteToMesh's raw `slot.peer.displayName`) are covered by one coercion. Nothing keys
+        // promoteToMesh's raw `slot.peer.displayHint`) are covered by one coercion. Nothing keys
         // off the roster display name — lookups and removal key on fingerprint — so rewriting an
         // existing entry to the sanitized form is safe.
         let name = ItemNameModeration.moderatedPeerDisplayName(displayName)
@@ -1870,7 +1869,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // too), then clear both records: a deliberate local eviction must not be retried.
             let wasKickedLocally = self.locallyKickedPeerIDs.contains(peer.id)
             let matchingSlot = self.slots.first {
-                $0.peer.id == peer.id || $0.peer.underlying == peer.underlying
+                $0.peer.isSameEndpoint(as: peer)
             }
             let wasCommitted = matchingSlot?.fingerprint != nil
             if let slot = matchingSlot {
@@ -1895,7 +1894,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 }
                 guard let self, self.isProximityJoin, self.isSessionOpen,
                       self.slots.count < Self.maxTotalSlots,
-                      !self.slots.contains(where: { $0.peer.id == peer.id || $0.peer.underlying == peer.underlying }) else { return }
+                      !self.slots.contains(where: { $0.peer.isSameEndpoint(as: peer) }) else { return }
                 self.meshSession.invite(peer)
             }
         }
@@ -2009,7 +2008,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Internal rather than private so the symmetry property can be asserted directly — the bug
     /// this replaces was invisible to every existing test because it lived inside a closure that
     /// needs live radios to reach.
-    func shouldInitiateInvite(to peer: MultipeerPeer) -> Bool {
+    func shouldInitiateInvite(to peer: PeerHandle) -> Bool {
         guard let peerSessionID = peer.discoveryInfo?["sid"], !peerSessionID.isEmpty else {
             // Discovery info absent (peer not yet resolved, or a build predating "sid"). Deadlock
             // is strictly worse than a redundant invite here: a simultaneous mutual invite fails
@@ -2020,7 +2019,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return sessionID > peerSessionID
     }
 
-    private func handlePeerDiscovered(_ peer: MultipeerPeer) {
+    private func handlePeerDiscovered(_ peer: PeerHandle) {
         // Proximity-join mode: auto-invite every peer silently; no browse list shown.
         if isProximityJoin {
             guard isSessionOpen else { return }
@@ -2144,7 +2143,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// as the sibling managers (see `MeshMultipeerSession.disconnectPeer`); a no-op for a peer MC
     /// already reported gone. Records the id so `onPeerDisconnected` does not treat the resulting
     /// `.notConnected` as a transient drop to retry.
-    private func kickEvictedPeer(_ peer: MultipeerPeer) {
+    private func kickEvictedPeer(_ peer: PeerHandle) {
         if locallyKickedPeerIDs.count < Self.maxLocallyKickedPeers {
             locallyKickedPeerIDs.insert(peer.id)
         }
@@ -2252,7 +2251,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         updateDiscoveryInfo()
         let committed = slots.filter { $0.fingerprint != nil }
         // Phase 2 belt-and-braces: every committed slot already passed through onSlotConnected
-        // (which recorded its verified identity), so this is insert-only — `slot.peer.displayName`
+        // (which recorded its verified identity), so this is insert-only — `slot.peer.displayHint`
         // is the MC transport name and must not overwrite the identity display name.
         for slot in committed {
             guard let fingerprint = slot.fingerprint,
@@ -2260,7 +2259,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                   let signingKey = slot.verifiedSigningPublicKey,
                   let kaKey = slot.verifiedKeyAgreementPublicKey else { continue }
             recordSessionParticipant(
-                displayName: slot.peer.displayName,
+                displayName: slot.peer.displayHint,
                 fingerprint: fingerprint,
                 signingPublicKey: signingKey,
                 keyAgreementPublicKey: kaKey
@@ -2544,7 +2543,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         pendingQRVerifications[slotID]?.challengeNonce
     }
 
-    private func canEvaluateOverflowCandidate(_ peer: MultipeerPeer) -> Bool {
+    private func canEvaluateOverflowCandidate(_ peer: PeerHandle) -> Bool {
         guard !slots.contains(where: { $0.peer.id == peer.id }) else { return false }
         guard slots.count < Self.maxSlotsDuringOverflowEvaluation else { return false }
         guard !slots.contains(where: { $0.isOverflowCandidate }) else { return false }
@@ -4105,7 +4104,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Phase-3a registry gate must drop. `internal` for `@testable` unit tests only.
     func addSlotForTesting(
         coordinator: ProximityCoordinator,
-        peer: MultipeerPeer,
+        peer: PeerHandle,
         fingerprint: String?,
         verifiedKeyAgreementPublicKey: Data? = nil,
         peerCapabilities: [String]? = nil
@@ -4134,7 +4133,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Observes the transport's per-peer MC kick (`MeshMultipeerSession.disconnectPeer`) so a test
     /// can assert every local eviction path frees the MC link instead of leaving a zombie.
-    func setDisconnectPeerObserverForTesting(_ handler: ((MultipeerPeer) -> Void)?) {
+    func setDisconnectPeerObserverForTesting(_ handler: ((PeerHandle) -> Void)?) {
         meshSession.onDisconnectPeerRequestedForTesting = handler
     }
 
@@ -4155,8 +4154,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// regresses (`slotTrustPolicies` no longer populated), the coordinator's weak ref goes nil once
     /// this returns and the revoked/blocked-key drop this drives silently stops firing.
     func makeRetainedSlotCoordinatorForTesting(
-        peer: MultipeerPeer,
-        transport: any MultipeerTransport,
+        peer: PeerHandle,
+        transport: any PeerTransport,
         ranging: any RangingProvider
     ) -> ProximityCoordinator {
         let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)

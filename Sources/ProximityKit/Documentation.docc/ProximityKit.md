@@ -204,12 +204,19 @@ type has no local label). Senders keep emitting frozen English forever.
 
 ### Transport
 
-- ``MultipeerTransport``
-- ``MultipeerPeer``
-- ``MultipeerTransportState``
-- ``MultipeerPendingInvite``
-- ``MultipeerInboundMessage``
-- ``MultipeerTransportError``
+The protocol surface carries no framework peer type: `MeshMultipeerSession` keeps the
+MultipeerConnectivity half private behind ``PeerEndpointKey``, so a Network.framework/QUIC conformer
+slots in beside it without changing anything here. ``MCPeerIDStoring`` and ``FileMCPeerIDStore``
+are the two deliberate exceptions — they persist the MC peer identity itself and retire with MC.
+
+- ``PeerTransport``
+- ``PeerHandle``
+- ``PeerEndpointKey``
+- ``PeerDeliveryMode``
+- ``PeerTransportState``
+- ``PeerPendingInvite``
+- ``InboundPeerFrame``
+- ``PeerTransportError``
 - ``MultipeerServiceType``
 - ``MCPeerIDStoring``
 - ``FileMCPeerIDStore``

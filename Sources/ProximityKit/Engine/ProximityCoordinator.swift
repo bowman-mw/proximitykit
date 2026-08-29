@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import MultipeerConnectivity
 import Observation
 import UIKit
 import FernletDomainModel
@@ -180,7 +179,7 @@ public final class ProximityCoordinator {
     static let peerHeartbeatCommitEvidenceWindow: TimeInterval = 3.0
 
     @ObservationIgnored private let identity: IdentityService
-    @ObservationIgnored private let transport: any MultipeerTransport
+    @ObservationIgnored private let transport: any PeerTransport
     @ObservationIgnored private let ranging: any RangingProvider
     @ObservationIgnored private weak var inspector: (any ProximityInspectorRecording)?
     @ObservationIgnored private weak var payloadHandler: (any ProximityPayloadHandling)?
@@ -208,8 +207,8 @@ public final class ProximityCoordinator {
     @ObservationIgnored private var rangingStarted = false
     @ObservationIgnored private var currentRole: Role?
     @ObservationIgnored private var currentMode: Mode?
-    @ObservationIgnored private var currentTransportPeer: MultipeerPeer?
-    @ObservationIgnored private var pendingInvite: MultipeerPendingInvite?
+    @ObservationIgnored private var currentTransportPeer: PeerHandle?
+    @ObservationIgnored private var pendingInvite: PeerPendingInvite?
     @ObservationIgnored private var pendingPeerIdentity: PeerIdentity?
     @ObservationIgnored private var connectedPeerIdentity: PeerIdentity?
     @ObservationIgnored private var rangingMode: RangingMode = .none
@@ -231,7 +230,7 @@ public final class ProximityCoordinator {
 
     public init(
         identity: IdentityService,
-        transport: any MultipeerTransport,
+        transport: any PeerTransport,
         ranging: any RangingProvider,
         inspector: (any ProximityInspectorRecording)? = nil,
         payloadHandler: (any ProximityPayloadHandling)? = nil,
@@ -540,7 +539,7 @@ public final class ProximityCoordinator {
         }
     }
 
-    private func handleTransportState(_ transportState: MultipeerTransportState) async {
+    private func handleTransportState(_ transportState: PeerTransportState) async {
         switch transportState {
         case .advertising, .browsing:
             if isSessionLive { return }
@@ -579,7 +578,7 @@ public final class ProximityCoordinator {
 
     /// `.discovered`: adopt the first peer, publish it to the inspector, and — as the browser —
     /// invite it when the deterministic single-inviter rule selects us.
-    private func handleDiscoveredPeers(_ peers: [MultipeerPeer]) async {
+    private func handleDiscoveredPeers(_ peers: [PeerHandle]) async {
         if isSessionLive { return }
         guard let peer = peers.first else {
             transition(to: .discovering)
@@ -592,7 +591,7 @@ public final class ProximityCoordinator {
         guard shouldInviteDiscoveredPeer(peer) else { return }
         do {
             try await transport.invite(peer)
-            inspector?.recordCoordinatorEvent("invite sent to \(peer.displayName)")
+            inspector?.recordCoordinatorEvent("invite sent to \(peer.displayHint)")
         } catch {
             fail(error.localizedDescription)
         }
@@ -600,7 +599,7 @@ public final class ProximityCoordinator {
 
     /// `.connecting`: record the peer, and only enter the tap gate when the handshake has not
     /// already moved past it (a late transport callback must never rewind the state machine).
-    private func handleTransportConnecting(_ peer: MultipeerPeer) {
+    private func handleTransportConnecting(_ peer: PeerHandle) {
         currentTransportPeer = peer
         updateInspectorPeer(transportPeer: peer)
         updateInspectorTransport(state: "connecting")
@@ -622,7 +621,7 @@ public final class ProximityCoordinator {
     /// auto-advance to the identity exchange; the human gate is the explicit post-identity
     /// confirmation (plus the verification ceremony on a first pairing), mirroring the friend
     /// path's identity-first architecture.
-    private func handleTransportConnected(_ peer: MultipeerPeer) async {
+    private func handleTransportConnected(_ peer: PeerHandle) async {
         currentTransportPeer = peer
         updateInspectorPeer(transportPeer: peer)
         updateInspectorTransport(state: "connected")
@@ -650,11 +649,11 @@ public final class ProximityCoordinator {
         await finishTapConfirmation(for: peer)
     }
 
-    private func shouldInviteDiscoveredPeer(_ peer: MultipeerPeer) -> Bool {
+    private func shouldInviteDiscoveredPeer(_ peer: PeerHandle) -> Bool {
         guard currentMode == .friend else { return true }
         guard let remoteSID = peer.discoveryInfo?["sid"] else { return true }
         if sessionID == remoteSID {
-            return displayName < peer.displayName  // self-discovery tie-break
+            return displayName < peer.displayHint  // self-discovery tie-break
         }
         return sessionID < remoteSID  // deterministic single-inviter selection
     }
@@ -730,7 +729,7 @@ public final class ProximityCoordinator {
         }
     }
 
-    private func finishTapConfirmation(for peer: MultipeerPeer) async {
+    private func finishTapConfirmation(for peer: PeerHandle) async {
         currentTransportPeer = peer
         transition(to: .awaitingIdentityIntroduction(peer: peer))
         inspector?.recordCoordinatorEvent("tap confirmed")
@@ -802,7 +801,7 @@ public final class ProximityCoordinator {
         }
     }
 
-    private func sendIdentityIntroduction(to peer: MultipeerPeer) async {
+    private func sendIdentityIntroduction(to peer: PeerHandle) async {
         do {
             let sentAt = now()
             let envelope = try FernletIdentityEnvelope.signed(
@@ -828,7 +827,7 @@ public final class ProximityCoordinator {
         }
     }
 
-    private func handleInbound(_ message: MultipeerInboundMessage) async {
+    private func handleInbound(_ message: InboundPeerFrame) async {
         currentTransportPeer = message.peer
         if rejectsOversizedTrainerBlob(message) { return }
         guard let unwrapped = unwrapInboundEnvelopeData(message) else { return }
@@ -862,7 +861,7 @@ public final class ProximityCoordinator {
             trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
                 kind: .envelopeRejected,
                 peerFingerprint: message.peer.advertisedFingerprint,
-                peerDisplayName: message.peer.displayName,
+                peerDisplayName: message.peer.displayHint,
                 message: "Envelope verification failed: \(error)"
             ))
             inspector?.recordError(domain: "Envelope", message: String(describing: error), recoverable: false)
@@ -878,13 +877,13 @@ public final class ProximityCoordinator {
     /// uniform floor every radio already gets from `MeshMultipeerSession.maxInboundWireBytes`
     /// (16 MiB, dropped before the frame ever reaches a channel). 4 MB ≪ 16 MiB, so the trainer
     /// bound still binds. True when the session was failed and the caller stops.
-    private func rejectsOversizedTrainerBlob(_ message: MultipeerInboundMessage) -> Bool {
+    private func rejectsOversizedTrainerBlob(_ message: InboundPeerFrame) -> Bool {
         guard currentMode == .trainer,
               message.data.count > TrainerExportPayload.maxTrainerWireBytes else { return false }
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .envelopeRejected,
             peerFingerprint: message.peer.advertisedFingerprint,
-            peerDisplayName: message.peer.displayName,
+            peerDisplayName: message.peer.displayHint,
             message: "Rejected oversized inbound blob (\(message.data.count) bytes) before decode"
         ))
         inspector?.recordError(domain: "Envelope", message: "oversized inbound blob", recoverable: false)
@@ -899,7 +898,7 @@ public final class ProximityCoordinator {
     /// nobody), which is why `handleIdentityEnvelope` additionally binds the inner envelope's
     /// sender KA key to `sealedIntroductionPeerKey`. A plain envelope (a post-commit heartbeat)
     /// passes straight through. Nil = already failed.
-    private func unwrapInboundEnvelopeData(_ message: MultipeerInboundMessage)
+    private func unwrapInboundEnvelopeData(_ message: InboundPeerFrame)
     -> (data: Data, cameFromSealedWrapper: Bool)? {
         guard usesSealedIntroduction else { return (message.data, false) }
         switch unwrapSealedIntroduction(message.data) {
@@ -963,7 +962,7 @@ public final class ProximityCoordinator {
     private func dispatchVerified(
         _ envelope: FernletIdentityEnvelope,
         plaintext: Data,
-        from peer: MultipeerPeer,
+        from peer: PeerHandle,
         cameFromSealedWrapper: Bool
     ) async throws {
         guard let payloadType = envelope.payloadType else {
@@ -1007,7 +1006,7 @@ public final class ProximityCoordinator {
         return try JSONEncoder().encode(payload)
     }
 
-    private func sendIdentityAcknowledgement(to peer: MultipeerPeer) async {
+    private func sendIdentityAcknowledgement(to peer: PeerHandle) async {
         do {
             let sentAt = now()
             let envelope = try FernletIdentityEnvelope.signed(
@@ -1041,7 +1040,7 @@ public final class ProximityCoordinator {
     private func handleHeartbeat(
         _ envelope: FernletIdentityEnvelope,
         plaintext: Data,
-        from peer: MultipeerPeer
+        from peer: PeerHandle
     ) async {
         // SEALED-INTRODUCTION rule (Phase 4b): never respond to a heartbeat before the peer's
         // identity has been verified via the sealed intro. `sendHeartbeatAcknowledgement` emits our
@@ -1106,7 +1105,7 @@ public final class ProximityCoordinator {
         await confirmPeerIdentity()
     }
 
-    private func sendHeartbeatAcknowledgement(for heartbeatID: UUID, to peer: MultipeerPeer) async {
+    private func sendHeartbeatAcknowledgement(for heartbeatID: UUID, to peer: PeerHandle) async {
         do {
             let now = now()
             let payload = SessionHeartbeatPayload(
@@ -1128,7 +1127,7 @@ public final class ProximityCoordinator {
                 expiresAt: now.addingTimeInterval(30)
             )
             let data = try JSONEncoder().encode(envelope)
-            try await transport.send(data, to: peer, mode: .unreliable)
+            try await transport.send(data, to: peer, mode: .bestEffort)
             recordEnvelope(envelope, direction: .sent, byteCount: data.count, signatureVerified: true)
             bytesSent += data.count
             await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
@@ -1174,8 +1173,8 @@ public final class ProximityCoordinator {
         ))
     }
 
-    private func updateInspectorPeer(identity: PeerIdentity? = nil, transportPeer: MultipeerPeer? = nil) {
-        let displayName = identity?.displayName ?? transportPeer?.displayName ?? "Unknown"
+    private func updateInspectorPeer(identity: PeerIdentity? = nil, transportPeer: PeerHandle? = nil) {
+        let displayName = identity?.displayName ?? transportPeer?.displayHint ?? "Unknown"
         let advertisedFingerprint = transportPeer?.advertisedFingerprint
         let confirmedFingerprint = identity?.fingerprint
         inspector?.updatePeer(ConnectionSessionLog.PeerInfo(
@@ -1226,7 +1225,7 @@ public final class ProximityCoordinator {
     private func handleIdentityEnvelope(
         _ envelope: FernletIdentityEnvelope,
         plaintext: Data,
-        from peer: MultipeerPeer,
+        from peer: PeerHandle,
         cameFromSealedWrapper: Bool
     ) async throws {
         let fingerprint = IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
@@ -1335,7 +1334,7 @@ public final class ProximityCoordinator {
         }
     }
 
-    private func startRangingIfPossible(with payload: IdentityRangingPayload?, from peer: MultipeerPeer) async {
+    private func startRangingIfPossible(with payload: IdentityRangingPayload?, from peer: PeerHandle) async {
         guard !rangingStarted else { return }  // idempotent — NI session must not be restarted mid-session
         guard ranging.isHardwareSupported else {
             rangingMode = .rssi
@@ -1356,7 +1355,7 @@ public final class ProximityCoordinator {
             try await ranging.start(with: discoveryToken)
             rangingMode = .uwb
             updateInspectorRangingMode(.uwb)
-            inspector?.recordCoordinatorEvent("ranging token accepted from \(peer.displayName)")
+            inspector?.recordCoordinatorEvent("ranging token accepted from \(peer.displayHint)")
         } catch {
             rangingMode = .rssi
             updateInspectorRangingMode(.rssi)
@@ -1401,7 +1400,7 @@ public final class ProximityCoordinator {
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .stateTransition,
             peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
-            peerDisplayName: connectedIdentity?.displayName ?? pendingPeerIdentity?.displayName ?? currentTransportPeer?.displayName,
+            peerDisplayName: connectedIdentity?.displayName ?? pendingPeerIdentity?.displayName ?? currentTransportPeer?.displayHint,
             message: newState.debugLabel
         ))
     }
@@ -1416,7 +1415,7 @@ public final class ProximityCoordinator {
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .error,
             peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
-            peerDisplayName: connectedIdentity?.displayName ?? pendingPeerIdentity?.displayName ?? currentTransportPeer?.displayName,
+            peerDisplayName: connectedIdentity?.displayName ?? pendingPeerIdentity?.displayName ?? currentTransportPeer?.displayHint,
             message: reason
         ))
         inspector?.endSession(endState: "failed")
@@ -1451,7 +1450,7 @@ public final class ProximityCoordinator {
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .sessionEnded,
             peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
-            peerDisplayName: connectedIdentity?.displayName ?? pendingPeerIdentity?.displayName ?? currentTransportPeer?.displayName,
+            peerDisplayName: connectedIdentity?.displayName ?? pendingPeerIdentity?.displayName ?? currentTransportPeer?.displayHint,
             message: "\(reason)"
         ))
 
@@ -1538,7 +1537,7 @@ public final class ProximityCoordinator {
                 expiresAt: sentAt.addingTimeInterval(interval * 2)
             )
             let data = try JSONEncoder().encode(envelope)
-            try await transport.send(data, to: peer, mode: .unreliable)
+            try await transport.send(data, to: peer, mode: .bestEffort)
             pendingHeartbeatSentAtByID[heartbeatID] = sentAt
             let pruneThreshold = sentAt.addingTimeInterval(-(interval * 5))
             pendingHeartbeatSentAtByID = pendingHeartbeatSentAtByID.filter { $0.value > pruneThreshold }
@@ -1573,7 +1572,7 @@ public final class ProximityCoordinator {
                 self.trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
                     kind: .sessionEnded,
                     peerFingerprint: self.connectedIdentity?.fingerprint ?? self.pendingPeerIdentity?.fingerprint ?? self.currentTransportPeer?.advertisedFingerprint,
-                    peerDisplayName: self.connectedIdentity?.displayName ?? self.pendingPeerIdentity?.displayName ?? self.currentTransportPeer?.displayName,
+                    peerDisplayName: self.connectedIdentity?.displayName ?? self.pendingPeerIdentity?.displayName ?? self.currentTransportPeer?.displayHint,
                     message: "timeout"
                 ))
                 self.inspector?.recordCoordinatorEvent("ended: timeout")
@@ -1593,10 +1592,10 @@ extension ProximityCoordinator {
         case idle
         case starting
         case discovering
-        case peerInRange(peer: MultipeerPeer, distance: RangingDistance)
-        case pendingInvite(MultipeerPendingInvite)
-        case awaitingTapConfirmation(peer: MultipeerPeer)
-        case awaitingIdentityIntroduction(peer: MultipeerPeer)
+        case peerInRange(peer: PeerHandle, distance: RangingDistance)
+        case pendingInvite(PeerPendingInvite)
+        case awaitingTapConfirmation(peer: PeerHandle)
+        case awaitingIdentityIntroduction(peer: PeerHandle)
         case awaitingProximityCommit(peer: PeerIdentity)   // friend mode, UWB: waiting for 15 cm dwell
         case awaitingManualCommit(peer: PeerIdentity)      // friend mode, no UWB: waiting for on-screen confirm
         case awaitingUserConfirmation(peer: PeerIdentity)

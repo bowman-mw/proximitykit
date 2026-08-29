@@ -58,7 +58,7 @@ import FernletFoundation
 /// recipe manager's `RecipeShareConnection`.
 private struct PresenceHeartConnection: Identifiable {
     let id: UUID
-    let peer: MultipeerPeer
+    let peer: PeerHandle
     let channel: PeerChannelTransport
     let coordinator: ProximityCoordinator
     let trustPolicy: FriendSessionTrustPolicy
@@ -151,9 +151,9 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     /// Live heart connections (outbound sends in flight + inbound accepts). Keyed by peer UUID.
     @ObservationIgnored private var heartConnections: [PresenceHeartConnection] = []
-    /// Peers currently discovered nearby (the MultipeerPeer objects), so a send can invite the
+    /// Peers currently discovered nearby (the PeerHandle objects), so a send can invite the
     /// exact peer whose tag matched the intended friend.
-    @ObservationIgnored private var discoveredPeers: [UUID: MultipeerPeer] = [:]
+    @ObservationIgnored private var discoveredPeers: [UUID: PeerHandle] = [:]
     /// Outbound sends awaiting their MC channel: peer UUID → (friend, attempt count).
     @ObservationIgnored private var pendingHeartSends: [UUID: (friend: ProximityTrustedPeerRecord, attempt: Int)] = [:]
     @ObservationIgnored private var heartObservationTask: Task<Void, Never>?
@@ -358,11 +358,11 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     // MARK: - Discovery → nearby set
 
-    private func handleDiscoveredPeer(_ peer: MultipeerPeer) {
+    private func handleDiscoveredPeer(_ peer: PeerHandle) {
         guard let info = peer.discoveryInfo, info["v"] == "1", let joined = info["t"] else { return }
         // Self-exclusion layer 1: our own previous-start ghost (stale Bonjour cache during a
         // stop/start) advertises under an ephemeral display name we generated this launch.
-        guard !ownEphemeralPeerNames.contains(peer.displayName) else { return }
+        guard !ownEphemeralPeerNames.contains(peer.displayHint) else { return }
 
         let tokens = Set(joined.split(separator: ",").map(String.init)).filter { !$0.isEmpty }
         var matched: Set<String> = []
@@ -404,7 +404,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         recomputeNearby()
     }
 
-    private func handleLostPeer(_ peer: MultipeerPeer) {
+    private func handleLostPeer(_ peer: PeerHandle) {
         guard matchedFingerprintsByPeer[peer.id] != nil else { return }
         peerLostAt[peer.id] = nowProvider()
         // Debounce: the peer stays "nearby" through the grace window (epoch restart flap); the
@@ -661,7 +661,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         }
     }
 
-    private func discoveredPeer(matchingFriendFingerprint fingerprint: String) -> MultipeerPeer? {
+    private func discoveredPeer(matchingFriendFingerprint fingerprint: String) -> PeerHandle? {
         for (peerID, matched) in matchedFingerprintsByPeer
         where matched.contains(where: { IdentityService.fingerprintsMatch($0, fingerprint) }) {
             if let peer = discoveredPeers[peerID] { return peer }
@@ -688,10 +688,10 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// Accept an inbound presence invitation ONLY from a peer whose discovered tag matched a
     /// friend, hearts are enabled, and we're under the connection cap. A pre-discovery-race
     /// inviter (not yet in the match map) is REJECTED — the sender retries.
-    func shouldAcceptHeartInvitation(_ peer: MultipeerPeer) -> Bool {
+    func shouldAcceptHeartInvitation(_ peer: PeerHandle) -> Bool {
         // A peer we already hold a connection with re-inviting (retry of a dropped attempt) is
         // always let through.
-        if heartConnections.contains(where: { $0.peer.id == peer.id || $0.peer.underlying == peer.underlying }) {
+        if heartConnections.contains(where: { $0.peer.isSameEndpoint(as: peer) }) {
             return true
         }
         guard store.allowNearbyHearts else { return false }
@@ -912,9 +912,9 @@ public final class PresenceManager: ProximityPayloadHandling {
         heartConnectTimeoutTasks.removeAll()
     }
 
-    private func removeHeartConnection(matching peer: MultipeerPeer) {
+    private func removeHeartConnection(matching peer: PeerHandle) {
         let dropped = heartConnections.filter { conn in
-            conn.peer.id == peer.id || conn.peer.underlying == peer.underlying
+            conn.peer.isSameEndpoint(as: peer)
         }
         guard !dropped.isEmpty else { return }
         let droppedIDs = Set(dropped.map(\.id))
@@ -942,7 +942,7 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     // MARK: - Hearts: pre-connect timeout + retry (pre-discovery race)
 
-    private func armHeartConnectTimeout(peerID: UUID, peer: MultipeerPeer, friend: ProximityTrustedPeerRecord) {
+    private func armHeartConnectTimeout(peerID: UUID, peer: PeerHandle, friend: ProximityTrustedPeerRecord) {
         cancelHeartConnectTimeout(peerID: peerID)
         let timeout = heartConnectTimeoutSeconds
         heartConnectTimeoutTasks[peerID] = Task { @MainActor [weak self] in
@@ -958,7 +958,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         }
     }
 
-    private func handleHeartConnectTimeout(peerID: UUID, peer: MultipeerPeer, friend: ProximityTrustedPeerRecord) {
+    private func handleHeartConnectTimeout(peerID: UUID, peer: PeerHandle, friend: ProximityTrustedPeerRecord) {
         // A channel already came up — the handshake budget governs; nothing to do.
         guard !heartConnections.contains(where: { $0.id == peerID }) else { return }
         guard let pending = pendingHeartSends[peerID], pending.friend.fingerprint == friend.fingerprint else { return }
@@ -1106,13 +1106,13 @@ public final class PresenceManager: ProximityPayloadHandling {
         rebuildTags(epoch: currentEpoch)
     }
 
-    func handleDiscoveredPeerForTesting(_ peer: MultipeerPeer) {
+    func handleDiscoveredPeerForTesting(_ peer: PeerHandle) {
         handleDiscoveredPeer(peer)
     }
 
     /// Marks the peer lost WITHOUT scheduling the real-time sweep task — tests drive expiry
     /// through `sweepExpiredPeersForTesting()` against the injected clock.
-    func markPeerLostForTesting(_ peer: MultipeerPeer) {
+    func markPeerLostForTesting(_ peer: PeerHandle) {
         guard matchedFingerprintsByPeer[peer.id] != nil else { return }
         peerLostAt[peer.id] = nowProvider()
     }
@@ -1136,7 +1136,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// Drives the production MC-disconnect removal path (`removeHeartConnection(matching:)`)
     /// exactly as the transport's `onPeerDisconnected` would — the writer needs a live radio a
     /// unit test must never start.
-    func simulateHeartPeerDisconnectForTesting(_ peer: MultipeerPeer) {
+    func simulateHeartPeerDisconnectForTesting(_ peer: PeerHandle) {
         removeHeartConnection(matching: peer)
     }
 
@@ -1149,7 +1149,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     }
 
     /// Drives the production inbound-invitation gate exactly as the transport would.
-    func shouldAcceptHeartInvitationForTesting(_ peer: MultipeerPeer) -> Bool {
+    func shouldAcceptHeartInvitationForTesting(_ peer: PeerHandle) -> Bool {
         shouldAcceptHeartInvitation(peer)
     }
 
@@ -1182,7 +1182,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// ranging provider so no real radio starts), then tears it down — exercising the exact
     /// teardown path a completed/failed send runs. Afterward the peer, if still advertising, must
     /// remain both reachable and sendable.
-    func simulateHeartConnectionTeardownForTesting(peer: MultipeerPeer, ranging: any RangingProvider) {
+    func simulateHeartConnectionTeardownForTesting(peer: PeerHandle, ranging: any RangingProvider) {
         let channelSession = session ?? MeshMultipeerSession(usesEphemeralPeerID: true)
         let channel = PeerChannelTransport(peer: peer, session: channelSession)
         let coordinator = ProximityCoordinator(
@@ -1213,7 +1213,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// caller that ignores it is ignoring the trust decision.
     func evaluateConnectedCoordinatorForTesting(
         _ coordinator: ProximityCoordinator,
-        peer: MultipeerPeer,
+        peer: PeerHandle,
         trustPolicy: FriendSessionTrustPolicy,
         intendedFriend: ProximityTrustedPeerRecord? = nil
     ) -> Bool {

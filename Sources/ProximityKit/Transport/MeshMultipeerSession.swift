@@ -8,7 +8,7 @@ import FernletFoundation
 
 // MARK: - PeerChannelTransport
 
-/// Per-peer ``MultipeerTransport`` adapter for mesh slots.
+/// Per-peer ``PeerTransport`` adapter for mesh slots.
 ///
 /// ``MeshMultipeerSession`` manages the shared MCSession; this type routes state and data events
 /// for a single peer without managing MC lifecycle — the advertise/browse/invite/accept
@@ -17,18 +17,18 @@ import FernletFoundation
 /// `notifyDisconnected` / `receive` to feed the publishers the peer's ``ProximityCoordinator``
 /// subscribes to.
 @MainActor
-final class PeerChannelTransport: MultipeerTransport {
-    let peer: MultipeerPeer
+final class PeerChannelTransport: PeerTransport {
+    let peer: PeerHandle
     private weak var session: MeshMultipeerSession?
 
-    private let stateSubject = CurrentValueSubject<MultipeerTransportState, Never>(.idle)
-    private let inboundSubject = PassthroughSubject<MultipeerInboundMessage, Never>()
+    private let stateSubject = CurrentValueSubject<PeerTransportState, Never>(.idle)
+    private let inboundSubject = PassthroughSubject<InboundPeerFrame, Never>()
 
-    var state: AnyPublisher<MultipeerTransportState, Never> { stateSubject.eraseToAnyPublisher() }
-    var inbound: AnyPublisher<MultipeerInboundMessage, Never> { inboundSubject.eraseToAnyPublisher() }
-    var connectedPeers: [MultipeerPeer] { [] }
+    var state: AnyPublisher<PeerTransportState, Never> { stateSubject.eraseToAnyPublisher() }
+    var inbound: AnyPublisher<InboundPeerFrame, Never> { inboundSubject.eraseToAnyPublisher() }
+    var connectedPeers: [PeerHandle] { [] }
 
-    init(peer: MultipeerPeer, session: MeshMultipeerSession) {
+    init(peer: PeerHandle, session: MeshMultipeerSession) {
         self.peer = peer
         self.session = session
     }
@@ -36,11 +36,11 @@ final class PeerChannelTransport: MultipeerTransport {
     // MC advertising/browsing is handled by MeshMultipeerSession, not per-channel
     func startAdvertising(serviceType: String, discoveryInfo: [String: String]) async throws {}
     func startBrowsing(serviceType: String) async throws {}
-    func invite(_ peer: MultipeerPeer) async throws {}
-    func accept(_ invite: MultipeerPendingInvite) async throws {}
+    func invite(_ peer: PeerHandle) async throws {}
+    func accept(_ invite: PeerPendingInvite) async throws {}
 
-    func send(_ data: Data, to peer: MultipeerPeer, mode: MCSessionSendDataMode) async throws {
-        guard let session else { throw MultipeerTransportError.unexpectedState }
+    func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws {
+        guard let session else { throw PeerTransportError.unexpectedState }
         try await session.send(data, to: peer, mode: mode)
     }
 
@@ -60,7 +60,7 @@ final class PeerChannelTransport: MultipeerTransport {
     }
 
     func receive(_ data: Data) {
-        inboundSubject.send(MultipeerInboundMessage(
+        inboundSubject.send(InboundPeerFrame(
             peer: peer,
             data: data,
             receivedAt: Date(),
@@ -101,6 +101,11 @@ final class MeshMultipeerSession: NSObject {
     /// would approach this bound — the two caps must be moved together.
     nonisolated static let maxInboundWireBytes = SealedPayloadFraming.maxInflatedByteCount
 
+    /// Cap on the retained `MCPeerID ↔ PeerEndpointKey` mapping. Eight is the roster cap and four
+    /// the connection cap, so 64 leaves an order of magnitude of headroom over any real session
+    /// while keeping a crowded room from growing the map without end.
+    nonisolated private static let maxTrackedEndpoints = 64
+
     // Discovery-failure surfacing (Phase 1): the empty didNotStart* delegates are how the
     // missing-NSBonjourServices bug shipped invisibly — a service type absent from Info.plist
     // fails here on device (iOS 14+ local-network privacy) with no other signal.
@@ -109,7 +114,26 @@ final class MeshMultipeerSession: NSObject {
     let localPeerID: MCPeerID
     private(set) var channels: [MCPeerID: PeerChannelTransport] = [:]
     private(set) var peerInfoCache: [MCPeerID: [String: String]] = [:]
-    private var peerMap: [MCPeerID: MultipeerPeer] = [:]
+    private var peerMap: [MCPeerID: PeerHandle] = [:]
+    /// `MCPeerID ↔ PeerEndpointKey`, the private half of transport neutrality: the framework peer
+    /// type stops at this class, and everything above it compares ``PeerEndpointKey``s.
+    ///
+    /// Deliberately NOT pruned alongside `peerMap`. `peerMap` is evicted on `lostPeer` (when no
+    /// channel exists), which is exactly what re-mints a peer's `id` and is exactly why the
+    /// endpoint key exists. `MCPeerID` equality — the thing these maps stand in for — is unaffected
+    /// by our cache, so pruning here would narrow the identity test rather than preserve it, and
+    /// an owner still holding a record for that device would stop recognizing it.
+    ///
+    /// Bounded by ``maxTrackedEndpoints`` with oldest-first eviction (Power of 10 rule 3). Evicting
+    /// only re-exposes the pre-existing false negative — a returning device read as new — never a
+    /// false positive, since a key is minted once per distinct `MCPeerID`.
+    ///
+    /// Memory-only, per session instance: never persisted, never advertised, never on the wire. It
+    /// links nothing the presence radio's ephemeral-`MCPeerID` posture does not already link, and
+    /// owes no persisted-surface wipe row for the same reason.
+    private var endpointKeyByPeerID: [MCPeerID: PeerEndpointKey] = [:]
+    private var peerIDByEndpointKey: [PeerEndpointKey: MCPeerID] = [:]
+    private var endpointKeyOrder: [MCPeerID] = []
     private var mcSession: MCSession?
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
@@ -120,11 +144,11 @@ final class MeshMultipeerSession: NSObject {
     /// any live connections) kept alive. See `pauseDiscovery()`/`resumeDiscovery()`.
     private(set) var isDiscoveryPaused = false
 
-    var onPeerDiscovered: ((MultipeerPeer) -> Void)?
-    var onPeerLost: ((MultipeerPeer) -> Void)?
+    var onPeerDiscovered: ((PeerHandle) -> Void)?
+    var onPeerLost: ((PeerHandle) -> Void)?
     var onPeerChannelReady: ((PeerChannelTransport) -> Void)?
-    var onPeerDisconnected: ((MultipeerPeer, String) -> Void)?
-    var shouldAcceptInvitation: ((MultipeerPeer) -> Bool)?
+    var onPeerDisconnected: ((PeerHandle, String) -> Void)?
+    var shouldAcceptInvitation: ((PeerHandle) -> Bool)?
     /// Invoked (on the MainActor) with a human-readable message when the advertiser or browser
     /// fails to start — discovery is silently dead without it. Owners route this into their
     /// diagnostic surface; the failure is os_log'd here regardless.
@@ -211,8 +235,9 @@ final class MeshMultipeerSession: NSObject {
 
     /// True when a connection attempt is in flight to any peer OTHER than `peer` — the
     /// same-peer carve-out lets a retrying peer through its own pending window.
-    func hasPendingConnections(besides peer: MultipeerPeer?) -> Bool {
-        pendingConnectionPeers.keys.contains { $0 != peer?.underlying }
+    func hasPendingConnections(besides peer: PeerHandle?) -> Bool {
+        let excluded = peer.flatMap(mcPeerID(for:))
+        return pendingConnectionPeers.keys.contains { $0 != excluded }
     }
 
     /// Best-effort targeted disconnect. `MCSession.cancelConnectPeer` is documented only for
@@ -220,16 +245,17 @@ final class MeshMultipeerSession: NSObject {
     /// kick on current iOS but is NOT documented to — callers must treat this as
     /// belt-and-braces and never depend on it alone (manager-level record eviction is what
     /// actually drives teardown/reopen decisions).
-    func disconnectPeer(_ peer: MultipeerPeer) {
+    func disconnectPeer(_ peer: PeerHandle) {
         onDisconnectPeerRequestedForTesting?(peer)
-        pendingConnectionPeers.removeValue(forKey: peer.underlying)
-        mcSession?.cancelConnectPeer(peer.underlying)
+        guard let peerID = mcPeerID(for: peer) else { return }
+        pendingConnectionPeers.removeValue(forKey: peerID)
+        mcSession?.cancelConnectPeer(peerID)
     }
 
     /// Fired synchronously at the top of `disconnectPeer` so unit tests — which cannot start a
     /// real `MCSession` — can assert that an owner's eviction path requested the MC kick
     /// (`MeshNetworkManagerTests`: an evicted slot must not leave a zombie link).
-    var onDisconnectPeerRequestedForTesting: ((MultipeerPeer) -> Void)?
+    var onDisconnectPeerRequestedForTesting: ((PeerHandle) -> Void)?
 
     func stop() {
         advertiser?.stopAdvertisingPeer()
@@ -243,31 +269,46 @@ final class MeshMultipeerSession: NSObject {
         peerMap.removeAll()
         pendingConnectionPeers.removeAll()
         isDiscoveryPaused = false
+        // `endpointKeyByPeerID` / `peerIDByEndpointKey` deliberately survive: they stand in for
+        // `MCPeerID` equality, which a local teardown does not change either. Clearing them would
+        // make a device that reconnects after a stop/start look new to an owner still holding its
+        // record — precisely the identity churn this mapping exists to absorb. Growth stays bounded
+        // by `maxTrackedEndpoints`, so a long-lived session cannot leak through them.
     }
 
-    func invite(_ peer: MultipeerPeer) {
+    func invite(_ peer: PeerHandle) {
         guard let session = mcSession, let browser else { return }
-        guard !session.connectedPeers.contains(peer.underlying) else { return }
-        guard pendingConnectionPeers[peer.underlying] == nil else { return }
+        guard let peerID = mcPeerID(for: peer) else { return }
+        guard !session.connectedPeers.contains(peerID) else { return }
+        guard pendingConnectionPeers[peerID] == nil else { return }
         // CONTRACT (see pauseDiscovery): inviting on a stopped browser is undocumented — drop
         // loudly instead of relying on it. Callers must resumeDiscovery() first.
         guard !isDiscoveryPaused else {
             Self.logger.error("invite(_:) while discovery is paused — dropped; resumeDiscovery() must precede invites")
             return
         }
-        registerPendingConnection(peer.underlying)
-        _ = prepareChannel(for: peer.underlying)
-        browser.invitePeer(peer.underlying, to: session, withContext: nil, timeout: 30)
+        registerPendingConnection(peerID)
+        _ = prepareChannel(for: peerID)
+        browser.invitePeer(peerID, to: session, withContext: nil, timeout: 30)
     }
 
-    func send(_ data: Data, to peer: MultipeerPeer, mode: MCSessionSendDataMode) async throws {
-        guard let session = mcSession else {
-            throw MultipeerTransportError.unexpectedState
+    func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws {
+        guard let session = mcSession, let peerID = mcPeerID(for: peer) else {
+            throw PeerTransportError.unexpectedState
         }
         do {
-            try session.send(data, toPeers: [peer.underlying], with: mode)
+            try session.send(data, toPeers: [peerID], with: Self.sendDataMode(for: mode))
         } catch {
-            throw MultipeerTransportError.sendFailed(reason: error.localizedDescription)
+            throw PeerTransportError.sendFailed(reason: error.localizedDescription)
+        }
+    }
+
+    /// The one place a neutral delivery mode becomes a MultipeerConnectivity one. `.bestEffort`
+    /// maps to `.unreliable`: MC's name for the same guarantee, kept out of the shared surface.
+    nonisolated private static func sendDataMode(for mode: PeerDeliveryMode) -> MCSessionSendDataMode {
+        switch mode {
+        case .reliable:   return .reliable
+        case .bestEffort: return .unreliable
         }
     }
 
@@ -332,31 +373,63 @@ final class MeshMultipeerSession: NSObject {
         br.startBrowsingForPeers()
     }
 
-    private func peer(for mcPeerID: MCPeerID, discoveryInfo: [String: String]? = nil) -> MultipeerPeer {
+    private func peer(for mcPeerID: MCPeerID, discoveryInfo: [String: String]? = nil) -> PeerHandle {
         let info = discoveryInfo ?? peerInfoCache[mcPeerID]
         if let existing = peerMap[mcPeerID] {
             guard let info, info != existing.discoveryInfo else { return existing }
-            let updated = MultipeerPeer(
+            let updated = PeerHandle(
                 id: existing.id,
-                displayName: existing.displayName,
+                displayHint: existing.displayHint,
                 discoveryInfo: info,
                 advertisedFingerprint: info["fp"],
-                underlying: existing.underlying
+                endpoint: existing.endpoint
             )
             peerMap[mcPeerID] = updated
             peerInfoCache[mcPeerID] = info
             return updated
         }
-        let p = MultipeerPeer(
+        // The `id` below is fresh on every cache miss — that re-mint is the whole reason
+        // PeerEndpointKey exists — but the endpoint key is REUSED for a peer ID seen before, so a
+        // returning device stays recognizable to owners holding a record under its old `id`.
+        let p = PeerHandle(
             id: UUID(),
-            displayName: mcPeerID.displayName,
+            displayHint: mcPeerID.displayName,
             discoveryInfo: info,
             advertisedFingerprint: info?["fp"],
-            underlying: mcPeerID
+            endpoint: endpointKey(for: mcPeerID)
         )
         peerMap[mcPeerID] = p
         if let discoveryInfo { peerInfoCache[mcPeerID] = discoveryInfo }
         return p
+    }
+
+    // MARK: - Endpoint identity
+
+    /// The stable key for `mcPeerID`, minting one on first sight.
+    ///
+    /// Oldest-first eviction at ``maxTrackedEndpoints`` keeps both directions of the mapping in
+    /// step; a re-seen peer refreshes nothing, so the order is strictly first-seen and an evicted
+    /// device is simply re-minted as new on its next appearance.
+    private func endpointKey(for mcPeerID: MCPeerID) -> PeerEndpointKey {
+        if let existing = endpointKeyByPeerID[mcPeerID] { return existing }
+        if endpointKeyOrder.count >= Self.maxTrackedEndpoints {
+            let oldest = endpointKeyOrder.removeFirst()
+            if let staleKey = endpointKeyByPeerID.removeValue(forKey: oldest) {
+                peerIDByEndpointKey.removeValue(forKey: staleKey)
+            }
+        }
+        let key = PeerEndpointKey()
+        endpointKeyByPeerID[mcPeerID] = key
+        peerIDByEndpointKey[key] = mcPeerID
+        endpointKeyOrder.append(mcPeerID)
+        return key
+    }
+
+    /// The framework peer behind a handle, or nil once its endpoint has aged out of the bounded
+    /// map. Every MC call that used to read the peer's framework `MCPeerID` goes through here,
+    /// which is what keeps the framework type off the shared surface.
+    private func mcPeerID(for peer: PeerHandle) -> MCPeerID? {
+        peerIDByEndpointKey[peer.endpoint]
     }
 
     // MARK: - Test seam
@@ -364,8 +437,22 @@ final class MeshMultipeerSession: NSObject {
     /// Registers a synthetic connecting-window entry so unit tests can exercise the
     /// pending-connection acceptance/cap gates without starting real radios (the production
     /// writers are `invite(_:)` and the MC delegate paths, all of which need live transport).
-    func registerPendingConnectionForTesting(_ peer: MultipeerPeer) {
-        pendingConnectionPeers[peer.underlying] = UUID()
+    func registerPendingConnectionForTesting(_ peer: PeerHandle) {
+        // A test handle was minted outside this session, so bind its endpoint to a framework peer
+        // first — otherwise `hasPendingConnections(besides:)` could not exclude it and the gates
+        // under test would read a synthetic entry as somebody else's in-flight connection.
+        let peerID = mcPeerID(for: peer) ?? MCPeerID(displayName: peer.displayHint)
+        bindEndpointForTesting(peer.endpoint, to: peerID)
+        pendingConnectionPeers[peerID] = UUID()
+    }
+
+    /// Registers an externally-minted endpoint key against a framework peer, so a handle a test
+    /// built by hand routes like a discovered one.
+    func bindEndpointForTesting(_ key: PeerEndpointKey, to peerID: MCPeerID) {
+        guard peerIDByEndpointKey[key] == nil else { return }
+        endpointKeyByPeerID[peerID] = key
+        peerIDByEndpointKey[key] = peerID
+        endpointKeyOrder.append(peerID)
     }
 }
 

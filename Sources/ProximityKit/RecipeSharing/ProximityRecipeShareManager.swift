@@ -10,7 +10,7 @@ import FernletFoundation
 /// Under the hard 2-device cap the manager holds at most one of these at a time.
 private struct RecipeShareConnection: Identifiable {
     let id: UUID
-    let peer: MultipeerPeer
+    let peer: PeerHandle
     let channel: PeerChannelTransport
     let coordinator: ProximityCoordinator
     /// Retained for the connection's lifetime so the coordinator's `weak` trustPolicy stays alive —
@@ -105,7 +105,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     @ObservationIgnored private let identity: IdentityService
     @ObservationIgnored private let replayCache = ReplayCache()
     @ObservationIgnored private var connections: [RecipeShareConnection] = []
-    @ObservationIgnored private var discoveredPeers: [UUID: MultipeerPeer] = [:]
+    @ObservationIgnored private var discoveredPeers: [UUID: PeerHandle] = [:]
     @ObservationIgnored private var observationTask: Task<Void, Never>?
     @ObservationIgnored private var clearStatusTask: Task<Void, Never>?
     @ObservationIgnored private var connectTimeoutTask: Task<Void, Never>?
@@ -366,7 +366,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             guard let self else { return }
             self.handlePeerLost(peer)
             self.removeConnections(matching: peer)
-            self.recordDiagnostic("\(peer.displayName) disconnected.")
+            self.recordDiagnostic("\(peer.displayHint) disconnected.")
         }
         session.shouldAcceptInvitation = { [weak self] peer in
             guard let self else { return false }
@@ -375,7 +375,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             // connecting-window pending peer — checking `connections` alone leaves a race
             // where a second inviter slips in while the first is still MC-connecting. The
             // SAME peer re-inviting (retry of a dropped attempt) is always let through.
-            if self.connections.contains(where: { $0.peer.id == peer.id || $0.peer.underlying == peer.underlying }) {
+            if self.connections.contains(where: { $0.peer.isSameEndpoint(as: peer) }) {
                 return true
             }
             guard self.connections.isEmpty else { return false }
@@ -409,7 +409,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// The advertised local display name (shared coercion; see `PeerDisplayNames.swift`).
     private var displayName: String { store.resolvedProximityDisplayName }
 
-    private func handlePeerDiscovered(_ peer: MultipeerPeer) {
+    private func handlePeerDiscovered(_ peer: PeerHandle) {
         // Exclude self using session ID comparison; blocklist is enforced post-introduction.
         if let remoteSID = peer.discoveryInfo?["sid"], remoteSID == sessionID { return }
         discoveredPeers[peer.id] = peer
@@ -417,7 +417,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             id: peer.id,
             // Pre-handshake label straight off the wire — the picker, the browse list and the
             // diagnostics all read it back from here, so this is the one ingest to coerce.
-            displayName: ItemNameModeration.moderatedPeerDisplayName(peer.discoveryInfo?["name"] ?? peer.displayName),
+            displayName: ItemNameModeration.moderatedPeerDisplayName(peer.discoveryInfo?["name"] ?? peer.displayHint),
             fingerprint: nil
         )
         nearbyRecipients.removeAll { $0.id == recipient.id }
@@ -426,8 +426,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         recordDiagnostic("Discovered \(recipient.displayName).")
     }
 
-    private func handlePeerLost(_ peer: MultipeerPeer) {
-        let displayName = nearbyRecipients.first { $0.id == peer.id }?.displayName ?? peer.displayName
+    private func handlePeerLost(_ peer: PeerHandle) {
+        let displayName = nearbyRecipients.first { $0.id == peer.id }?.displayName ?? peer.displayHint
         discoveredPeers.removeValue(forKey: peer.id)
         nearbyRecipients.removeAll { $0.id == peer.id }
         recordDiagnostic("\(displayName) is no longer nearby.")
@@ -436,8 +436,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// Belt-and-braces admission check for a just-connected MC channel (hard 2-device cap):
     /// true only when no connection exists or the peer already holds it. A third peer can
     /// still slip past both invitation gates in the connecting window; this is the last line.
-    func shouldAdmitChannel(for peer: MultipeerPeer) -> Bool {
-        connections.isEmpty || connections.contains { $0.peer.id == peer.id || $0.peer.underlying == peer.underlying }
+    func shouldAdmitChannel(for peer: PeerHandle) -> Bool {
+        connections.isEmpty || connections.contains { $0.peer.isSameEndpoint(as: peer) }
     }
 
     private func handleChannelReady(_ channel: PeerChannelTransport) {
@@ -446,11 +446,11 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         // anyway is never admitted — best-effort kick it (see disconnectPeer's caveats) and
         // leave the existing pairing untouched.
         guard shouldAdmitChannel(for: channel.peer) else {
-            recordDiagnostic("Turned away \(channel.peer.displayName) — recipe sharing links two Fernlets at a time.")
+            recordDiagnostic("Turned away \(channel.peer.displayHint) — recipe sharing links two Fernlets at a time.")
             session.disconnectPeer(channel.peer)
             return
         }
-        recordDiagnostic("Secure recipe-share channel opened with \(channel.peer.displayName).")
+        recordDiagnostic("Secure recipe-share channel opened with \(channel.peer.displayHint).")
         let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
         let coordinator = ProximityCoordinator(
             identity: identity,
@@ -496,7 +496,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             connectTimeoutTask = nil
         }
         session.pauseDiscovery()
-        recordDiagnostic("Recipe sharing closed to others while paired with \(connection.peer.displayName).")
+        recordDiagnostic("Recipe sharing closed to others while paired with \(connection.peer.displayHint).")
         updateEngagedRecipient()
         startParkedSweepIfNeeded()
     }
@@ -563,10 +563,10 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         finalizeConnectionRemovals(previousCount: before)
     }
 
-    private func removeConnections(matching peer: MultipeerPeer) {
+    private func removeConnections(matching peer: PeerHandle) {
         let before = connections.count
         let evicted = connections.filter { connection in
-            connection.peer.id == peer.id || connection.peer.underlying == peer.underlying
+            connection.peer.isSameEndpoint(as: peer)
         }
         cancelCoordinators(of: evicted)
         for connection in evicted { parkedSince.removeValue(forKey: connection.id) }
@@ -618,7 +618,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     private func displayName(for connection: RecipeShareConnection) -> String {
         nearbyRecipients.first { $0.id == connection.id }?.displayName
-            ?? ItemNameModeration.moderatedPeerDisplayName(connection.peer.displayName)
+            ?? ItemNameModeration.moderatedPeerDisplayName(connection.peer.displayHint)
     }
 
     /// Arms the sender-side connect timeout for the PRE-CONNECT stage only. Under the hard
@@ -701,7 +701,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             // the coordinator stalled — kick it best-effort.
             session.disconnectPeer(connection.peer)
             parkedSince.removeValue(forKey: connection.id)
-            recordDiagnostic("Dropped stalled connection to \(connection.peer.displayName).")
+            recordDiagnostic("Dropped stalled connection to \(connection.peer.displayHint).")
             connections.removeAll { $0.id == connection.id }
         }
         finalizeConnectionRemovals(previousCount: before)
@@ -753,7 +753,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         scheduleStatusClear()
     }
 
-    private func peer(for recipient: ProximityRecipeShareRecipient) -> MultipeerPeer? {
+    private func peer(for recipient: ProximityRecipeShareRecipient) -> PeerHandle? {
         if let connection = connections.first(where: { $0.id == recipient.id }) {
             return connection.peer
         }
@@ -790,8 +790,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// retention regresses (policy no longer stored on the connection), the coordinator's weak ref goes nil
     /// once this returns and the revoked-key drop this drives silently stops firing.
     func makeRetainedConnectionCoordinatorForTesting(
-        peer: MultipeerPeer,
-        transport: any MultipeerTransport,
+        peer: PeerHandle,
+        transport: any PeerTransport,
         ranging: any RangingProvider
     ) -> ProximityCoordinator {
         let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
@@ -841,7 +841,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     /// Drives the production inbound-invitation gate closure exactly as the transport would.
-    func shouldAcceptInvitationForTesting(_ peer: MultipeerPeer) -> Bool {
+    func shouldAcceptInvitationForTesting(_ peer: PeerHandle) -> Bool {
         session.shouldAcceptInvitation?(peer) ?? false
     }
 

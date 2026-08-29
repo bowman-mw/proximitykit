@@ -41,7 +41,7 @@ public enum SlotKind {
 /// Memory-only session state, never persisted.
 public struct PeerSlot: Identifiable {
     public let id: UUID  // == peer.id
-    public let peer: MultipeerPeer
+    public let peer: PeerHandle
     let channel: PeerChannelTransport
     public let coordinator: ProximityCoordinator
     public var kind: SlotKind
