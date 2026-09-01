@@ -209,6 +209,24 @@ MultipeerConnectivity half private behind ``PeerEndpointKey``, so a Network.fram
 slots in beside it without changing anything here. ``MCPeerIDStoring`` and ``FileMCPeerIDStore``
 are the two deliberate exceptions — they persist the MC peer identity itself and retire with MC.
 
+**Two conformers, one surface.** `MeshMultipeerSession` (MultipeerConnectivity, all four shipping
+radios) and `NetworkMeshSession` (Network.framework/QUIC, the friend mesh's migration target — see
+[the network migration plan](../../../../Docs/Plan-ProximityKit-Network-Migration-2026-08-27.md) §7)
+are the two radios; each multiplexes into per-peer channels — `PeerChannelTransport` and
+`NetworkPeerChannel` — that conform to ``PeerTransport``. Neither channel ever publishes
+``PeerTransportState/discovered``: `ProximityCoordinator.shouldInviteDiscoveredPeer` is a dormant,
+opposite-direction inviter policy that wakes if one does, and two policies pointing opposite ways
+means neither side dials. Discovery reaches the owner through the sessions' closure hooks instead.
+
+Every decision the QUIC session makes is factored out of it so it can be enumerated at tier 1 with
+no radios and no wall clock: `MeshLinkTable` (peer cap, per-connection state machine, three-attempt
+dial budget, duplicate-tunnel suppression, endpoint cache), `MeshHeartbeatSchedule` (the 30 s
+heartbeat's due times), `MeshLinkAdvertisement` (the Bonjour TXT vocabulary — `sid` carried, `fp`
+withheld), `MeshSessionIdentityMap` (one session-stable ``PeerHandle`` identity per endpoint),
+`NetworkMeshWire` (control-stream framing) and `EphemeralMeshTLSIdentity` (a self-signed P-256
+identity minted per session and never persisted). `Tests/FernletTests/NetworkMeshTransportTests.swift`
+is the battery; the session actor itself is covered by the runbook's device lanes.
+
 - ``PeerTransport``
 - ``PeerHandle``
 - ``PeerEndpointKey``
@@ -220,6 +238,12 @@ are the two deliberate exceptions — they persist the MC peer identity itself a
 - ``MultipeerServiceType``
 - ``MCPeerIDStoring``
 - ``FileMCPeerIDStore``
+
+Internal to the module, and listed here because they are where the QUIC transport's behaviour
+actually lives: `NetworkMeshSession`, `NetworkPeerChannel`, `MeshLinkTable`, `MeshLinkKey`,
+`MeshLinkPhase`, `MeshLinkAdmission`, `MeshDialPreference`, `MeshDialOutcome`, `MeshEndpointRecord`,
+`MeshHeartbeatSchedule`, `MeshLinkAdvertisement`, `MeshSessionIdentityMap`, `NetworkMeshWire`,
+`EphemeralMeshTLSIdentity`, `MeshCertificateDER`, `MeshTransportError`.
 
 ### Ranging
 
