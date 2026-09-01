@@ -358,6 +358,10 @@ final class NetworkMeshSession {
         var task: Task<Void, Never>?
         /// Owns the inbound datagram reader.
         var datagramTask: Task<Void, Never>?
+        /// Set once a heartbeat write to this tunnel's datagram flow has thrown. The one-shot latch
+        /// ``MeshHeartbeatChannel`` reads: the designed channel is tried once per tunnel, and a
+        /// tunnel that has answered "no" is never asked again. Never a reason to end the tunnel.
+        var datagramWriteFailed = false
     }
 
     /// The mesh id, epoch reference, roster and signing key the introduction needs. Nil refuses
@@ -506,14 +510,19 @@ final class NetworkMeshSession {
     /// best-effort in the same way: the owner's record eviction is what actually drives teardown.
     ///
     /// `notifyOwner: false` is the load-bearing half. This is an eviction the owner *asked* for, and
-    /// ``endTunnel(_:reason:notifyOwner:)`` fires ``onPeerDisconnected`` synchronously — so
+    /// ``endTunnel(_:cause:reason:notifyOwner:)`` fires ``onPeerDisconnected`` synchronously — so
     /// reporting it back would re-enter the owner's disconnect path from inside its own removal
     /// funnel. MC has the same shape and does not have the problem only because its `.notConnected`
     /// arrives later, on a delegate callback the owner already knows to swallow. The peer's channel
     /// still publishes `.disconnected`: the coordinator on the other end of it must see the link die.
     func disconnectPeer(_ peer: PeerHandle) {
         guard let key = identities.key(for: peer) else { return }
-        endTunnel(key, reason: "This peer's slot was evicted locally.", notifyOwner: false)
+        endTunnel(
+            key,
+            cause: .localEviction,
+            reason: "This peer's slot was evicted locally.",
+            notifyOwner: false
+        )
     }
 
     /// Hands a start failure to the owner's transport-error hook, with the same logging every other
@@ -724,11 +733,16 @@ private extension NetworkMeshSession {
 
     /// QUIC parameters for an outbound connection. No local identity: only the listener side
     /// presents a certificate, and neither side validates one — see ``EphemeralMeshTLSIdentity``.
+    ///
+    /// ``MeshHeartbeatSchedule/idleTimeoutMilliseconds`` is declared rather than defaulted, and that
+    /// is the P2 item 15 fix: the framework's default idle timeout sat at roughly the heartbeat
+    /// interval, so QUIC reaped every tunnel a moment before its first beat was due.
     static func connectionParameters() -> NWParametersBuilder<QUIC> {
         let parameters = NWParametersBuilder<QUIC>.parameters {
             QUIC(alpn: [alpn])
                 .tls.certificateValidator { _, _ in true }
                 .tls.peerAuthentication(.none)
+                .idleTimeout(MeshHeartbeatSchedule.idleTimeoutMilliseconds)
                 .maxUDPPayloadSize(udpPayloadSize)
                 .maxDatagramFrameSize(datagramFrameSize)
         }.prohibitedInterfaceTypes([.cellular])
@@ -737,12 +751,17 @@ private extension NetworkMeshSession {
     }
 
     /// QUIC parameters for the listener, presenting this session's ephemeral identity.
+    ///
+    /// The idle timeout is declared on both sides deliberately: QUIC uses the **minimum** of the two
+    /// endpoints' advertised `max_idle_timeout` values, so a listener left on the default would pull
+    /// the negotiated timeout straight back under the heartbeat interval.
     static func listenerParameters(identity: sec_identity_t) -> NWParametersBuilder<QUIC> {
         let parameters = NWParametersBuilder<QUIC>.parameters {
             QUIC(alpn: [alpn])
                 .tls.localIdentity(identity)
                 .tls.certificateValidator { _, _ in true }
                 .tls.peerAuthentication(.none)
+                .idleTimeout(MeshHeartbeatSchedule.idleTimeoutMilliseconds)
                 .maxUDPPayloadSize(udpPayloadSize)
                 .maxDatagramFrameSize(datagramFrameSize)
         }.prohibitedInterfaceTypes([.cellular])
@@ -959,7 +978,7 @@ private extension NetworkMeshSession {
     /// read app frames.
     ///
     /// An introduction failure ends the tunnel through the dial budget, not as a live disconnect: no
-    /// control stream was ever recorded, so ``endTunnel(_:reason:)`` charges it as a failed dial and
+    /// control stream was ever recorded, so ``endTunnel(_:cause:reason:notifyOwner:)`` charges it as a failed dial and
     /// the three-attempt budget bounds how often this side re-offers itself to a peer that refuses
     /// it. A cancelled task returns silently — cancellation is a deliberate teardown (``stop()``, or
     /// this dial losing the duplicate-tunnel tie-break), never a failure to book.
@@ -969,14 +988,22 @@ private extension NetworkMeshSession {
             let datagrams = try await connection.datagrams
             guard let verified = await introduce(role: .initiator, over: connection, stream: stream) else {
                 guard !Task.isCancelled else { return }
-                endTunnel(key, reason: "The outbound QUIC tunnel failed its signed channel introduction.")
+                endTunnel(
+                    key,
+                    cause: .introductionFailed,
+                    reason: "The outbound QUIC tunnel failed its signed channel introduction."
+                )
                 return
             }
             activate(key, stream: stream, datagrams: datagrams, verified: verified)
             try await receiveFrames(for: key, from: stream)
         } catch {
             guard !Task.isCancelled else { return }
-            endTunnel(key, reason: "The outbound QUIC tunnel ended: \(error.localizedDescription)")
+            endTunnel(
+                key,
+                cause: .controlStreamEnded,
+                reason: "The outbound QUIC tunnel ended: \(error.localizedDescription)"
+            )
         }
     }
 
@@ -1026,7 +1053,11 @@ private extension NetworkMeshSession {
             try await receiveFrames(for: key, from: stream)
         } catch {
             guard !Task.isCancelled else { return }
-            endTunnel(key, reason: "The inbound QUIC tunnel ended: \(error.localizedDescription)")
+            endTunnel(
+                key,
+                cause: .controlStreamEnded,
+                reason: "The inbound QUIC tunnel ended: \(error.localizedDescription)"
+            )
         }
     }
 
@@ -1086,8 +1117,36 @@ private extension NetworkMeshSession {
         MeshTransportConsoleLog.echo(
             "accepted \(verified.fingerprint) sid=\(verified.sessionID): tunnel activated, tunnels=\(tunnels.count)"
         )
+        noteDatagramCapacity(key, datagrams: datagrams)
         onPeerVerified?(tunnel.peer, verified)
         onPeerChannelReady?(tunnel.channel)
+    }
+
+    /// Records this tunnel's declared and reported liveness parameters, once, at activation.
+    ///
+    /// The measurement the P2 loop went a fortnight without. It carries the requested datagram frame
+    /// size, the size the framework *reports* as usable, the beat a heartbeat needs, and the two
+    /// numbers whose relationship the churn turned on — the heartbeat interval and the QUIC idle
+    /// timeout. Until they were logged together, "the keepalive fires after the timeout it defends
+    /// against" was not a thing anyone could read off a transcript.
+    ///
+    /// The reported usable size is evidence, not a verdict: see ``MeshHeartbeatChannel`` for why it
+    /// is read off the parent connection and therefore cannot distinguish "datagrams did not
+    /// negotiate" from "this is the wrong object to ask".
+    ///
+    /// A separate line rather than a longer `accepted` one: the runbook's Lane C rows grep the
+    /// activation line, and a diagnostic that rewrites the evidence it is being read against is a
+    /// diagnostic that invalidates its own record.
+    func noteDatagramCapacity(
+        _ key: MeshLinkKey,
+        datagrams: Network.QUIC.Datagrams<QUICDatagram>
+    ) {
+        let line = "datagramCapacity usable=\(datagrams.parent.usableDatagramFrameSize) "
+            + "requested=\(Self.datagramFrameSize) required=\(Self.heartbeatDatagram.count) "
+            + "idleTimeoutMs=\(MeshHeartbeatSchedule.idleTimeoutMilliseconds) "
+            + "beatSeconds=\(Int(MeshHeartbeatSchedule.intervalSeconds)) for \(key.rawValue)"
+        Self.logger.notice("\(line, privacy: .public)")
+        MeshTransportConsoleLog.echo(line)
     }
 
     // MARK: Duplicate collapse
@@ -1166,7 +1225,7 @@ private extension NetworkMeshSession {
         tunnel.datagramTask?.cancel()
         links.noteClosed(key)
         tunnel.channel.notifyDisconnected(reason: MeshTunnelConvergence.closeReason)
-        Self.logger.debug("redundant QUIC tunnel closed for \(key.rawValue, privacy: .public)")
+        noteTunnelEnded(key, cause: .redundantDuplicate, tunnel: tunnel, detail: "closed")
         MeshTransportConsoleLog.echo(
             "redundantTunnelClosed \(verified.fingerprint) sid=\(verified.sessionID): closed"
         )
@@ -1193,6 +1252,7 @@ private extension NetworkMeshSession {
                 peerSessionID: verified.sessionID
               ) == .keepIncoming else { return false }
         heartbeats.stop(key)
+        noteTunnelEnded(key, cause: .redundantDuplicate, tunnel: tunnel, detail: "yielded")
         tunnel.task?.cancel()
         tunnel.datagramTask?.cancel()
         tunnel.task = nil
@@ -1214,12 +1274,22 @@ private extension NetworkMeshSession {
     /// Falling out of the loop **throws** rather than returning: a receive loop that simply stopped
     /// would leave a tunnel that still reads as connected and delivers nothing, which is the silent
     /// failure the bound exists to avoid rather than to cause.
+    ///
+    /// Heartbeats are filtered here for the same reason ``receiveDatagrams(for:from:)`` filters
+    /// them: since P2 item 15 a beat rides this stream whenever the datagram flow did not negotiate,
+    /// and a liveness token handed to a decoder as an app frame is a frame the coordinator has to
+    /// reject on every beat. One byte-equal comparison against a frozen token keeps it off that
+    /// path entirely.
     func receiveFrames(for key: MeshLinkKey, from stream: Network.QUIC.Stream<QUICStream>) async throws {
         for _ in 0..<Self.maxInboundFramesPerConnection {
             guard !Task.isCancelled, tunnels[key] != nil else { return }
             let header = try await stream.receive(exactly: NetworkMeshWire.headerByteCount).content
             let length = try NetworkMeshWire.payloadLength(from: header, ceiling: Self.maxInboundWireBytes)
             let payload = try await stream.receive(exactly: length).content
+            guard payload != Self.heartbeatDatagram else {
+                noteHeartbeat("received", key: key, over: .controlStream)
+                continue
+            }
             tunnels[key]?.channel.receive(payload, at: Date())
         }
         throw MeshTransportError.frameBudgetSpent
@@ -1237,7 +1307,10 @@ private extension NetworkMeshSession {
             guard !Task.isCancelled, tunnels[key] != nil else { return }
             do {
                 let payload = try await datagrams.receive().content
-                guard payload != Self.heartbeatDatagram else { continue }
+                guard payload != Self.heartbeatDatagram else {
+                    noteHeartbeat("received", key: key, over: .datagram)
+                    continue
+                }
                 guard payload.count <= Self.maxInboundWireBytes else {
                     FernletAuditLog.log(
                         "mesh.quic.droppedOversizedDatagram",
@@ -1250,7 +1323,11 @@ private extension NetworkMeshSession {
                 return
             }
         }
-        endTunnel(key, reason: MeshTransportError.frameBudgetSpent.diagnosticDescription)
+        endTunnel(
+            key,
+            cause: .frameBudgetSpent,
+            reason: MeshTransportError.frameBudgetSpent.diagnosticDescription
+        )
     }
 
     /// Ends a tunnel, choosing between "the dial failed" and "a live link dropped" by whether the
@@ -1260,11 +1337,22 @@ private extension NetworkMeshSession {
     /// `notifyOwner` is false for exactly one caller — ``disconnectPeer(_:)``, an eviction the owner
     /// asked for, which must not be reported back to the owner from inside its own removal funnel.
     /// The channel is told either way.
-    func endTunnel(_ key: MeshLinkKey, reason: String, notifyOwner: Bool = true) {
+    ///
+    /// `cause` is not decoration. Every end passes through ``noteTunnelEnded(_:cause:tunnel:detail:)``
+    /// before anything else happens, so a tunnel can no longer stop carrying traffic without saying
+    /// so — the silence that made P2 item 13 misread three sequential tunnels as three coexisting
+    /// ones, and then hid the churn behind that misreading for another fortnight.
+    func endTunnel(
+        _ key: MeshLinkKey,
+        cause: MeshTunnelEndReason,
+        reason: String,
+        notifyOwner: Bool = true
+    ) {
         heartbeats.stop(key)
         guard let tunnel = tunnels.removeValue(forKey: key) else { return }
         tunnel.task?.cancel()
         tunnel.datagramTask?.cancel()
+        noteTunnelEnded(key, cause: cause, tunnel: tunnel, detail: reason)
         guard tunnel.controlStream != nil else {
             handleDialFailure(key, reason: reason)
             return
@@ -1273,6 +1361,39 @@ private extension NetworkMeshSession {
         tunnel.channel.notifyDisconnected(reason: reason)
         guard notifyOwner else { return }
         onPeerDisconnected?(tunnel.peer, reason)
+    }
+
+    /// The one line every tunnel end emits, in production and not only under a debug flag.
+    ///
+    /// **Permanent os.log, not a diagnostic hack.** A disconnect that leaves no trace is unreadable
+    /// on a device, where there is no console mirror at all — and the console mirror exists to make
+    /// a headless simulator run legible, not to be the only place the fact is recorded.
+    ///
+    /// What it carries is reasons and hashes: the frozen ``MeshTunnelEndReason`` token, the peer's
+    /// 16-character key fingerprint (or ``MeshTunnelEndReason/unverifiedFingerprint`` when the
+    /// tunnel died before anyone proved who they were), whether the tunnel had ever gone live, the
+    /// surviving tunnel count, and the framework's own error text. No payload, no endpoint address,
+    /// no display name — `key.rawValue` is the same session-scoped opaque endpoint id every other
+    /// line in this class already logs.
+    ///
+    /// A benign end logs at `notice` and a fault at `error`, so an owner tidying a slot does not
+    /// read as a radio failure — see ``MeshTunnelEndReason/isBenign``.
+    private func noteTunnelEnded(
+        _ key: MeshLinkKey,
+        cause: MeshTunnelEndReason,
+        tunnel: Tunnel,
+        detail: String
+    ) {
+        let fingerprint = tunnel.verified?.fingerprint ?? MeshTunnelEndReason.unverifiedFingerprint
+        let line = "tunnelEnded \(cause.rawValue) \(fingerprint) live=\(tunnel.controlStream != nil) "
+            + "tunnels=\(tunnels.count) for \(key.rawValue): \(detail)"
+        guard cause.isBenign else {
+            Self.logger.error("\(line, privacy: .public)")
+            MeshTransportConsoleLog.echo(line)
+            return
+        }
+        Self.logger.notice("\(line, privacy: .public)")
+        MeshTransportConsoleLog.echo(line)
     }
 
     /// Books a failed dial attempt and reports the give-up. The retry itself is not scheduled here:
@@ -1546,17 +1667,82 @@ private extension NetworkMeshSession {
         }
     }
 
-    /// Sends one heartbeat datagram, ending the tunnel if the write fails — a link that cannot
-    /// carry 22 bytes is not a link.
+    /// Sends one heartbeat on whichever pipe this tunnel actually has.
+    ///
+    /// **The channel is asked, not assumed** (P2 item 15). Plan §7.1 puts heartbeats on QUIC
+    /// datagrams, so a fresh tunnel tries that first; if the write throws, the tunnel latches
+    /// ``Tunnel/datagramWriteFailed`` and every later beat rides the control stream. See
+    /// ``MeshHeartbeatChannel`` for why the *reported* usable frame size is recorded as evidence but
+    /// never used as the gate.
+    ///
+    /// A failed datagram write is **not** a dead peer and no longer ends the tunnel. Only a beat
+    /// that the reliable control stream also refuses does that — a link that cannot carry 22 framed
+    /// bytes really is not a link.
     func sendHeartbeat(to key: MeshLinkKey) {
-        guard let datagrams = tunnels[key]?.datagrams else { return }
+        guard let tunnel = tunnels[key] else { return }
+        let channel = MeshHeartbeatChannel.choice(
+            hasDatagramFlow: tunnel.datagrams != nil,
+            datagramWriteFailed: tunnel.datagramWriteFailed
+        )
+        guard channel == .datagram, let datagrams = tunnel.datagrams else {
+            guard let stream = tunnel.controlStream else { return }
+            noteHeartbeat("sending", key: key, over: .controlStream)
+            beat(key) { try await self.sendFramed(Self.heartbeatDatagram, over: stream) }
+            return
+        }
+        noteHeartbeat("sending", key: key, over: .datagram)
+        beat(key, isDatagram: true) {
+            try await datagrams.send(NetworkMeshSession.heartbeatDatagram)
+        }
+    }
+
+    /// Runs one heartbeat write off the main actor's queue and applies the failure policy.
+    ///
+    /// The two channels differ only in the write, so the policy lives here once rather than twice.
+    /// A failed *datagram* beat latches the tunnel onto the control stream and is otherwise
+    /// harmless; a failed *control stream* beat ends the tunnel, naming
+    /// ``MeshTunnelEndReason/heartbeatSendFailed`` instead of ending it without a word.
+    func beat(
+        _ key: MeshLinkKey,
+        isDatagram: Bool = false,
+        write: @escaping @MainActor () async throws -> Void
+    ) {
         Task { @MainActor [weak self] in
             do {
-                try await datagrams.send(NetworkMeshSession.heartbeatDatagram)
+                try await write()
             } catch {
-                self?.endTunnel(key, reason: "A heartbeat could not be sent: \(error.localizedDescription)")
+                self?.heartbeatFailed(key, isDatagram: isDatagram, error: error)
             }
         }
+    }
+
+    /// One failed heartbeat write: latch and carry on, or end the tunnel.
+    func heartbeatFailed(_ key: MeshLinkKey, isDatagram: Bool, error: Error) {
+        guard isDatagram else {
+            endTunnel(
+                key,
+                cause: .heartbeatSendFailed,
+                reason: "A heartbeat could not be sent: \(error.localizedDescription)"
+            )
+            return
+        }
+        tunnels[key]?.datagramWriteFailed = true
+        let line = "heartbeat datagram refused, falling back to the control stream "
+            + "for \(key.rawValue): \(error.localizedDescription)"
+        Self.logger.notice("\(line, privacy: .public)")
+        MeshTransportConsoleLog.echo(line)
+    }
+
+    /// Records one heartbeat crossing, at `debug` level plus the console mirror.
+    ///
+    /// Debug rather than notice on purpose: two lines a minute per link is the right volume for a
+    /// Lane C transcript and the wrong volume for a device's persisted log. What it makes directly
+    /// observable is the thing that was only ever inferred before — that beats are *flowing*, and on
+    /// which pipe.
+    func noteHeartbeat(_ verb: String, key: MeshLinkKey, over channel: MeshHeartbeatChannel) {
+        let line = "heartbeat \(verb) over \(channel) for \(key.rawValue)"
+        Self.logger.debug("\(line, privacy: .public)")
+        MeshTransportConsoleLog.echo(line)
     }
 
     /// Logs a diagnostic and hands it to the owner. Frozen English: this is the surface that makes

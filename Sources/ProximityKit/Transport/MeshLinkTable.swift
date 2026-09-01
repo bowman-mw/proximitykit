@@ -178,6 +178,72 @@ nonisolated enum MeshTunnelConvergence: Equatable, Sendable {
     }
 }
 
+// MARK: - MeshTunnelEndReason
+
+/// Why one QUIC tunnel stopped carrying traffic — the vocabulary that turns a silent teardown into
+/// a readable line.
+///
+/// **The defect this exists to close.** Before P2 item 15, a *live* tunnel that ended emitted
+/// nothing at all: `NetworkMeshSession.endTunnel` booked the close, told the channel and called the
+/// owner's disconnect hook without a single `Logger` line. A dial failure logged, a refusal logged,
+/// a give-up logged — a healthy tunnel dropping did not. Three sequential tunnels therefore read as
+/// three coexisting ones for a fortnight (Lane C, item 13), and the churn itself went undiagnosed
+/// for as long again because nothing on the disconnect path said the word "ended".
+///
+/// Every case is a **frozen automation token**: it is the grep target a Lane C transcript is read
+/// with, never a display string, never localized, and never persisted. The English that accompanies
+/// it on the line is the carried `detail`, which is the framework's own error text.
+///
+/// The distinctions are the ones an operator has to make. `heartbeatSendFailed` and
+/// `controlStreamEnded` both mean "the link stopped working", but the first says *this side could
+/// not write* and the second says *the pipe went away* — one points at the heartbeat channel, the
+/// other at the connection. `localEviction` and `redundantDuplicate` are not failures at all, and a
+/// reader who cannot tell them from the first two will go looking for a network bug that is not
+/// there.
+nonisolated enum MeshTunnelEndReason: String, CaseIterable, Sendable {
+
+    /// The periodic heartbeat could not be written to its channel. The link cannot carry the
+    /// smallest frame the transport has, so it is not a link.
+    case heartbeatSendFailed
+
+    /// The control stream's receive loop threw: the connection failed, the peer closed it, or QUIC
+    /// timed it out. The carried detail is the framework's error text, which is what tells the
+    /// three apart.
+    case controlStreamEnded
+
+    /// The signed channel introduction did not complete, so no tunnel was ever established. Charged
+    /// to the dial budget rather than reported as a disconnect.
+    case introductionFailed
+
+    /// The bounded receive loop retired after its frame budget. Not a fault — a Power of 10 rule 2
+    /// bound doing its job — but a tunnel ending all the same.
+    case frameBudgetSpent
+
+    /// The owner evicted this peer's slot. A local decision, not a network event.
+    case localEviction
+
+    /// A duplicate tunnel to the same verified peer was collapsed. Benign, charged to nothing.
+    case redundantDuplicate
+
+    /// Frozen stand-in for the fingerprint of a tunnel that ended before it verified anyone. A
+    /// tunnel can die mid-introduction, and the line still has to name *something* in the slot the
+    /// fingerprint occupies or a transcript reader cannot align the columns.
+    static let unverifiedFingerprint = "unverified"
+
+    /// Whether this end is an ordinary part of the radio's operation rather than a fault.
+    ///
+    /// Read by the log level: a benign end is a `notice`, a fault is an `error`. Without the split
+    /// every tidy-up looks like a failure in Console, which is the noise that gets a diagnostic
+    /// filtered out and then forgotten.
+    var isBenign: Bool {
+        switch self {
+        case .localEviction, .redundantDuplicate: return true
+        case .heartbeatSendFailed, .controlStreamEnded, .introductionFailed, .frameBudgetSpent:
+            return false
+        }
+    }
+}
+
 // MARK: - MeshLinkAdmission
 
 /// The answer to "may this session open — or accept — a tunnel for this endpoint right now?"
