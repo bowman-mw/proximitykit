@@ -237,9 +237,26 @@ no radios and no wall clock: `MeshLinkTable` (peer cap, per-connection state mac
 dial budget, duplicate-tunnel suppression, endpoint cache), `MeshHeartbeatSchedule` (the 30 s
 heartbeat's due times), `MeshLinkAdvertisement` (the Bonjour TXT vocabulary — `sid` carried, `fp`
 withheld), `MeshSessionIdentityMap` (one session-stable ``PeerHandle`` identity per endpoint),
-`NetworkMeshWire` (control-stream framing) and `EphemeralMeshTLSIdentity` (a self-signed P-256
+`NetworkMeshWire` (control-stream framing), `MeshTransferStreamTable` (which frames earn a stream of
+their own, and how many may be open at once) and `EphemeralMeshTLSIdentity` (a self-signed P-256
 identity minted per session and never persisted). `Tests/FernletTests/NetworkMeshTransportTests.swift`
 is the battery; the session actor itself is covered by the runbook's device lanes.
+
+**Bulk frames ride per-transfer streams** (plan §7.1). A reliable payload at or above
+`MeshTransferStreamTable.bulkFloorBytes` is written on a QUIC stream opened for it alone, so a friend
+photo cannot park a heartbeat or a chat message behind it on the control stream; everything smaller
+stays in order where it was. Nothing above the transport can tell — one transfer stream carries
+exactly one length-framed payload, delivered as exactly one ``InboundPeerFrame``, under the same
+ceiling both radios enforce. The budget lives inside the tunnel record, so a torn-down link takes its
+open transfers with it, and both exhaustion paths degrade to today's behaviour rather than to a
+failure: an outbound frame with no slot free goes on the control stream, and an inbound stream with
+no slot free goes back un-acked so the sender's write fails loudly.
+
+**One frame is one write.** `sendFramed` writes the length prefix and the payload as a single
+contiguous send. Two awaited sends let concurrent senders on the shared control stream interleave at
+the suspension between them, and the peer then read one frame's header followed by another frame's
+first bytes as a length — observed on the runbook's Lane C app-flow run, and reproduced on a loopback
+pair. A per-transfer stream keeps two writes because it has exactly one writer, by construction.
 
 **Peer authentication is the signed channel introduction, not the certificate** (plan §7.2). Before
 any app frame crosses a QUIC tunnel, both ends exchange a `MeshChannelHello` and then Ed25519
@@ -285,6 +302,7 @@ actually lives: `NetworkMeshSession`, `NetworkPeerChannel`, `MeshLinkTable`, `Me
 `MeshLinkPhase`, `MeshLinkAdmission`, `MeshDialPreference`, `MeshTunnelConvergence`,
 `MeshDialOutcome`, `MeshEndpointRecord`,
 `MeshHeartbeatSchedule`, `MeshLinkAdvertisement`, `MeshSessionIdentityMap`, `NetworkMeshWire`,
+`MeshTransferStreamTable`, `MeshTransferRoute`, `MeshTransferID`,
 `EphemeralMeshTLSIdentity`, `MeshCertificateDER`, `MeshTransportError`, `MeshChannelRole`,
 `MeshChannelIntroductionFormat`, `MeshChannelHello`, `MeshChannelIntroduction`,
 `MeshChannelIntroductionTranscript`, `MeshChannelIntroductionExchange`,

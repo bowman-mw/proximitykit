@@ -173,9 +173,22 @@ final class NetworkPeerChannel: PeerTransport {
     func invite(_ peer: PeerHandle) async throws {}
     func accept(_ invite: PeerPendingInvite) async throws {}
 
+    /// Sends one frame. A reliable payload at or above ``MeshTransferStreamTable/bulkFloorBytes``
+    /// takes a per-transfer stream of its own (plan §7.1); everything else rides the tunnel's
+    /// control stream or a datagram, exactly as it did before those streams existed. **No caller
+    /// above this line can tell the difference**, which is the point: `MeshNetworkManager` sends a
+    /// friend photo the same way over MultipeerConnectivity and over QUIC.
     func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws {
         guard let session else { throw PeerTransportError.unexpectedState }
         try await session.send(data, to: peer, mode: mode)
+    }
+
+    /// Per-transfer streams open on this peer's tunnel right now, in both directions.
+    ///
+    /// Zero on a settled tunnel. The read exists so a test can assert that a finished transfer gave
+    /// its budget slot back, rather than inferring it from a later send happening to succeed.
+    var openTransferCount: Int {
+        session?.openTransferCount(for: peer) ?? 0
     }
 
     func disconnect() async {
@@ -270,6 +283,14 @@ final class NetworkMeshSession {
     /// Maximum UDP payload requested, the floor QUIC datagrams negotiate against.
     nonisolated static let udpPayloadSize = 1_280
 
+    /// The QUIC stream id the control stream always has.
+    ///
+    /// Not a choice: RFC 9000 §2.1 assigns client-initiated bidirectional streams the ids 0, 4, 8 …
+    /// in the order they are opened, and the dialing side opens exactly one stream — the control
+    /// stream — before the signed introduction. So the listening side can name the control stream by
+    /// its id alone, and every other inbound stream is a per-transfer stream.
+    nonisolated static let controlStreamID: UInt64 = 0
+
     /// Seconds between ticks of the single poll that drives retries and heartbeats.
     nonisolated static let pollIntervalSeconds: TimeInterval = 1
 
@@ -351,6 +372,10 @@ final class NetworkMeshSession {
         let role: MeshChannelRole
         var controlStream: Network.QUIC.Stream<QUICStream>?
         var datagrams: Network.QUIC.Datagrams<QUICDatagram>?
+        /// The connection every per-transfer stream is opened on. Recorded at activation beside the
+        /// control stream, because a bulk frame needs the *connection* and the control stream is
+        /// the one object on a tunnel that cannot produce one.
+        var connection: NetworkConnection<QUIC>?
         /// The identity this tunnel's peer proved in the signed channel introduction. Set once, at
         /// activation; a tunnel with no verified peer never reaches this map.
         var verified: MeshVerifiedPeer?
@@ -358,10 +383,28 @@ final class NetworkMeshSession {
         var task: Task<Void, Never>?
         /// Owns the inbound datagram reader.
         var datagramTask: Task<Void, Never>?
+        /// Owns the inbound *transfer stream* acceptor on the dialing side. The listening side has
+        /// no such task: its `inboundStreams` acceptor is already running, and every stream past the
+        /// control one is routed there (see ``NetworkMeshSession/runResponder(_:pendingKey:)``).
+        var transferAcceptorTask: Task<Void, Never>?
+        /// Which frames earn a stream of their own, and how many may be open at once. Held **in**
+        /// the tunnel so a budget can never outlive the link it bounded.
+        var transfers = MeshTransferStreamTable()
         /// Set once a heartbeat write to this tunnel's datagram flow has thrown. The one-shot latch
         /// ``MeshHeartbeatChannel`` reads: the designed channel is tried once per tunnel, and a
         /// tunnel that has answered "no" is never asked again. Never a reason to end the tunnel.
         var datagramWriteFailed = false
+
+        /// Cancels every task this tunnel owns.
+        ///
+        /// One funnel rather than a list repeated at each teardown site: a tunnel gained a third
+        /// task when per-transfer streams landed, and the five call sites that had to learn about it
+        /// are exactly the shape a leak hides in.
+        func cancelTasks() {
+            task?.cancel()
+            datagramTask?.cancel()
+            transferAcceptorTask?.cancel()
+        }
     }
 
     /// The mesh id, epoch reference, roster and signing key the introduction needs. Nil refuses
@@ -416,8 +459,7 @@ final class NetworkMeshSession {
         browserTask?.cancel()
         pollTask?.cancel()
         for tunnel in tunnels.values {
-            tunnel.task?.cancel()
-            tunnel.datagramTask?.cancel()
+            tunnel.cancelTasks()
         }
         for pending in pendingInbound.values {
             pending.task.cancel()
@@ -462,8 +504,7 @@ final class NetworkMeshSession {
     /// this radio learns survives its own stop, so nothing owes a row on the wipe ledger.
     func stop() {
         for tunnel in tunnels.values {
-            tunnel.task?.cancel()
-            tunnel.datagramTask?.cancel()
+            tunnel.cancelTasks()
         }
         for pending in pendingInbound.values {
             pending.task.cancel()
@@ -532,9 +573,16 @@ final class NetworkMeshSession {
         report(message)
     }
 
-    /// Sends one frame to a peer. `.reliable` rides the control stream; `.bestEffort` rides a QUIC
-    /// datagram when the payload fits one, and falls back to the control stream when it does not —
-    /// delivering a best-effort frame reliably is always allowed, dropping it silently is not.
+    /// Sends one frame to a peer.
+    ///
+    /// `.bestEffort` rides a QUIC datagram when the payload fits one. A `.reliable` frame at or above
+    /// ``MeshTransferStreamTable/bulkFloorBytes`` — a friend photo, in practice — rides a stream
+    /// opened for it alone, so it cannot park the rest of the tunnel behind itself. Everything else
+    /// rides the control stream, in order, as it does under MultipeerConnectivity.
+    ///
+    /// Every fallback runs the same direction: a payload too large for a datagram, and a bulk frame
+    /// with no transfer slot free, both end up on the control stream. Delivering a frame more
+    /// reliably or more slowly than designed is always allowed; dropping it silently is not.
     func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws {
         guard let key = identities.key(for: peer), let tunnel = tunnels[key] else {
             throw PeerTransportError.unexpectedState
@@ -549,10 +597,24 @@ final class NetworkMeshSession {
             try await sendDatagram(data, over: datagrams)
             return
         }
+        if mode == .reliable, let claim = claimTransferStream(key, byteCount: data.count) {
+            try await sendOverTransferStream(data, key: key, claim: claim)
+            return
+        }
         guard let stream = tunnel.controlStream else {
             throw PeerTransportError.sendFailed(reason: MeshTransportError.noControlStream.diagnosticDescription)
         }
         try await sendFramed(data, over: stream)
+    }
+
+    /// How many per-transfer streams are open on one peer's tunnel, outbound plus inbound.
+    ///
+    /// The read `NetworkPeerChannel.openTransferCount` exposes: it lets a test — and a Lane C
+    /// transcript — assert that a transfer released its slot rather than infer it from a later send
+    /// happening to succeed.
+    func openTransferCount(for peer: PeerHandle) -> Int {
+        guard let key = identities.key(for: peer), let tunnel = tunnels[key] else { return 0 }
+        return tunnel.transfers.outbound.openCount + tunnel.transfers.inbound.openCount
     }
 
     // MARK: - Test seam
@@ -603,6 +665,24 @@ final class NetworkMeshSession {
         let now = Date()
         links.noteReady(key, now: now)
         heartbeats.start(key, now: now)
+    }
+
+    /// Claims one outbound transfer slot on a booked tunnel — the **budget** half of what
+    /// ``send(_:to:mode:)`` does, minus the framework connection a unit test cannot build.
+    ///
+    /// Same fork, same cap, same answer shape: nil means "send it on the control stream", whether
+    /// because the frame is under the floor or because the direction is full.
+    func claimOutboundTransferForTesting(_ key: MeshLinkKey, byteCount: Int) -> MeshTransferID? {
+        guard var tunnel = tunnels[key],
+              let id = tunnel.transfers.openOutbound(reliableByteCount: byteCount) else { return nil }
+        tunnels[key] = tunnel
+        return id
+    }
+
+    /// Releases one outbound transfer slot, exactly as ``sendOverTransferStream(_:key:claim:)``'s
+    /// `defer` releases it on both the success and the failure path.
+    func releaseOutboundTransferForTesting(_ key: MeshLinkKey, id: MeshTransferID) {
+        tunnels[key]?.transfers.closeOutbound(id)
     }
 
     /// Runs the duplicate-collapse gate `activate` runs, and answers exactly what it answers: may
@@ -995,7 +1075,7 @@ private extension NetworkMeshSession {
                 )
                 return
             }
-            activate(key, stream: stream, datagrams: datagrams, verified: verified)
+            activate(key, connection: connection, stream: stream, datagrams: datagrams, verified: verified)
             try await receiveFrames(for: key, from: stream)
         } catch {
             guard !Task.isCancelled else { return }
@@ -1007,12 +1087,26 @@ private extension NetworkMeshSession {
         }
     }
 
-    /// Listening side: serve the peer's control stream. Only the first inbound stream is served;
-    /// later ones (per-transfer photo streams, plan §7.1) have no handler yet and are declined
-    /// rather than silently treated as control.
+    /// Listening side: serve the peer's control stream, and every later stream as a transfer.
+    ///
+    /// **The control stream is the peer's stream 0, and only ever that.** RFC 9000 §2.1 numbers
+    /// client-initiated bidirectional streams 0, 4, 8 …, and the dialing side opens exactly one
+    /// stream before the signed introduction — so `streamID == 0` names the control stream without a
+    /// latch, and cannot be confused by a transfer that arrives while the introduction is still
+    /// running. Anything else is a per-transfer stream (plan §7.1), which closes item 5's named
+    /// residual: those streams used to be dropped for want of a handler.
+    ///
+    /// The handler for stream 0 blocks for the tunnel's whole life, and that is fine: this framework
+    /// runs `inboundStreams` handlers concurrently, one task per stream. Measured, not assumed — a
+    /// loopback QUIC pair delivered stream 4 to a handler while stream 0's handler was still parked
+    /// in its receive loop.
     func runResponder(_ connection: NetworkConnection<QUIC>, pendingKey: MeshLinkKey) async {
         do {
             try await connection.inboundStreams { stream in
+                guard stream.streamID == Self.controlStreamID else {
+                    await self.serveTransferStream(stream, on: connection)
+                    return
+                }
                 guard self.pendingInbound[pendingKey] != nil else { return }
                 let datagrams = try await connection.datagrams
                 await self.serveInbound(connection, stream: stream, datagrams: datagrams, pendingKey: pendingKey)
@@ -1048,7 +1142,7 @@ private extension NetworkMeshSession {
             at: key,
             with: Tunnel(peer: channel.peer, channel: channel, role: .responder, task: owning.task)
         )
-        activate(key, stream: stream, datagrams: datagrams, verified: verified)
+        activate(key, connection: connection, stream: stream, datagrams: datagrams, verified: verified)
         do {
             try await receiveFrames(for: key, from: stream)
         } catch {
@@ -1069,10 +1163,7 @@ private extension NetworkMeshSession {
     /// cancelled task returns without booking anything, because both its failure paths check
     /// `Task.isCancelled` first.
     private func replaceTunnel(at key: MeshLinkKey, with tunnel: Tunnel) {
-        if let previous = tunnels.removeValue(forKey: key) {
-            previous.task?.cancel()
-            previous.datagramTask?.cancel()
-        }
+        tunnels.removeValue(forKey: key)?.cancelTasks()
         tunnels[key] = tunnel
     }
 
@@ -1091,8 +1182,15 @@ private extension NetworkMeshSession {
     /// ``admitActivation(at:role:verified:)`` runs **first**, before a single hook fires: a tunnel
     /// that loses the duplicate collapse must never be announced to an owner, or the owner is handed
     /// a second peer for one device and then told one of them died.
+    ///
+    /// The connection is recorded here for the same reason the control stream is: it is what a
+    /// per-transfer stream is opened on, and recording it only at activation is what makes "a
+    /// transfer stream can never carry a frame from an unverified peer" structural rather than a
+    /// matter of call order (``serveTransferStream(_:on:)`` resolves its tunnel *through* it). The
+    /// dialing side also starts its transfer acceptor here — the listening side already has one.
     func activate(
         _ key: MeshLinkKey,
+        connection: NetworkConnection<QUIC>,
         stream: Network.QUIC.Stream<QUICStream>,
         datagrams: Network.QUIC.Datagrams<QUICDatagram>,
         verified: MeshVerifiedPeer
@@ -1103,9 +1201,15 @@ private extension NetworkMeshSession {
         let now = Date()
         tunnel.controlStream = stream
         tunnel.datagrams = datagrams
+        tunnel.connection = connection
         tunnel.verified = verified
         tunnel.datagramTask = Task { @MainActor [weak self] in
             await self?.receiveDatagrams(for: key, from: datagrams)
+        }
+        if role == .initiator {
+            tunnel.transferAcceptorTask = Task { @MainActor [weak self] in
+                await self?.acceptTransferStreams(on: connection, key: key)
+            }
         }
         tunnels[key] = tunnel
         links.noteReady(key, now: now)
@@ -1221,8 +1325,7 @@ private extension NetworkMeshSession {
     func closeRedundantTunnel(_ key: MeshLinkKey, peer verified: MeshVerifiedPeer) {
         heartbeats.stop(key)
         guard let tunnel = tunnels.removeValue(forKey: key) else { return }
-        tunnel.task?.cancel()
-        tunnel.datagramTask?.cancel()
+        tunnel.cancelTasks()
         links.noteClosed(key)
         tunnel.channel.notifyDisconnected(reason: MeshTunnelConvergence.closeReason)
         noteTunnelEnded(key, cause: .redundantDuplicate, tunnel: tunnel, detail: "closed")
@@ -1350,8 +1453,7 @@ private extension NetworkMeshSession {
     ) {
         heartbeats.stop(key)
         guard let tunnel = tunnels.removeValue(forKey: key) else { return }
-        tunnel.task?.cancel()
-        tunnel.datagramTask?.cancel()
+        tunnel.cancelTasks()
         noteTunnelEnded(key, cause: cause, tunnel: tunnel, detail: reason)
         guard tunnel.controlStream != nil else {
             handleDialFailure(key, reason: reason)
@@ -1406,6 +1508,145 @@ private extension NetworkMeshSession {
         case .giveUp(let attempts):
             report("The QUIC tunnel gave up after \(attempts) attempts: \(reason)")
         }
+    }
+}
+
+// MARK: - Per-transfer streams
+
+/// One claimed outbound transfer: the budget slot it holds and the connection its stream is opened
+/// on.
+///
+/// The two are claimed together and released together, so a slot cannot be taken for a tunnel whose
+/// connection has already gone.
+private struct MeshTransferClaim {
+
+    /// The budget slot this transfer holds, released when it finishes however it finishes.
+    let id: MeshTransferID
+
+    /// The connection to open this transfer's stream on.
+    let connection: NetworkConnection<QUIC>
+}
+
+private extension NetworkMeshSession {
+
+    /// Claims a transfer stream for one outbound frame, or answers nil to send it on the control
+    /// stream — see ``MeshTransferStreamTable/openOutbound(reliableByteCount:)`` for why those two
+    /// answers are deliberately one value.
+    func claimTransferStream(_ key: MeshLinkKey, byteCount: Int) -> MeshTransferClaim? {
+        guard var tunnel = tunnels[key], let connection = tunnel.connection,
+              let id = tunnel.transfers.openOutbound(reliableByteCount: byteCount) else { return nil }
+        tunnels[key] = tunnel
+        return MeshTransferClaim(id: id, connection: connection)
+    }
+
+    /// Writes one length-framed payload on a stream of its own and waits for the peer's ack.
+    ///
+    /// **The ack is not a protocol feature, it is what keeps the stream open.** A
+    /// `Network.QUIC.Stream`'s lifetime is its Swift object's: returning the moment the last write
+    /// returns releases the stream, and a peer that had not finished reading sees it reset. Reading
+    /// one byte back is the shortest thing that holds the object until the payload has landed — and
+    /// it turns a peer that vanished mid-transfer into a thrown send the caller already handles,
+    /// rather than a silent truncation the receiver would have to detect.
+    ///
+    /// The `defer` releases the budget on every path, including the throw and including a tunnel
+    /// that was torn down while this was in flight (where the optional chain is a no-op because the
+    /// whole record, budget included, is already gone).
+    func sendOverTransferStream(_ payload: Data, key: MeshLinkKey, claim: MeshTransferClaim) async throws {
+        defer { tunnels[key]?.transfers.closeOutbound(claim.id) }
+        do {
+            let stream = try await claim.connection.openStream()
+            noteTransfer("opened", bytes: payload.count, streamID: stream.streamID, key: key)
+            try await stream.send(NetworkMeshWire.header(for: payload.count))
+            try await stream.send(payload, endOfStream: true)
+            _ = try await stream.receive(exactly: MeshTransferStreamTable.ack.count)
+            noteTransfer("sent", bytes: payload.count, streamID: stream.streamID, key: key)
+        } catch {
+            noteTransfer("failed", bytes: payload.count, streamID: 0, key: key)
+            throw PeerTransportError.sendFailed(reason: error.localizedDescription)
+        }
+    }
+
+    /// The dialing side's inbound-stream acceptor.
+    ///
+    /// It exists because that side has none: it opens its own control stream, so every stream
+    /// arriving *at* it is a per-transfer stream and there is nothing to disambiguate. The listening
+    /// side needs no equivalent — its `inboundStreams` acceptor is already running and routes past
+    /// the control stream itself.
+    func acceptTransferStreams(on connection: NetworkConnection<QUIC>, key: MeshLinkKey) async {
+        do {
+            try await connection.inboundStreams { stream in
+                await self.serveTransferStream(stream, on: connection)
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            Self.logger.debug("QUIC transfer acceptor ended for \(key.rawValue, privacy: .public)")
+        }
+    }
+
+    /// Reads one whole transfer, hands it to the peer's channel as a single frame, and acks it.
+    ///
+    /// **Nothing crosses before the introduction, structurally.** A tunnel records its connection
+    /// only at ``activate(_:connection:stream:datagrams:verified:)``, which is only ever reached
+    /// with a ``MeshVerifiedPeer`` — so a stream opened by an unauthenticated connection resolves to
+    /// no tunnel here, is refused, and never reaches a channel or a decoder.
+    ///
+    /// A refused or failed transfer is dropped rather than fatal, and the stream goes back un-acked
+    /// so the sender's write fails loudly. That is the MC photo path's own failure semantics, and it
+    /// is why neither branch touches the tunnel: never disconnect at this layer, or one malformed
+    /// transfer could end any session.
+    func serveTransferStream(
+        _ stream: Network.QUIC.Stream<QUICStream>,
+        on connection: NetworkConnection<QUIC>
+    ) async {
+        guard let key = tunnelKey(for: connection), let id = claimInboundTransfer(key) else {
+            FernletAuditLog.log("mesh.quic.refusedTransferStream")
+            return
+        }
+        defer { tunnels[key]?.transfers.closeInbound(id) }
+        do {
+            let header = try await stream.receive(exactly: NetworkMeshWire.headerByteCount).content
+            let length = try NetworkMeshWire.payloadLength(from: header, ceiling: Self.maxInboundWireBytes)
+            let payload = try await stream.receive(exactly: length).content
+            tunnels[key]?.channel.receive(payload, at: Date())
+            noteTransfer("received", bytes: length, streamID: stream.streamID, key: key)
+            try await stream.send(MeshTransferStreamTable.ack, endOfStream: true)
+        } catch {
+            FernletAuditLog.log("mesh.quic.transferStreamFailed")
+            noteTransfer("dropped", bytes: 0, streamID: stream.streamID, key: key)
+        }
+    }
+
+    /// Takes one inbound transfer slot on a live tunnel, or answers nil when the peer already holds
+    /// ``MeshTransferStreamTable/maxConcurrentInbound``.
+    func claimInboundTransfer(_ key: MeshLinkKey) -> MeshTransferID? {
+        guard var tunnel = tunnels[key], let id = tunnel.transfers.openInbound() else { return nil }
+        tunnels[key] = tunnel
+        return id
+    }
+
+    /// The tunnel a connection belongs to, by object identity.
+    ///
+    /// Identity rather than a second pendingKey→tunnelKey map: a listening tunnel is promoted from
+    /// its pending key to the key its verified `sid` resolves to, so a map would have two spellings
+    /// of one link to keep in step. The connection object has exactly one. Scanned in sorted key
+    /// order and bounded by the roster cap, like ``liveTunnel(verifiedAs:excluding:)``.
+    func tunnelKey(for connection: NetworkConnection<QUIC>) -> MeshLinkKey? {
+        for candidate in tunnels.keys.sorted(by: { $0.rawValue < $1.rawValue })
+        where tunnels[candidate]?.connection === connection {
+            return candidate
+        }
+        return nil
+    }
+
+    /// Records one transfer crossing: the verb, the payload size, and the stream it rode.
+    ///
+    /// Byte counts and stream ids only — no payload, no peer name, and the same session-scoped
+    /// opaque endpoint id every other line in this class logs. `notice`, not `debug`: a transfer is
+    /// a rare, significant event, and this is the line a Lane C transcript reads the photo flow off.
+    func noteTransfer(_ verb: String, bytes: Int, streamID: UInt64, key: MeshLinkKey) {
+        let line = "transfer \(verb) bytes=\(bytes) stream=\(streamID) for \(key.rawValue)"
+        Self.logger.notice("\(line, privacy: .public)")
+        MeshTransportConsoleLog.echo(line)
     }
 }
 
@@ -1579,8 +1820,14 @@ private extension NetworkMeshSession {
         guard payload.count <= MeshChannelIntroductionFormat.maxFrameByteCount else {
             throw MeshTransportError.oversizedFrame(byteCount: payload.count)
         }
-        try await stream.send(NetworkMeshWire.header(for: payload.count))
-        try await stream.send(payload)
+        // One write, for the reason ``sendFramed(_:over:)`` gives at length: a length prefix and its
+        // payload written as two awaited sends can be split by another writer on the same stream.
+        // The handshake has only one writer per stream today, so this is uniformity rather than a
+        // fix — but a framing rule that holds in one place and not the other is the kind that gets
+        // broken by the next caller.
+        var frame = NetworkMeshWire.header(for: payload.count)
+        frame.append(payload)
+        try await stream.send(frame)
     }
 
     /// Reads one length-framed JSON handshake frame, under the handshake's own small ceiling.
@@ -1606,11 +1853,29 @@ private extension NetworkMeshSession {
 
 private extension NetworkMeshSession {
 
-    /// Writes one length-framed payload to a control stream.
+    /// Writes one length-framed payload to a control stream, in **one** write.
+    ///
+    /// The single write is the whole point, and it is not a micro-optimisation. Every frame on a
+    /// tunnel shares one control stream, and `MeshNetworkManager` fires its envelopes as independent
+    /// tasks — a photo manifest, a vouch list, a shop catalogue and a shop request all leave within
+    /// the same instant of a slot committing. Writing the header and the payload as two awaited
+    /// sends let two of those tasks interleave at the suspension between them, so the peer read one
+    /// frame's header followed by another frame's first four bytes as a length. The reader then
+    /// refused an implausible length (``MeshTransportError/invalidFrameLength``) and the tunnel died
+    /// — observed on the Lane C app-flow run, every time, within a second of the first slot commit.
+    ///
+    /// One contiguous buffer per frame closes it: concurrent sends can be ordered either way, but
+    /// neither can land inside the other. The bytes on the wire are identical.
+    ///
+    /// The per-transfer streams do not need this and deliberately do not copy: a transfer stream is
+    /// opened by one task, written by that task alone, and closed with it, so it has no second
+    /// writer to interleave with — and a bulk payload is exactly the one it would be wasteful to
+    /// concatenate.
     func sendFramed(_ payload: Data, over stream: Network.QUIC.Stream<QUICStream>) async throws {
+        var frame = NetworkMeshWire.header(for: payload.count)
+        frame.append(payload)
         do {
-            try await stream.send(NetworkMeshWire.header(for: payload.count))
-            try await stream.send(payload)
+            try await stream.send(frame)
         } catch {
             throw PeerTransportError.sendFailed(reason: error.localizedDescription)
         }
