@@ -691,7 +691,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     func shouldAcceptHeartInvitation(_ peer: PeerHandle) -> Bool {
         // A peer we already hold a connection with re-inviting (retry of a dropped attempt) is
         // always let through.
-        if heartConnections.contains(where: { $0.peer.isSameEndpoint(as: peer) }) {
+        if hasHeartConnection(with: peer) {
             return true
         }
         guard store.allowNearbyHearts else { return false }
@@ -702,11 +702,59 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     // MARK: - Hearts: connection lifecycle
 
+    /// True when `peer`'s DEVICE already holds a heart connection.
+    ///
+    /// The one spelling of "are we already connected to this device?", matched the way every stored
+    /// record must be matched against a transport event — by ``PeerHandle/isSameEndpoint(as:)``,
+    /// never `==` — so the inbound-invitation gate and the channel-ready gate cannot drift apart
+    /// again. `removeHeartConnection(matching:)` filters on the same test.
+    private func hasHeartConnection(with peer: PeerHandle) -> Bool {
+        heartConnections.contains { $0.peer.isSameEndpoint(as: peer) }
+    }
+
+    /// What ``handleHeartChannelReady`` does with a freshly connected heart channel.
+    ///
+    /// Extracted from the guard chain so the decision is reachable from a unit test: what follows
+    /// it in production is a live `ProximityCoordinator` over a real `NIRangingSession`, which a
+    /// unit test must not build, and the decision is the half that was wrong. Mirrors
+    /// `MeshNetworkManager.ChannelAdmission`.
+    enum HeartChannelAdmission: Equatable {
+        /// Build the coordinator and hold the heart connection.
+        case admit
+        /// Refuse and free the MC link. A connected peer with no heart-connection record holds a
+        /// zombie link — one of the 8 MC peer slots — until presence stops.
+        case turnAway
+        /// This device already holds a heart connection. Leave it entirely alone: disconnecting
+        /// here would drop the live handshake, and admitting would hold one device twice.
+        case alreadyConnected
+    }
+
+    /// The admission decision for a freshly connected heart channel — see
+    /// ``HeartChannelAdmission``.
+    ///
+    /// Recognizes the peer by endpoint, exactly as ``shouldAcceptHeartInvitation(_:)`` above does,
+    /// and in the same order: a device we already hold is answered before the cap, because the cap
+    /// is not what it is asking. The duplicate check used to compare `peer.id` alone (plan §6.4),
+    /// so a connected device whose handle churned — a bounded identity-map eviction, a transport
+    /// `stop()`/restart — was read as a stranger by the ready path the invitation gate had just
+    /// waved through: below the cap it opened a SECOND coordinator, ranging session and Live
+    /// Activity anchor for one peer; at the cap it disconnected the device, killing the live
+    /// connection it already held.
+    func heartChannelAdmission(for peer: PeerHandle) -> HeartChannelAdmission {
+        guard !hasHeartConnection(with: peer) else { return .alreadyConnected }
+        guard heartConnections.count < Self.maxHeartConnections else { return .turnAway }
+        return .admit
+    }
+
     private func handleHeartChannelReady(_ channel: PeerChannelTransport) {
-        guard !heartConnections.contains(where: { $0.id == channel.peer.id }) else { return }
-        guard heartConnections.count < Self.maxHeartConnections else {
+        switch heartChannelAdmission(for: channel.peer) {
+        case .alreadyConnected:
+            return
+        case .turnAway:
             session?.disconnectPeer(channel.peer)
             return
+        case .admit:
+            break
         }
         // The MC channel is up — cancel the pre-connect retry timer (the coordinator's own 25 s
         // handshake budget governs from here).

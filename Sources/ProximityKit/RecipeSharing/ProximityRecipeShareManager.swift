@@ -433,22 +433,67 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         recordDiagnostic("\(displayName) is no longer nearby.")
     }
 
+    /// True when `peer`'s DEVICE already holds the pairing.
+    ///
+    /// The one spelling of "are we already paired with this device?", matched the way every stored
+    /// record must be matched against a transport event — by ``PeerHandle/isSameEndpoint(as:)``,
+    /// never `==` — so the inbound-invitation gate, the admission check and the channel-ready gate
+    /// cannot drift apart again.
+    private func isConnected(to peer: PeerHandle) -> Bool {
+        connections.contains { $0.peer.isSameEndpoint(as: peer) }
+    }
+
     /// Belt-and-braces admission check for a just-connected MC channel (hard 2-device cap):
     /// true only when no connection exists or the peer already holds it. A third peer can
     /// still slip past both invitation gates in the connecting window; this is the last line.
     func shouldAdmitChannel(for peer: PeerHandle) -> Bool {
-        connections.isEmpty || connections.contains { $0.peer.isSameEndpoint(as: peer) }
+        connections.isEmpty || isConnected(to: peer)
+    }
+
+    /// What ``handleChannelReady`` does with a freshly connected channel.
+    ///
+    /// Extracted from the guard chain so the decision is reachable from a unit test: what follows
+    /// it in production is a live `ProximityCoordinator` over a real `NIRangingSession`, which a
+    /// unit test must not build, and the decision is the half that was wrong. Mirrors
+    /// `MeshNetworkManager.ChannelAdmission`.
+    enum ChannelAdmission: Equatable {
+        /// Open the pairing: build the coordinator and record the connection.
+        case admit
+        /// Refuse and free the MC link. A connected peer with no connection record holds a zombie
+        /// link — a channel with no owner, one of the 8 MC peer slots — until the radio stops.
+        case turnAway
+        /// This device already holds the pairing. Leave it entirely alone: disconnecting here would
+        /// drop the good connection, and admitting would seat one device twice.
+        case alreadyConnected
+    }
+
+    /// The admission decision for a freshly connected channel — see ``ChannelAdmission``.
+    ///
+    /// Recognizes the peer by endpoint, exactly as ``shouldAdmitChannel(for:)`` and the inbound
+    /// invitation gate beside it do. The duplicate check used to compare `peer.id` alone (plan
+    /// §6.4), so a paired device whose handle churned — a bounded identity-map eviction, a
+    /// transport `stop()`/restart — fell through to ``shouldAdmitChannel(for:)``, which DID
+    /// recognize it, and was admitted a second time: two connection records, two coordinators and
+    /// two ranging sessions for one device, on a radio capped at two devices.
+    func channelAdmission(for peer: PeerHandle) -> ChannelAdmission {
+        guard !isConnected(to: peer) else { return .alreadyConnected }
+        guard shouldAdmitChannel(for: peer) else { return .turnAway }
+        return .admit
     }
 
     private func handleChannelReady(_ channel: PeerChannelTransport) {
-        guard !connections.contains(where: { $0.peer.id == channel.peer.id }) else { return }
-        // Hard 2-device cap, belt-and-braces: a third peer that won the connecting-window race
-        // anyway is never admitted — best-effort kick it (see disconnectPeer's caveats) and
-        // leave the existing pairing untouched.
-        guard shouldAdmitChannel(for: channel.peer) else {
+        switch channelAdmission(for: channel.peer) {
+        case .alreadyConnected:
+            return
+        case .turnAway:
+            // Hard 2-device cap, belt-and-braces: a third peer that won the connecting-window race
+            // anyway is never admitted — best-effort kick it (see disconnectPeer's caveats) and
+            // leave the existing pairing untouched.
             recordDiagnostic("Turned away \(channel.peer.displayHint) — recipe sharing links two Fernlets at a time.")
             session.disconnectPeer(channel.peer)
             return
+        case .admit:
+            break
         }
         recordDiagnostic("Secure recipe-share channel opened with \(channel.peer.displayHint).")
         let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
