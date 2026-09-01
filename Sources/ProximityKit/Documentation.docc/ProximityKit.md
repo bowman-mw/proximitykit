@@ -28,8 +28,9 @@ list in the manifest is the truth.
 
 **How a session forms.** A radio owner (``MeshNetworkManager`` for the friend mesh,
 ``ProximityRecipeShareManager`` for recipe pairing, ``PresenceManager`` for presence hearts)
-runs a `MeshMultipeerSession` — one shared MCSession multiplexed into per-peer
-`PeerChannelTransport` channels. All three resolve the display name they advertise the same way
+runs one shared radio multiplexed into per-peer channels — a `MeshMultipeerSession` on every
+shipping path (the friend mesh *selects* its radio; see Transport below).
+All three resolve the display name they advertise the same way
 (host preference, device name as fallback), and the peer-supplied names that reach chat, hearts,
 vouches, and the keep-as-friend rows pass one sanitize-or-"A friend" coercion; both live in
 `PeerDisplayNames.swift`, the single home of what was a copy per call site. Each connected peer
@@ -87,7 +88,7 @@ suspension — so the loop can never pin the manager. Every long-running task th
 own is also cancelled in an `isolated deinit`, and every record-drop path (stop, refresh, MC
 disconnect, stale/parked sweeps, slot eviction) runs the dropped ``ProximityCoordinator``'s own
 `cancel()` so ranging and the Live Activity anchor stop with it; the mesh manager additionally
-kicks an evicted peer's MC link (`MeshMultipeerSession.disconnectPeer`) so no zombie link
+kicks an evicted peer's link (`MeshTransportSession.disconnectPeer`) so no zombie link
 survives a slot (`Tests/FernletTests/MemoryLifecycleTests` + `MemoryLifecycleBoundaryTests` are
 the enforcement; see Docs/Memory-Leak-Review-2026-08-17.md). Framework delegate callbacks
 (MCSession, NearbyInteraction, ActivityKit)
@@ -218,6 +219,19 @@ are the two radios; each multiplexes into per-peer channels — `PeerChannelTran
 opposite-direction inviter policy that wakes if one does, and two policies pointing opposite ways
 means neither side dials. Discovery reaches the owner through the sessions' closure hooks instead.
 
+**Which radio a manager gets is a selection, not a hard-coding** (plan §7, P2 item 8).
+`MeshNetworkManager` holds its radio as a `MeshTransportSession` — `wire(_:)` installs one
+`MeshTransportHandlers` value, and start/stop/republish/invite/disconnect are the whole surface — so
+the same manager runs on either conformer and, in the suite, on an in-memory fake.
+`MeshTransportFactory` decides: `shippingDefault` is MultipeerConnectivity and is the only answer a
+Release build can produce; QUIC is reachable from an internal injection or the DEBUG-only
+`FERNLET_MESH_TRANSPORT=quic` launch variable, and **nothing about the choice is persisted** — no
+setting, no UI, no `UserDefaults` key, so it owes no row on the wipe ledger. A slot's channel is held
+as `MeshPeerChannel` for the same reason; `DetachedPeerChannel` is the radio-less one the manager's
+test seams use. Selecting QUIC also attaches the manager as the radio's `MeshIntroductionAuthority`
+(mesh id, epoch reference, roster, signing key), which the MC radio is handed and ignores by
+contract — it authenticates one layer up, inside the slot coordinator's identity introduction.
+
 Every decision the QUIC session makes is factored out of it so it can be enumerated at tier 1 with
 no radios and no wall clock: `MeshLinkTable` (peer cap, per-connection state machine, three-attempt
 dial budget, duplicate-tunnel suppression, endpoint cache), `MeshHeartbeatSchedule` (the 30 s
@@ -251,6 +265,10 @@ advertisement it came from, so duplicate-tunnel suppression ranks the pair inste
 - ``MultipeerServiceType``
 - ``MCPeerIDStoring``
 - ``FileMCPeerIDStore``
+
+Internal to the module, and listed here because they are where the transport SELECTION lives:
+`MeshTransportSession`, `MeshTransportHandlers`, `MeshTransportKind`, `MeshTransportFactory`,
+`MeshPeerChannel`, `DetachedPeerChannel`.
 
 Internal to the module, and listed here because they are where the QUIC transport's behaviour
 actually lives: `NetworkMeshSession`, `NetworkPeerChannel`, `MeshLinkTable`, `MeshLinkKey`,

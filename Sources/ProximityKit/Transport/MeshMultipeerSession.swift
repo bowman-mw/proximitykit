@@ -272,16 +272,10 @@ final class MeshMultipeerSession: NSObject {
     /// belt-and-braces and never depend on it alone (manager-level record eviction is what
     /// actually drives teardown/reopen decisions).
     func disconnectPeer(_ peer: PeerHandle) {
-        onDisconnectPeerRequestedForTesting?(peer)
         guard let peerID = mcPeerID(for: peer) else { return }
         pendingConnectionPeers.removeValue(forKey: peerID)
         mcSession?.cancelConnectPeer(peerID)
     }
-
-    /// Fired synchronously at the top of `disconnectPeer` so unit tests — which cannot start a
-    /// real `MCSession` — can assert that an owner's eviction path requested the MC kick
-    /// (`MeshNetworkManagerTests`: an evicted slot must not leave a zombie link).
-    var onDisconnectPeerRequestedForTesting: ((PeerHandle) -> Void)?
 
     func stop() {
         advertiser?.stopAdvertisingPeer()

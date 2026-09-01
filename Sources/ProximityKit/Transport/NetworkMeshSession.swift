@@ -238,9 +238,14 @@ final class NetworkPeerChannel: PeerTransport {
 /// is what turns the serverless/no-internet claim from an aspiration into something the OS enforces.
 ///
 /// **Fail closed without an authority.** ``introductionAuthority`` is the seam that supplies the
-/// mesh id, the epoch reference, the roster and the signing key. It is nil until P2 item 8 wires
-/// `MeshNetworkManager`, and a session with no authority cannot authenticate anyone, so it refuses
-/// every tunnel rather than admitting one unverified.
+/// mesh id, the epoch reference, the roster and the signing key; `MeshNetworkManager` attaches
+/// itself as one through ``MeshTransportSession/attachIntroductionAuthority(_:)`` when this radio is
+/// selected (P2 item 8). A session with no authority cannot authenticate anyone, so it refuses every
+/// tunnel rather than admitting one unverified — as does one whose owner wired no ``invitationGate``.
+///
+/// **Selected, never defaulted.** `MeshTransportFactory` hands the manager a `MeshMultipeerSession`
+/// on every shipping path; this radio is reachable only from an internal injection or the DEBUG-only
+/// `FERNLET_MESH_TRANSPORT=quic` launch variable, and nothing about that choice is persisted.
 ///
 /// `@MainActor`; framework callbacks arrive `@Sendable` and hop in. Owners wire behaviour through
 /// the closure hooks, the same way they do for the MC session.
@@ -321,6 +326,14 @@ final class NetworkMeshSession {
     /// Invoked with frozen diagnostic English when the listener or browser fails to start.
     /// Without it a missing `NSBonjourServices` entry or a declined Local Network prompt is silent.
     var onTransportError: ((String) -> Void)?
+    /// The owner's admission gate, consulted once a peer has proved who it is and before its tunnel
+    /// takes a roster slot (``admitVerifiedInbound(_:pendingKey:)``).
+    ///
+    /// **Fail closed**, exactly like the MC advertiser's `shouldAcceptInvitation` (`?? false`): a
+    /// radio nobody has wired admits nobody. It runs *after* the signed channel introduction rather
+    /// than before, because there is no invitation moment here to gate — a peer dials and
+    /// authenticates — so the earliest honest question is "this verified member: do you want it?".
+    var invitationGate: ((PeerHandle) -> Bool)?
 
     // MARK: State
 
@@ -484,6 +497,27 @@ final class NetworkMeshSession {
             return
         }
         startOutboundTunnel(to: key)
+    }
+
+    /// Frees one peer's tunnel — the QUIC counterpart of the MC session's targeted disconnect, and
+    /// best-effort in the same way: the owner's record eviction is what actually drives teardown.
+    ///
+    /// `notifyOwner: false` is the load-bearing half. This is an eviction the owner *asked* for, and
+    /// ``endTunnel(_:reason:notifyOwner:)`` fires ``onPeerDisconnected`` synchronously — so
+    /// reporting it back would re-enter the owner's disconnect path from inside its own removal
+    /// funnel. MC has the same shape and does not have the problem only because its `.notConnected`
+    /// arrives later, on a delegate callback the owner already knows to swallow. The peer's channel
+    /// still publishes `.disconnected`: the coordinator on the other end of it must see the link die.
+    func disconnectPeer(_ peer: PeerHandle) {
+        guard let key = identities.key(for: peer) else { return }
+        endTunnel(key, reason: "This peer's slot was evicted locally.", notifyOwner: false)
+    }
+
+    /// Hands a start failure to the owner's transport-error hook, with the same logging every other
+    /// radio failure gets. Internal so the ``MeshTransportSession`` conformance — whose
+    /// `startRadios(discoveryInfo:)` cannot throw, because the MC radio's cannot — can report one.
+    func reportTransportError(_ message: String) {
+        report(message)
     }
 
     /// Sends one frame to a peer. `.reliable` rides the control stream; `.bestEffort` rides a QUIC
@@ -803,9 +837,18 @@ private extension NetworkMeshSession {
     /// pair, so duplicate-tunnel suppression makes the real ``MeshDialPreference`` decision rather
     /// than admitting both sides.
     ///
-    /// - Returns: the key to build the tunnel under, or nil when the table refused it.
+    /// The owner's ``invitationGate`` is consulted here too, and fails closed: this is the moment
+    /// the MC advertiser's `shouldAcceptInvitation` answers, moved to the earliest point on this
+    /// radio where the question can honestly be asked (the peer has proved who it is; nothing has
+    /// been admitted yet).
+    ///
+    /// - Returns: the key to build the tunnel under, or nil when the table or the owner refused it.
     func admitVerifiedInbound(_ verified: MeshVerifiedPeer, pendingKey: MeshLinkKey) -> MeshLinkKey? {
         let key = links.key(advertisingSessionID: verified.sessionID) ?? pendingKey
+        guard invitationGate?(handle(for: key)) ?? false else {
+            Self.logger.debug("inbound QUIC tunnel refused by its owner for \(key.rawValue, privacy: .public)")
+            return nil
+        }
         let admission = links.admitInbound(
             from: key,
             localSessionID: advertisedFields[MeshLinkAdvertisement.sessionIDKey] ?? "",
@@ -1012,7 +1055,11 @@ private extension NetworkMeshSession {
     /// Ends a tunnel, choosing between "the dial failed" and "a live link dropped" by whether the
     /// control stream ever came up. Charging a disconnect to the dial budget is how a peer that
     /// reconnects a few times would become permanently undialable.
-    func endTunnel(_ key: MeshLinkKey, reason: String) {
+    ///
+    /// `notifyOwner` is false for exactly one caller — ``disconnectPeer(_:)``, an eviction the owner
+    /// asked for, which must not be reported back to the owner from inside its own removal funnel.
+    /// The channel is told either way.
+    func endTunnel(_ key: MeshLinkKey, reason: String, notifyOwner: Bool = true) {
         heartbeats.stop(key)
         guard let tunnel = tunnels.removeValue(forKey: key) else { return }
         tunnel.task?.cancel()
@@ -1023,6 +1070,7 @@ private extension NetworkMeshSession {
         }
         links.noteClosed(key)
         tunnel.channel.notifyDisconnected(reason: reason)
+        guard notifyOwner else { return }
         onPeerDisconnected?(tunnel.peer, reason)
     }
 

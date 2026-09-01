@@ -42,7 +42,10 @@ public enum SlotKind {
 public struct PeerSlot: Identifiable {
     public let id: UUID  // == peer.id
     public let peer: PeerHandle
-    let channel: PeerChannelTransport
+    /// The peer's channel on whichever radio the manager is running — `PeerChannelTransport` under
+    /// MultipeerConnectivity, `NetworkPeerChannel` under QUIC, a detached one in unit tests. Held
+    /// as the neutral protocol so a slot never names a radio.
+    let channel: any MeshPeerChannel
     public let coordinator: ProximityCoordinator
     public var kind: SlotKind
     public var fingerprint: String?

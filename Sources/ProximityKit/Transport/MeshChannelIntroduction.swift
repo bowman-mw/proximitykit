@@ -519,7 +519,7 @@ nonisolated struct MeshChannelIntroductionExchange {
 ///
 /// The transport owns no identity and no membership: it does not know which mesh it is in, who is
 /// on the roster, or how to reach the signing key. This is that seam, kept to five members so the
-/// wiring in P2 item 8 is a small adapter over `MeshNetworkManager` and `IdentityService` rather
+/// wiring in P2 item 8 is `MeshNetworkManager` itself, reading `IdentityService`, rather
 /// than a second copy of either.
 ///
 /// **Fail closed.** ``NetworkMeshSession`` with no authority refuses every tunnel: a transport that

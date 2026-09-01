@@ -56,8 +56,9 @@ private struct FriendPhotoWallPreferences: Codable, Equatable {
 /// live-session chat, in-session hearts, moderation relay, fuzzy friend state, Group Activities,
 /// the QR verification ceremony, and the post-session keep-as-friend review.
 ///
-/// Structure: one shared `MeshMultipeerSession` MCSession feeds per-peer `PeerChannelTransport`
-/// channels; each channel gets a ``PeerSlot`` with its own ``ProximityCoordinator`` and a
+/// Structure: one shared radio — held through `MeshTransportSession`, so it is the MC session on
+/// every shipping path and the QUIC one only when selected — feeds per-peer channels; each channel
+/// gets a ``PeerSlot`` with its own ``ProximityCoordinator`` and a
 /// retained ``FriendSessionTrustPolicy``. Slots are capped (3 active + 2 lightweight, ranked by
 /// stable UWB distance with hysteresis-guarded overflow eviction) and a symmetric `sid`
 /// comparison picks the single inviter of a mutually-discovered pair. Core mesh-control payloads
@@ -179,7 +180,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public var discoveryError: String?
 
     @ObservationIgnored private unowned let store: any ProximityHost
-    @ObservationIgnored private let meshSession = MeshMultipeerSession()
+    /// The shared radio, held through ``MeshTransportSession`` so this manager never names one.
+    /// `MeshTransportFactory` picks it: MultipeerConnectivity on every shipping path, the QUIC
+    /// conformer only from an internal injection or the DEBUG-only launch variable.
+    @ObservationIgnored private let transport: any MeshTransportSession
+    /// The callbacks installed on ``transport``. Kept so a unit test can fire the events a radio
+    /// drives in production — `onPeerDisconnected` above all, whose retry and local-kick bookkeeping
+    /// has no other entry point.
+    @ObservationIgnored private var transportHandlers = MeshTransportHandlers()
     @ObservationIgnored private let identity: IdentityService
     @ObservationIgnored private let replayCache = ReplayCache()
     @ObservationIgnored private let photoCacheStore: PrivateMediaStore
@@ -355,8 +363,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Hard cap on outstanding removal proposals (backstop against spoofed proposer fingerprints).
     private static let maxPendingRemovalProposals = 16
 
-    public init(store: any ProximityHost) {
+    /// The app's entry point: a manager over the radio this build selected.
+    ///
+    /// That is MultipeerConnectivity everywhere it matters — ``MeshTransportFactory/shippingDefault``
+    /// is the only answer a Release build can produce. A DEBUG build can be launched onto the QUIC
+    /// radio with `FERNLET_MESH_TRANSPORT=quic`; nothing about the choice is stored, so it lasts one
+    /// launch and owes no row on the persisted-surface wipe ledger.
+    public convenience init(store: any ProximityHost) {
+        self.init(store: store, transport: nil)
+    }
+
+    /// The designated initializer, taking the radio.
+    ///
+    /// `nil` means "whatever this build selects", which is what the public initializer passes. Tests
+    /// pass an in-memory fake; that seam is the whole of P2 item 8, and what closes the long-standing
+    /// gap where manager-level invite behaviour could not be asserted at tier 1 at all.
+    init(store: any ProximityHost, transport: (any MeshTransportSession)?) {
         self.store = store
+        self.transport = transport ?? MeshTransportFactory.makeSession(MeshTransportFactory.resolvedKind())
         let id = IdentityService()
         // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
         // otherwise every later sign/seal on this identity fails with no visible cause.
@@ -1862,59 +1886,82 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         clothingShop.isSharingEnabled && peerIdentity.supports(.shop)
     }
 
+    /// Installs this manager's callbacks on its radio and, for a radio that authenticates peers
+    /// itself, hands it the introduction authority.
+    ///
+    /// Both halves go through ``MeshTransportSession``, so the wiring reads the same whichever
+    /// conformer is behind it. `attachIntroductionAuthority` is a documented no-op on the MC radio,
+    /// whose peers authenticate one layer up inside the slot coordinator's identity introduction.
     private func setupMeshSession() {
-        meshSession.onPeerDiscovered = { [weak self] peer in
+        transportHandlers = makeTransportHandlers()
+        transport.wire(transportHandlers)
+        transport.attachIntroductionAuthority(self)
+    }
+
+    /// The callback set, built once so it can be both installed and kept (see ``transportHandlers``).
+    private func makeTransportHandlers() -> MeshTransportHandlers {
+        var handlers = MeshTransportHandlers()
+        handlers.onPeerDiscovered = { [weak self] peer in
             self?.handlePeerDiscovered(peer)
         }
-        meshSession.onPeerChannelReady = { [weak self] channel in
+        handlers.onChannelReady = { [weak self] channel in
             self?.handleChannelReady(channel)
         }
-        meshSession.onPeerDisconnected = { [weak self] peer, _ in
-            guard let self else { return }
-            // Read BEFORE removeSlot (whose no-op kick of an already-dropped peer records the
-            // endpoint too), then clear both records: a deliberate local eviction must not be retried.
-            let wasKickedLocally = self.locallyKickedEndpoints.contains(peer.endpoint)
-            let matchingSlot = self.slot(for: peer)
-            let wasCommitted = matchingSlot?.fingerprint != nil
-            if let slot = matchingSlot {
-                self.removeSlot(slot)
-            }
-            self.locallyKickedEndpoints.remove(peer.endpoint)
-            // In proximity join: if the MC connection dropped before the peer committed and we
-            // are the designated inviter (higher fingerprint), retry up to maxPeerRetries times.
-            // Without this, a transient socket failure permanently strands the session because
-            // the browser won't re-fire onPeerDiscovered for a peer it already found.
-            guard self.isProximityJoin, self.isSessionOpen, !wasCommitted, !wasKickedLocally else { return }
-            guard self.shouldInitiateInvite(to: peer) else { return }
-            let retryCount = self.peerRetryCount[peer.endpoint, default: 0]
-            guard retryCount < Self.maxPeerRetries else { return }
-            self.peerRetryCount[peer.endpoint] = retryCount + 1
-            Task { [weak self] in
-                // A cancelled retry must not invite (R7).
-                do {
-                    try await Task.sleep(for: .seconds(Self.reinviteDelaySeconds))
-                } catch {
-                    return
-                }
-                guard let self, self.isProximityJoin, self.isSessionOpen,
-                      self.slots.count < Self.maxTotalSlots,
-                      !self.hasSlot(for: peer) else { return }
-                self.meshSession.invite(peer)
-            }
+        handlers.onPeerDisconnected = { [weak self] peer, _ in
+            self?.handlePeerDisconnected(peer)
         }
-        meshSession.shouldAcceptInvitation = { [weak self] peer in
+        handlers.shouldAcceptInvitation = { [weak self] peer in
             guard let self else { return false }
             // Blocklist is enforced at identity-introduction time by the slot coordinator.
             if self.isProximityJoin && !self.isSessionOpen { return false }
             if self.slots.count < Self.maxTotalSlots { return true }
             return self.canEvaluateOverflowCandidate(peer)
         }
-        meshSession.onTransportError = { [weak self] message in
+        handlers.onTransportError = { [weak self] message in
             // Discovery failed to start (e.g. a declined Local Network prompt, or a service type
             // missing from NSBonjourServices) — surface it instead of searching forever in
             // silence. Its own property, not `meshError`: the only `meshError` view lives inside a
             // session, which by definition does not exist yet at a discovery failure.
             self?.discoveryError = message
+        }
+        return handlers
+    }
+
+    /// A peer's link dropped: tear its slot down, then decide whether to re-invite it.
+    ///
+    /// Extracted from the transport wiring so the wiring stays a list of hooks and this stays
+    /// readable — the retry bookkeeping is the part that has been subtly wrong before, and it is
+    /// now reachable from a unit test through the injected fake rather than only through a radio.
+    private func handlePeerDisconnected(_ peer: PeerHandle) {
+        // Read BEFORE removeSlot (whose no-op kick of an already-dropped peer records the
+        // endpoint too), then clear both records: a deliberate local eviction must not be retried.
+        let wasKickedLocally = locallyKickedEndpoints.contains(peer.endpoint)
+        let matchingSlot = slot(for: peer)
+        let wasCommitted = matchingSlot?.fingerprint != nil
+        if let slot = matchingSlot {
+            removeSlot(slot)
+        }
+        locallyKickedEndpoints.remove(peer.endpoint)
+        // In proximity join: if the link dropped before the peer committed and we are the
+        // designated inviter (higher session id), retry up to maxPeerRetries times. Without this, a
+        // transient socket failure permanently strands the session because the browser won't
+        // re-fire onPeerDiscovered for a peer it already found.
+        guard isProximityJoin, isSessionOpen, !wasCommitted, !wasKickedLocally else { return }
+        guard shouldInitiateInvite(to: peer) else { return }
+        let retryCount = peerRetryCount[peer.endpoint, default: 0]
+        guard retryCount < Self.maxPeerRetries else { return }
+        peerRetryCount[peer.endpoint] = retryCount + 1
+        Task { [weak self] in
+            // A cancelled retry must not invite (R7).
+            do {
+                try await Task.sleep(for: .seconds(Self.reinviteDelaySeconds))
+            } catch {
+                return
+            }
+            guard let self, self.isProximityJoin, self.isSessionOpen,
+                  self.slots.count < Self.maxTotalSlots,
+                  !self.hasSlot(for: peer) else { return }
+            self.transport.invite(peer)
         }
     }
 
@@ -1924,7 +1971,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // (or a fresh attempt after a transient failure) drops the banner instead of pinning it up
         // over a search that is now healthy.
         discoveryError = nil
-        meshSession.start(serviceType: MeshMultipeerSession.friendServiceType, discoveryInfo: currentDiscoveryInfo())
+        transport.startRadios(discoveryInfo: currentDiscoveryInfo())
         startObserving()
     }
 
@@ -1940,7 +1987,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         locallyKickedEndpoints.removeAll()
         sentShopCatalogSlotIDs.removeAll()
         shopCatalogRequestResponseAt.removeAll()
-        meshSession.stop()
+        transport.stop()
         for slot in slots { Task { await slot.coordinator.cancel() } }
         slots.removeAll()
         slotTrustPolicies.removeAll()
@@ -1984,7 +2031,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     private func updateDiscoveryInfo() {
-        meshSession.updateDiscoveryInfo(currentDiscoveryInfo())
+        transport.updateDiscoveryInfo(currentDiscoveryInfo())
     }
 
     /// Decides which half of a mutually-discovered pair sends the MC invitation.
@@ -2004,7 +2051,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///     user-assigned-device-name` (Fernlet.entitlements does not request it);
     ///   * `localFingerprint` is 16 lowercase hex chars, so its first character is at most "f" —
     ///     always less than "i". `localFingerprint > "iPhone"` was therefore false on BOTH sides,
-    ///     every time, and `meshSession.invite` was unreachable from either call site.
+    ///     every time, and the transport's `invite` was unreachable from either call site.
     ///
     /// `sid` is the correct discriminator: a per-launch random UUID that both sides already
     /// broadcast in `currentDiscoveryInfo()`. It needs no new field on the wire, and — unlike a
@@ -2070,7 +2117,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             guard isSessionOpen else { return }
             guard shouldInitiateInvite(to: peer) else { return }
             if slots.count < Self.maxTotalSlots, !hasSlot(for: peer) {
-                meshSession.invite(peer)
+                transport.invite(peer)
             }
             return
         }
@@ -2080,7 +2127,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if let mesh = currentMesh, mesh.mode == .open {
             if slots.count < Self.maxTotalSlots || canEvaluateOverflowCandidate(peer) {
                 if !hasSlot(for: peer) {
-                    meshSession.invite(peer)
+                    transport.invite(peer)
                 }
             }
         }
@@ -2110,7 +2157,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return .seat
     }
 
-    private func handleChannelReady(_ channel: PeerChannelTransport) {
+    private func handleChannelReady(_ channel: any MeshPeerChannel) {
         switch channelAdmission(for: channel.peer) {
         case .kick:
             kickEvictedPeer(channel.peer)
@@ -2207,19 +2254,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Frees the MC link of a peer whose slot this manager is evicting itself. `removeSlot` /
     /// `disconnectSlot` drop the record and cancel the coordinator, but nothing in that chain
-    /// touches the MCSession (`PeerChannelTransport.disconnect()` only publishes `.idle` locally),
+    /// touches the shared radio (a channel's `disconnect()` only publishes `.idle` locally),
     /// so the link lingered as a zombie until `stopSearching()`: it held one of the 8 MC peer slots
-    /// on both devices, kept the peer's `PeerChannelTransport` in the transport's `channels`, and —
+    /// on both devices, kept the peer's channel in the transport's `channels`, and —
     /// because `invite` refuses connected peers and `.connected` never re-fires — made re-forming a
     /// slot with that peer impossible for the rest of the search. Best-effort with the same caveat
-    /// as the sibling managers (see `MeshMultipeerSession.disconnectPeer`); a no-op for a peer MC
-    /// already reported gone. Records the endpoint so `onPeerDisconnected` does not treat the
+    /// as the sibling managers (see `MeshTransportSession.disconnectPeer`); a no-op for a peer the
+    /// radio already reported gone. Records the endpoint so `onPeerDisconnected` does not treat the
     /// resulting `.notConnected` as a transient drop to retry.
     private func kickEvictedPeer(_ peer: PeerHandle) {
         if locallyKickedEndpoints.count < Self.maxLocallyKickedPeers {
             locallyKickedEndpoints.insert(peer.endpoint)
         }
-        meshSession.disconnectPeer(peer)
+        transport.disconnectPeer(peer)
     }
 
     /// Slot eviction prunes the shop send-tracking so a REJOINING friend re-exchanges catalogs: the
@@ -4198,7 +4245,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         var slot = PeerSlot(
             id: peer.id,
             peer: peer,
-            channel: PeerChannelTransport(peer: peer, session: meshSession),
+            channel: DetachedPeerChannel(peer: peer),
             coordinator: coordinator,
             kind: kind,
             fingerprint: fingerprint
@@ -4209,11 +4256,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slots.append(slot)
     }
 
-    /// The transport this manager owns, so a unit test can fire the session callbacks the MC
-    /// delegates drive in production (`onPeerDisconnected` above all — the retry/local-kick
-    /// bookkeeping has no other entry point). Mirrors
-    /// `ProximityRecipeShareManager.multipeerSessionForTesting`.
-    var multipeerSessionForTesting: MeshMultipeerSession { meshSession }
+    /// The radio this manager is driving, so a test can assert WHICH one it selected — and, when it
+    /// injected a fake, read back what the manager asked the radio to do.
+    var transportForTesting: any MeshTransportSession { transport }
+
+    /// The callbacks this manager installed on its radio, so a unit test can fire the events a live
+    /// radio drives in production (`onPeerDisconnected` above all — the retry and local-kick
+    /// bookkeeping has no other entry point). Transport-neutral by construction: the same set is
+    /// what the MC session, the QUIC session and the fake are each handed.
+    var transportHandlersForTesting: MeshTransportHandlers { transportHandlers }
 
     /// Enters proximity-join mode WITHOUT starting the radios. `startJoin()` calls
     /// `startSearching()`, which starts real advertising and browsing — a unit test must never do
@@ -4246,12 +4297,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func evictSlotForTesting(peerID: UUID) {
         guard let slot = slots.first(where: { $0.id == peerID }) else { return }
         removeSlot(slot)
-    }
-
-    /// Observes the transport's per-peer MC kick (`MeshMultipeerSession.disconnectPeer`) so a test
-    /// can assert every local eviction path frees the MC link instead of leaving a zombie.
-    func setDisconnectPeerObserverForTesting(_ handler: ((PeerHandle) -> Void)?) {
-        meshSession.onDisconnectPeerRequestedForTesting = handler
     }
 
     /// Total wall-preference entries (aggregated sessions + covers + favorites) — the number the
@@ -4290,7 +4335,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let slot = PeerSlot(
             id: peer.id,
             peer: peer,
-            channel: PeerChannelTransport(peer: peer, session: meshSession),
+            channel: DetachedPeerChannel(peer: peer),
             coordinator: coordinator,
             kind: .active,
             fingerprint: nil
@@ -4378,5 +4423,57 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )]
         }
         #endif
+    }
+}
+
+// MARK: - MeshIntroductionAuthority
+
+/// What the QUIC radio must be told before it can authenticate a peer (P2 item 8's wiring).
+///
+/// The manager answers from exactly the state the MC path already trusts: the identity service for
+/// the signing key and the signature, and the live ``MeshDescriptor`` for the mesh id, the epoch and
+/// the roster. Nothing new is derived and nothing is stored — a removal takes effect on the next
+/// introduction because the roster is read fresh each time.
+///
+/// **Scope, stated plainly.** A roster-authenticated transport can only ever admit a member. With no
+/// mesh yet — a first proximity-join meeting, where the two devices have never met — the roster is
+/// empty, every peer verdicts ``MeshRosterVerdict/stranger``, and the QUIC radio refuses. That is the
+/// fail-closed posture plan §7.2 asks for and one more reason MultipeerConnectivity remains the
+/// default: admission of a stranger is a membership question (plan §8), not a transport one, and the
+/// item that migrates the app's flows is where it gets answered.
+extension MeshNetworkManager: MeshIntroductionAuthority {
+
+    /// The mesh id used when this device holds no mesh descriptor: the all-zero UUID, so two peers
+    /// in the same "no mesh yet" state agree instead of each inventing a random one and rejecting
+    /// the other for ``MeshIntroductionRejection/foreignMesh``. A frozen token, never on a wire in
+    /// any other role.
+    private static let unboundMeshID = UUID(uuid: (
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0
+    ))
+
+    var meshID: UUID { currentMesh?.meshID ?? Self.unboundMeshID }
+
+    /// The current group-key epoch as a decimal string, or empty when this device holds no group
+    /// key. Empty is meaningful: the introduction's epoch gate admits equal-or-one-empty, because a
+    /// peer that has not been given the group key yet cannot name an epoch.
+    var epochRef: String {
+        guard let key = currentGroupKey else { return "" }
+        return String(key.epoch)
+    }
+
+    /// Who may connect right now, derived fresh from the mesh descriptor.
+    ///
+    /// `barred` is deliberately empty: a removed member is already absent from `members`, so it
+    /// verdicts `.stranger` and is refused either way, and this manager keeps removals by
+    /// FINGERPRINT (`removedMemberFingerprints`) — it holds no signing key for a member it has
+    /// dropped, so it cannot honestly name one as barred. The refusal is identical; only the
+    /// diagnostic differs.
+    var roster: MeshIntroductionRoster {
+        MeshIntroductionRoster(members: currentMesh?.members.map(\.signingPublicKey) ?? [])
+    }
+
+    func signChannelIntroduction(_ transcript: Data) throws -> Data {
+        try identity.sign(transcript, purpose: FernletCryptoPurpose.Signature.meshChannelIntroductionV1)
     }
 }
