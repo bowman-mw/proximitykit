@@ -405,6 +405,31 @@ nonisolated struct MeshLinkTable {
         cache.count
     }
 
+    /// The cached endpoint advertising `sessionID`, if this session has browsed one.
+    ///
+    /// **This is what the signed channel introduction unlocks.** An inbound QUIC connection arrives
+    /// as a host and port, and a browsed peer is a Bonjour service instance; nothing at accept time
+    /// matches the two, which is why an inbound tunnel had no ranking at all and fell through to
+    /// ``MeshDialPreference/unranked``. Once the introduction has verified the peer, its `sid` is
+    /// attributable, and the `sid` is exactly what the TXT record carries — so an inbound tunnel can
+    /// be resolved to the same ``MeshLinkKey`` an outbound dial to that peer uses, and the two
+    /// collide in this table instead of coexisting as a duplicate pair.
+    ///
+    /// An empty id never matches: `MeshLinkAdvertisement` drops empty values, so a cached
+    /// advertisement cannot hold one, and treating "no id" as a match would attach a tunnel to an
+    /// arbitrary endpoint.
+    ///
+    /// Bounded by ``maxCachedEndpoints`` and scanned in first-seen order, so the answer is
+    /// deterministic when two advertisements somehow carry the same id (Power of 10 rule 2).
+    func key(advertisingSessionID sessionID: String) -> MeshLinkKey? {
+        guard !sessionID.isEmpty else { return nil }
+        for key in cacheOrder
+        where cache[key]?.advertisement[MeshLinkAdvertisement.sessionIDKey] == sessionID {
+            return key
+        }
+        return nil
+    }
+
     /// Makes room for one more cache entry, dropping the oldest when the cache is full.
     private mutating func evictOldestCachedEndpointIfFull() {
         guard cacheOrder.count >= Self.maxCachedEndpoints, let oldest = cacheOrder.first else {

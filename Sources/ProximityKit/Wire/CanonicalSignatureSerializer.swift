@@ -161,6 +161,10 @@ private nonisolated let canonicalActivityRosterSnapshotDomain = FernletCryptoPur
 // Moderation report row (Phase 3b). Distinct tag so a report signature can never cross-validate any
 // other signed type.
 private nonisolated let canonicalModerationReportDomain = FernletCryptoPurpose.Signature.moderationReportV2.data
+// QUIC mesh channel introduction (network migration P2). Distinct from the DEBUG probe's spelling by
+// registry construction, so a spike build can never mint bytes a shipping peer would accept.
+private nonisolated let canonicalMeshChannelIntroductionDomain =
+    FernletCryptoPurpose.Signature.meshChannelIntroductionV1.data
 
 // MARK: - Identity envelope
 
@@ -330,6 +334,38 @@ public nonisolated func canonicalBytes(for entry: ModerationLedgerEntry) -> Data
     writer.appendUInt64(entry.reporterSeq)
     writer.appendDate(entry.createdAt)
     // signature: lives on `SignedModerationReport`, not the entry — nothing to exclude here.
+    return writer.bytes
+}
+
+// MARK: - QUIC mesh channel introduction (network migration P2)
+
+/// Canonical signing bytes for a ``MeshChannelIntroductionTranscript`` — the mutually-signed QUIC
+/// channel introduction of plan §7.2.
+///
+/// The field order **is** the plan's transcript definition, in the plan's order: purpose ‖ version ‖
+/// meshID ‖ epochRef ‖ both signing public keys ‖ both nonces ‖ TLS-exporter hash. Roles fix the
+/// order of the paired fields — initiator before responder — so both ends of one tunnel produce
+/// byte-identical input without exchanging the transcript itself.
+///
+/// Length-prefixing every variable field makes the encoding injective: no nonce can borrow a byte
+/// from a key, and no epoch reference can shift the fields after it. That is what lets the registry
+/// declare `.lengthPrefixed` for this purpose and have the claim be true —
+/// `CryptographicPurposeBoundaryTests` pins the pair, because a declared-vs-emitted framing
+/// mismatch is what broke silently in `91c3956`.
+///
+/// There is no signature field to exclude: the signature lives on ``MeshChannelIntroduction``, which
+/// is the frame, not the transcript.
+nonisolated func canonicalBytes(for transcript: MeshChannelIntroductionTranscript) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshChannelIntroductionDomain)
+    writer.appendInt64(Int64(transcript.protocolVersion))
+    writer.appendUUID(transcript.meshID)
+    writer.appendString(transcript.epochRef)
+    writer.appendLengthPrefixed(transcript.initiatorSigningPublicKey)
+    writer.appendLengthPrefixed(transcript.responderSigningPublicKey)
+    writer.appendLengthPrefixed(transcript.initiatorNonce)
+    writer.appendLengthPrefixed(transcript.responderNonce)
+    writer.appendLengthPrefixed(transcript.channelBindingHash)
     return writer.bytes
 }
 

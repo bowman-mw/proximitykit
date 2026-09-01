@@ -227,6 +227,19 @@ withheld), `MeshSessionIdentityMap` (one session-stable ``PeerHandle`` identity 
 identity minted per session and never persisted). `Tests/FernletTests/NetworkMeshTransportTests.swift`
 is the battery; the session actor itself is covered by the runbook's device lanes.
 
+**Peer authentication is the signed channel introduction, not the certificate** (plan §7.2). Before
+any app frame crosses a QUIC tunnel, both ends exchange a `MeshChannelHello` and then Ed25519
+signatures over one `MeshChannelIntroductionTranscript` — purpose ‖ version ‖ meshID ‖ epochRef ‖
+both signing public keys ‖ both nonces ‖ the SHA-256 of this connection's TLS exporter secret —
+serialized by `canonicalBytes(for:)` under
+`FernletCryptoPurpose.Signature.meshChannelIntroductionV1`. `MeshChannelIntroductionExchange` holds
+the whole decision as a value type: a foreign mesh, a diverged epoch, a roster-absent or barred key,
+a replayed nonce, a mismatched channel binding and an invalid signature each name themselves, and
+every one tears the tunnel down. `MeshIntroductionAuthority` is the seam that supplies the mesh id,
+epoch reference, roster and signing key; a session without one authenticates nobody and therefore
+admits nobody. The verified `sid` it yields is what lets an inbound tunnel be matched to the browsed
+advertisement it came from, so duplicate-tunnel suppression ranks the pair instead of admitting both.
+
 - ``PeerTransport``
 - ``PeerHandle``
 - ``PeerEndpointKey``
@@ -243,7 +256,11 @@ Internal to the module, and listed here because they are where the QUIC transpor
 actually lives: `NetworkMeshSession`, `NetworkPeerChannel`, `MeshLinkTable`, `MeshLinkKey`,
 `MeshLinkPhase`, `MeshLinkAdmission`, `MeshDialPreference`, `MeshDialOutcome`, `MeshEndpointRecord`,
 `MeshHeartbeatSchedule`, `MeshLinkAdvertisement`, `MeshSessionIdentityMap`, `NetworkMeshWire`,
-`EphemeralMeshTLSIdentity`, `MeshCertificateDER`, `MeshTransportError`.
+`EphemeralMeshTLSIdentity`, `MeshCertificateDER`, `MeshTransportError`, `MeshChannelRole`,
+`MeshChannelIntroductionFormat`, `MeshChannelHello`, `MeshChannelIntroduction`,
+`MeshChannelIntroductionTranscript`, `MeshChannelIntroductionExchange`,
+`MeshChannelIntroductionOutcome`, `MeshIntroductionRejection`, `MeshIntroductionRoster`,
+`MeshRosterVerdict`, `MeshIntroductionNonceCache`, `MeshVerifiedPeer`, `MeshIntroductionAuthority`.
 
 ### Ranging
 
