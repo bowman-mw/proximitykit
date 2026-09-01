@@ -642,7 +642,12 @@ public final class PresenceManager: ProximityPayloadHandling {
             failHeart(notNearbyHeartMessage(firstName: firstName))
             return
         }
-        guard !heartConnections.contains(where: { $0.id == peer.id }),
+        // Recognize the device by endpoint, exactly as the two gates on the inbound side do: the
+        // id-only test this replaced (plan §6.4) read a device whose handle had churned — a
+        // bounded identity-map eviction, a transport `stop()`/restart — as a stranger, so it
+        // re-invited a device we already hold a connection to and stranded `pendingHeartSends`
+        // until the connect timeout failed the send.
+        guard !hasHeartConnection(with: peer),
               heartConnections.count < Self.maxHeartConnections else {
             failHeart("Already sending \(firstName) some warmth — one moment.")
             return
@@ -706,8 +711,9 @@ public final class PresenceManager: ProximityPayloadHandling {
     ///
     /// The one spelling of "are we already connected to this device?", matched the way every stored
     /// record must be matched against a transport event — by ``PeerHandle/isSameEndpoint(as:)``,
-    /// never `==` — so the inbound-invitation gate and the channel-ready gate cannot drift apart
-    /// again. `removeHeartConnection(matching:)` filters on the same test.
+    /// never `==` — so the inbound-invitation gate, the channel-ready gate and the outbound
+    /// ``sendHeart(to:)`` gate cannot drift apart again. `removeHeartConnection(matching:)` filters
+    /// on the same test.
     private func hasHeartConnection(with peer: PeerHandle) -> Bool {
         heartConnections.contains { $0.peer.isSameEndpoint(as: peer) }
     }
