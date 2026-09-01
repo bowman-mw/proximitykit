@@ -346,6 +346,9 @@ final class NetworkMeshSession {
     private struct Tunnel {
         let peer: PeerHandle
         let channel: NetworkPeerChannel
+        /// Which end opened this connection. The only fact about a tunnel both devices name
+        /// identically, and therefore the only one ``MeshTunnelConvergence`` can rule on.
+        let role: MeshChannelRole
         var controlStream: Network.QUIC.Stream<QUICStream>?
         var datagrams: Network.QUIC.Datagrams<QUICDatagram>?
         /// The identity this tunnel's peer proved in the signed channel introduction. Set once, at
@@ -568,6 +571,48 @@ final class NetworkMeshSession {
     /// Runs the pending-introduction sweep the shared poll runs, at a caller-chosen `now`.
     func expirePendingInboundForTesting(now: Date) {
         expirePendingInbound(now: now)
+    }
+
+    /// Which endpoints hold a tunnel right now, in sorted key order — the read that lets a test say
+    /// *which* tunnel of a collapsed pair survived, not merely how many did.
+    var tunnelKeysForTesting: [MeshLinkKey] {
+        tunnels.keys.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    /// Books a tunnel exactly as `replaceTunnel` and `activate` record one, minus the two framework
+    /// objects a unit test cannot build.
+    ///
+    /// `verified: nil` is a tunnel mid-introduction — precisely what sits in the map at the instant
+    /// the duplicate-collapse gate is asked about it. A non-nil one is an activated tunnel, holding
+    /// a roster slot and a running heartbeat.
+    func bookTunnelForTesting(_ key: MeshLinkKey, role: MeshChannelRole, verified: MeshVerifiedPeer?) {
+        let channel = prepareChannel(for: key)
+        var tunnel = Tunnel(peer: channel.peer, channel: channel, role: role)
+        tunnel.verified = verified
+        tunnels[key] = tunnel
+        guard verified != nil else { return }
+        let now = Date()
+        links.noteReady(key, now: now)
+        heartbeats.start(key, now: now)
+    }
+
+    /// Runs the duplicate-collapse gate `activate` runs, and answers exactly what it answers: may
+    /// this tunnel go live?
+    func admitActivationForTesting(
+        at key: MeshLinkKey,
+        role: MeshChannelRole,
+        verified: MeshVerifiedPeer
+    ) -> Bool {
+        admitActivation(at: key, role: role, verified: verified)
+    }
+
+    /// Runs the verified inbound admission, so the same-key half of the convergence can be driven
+    /// through the production function rather than through its parts.
+    func admitVerifiedInboundForTesting(
+        _ verified: MeshVerifiedPeer,
+        pendingKey: MeshLinkKey
+    ) -> MeshLinkKey? {
+        admitVerifiedInbound(verified, pendingKey: pendingKey)
     }
 }
 
@@ -797,7 +842,7 @@ private extension NetworkMeshSession {
         }
         let connection = NetworkConnection(to: endpoint, using: Self.connectionParameters()).start()
         let channel = prepareChannel(for: key)
-        replaceTunnel(at: key, with: Tunnel(peer: channel.peer, channel: channel))
+        replaceTunnel(at: key, with: Tunnel(peer: channel.peer, channel: channel, role: .initiator))
         tunnels[key]?.task = Task { @MainActor [weak self] in
             await self?.runInitiator(connection, key: key)
         }
@@ -842,6 +887,13 @@ private extension NetworkMeshSession {
     /// radio where the question can honestly be asked (the peer has proved who it is; nothing has
     /// been admitted yet).
     ///
+    /// A duplicate against a tunnel *already verified as the same peer* is not a refusal but a
+    /// convergence question, and it is answered by the same ``MeshTunnelConvergence`` rule the
+    /// cross-key case uses. It has to be: whether a peer's two connections collide under one key or
+    /// land under two depends on whether that side happened to have cached the peer's TXT `sid`, and
+    /// the two ends can differ on that. One rule at both sites is what stops the pair from closing
+    /// one connection each and ending with none.
+    ///
     /// - Returns: the key to build the tunnel under, or nil when the table or the owner refused it.
     func admitVerifiedInbound(_ verified: MeshVerifiedPeer, pendingKey: MeshLinkKey) -> MeshLinkKey? {
         let key = links.key(advertisingSessionID: verified.sessionID) ?? pendingKey
@@ -849,17 +901,32 @@ private extension NetworkMeshSession {
             Self.logger.debug("inbound QUIC tunnel refused by its owner for \(key.rawValue, privacy: .public)")
             return nil
         }
-        let admission = links.admitInbound(
-            from: key,
-            localSessionID: advertisedFields[MeshLinkAdvertisement.sessionIDKey] ?? "",
-            peerSessionID: verified.sessionID,
-            now: Date()
-        )
+        var admission = inboundAdmission(for: verified, at: key)
+        if case .refusedDuplicateTunnel = admission, yieldSameKeyDuplicate(at: key, to: verified) {
+            admission = inboundAdmission(for: verified, at: key)
+        }
         guard admission == .admit else {
             Self.logger.debug("inbound QUIC tunnel refused for \(key.rawValue, privacy: .public)")
             return nil
         }
         return key
+    }
+
+    /// The single place the link table is asked about an inbound tunnel, so the `sid` that drives
+    /// duplicate suppression can only ever come off a ``MeshVerifiedPeer``.
+    func inboundAdmission(for verified: MeshVerifiedPeer, at key: MeshLinkKey) -> MeshLinkAdmission {
+        links.admitInbound(
+            from: key,
+            localSessionID: localSessionID,
+            peerSessionID: verified.sessionID,
+            now: Date()
+        )
+    }
+
+    /// The `sid` this session advertises, which is also the one its hello carries — one spelling, so
+    /// the value the peer ranks us by and the value we rank ourselves by cannot drift apart.
+    var localSessionID: String {
+        advertisedFields[MeshLinkAdvertisement.sessionIDKey] ?? ""
     }
 
     /// Drops a pending inbound connection, cancelling the task that owns it. Idempotent, and safe
@@ -950,7 +1017,10 @@ private extension NetworkMeshSession {
             return
         }
         let channel = prepareChannel(for: key)
-        replaceTunnel(at: key, with: Tunnel(peer: channel.peer, channel: channel, task: owning.task))
+        replaceTunnel(
+            at: key,
+            with: Tunnel(peer: channel.peer, channel: channel, role: .responder, task: owning.task)
+        )
         activate(key, stream: stream, datagrams: datagrams, verified: verified)
         do {
             try await receiveFrames(for: key, from: stream)
@@ -986,13 +1056,19 @@ private extension NetworkMeshSession {
     /// creates the coordinator and awaits its `begin()`, and publishing `.connected` before that
     /// completes is what put the MC handshake into the wrong branch — the channel's owner makes the
     /// call once `begin()` returns. Same contract, same reason.
+    ///
+    /// ``admitActivation(at:role:verified:)`` runs **first**, before a single hook fires: a tunnel
+    /// that loses the duplicate collapse must never be announced to an owner, or the owner is handed
+    /// a second peer for one device and then told one of them died.
     func activate(
         _ key: MeshLinkKey,
         stream: Network.QUIC.Stream<QUICStream>,
         datagrams: Network.QUIC.Datagrams<QUICDatagram>,
         verified: MeshVerifiedPeer
     ) {
-        guard var tunnel = tunnels[key] else { return }
+        guard let role = tunnels[key]?.role,
+              admitActivation(at: key, role: role, verified: verified),
+              var tunnel = tunnels[key] else { return }
         let now = Date()
         tunnel.controlStream = stream
         tunnel.datagrams = datagrams
@@ -1003,11 +1079,133 @@ private extension NetworkMeshSession {
         tunnels[key] = tunnel
         links.noteReady(key, now: now)
         heartbeats.start(key, now: now)
+        // `tunnels=` is what makes "at most one connection per peer pair" READABLE in a Lane C
+        // transcript. Without it the line says a tunnel came up and nothing about whether the last
+        // one is still there, so two activations are indistinguishable from one tunnel replacing
+        // another — which is exactly the ambiguity item 13 was opened on.
         MeshTransportConsoleLog.echo(
-            "accepted \(verified.fingerprint) sid=\(verified.sessionID): tunnel activated"
+            "accepted \(verified.fingerprint) sid=\(verified.sessionID): tunnel activated, tunnels=\(tunnels.count)"
         )
         onPeerVerified?(tunnel.peer, verified)
         onPeerChannelReady?(tunnel.channel)
+    }
+
+    // MARK: Duplicate collapse
+
+    /// Collapses a verified pair that ended up holding two tunnels, and says whether the tunnel now
+    /// activating is the one that survives.
+    ///
+    /// The defect this closes, observed on the radio in P2 item 9: during the pre-TXT window neither
+    /// side can rank the other, so *both* dial (the documented, deadlock-avoiding fallback); an
+    /// inbound tunnel whose `sid` still resolves to no browsed advertisement lands under its own
+    /// connection key; and two keys never collide, so the link table's duplicate suppression never
+    /// sees a duplicate. Both tunnels activated, and "at most one connection per peer pair" failed
+    /// on the wire while selectivity was untouched.
+    ///
+    /// Keying on the **durable verified identity** — the Ed25519 signing key, not the per-launch
+    /// `sid` and not the link key — is what makes the two tunnels recognisable as one peer's. The
+    /// verdict itself is ``MeshTunnelConvergence``, a pure function of facts both devices share.
+    func admitActivation(at key: MeshLinkKey, role: MeshChannelRole, verified: MeshVerifiedPeer) -> Bool {
+        guard let established = liveTunnel(verifiedAs: verified.signingPublicKey, excluding: key) else {
+            return true
+        }
+        switch MeshTunnelConvergence.resolve(
+            incomingRole: role,
+            establishedRole: established.tunnel.role,
+            localSessionID: localSessionID,
+            peerSessionID: verified.sessionID
+        ) {
+        case .keepBoth:
+            return true
+        case .keepIncoming:
+            closeRedundantTunnel(established.key, peer: verified)
+            return true
+        case .keepEstablished:
+            closeRedundantTunnel(key, peer: verified)
+            return false
+        }
+    }
+
+    /// The live tunnel already carrying `signingPublicKey` under some key other than `key`.
+    ///
+    /// Only *verified* tunnels are candidates: a tunnel still dialing has proved nothing, so it has
+    /// no identity to match and is left to ``MeshDialPreference`` where it already belongs. Scanned
+    /// in sorted key order so the answer is deterministic, and bounded by the roster cap.
+    private func liveTunnel(
+        verifiedAs signingPublicKey: Data,
+        excluding key: MeshLinkKey
+    ) -> (key: MeshLinkKey, tunnel: Tunnel)? {
+        for candidate in tunnels.keys.sorted(by: { $0.rawValue < $1.rawValue }) where candidate != key {
+            guard let tunnel = tunnels[candidate],
+                  tunnel.verified?.signingPublicKey == signingPublicKey else { continue }
+            return (candidate, tunnel)
+        }
+        return nil
+    }
+
+    /// Closes the losing half of a collapsed duplicate pair — a **benign** close, and every clause
+    /// of that word is load-bearing.
+    ///
+    /// It is not a dial failure, so it never reaches ``handleDialFailure(_:reason:)`` and spends
+    /// nothing from the three-attempt budget; the link returns to ``MeshLinkPhase/idle`` with a full
+    /// one, exactly as an honest disconnect does. It is not a rejection, so it does not go through
+    /// ``report(_:)`` — an owner's `onTransportError` must not light up because a radio tidied
+    /// itself. And it is not a peer disconnect, so ``onPeerDisconnected`` is not fired: the peer is
+    /// still connected, on the surviving tunnel, and re-entering the owner's removal funnel would
+    /// arm its re-invite retry against a device that never left (P2 item 8's `notifyOwner:` lesson).
+    /// The channel is still told, because a coordinator built on the losing tunnel must not sit
+    /// waiting on a connection that is gone; the owner's stale-coordinator sweep reclaims its slot
+    /// through the same `removeSlot` funnel a disconnect would have used.
+    ///
+    /// Idempotent, and everything it touches is keyed by `key` alone, so the surviving tunnel's
+    /// stream, heartbeat, budget and channel are untouched.
+    func closeRedundantTunnel(_ key: MeshLinkKey, peer verified: MeshVerifiedPeer) {
+        heartbeats.stop(key)
+        guard let tunnel = tunnels.removeValue(forKey: key) else { return }
+        tunnel.task?.cancel()
+        tunnel.datagramTask?.cancel()
+        links.noteClosed(key)
+        tunnel.channel.notifyDisconnected(reason: MeshTunnelConvergence.closeReason)
+        Self.logger.debug("redundant QUIC tunnel closed for \(key.rawValue, privacy: .public)")
+        MeshTransportConsoleLog.echo(
+            "redundantTunnelClosed \(verified.fingerprint) sid=\(verified.sessionID): closed"
+        )
+    }
+
+    /// Hands one key's tunnel over to the connection now arriving on it, when the convergence rule
+    /// says the peer's dial is the one that survives.
+    ///
+    /// The same-key twin of ``closeRedundantTunnel(_:peer:)``, and it differs in exactly one way:
+    /// the channel is **kept**. Both connections resolved to one ``MeshLinkKey``, so they are one
+    /// peer to every owner above — the same ``PeerHandle``, the same channel, the same slot — and
+    /// tearing the channel down only to hand back an identical one would evict a live coordinator to
+    /// replace it with itself. What is released is the losing *connection*: its tasks are cancelled,
+    /// its stream and datagrams are dropped, its heartbeat stops, and its identity is cleared so the
+    /// cross-key scan cannot mistake the husk for a second live tunnel. The link returns to
+    /// ``MeshLinkPhase/idle`` with a full budget, so the caller's re-ask admits.
+    func yieldSameKeyDuplicate(at key: MeshLinkKey, to verified: MeshVerifiedPeer) -> Bool {
+        guard var tunnel = tunnels[key],
+              tunnel.verified?.signingPublicKey == verified.signingPublicKey,
+              MeshTunnelConvergence.resolve(
+                incomingRole: .responder,
+                establishedRole: tunnel.role,
+                localSessionID: localSessionID,
+                peerSessionID: verified.sessionID
+              ) == .keepIncoming else { return false }
+        heartbeats.stop(key)
+        tunnel.task?.cancel()
+        tunnel.datagramTask?.cancel()
+        tunnel.task = nil
+        tunnel.datagramTask = nil
+        tunnel.controlStream = nil
+        tunnel.datagrams = nil
+        tunnel.verified = nil
+        tunnels[key] = tunnel
+        links.noteClosed(key)
+        MeshTransportConsoleLog.echo(
+            "redundantTunnelClosed \(verified.fingerprint) sid=\(verified.sessionID): yielded"
+        )
+        return true
     }
 
     /// Reads length-framed app frames off the control stream until the connection ends or the
@@ -1164,7 +1362,7 @@ private extension NetworkMeshSession {
             epochRef: authority.epochRef,
             signingPublicKey: authority.localSigningPublicKey,
             nonce: MeshIntroductionChaos.introductionNonce(),
-            sessionID: advertisedFields[MeshLinkAdvertisement.sessionIDKey] ?? ""
+            sessionID: localSessionID
         )
     }
 

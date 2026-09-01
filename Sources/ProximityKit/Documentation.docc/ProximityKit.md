@@ -254,6 +254,16 @@ epoch reference, roster and signing key; a session without one authenticates nob
 admits nobody. The verified `sid` it yields is what lets an inbound tunnel be matched to the browsed
 advertisement it came from, so duplicate-tunnel suppression ranks the pair instead of admitting both.
 
+Verification is also where a pair that ended up with **two** tunnels is collapsed back to one.
+`MeshDialPreference` deliberately admits on both sides when it cannot rank — zero tunnels is the
+unrecoverable direction — and in the pre-TXT window that means both peers dial; if neither inbound
+tunnel resolves to a browsed key, the two never collide and both activate (observed on the radio,
+P2 item 9). `MeshTunnelConvergence` closes that: keyed on the **durable verified identity** rather
+than the per-launch `sid`, it keeps the tunnel the *preferred dialer* opened — the same `sid`
+comparison the dial tie-break makes, so both devices name one connection and neither can close the
+one the other kept. The loser's close is benign: no dial-budget charge, no `onPeerDisconnected`, no
+transport error, and its own `redundantTunnelClosed` reason so a log never reads it as a refusal.
+
 - ``PeerTransport``
 - ``PeerHandle``
 - ``PeerEndpointKey``
@@ -272,7 +282,8 @@ Internal to the module, and listed here because they are where the transport SEL
 
 Internal to the module, and listed here because they are where the QUIC transport's behaviour
 actually lives: `NetworkMeshSession`, `NetworkPeerChannel`, `MeshLinkTable`, `MeshLinkKey`,
-`MeshLinkPhase`, `MeshLinkAdmission`, `MeshDialPreference`, `MeshDialOutcome`, `MeshEndpointRecord`,
+`MeshLinkPhase`, `MeshLinkAdmission`, `MeshDialPreference`, `MeshTunnelConvergence`,
+`MeshDialOutcome`, `MeshEndpointRecord`,
 `MeshHeartbeatSchedule`, `MeshLinkAdvertisement`, `MeshSessionIdentityMap`, `NetworkMeshWire`,
 `EphemeralMeshTLSIdentity`, `MeshCertificateDER`, `MeshTransportError`, `MeshChannelRole`,
 `MeshChannelIntroductionFormat`, `MeshChannelHello`, `MeshChannelIntroduction`,

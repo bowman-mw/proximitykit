@@ -98,6 +98,86 @@ nonisolated enum MeshDialPreference: Equatable, Sendable {
     }
 }
 
+// MARK: - MeshTunnelConvergence
+
+/// Which of a verified pair's two tunnels survives when both sides dialed and both dials succeeded.
+///
+/// ``MeshDialPreference`` keeps a mutually-dialing pair from ending with **zero** tunnels, and pays
+/// for that with **two**: an unranked pair admits on both sides, which is safe and wasteful. This is
+/// where the waste is collected. Once both ends have completed the signed channel introduction, each
+/// knows both verified identities *and* both `sid`s — so the ranking that did not exist during the
+/// pre-TXT dial window exists now, and the pair can be collapsed to the one tunnel plan §7.1
+/// promises.
+///
+/// ## Why closing one is safe here when refusing one was not safe earlier
+///
+/// A refusal during the dial window is a decision made on one side's *incomplete* knowledge, and two
+/// sides refusing on incomplete knowledge is exactly the deadlock ``MeshDialPreference`` exists to
+/// avoid. A convergence verdict is a pure function of values **both sides hold and agree on** — the
+/// two session ids, and which end dialed — so both sides compute the same answer and close the same
+/// connection. Closing a connection closes it at *both* ends, so the surviving tunnel is the same
+/// one on both devices however the two sides interleave, including when both act at once.
+///
+/// ## The rule
+///
+/// Keep the tunnel whose **dialer is the preferred dialer**: the higher `sid`, the identical
+/// comparison `MeshNetworkManager.shouldInitiateInvite` and ``MeshDialPreference`` already make, so
+/// the transport and the manager can never disagree about which direction is the real one. On the
+/// preferred dialer that is the tunnel it opened (``MeshChannelRole/initiator``); on the other side
+/// it is the tunnel it accepted (``MeshChannelRole/responder``) — one connection, named from each
+/// end.
+nonisolated enum MeshTunnelConvergence: Equatable, Sendable {
+
+    /// No symmetric rule exists, so nothing is closed. Two tunnels is wasteful and self-correcting;
+    /// zero is not recoverable without a retry, and that asymmetry decides every undecidable case.
+    case keepBoth
+    /// The tunnel now activating survives; the established one is the redundant duplicate.
+    case keepIncoming
+    /// The established tunnel survives; the one now activating is the redundant duplicate.
+    case keepEstablished
+
+    /// Frozen diagnostic English for a benign duplicate-collapse close.
+    ///
+    /// Deliberately **not** a `MeshTransportError` case: nothing failed, nothing was refused, and a
+    /// dedup close is charged to no budget. It leads with its own token so a log reader — and the
+    /// feasibility runbook's Lane C grep — can tell a collapsed duplicate from a rejected peer at a
+    /// glance, which is the whole reason it is named rather than folded into a disconnect reason.
+    static let closeReason =
+        "redundantTunnelClosed: a duplicate tunnel to the same verified peer was collapsed."
+
+    /// The verdict for one activating tunnel judged against one established tunnel to the *same*
+    /// verified peer.
+    ///
+    /// `localSessionID` is this device's advertised `sid`; `peerSessionID` is the one the signed
+    /// introduction attributed to a verified identity. The roles say which end opened each
+    /// connection.
+    ///
+    /// Two answers are deliberate:
+    ///
+    /// * **An unranked pair keeps both.** Ranking fails only when this side advertises no `sid`, or
+    ///   the two are identical — this process's own echo. Neither is two real devices disagreeing,
+    ///   and inventing a tie-break for them risks the one outcome no timer-free path recovers from.
+    /// * **Two tunnels in the same direction keep the established one.** Direction is the only fact
+    ///   both ends name identically, so a same-direction pair has no symmetric discriminator;
+    ///   keeping the established one never flaps, and still converges, because the connection this
+    ///   side closes is closed at the peer's end too.
+    static func resolve(
+        incomingRole: MeshChannelRole,
+        establishedRole: MeshChannelRole,
+        localSessionID: String,
+        peerSessionID: String
+    ) -> MeshTunnelConvergence {
+        let survivor: MeshChannelRole
+        switch MeshDialPreference.rank(localSessionID: localSessionID, peerSessionID: peerSessionID) {
+        case .unranked: return .keepBoth
+        case .localDials: survivor = .initiator
+        case .peerDials: survivor = .responder
+        }
+        guard incomingRole != establishedRole else { return .keepEstablished }
+        return incomingRole == survivor ? .keepIncoming : .keepEstablished
+    }
+}
+
 // MARK: - MeshLinkAdmission
 
 /// The answer to "may this session open — or accept — a tunnel for this endpoint right now?"
