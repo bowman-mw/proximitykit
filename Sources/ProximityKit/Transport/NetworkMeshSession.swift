@@ -1003,6 +1003,9 @@ private extension NetworkMeshSession {
         tunnels[key] = tunnel
         links.noteReady(key, now: now)
         heartbeats.start(key, now: now)
+        MeshTransportConsoleLog.echo(
+            "accepted \(verified.fingerprint) sid=\(verified.sessionID): tunnel activated"
+        )
         onPeerVerified?(tunnel.peer, verified)
         onPeerChannelReady?(tunnel.channel)
     }
@@ -1126,6 +1129,7 @@ private extension NetworkMeshSession {
             if let rejection = exchange.receive(
                 peerHello, roster: authority.roster, nonces: &introductionNonces
             ) {
+                MeshTransportConsoleLog.echo(Self.refusalDetail(rejection, role: role, authority: authority))
                 report("A QUIC tunnel was refused: \(rejection.diagnosticDescription)")
                 return nil
             }
@@ -1135,7 +1139,9 @@ private extension NetworkMeshSession {
             }
             let signed = MeshChannelIntroduction(
                 channelBindingHash: binding,
-                signature: try authority.signChannelIntroduction(transcript)
+                signature: MeshIntroductionChaos.signature(
+                    try authority.signChannelIntroduction(transcript)
+                )
             )
             return try await settle(exchange, role: role, signed: signed, over: stream)
         } catch {
@@ -1146,15 +1152,35 @@ private extension NetworkMeshSession {
 
     /// This device's half of the hello. The `sid` is the one it advertises, so a peer can match this
     /// tunnel to the advertisement it browsed.
+    ///
+    /// The nonce comes through ``MeshIntroductionChaos/introductionNonce()`` rather than directly
+    /// from ``MeshChannelIntroductionFormat/randomNonce()``: in Release the two are the same call,
+    /// and in DEBUG the seam lets a run deliberately replay a nonce so the peer's refusal is
+    /// observable over a real radio.
     func localHello(from authority: any MeshIntroductionAuthority) -> MeshChannelHello {
         MeshChannelHello(
             protocolVersion: MeshChannelIntroductionFormat.protocolVersion,
             meshID: authority.meshID,
             epochRef: authority.epochRef,
             signingPublicKey: authority.localSigningPublicKey,
-            nonce: MeshChannelIntroductionFormat.randomNonce(),
+            nonce: MeshIntroductionChaos.introductionNonce(),
             sessionID: advertisedFields[MeshLinkAdvertisement.sessionIDKey] ?? ""
         )
+    }
+
+    /// One console line describing a refused hello *and what it was judged against*.
+    ///
+    /// The reason alone cannot tell "nobody is on my roster" from "somebody is, but not you", and
+    /// those are two different rows of the rejection matrix. DEBUG mirror only — the `report(_:)`
+    /// text and the `Logger` line are unchanged.
+    static func refusalDetail(
+        _ rejection: MeshIntroductionRejection,
+        role: MeshChannelRole,
+        authority: any MeshIntroductionAuthority
+    ) -> String {
+        let roster = authority.roster
+        return "refused \(rejection) as \(role): mesh=\(authority.meshID) epoch=\"\(authority.epochRef)\" "
+            + "rosterMembers=\(roster.memberCount) rosterBarred=\(roster.barredCount)"
     }
 
     /// Exchanges hellos in the order the role fixes: the dialer speaks first.
@@ -1196,6 +1222,7 @@ private extension NetworkMeshSession {
         }
         guard let peer = outcome.verifiedPeer else {
             if case .rejected(let rejection) = outcome {
+                MeshTransportConsoleLog.echo("refused \(rejection) as \(role) at the signed introduction")
                 report("A QUIC tunnel was refused: \(rejection.diagnosticDescription)")
             }
             return nil
@@ -1339,6 +1366,7 @@ private extension NetworkMeshSession {
     /// silently dead, and it is read by a developer, not a user.
     func report(_ message: String) {
         Self.logger.error("\(message, privacy: .public)")
+        MeshTransportConsoleLog.echo(message)
         onTransportError?(message)
     }
 }

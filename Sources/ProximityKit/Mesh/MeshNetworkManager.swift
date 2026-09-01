@@ -4464,13 +4464,22 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
 
     /// Who may connect right now, derived fresh from the mesh descriptor.
     ///
-    /// `barred` is deliberately empty: a removed member is already absent from `members`, so it
-    /// verdicts `.stranger` and is refused either way, and this manager keeps removals by
-    /// FINGERPRINT (`removedMemberFingerprints`) — it holds no signing key for a member it has
-    /// dropped, so it cannot honestly name one as barred. The refusal is identical; only the
+    /// `barred` is deliberately empty in production: a removed member is already absent from
+    /// `members`, so it verdicts `.stranger` and is refused either way, and this manager keeps
+    /// removals by FINGERPRINT (`removedMemberFingerprints`) — it holds no signing key for a member
+    /// it has dropped, so it cannot honestly name one as barred. The refusal is identical; only the
     /// diagnostic differs.
+    ///
+    /// ``MeshIntroductionChaos/additionalBarredKeys`` is `[]` in every Release build and in every
+    /// DEBUG launch that does not ask for it, so the production answer is unchanged. It exists so
+    /// the ``MeshRosterVerdict/barred`` branch — otherwise reachable only at tier 1, for the reason
+    /// just given — can be observed over a real radio. It can only ever *refuse* a peer this roster
+    /// would have admitted (barred wins over member), never the reverse.
     var roster: MeshIntroductionRoster {
-        MeshIntroductionRoster(members: currentMesh?.members.map(\.signingPublicKey) ?? [])
+        MeshIntroductionRoster(
+            members: currentMesh?.members.map(\.signingPublicKey) ?? [],
+            barred: MeshIntroductionChaos.additionalBarredKeys
+        )
     }
 
     func signChannelIntroduction(_ transcript: Data) throws -> Data {
