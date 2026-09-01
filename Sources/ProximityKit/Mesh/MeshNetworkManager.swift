@@ -2013,14 +2013,38 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// this replaces was invisible to every existing test because it lived inside a closure that
     /// needs live radios to reach.
     func shouldInitiateInvite(to peer: PeerHandle) -> Bool {
-        guard let peerSessionID = peer.discoveryInfo?["sid"], !peerSessionID.isEmpty else {
+        Self.shouldInitiateInvite(
+            localSessionID: sessionID,
+            peerSessionID: peer.discoveryInfo?["sid"]
+        )
+    }
+
+    /// The tie-break itself, over the two values it actually compares.
+    ///
+    /// Split out from ``shouldInitiateInvite(to:)`` for one reason: the instance method can only
+    /// ever be evaluated with THIS manager's random per-launch `sid` on the left, so a test can
+    /// pin one side of a pair but never enumerate both sides across a chosen ordering — and
+    /// "exactly one of the two sides dials" is the whole property. Nothing about the decision
+    /// changed; the instance method reads the peer's advertisement and delegates here.
+    ///
+    /// Equal session ids deliberately return false on BOTH sides. `sid` is per-launch and random,
+    /// so two advertisements carrying the same one are our own echo (a stale Bonjour cache of this
+    /// process — the ghost `PresenceManager` excludes by hand), and dialling ourselves is never
+    /// right. The cost is that a peer which replays our `sid` back at us can suppress our invite;
+    /// that is a denial of discovery it could equally achieve by not advertising at all, not an
+    /// authentication bypass.
+    nonisolated static func shouldInitiateInvite(
+        localSessionID: String,
+        peerSessionID: String?
+    ) -> Bool {
+        guard let peerSessionID, !peerSessionID.isEmpty else {
             // Discovery info absent (peer not yet resolved, or a build predating "sid"). Deadlock
             // is strictly worse than a redundant invite here: a simultaneous mutual invite fails
             // one side with errno 61 and the disconnect-retry path recovers it, whereas neither
             // side inviting strands the pair permanently — which is exactly the bug above.
             return true
         }
-        return sessionID > peerSessionID
+        return localSessionID > peerSessionID
     }
 
     /// This device's slot in the live session, matched the way every transport event must be
