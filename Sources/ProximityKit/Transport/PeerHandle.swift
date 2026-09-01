@@ -3,16 +3,21 @@ import FernletDomainModel
 
 /// The transport's own stable notion of *one remote endpoint*, opaque to everything above it.
 ///
-/// This exists because ``PeerHandle/id`` is **not** an identity. `id` is a per-discovery cache
-/// handle: `MeshMultipeerSession.peer(for:)` mints a fresh `UUID` whenever its peer cache misses,
-/// which happens whenever a peer was lost while holding no channel, and on every inbound invitation
-/// from a device the transport is not currently tracking. So `a.id == b.id` implies "same device",
-/// but "same device" does **not** imply `a.id == b.id` — `id` is a false-negative-only test.
+/// This exists because ``PeerHandle/id`` alone cannot carry identity across transports. A key is
+/// minted once per remote endpoint per session, paired with that endpoint's `id` at the single
+/// mint point inside the transport, and handed to every handle built for it — so two handles from
+/// different discovery cycles for the same remote carry the same key, which is what lets a slot, a
+/// heart connection, or a device cap recognize a returning peer. Under MultipeerConnectivity it
+/// stands in for `MCPeerID` equality; under a QUIC transport it will be minted per authenticated
+/// connection endpoint.
 ///
-/// An endpoint key is the total test. Two handles minted in different discovery cycles for the same
-/// remote carry the same key, which is what lets a slot, a heart connection, or a device cap
-/// recognize a returning peer. Under MultipeerConnectivity it stands in for `MCPeerID` equality;
-/// under a QUIC transport it will be minted per authenticated connection endpoint.
+/// **History worth keeping.** `id` used to be a per-discovery cache handle: it was minted inside
+/// the same dictionary discovery pruned, so a peer lost while holding no channel came back under a
+/// fresh `id`, and `a.id == b.id` implied "same device" while "same device" did not imply
+/// `a.id == b.id`. Splitting the identity map out of that dictionary (plan §6.5) is what made `id`
+/// session-stable; the endpoint key stays because the *cross-transport* question it answers is
+/// not the same question, and because a handle built outside a transport (a test fixture, a mock)
+/// still has an `id` no transport minted.
 ///
 /// **Never leaves the process.** It is not persisted, not localized, not serialized, and never on
 /// the wire — it carries no meaning outside the transport instance that minted it, which is why it
@@ -35,18 +40,20 @@ public nonisolated struct PeerEndpointKey: Hashable, Sendable {
     }
 }
 
-/// A discovered peer, wrapped with a per-discovery `UUID`, the parsed advertisement, and the
-/// transport's stable ``PeerEndpointKey`` for the endpoint behind it.
+/// A discovered peer, wrapped with the transport's session-stable `UUID` for it, the parsed
+/// advertisement, and the ``PeerEndpointKey`` for the endpoint behind it.
 ///
 /// The value every transport/coordinator/manager API passes instead of a framework peer type.
 /// Equality and hashing are by `id` only, so a peer whose advertisement updates stays the same
-/// peer — but see ``isSameEndpoint(as:)`` for the question `==` does *not* answer. Peer-supplied
-/// fields (``displayHint``, ``discoveryInfo``) are untrusted wire data until the identity handshake
-/// verifies; nothing here is an identity claim.
+/// peer — and, since the split described in ``PeerEndpointKey``, so does a peer re-discovered after
+/// the transport pruned its discovery record. Peer-supplied fields (``displayHint``,
+/// ``discoveryInfo``) are untrusted wire data until the identity handshake verifies; nothing here
+/// is an identity claim.
 public nonisolated struct PeerHandle: Hashable, Identifiable, Sendable {
-    /// Per-discovery handle. Stable while the transport keeps tracking this endpoint, and re-minted
-    /// after a cache miss — see ``PeerEndpointKey``. `PeerSlot.id` is this value, which is why the
-    /// QR ceremony and admission bookkeeping key on it.
+    /// The transport's identity for this endpoint, stable for the life of the transport session
+    /// and re-minted only after a `stop()` or a bounded-map eviction — see ``PeerEndpointKey``.
+    /// `PeerSlot.id` is this value, which is why the QR ceremony and admission bookkeeping can key
+    /// on it.
     public let id: UUID
 
     /// The advertised instance name.
@@ -95,17 +102,20 @@ public nonisolated struct PeerHandle: Hashable, Identifiable, Sendable {
     /// different discovery cycles.
     ///
     /// **Use this, not `==`, wherever a stored record is being matched to a transport event** — a
-    /// slot, a heart connection, a recipe pairing, a device cap. `==` compares `id`, which answers
-    /// "same discovery handle" and returns false for a device that was re-minted between the record
-    /// being stored and the event arriving. The consequences of that false negative are concrete
-    /// and were a real review finding: a slot that is never removed on disconnect keeps its seat,
-    /// its coordinator is never cancelled (so ranging is never invalidated and the foreground Live
-    /// Activity anchor is orphaned), and a returning partner is refused by the very cap it already
-    /// occupies.
+    /// slot, a heart connection, a recipe pairing, a device cap. The consequences of getting the
+    /// false negative were concrete and were a real review finding: a slot that is never removed on
+    /// disconnect keeps its seat, its coordinator is never cancelled (so ranging is never
+    /// invalidated and the foreground Live Activity anchor is orphaned), and a returning partner is
+    /// refused by the very cap it already occupies.
     ///
-    /// The `id` disjunct is kept rather than dropped in favour of the endpoint alone: equal `id`
-    /// implies equal endpoint, so it can only ever add a match that a transport-level cache miss
-    /// would otherwise lose, never a wrong one.
+    /// Since ``PeerHandle/id`` became session-stable the two arms agree for every handle a
+    /// transport minted, so this reads as belt-and-braces there. It is kept, and kept as the house
+    /// spelling, for three reasons: a handle built outside a transport (a fixture, a mock, a fake)
+    /// has an `id` no transport minted and only the `id` arm can match it; the bounded identity map
+    /// can still evict a very old endpoint, after which the endpoint arm is the one that survives;
+    /// and a future transport is free to key identity differently. Neither arm can produce a wrong
+    /// match — `id` and endpoint are minted as a pair — so the disjunction only ever adds matches
+    /// that would otherwise be lost.
     public func isSameEndpoint(as other: PeerHandle) -> Bool {
         id == other.id || endpoint == other.endpoint
     }

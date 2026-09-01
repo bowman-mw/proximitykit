@@ -212,14 +212,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var activePhotoSessionID: UUID?
     // voucherFingerprint → cached payload; never persisted across app launches
     @ObservationIgnored private var vouchCache: [String: MeshFriendVouchListPayload] = [:]
-    // Retry counts for failed proximity-join MC connections (peer.id → attempts)
-    @ObservationIgnored private var peerRetryCount: [UUID: Int] = [:]
-    /// Peers this manager kicked itself (`kickEvictedPeer`) whose `.notConnected` has not arrived yet.
+    /// Re-invite attempts spent per DEVICE for failed proximity-join connections.
+    ///
+    /// Keyed on ``PeerEndpointKey``, not `peer.id`, and that is the whole point of the key: the
+    /// budget exists for a device that keeps dropping, and a device that reconnects is exactly the
+    /// case where a per-handle key would hand out a fresh budget every time. The slot lookup two
+    /// lines away in `onPeerDisconnected` has always used the endpoint test; this used not to.
+    @ObservationIgnored private var peerRetryCount: [PeerEndpointKey: Int] = [:]
+    /// Devices this manager kicked itself (`kickEvictedPeer`) whose `.notConnected` has not arrived yet.
     /// `onPeerDisconnected` reads that event as our own eviction — never as the transient socket loss
     /// its re-invite retry exists for. Consumed on the disconnect callback, cleared in
     /// `stopSearching()`; bounded by MC's 8-peer cap in practice and hard-capped by
-    /// ``maxLocallyKickedPeers`` (R3).
-    @ObservationIgnored private var locallyKickedPeerIDs: Set<UUID> = []
+    /// ``maxLocallyKickedPeers`` (R3). Keyed by endpoint for the same reason as `peerRetryCount`:
+    /// a deliberate eviction that stopped being recognized would be re-invited by its own retry.
+    @ObservationIgnored private var locallyKickedEndpoints: Set<PeerEndpointKey> = []
     /// Slots the local shop catalog was already sent to (belt-and-braces once-per-slot guard — the
     /// commit transition in checkCoordinatorStates fires once per fingerprint change already). Pruned
     /// per-slot on eviction (removeSlot/disconnectSlot) so a rejoining friend re-exchanges — the
@@ -1865,26 +1871,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         meshSession.onPeerDisconnected = { [weak self] peer, _ in
             guard let self else { return }
-            // Read BEFORE removeSlot (whose no-op kick of an already-dropped peer records the id
-            // too), then clear both records: a deliberate local eviction must not be retried.
-            let wasKickedLocally = self.locallyKickedPeerIDs.contains(peer.id)
-            let matchingSlot = self.slots.first {
-                $0.peer.isSameEndpoint(as: peer)
-            }
+            // Read BEFORE removeSlot (whose no-op kick of an already-dropped peer records the
+            // endpoint too), then clear both records: a deliberate local eviction must not be retried.
+            let wasKickedLocally = self.locallyKickedEndpoints.contains(peer.endpoint)
+            let matchingSlot = self.slot(for: peer)
             let wasCommitted = matchingSlot?.fingerprint != nil
             if let slot = matchingSlot {
                 self.removeSlot(slot)
             }
-            self.locallyKickedPeerIDs.remove(peer.id)
+            self.locallyKickedEndpoints.remove(peer.endpoint)
             // In proximity join: if the MC connection dropped before the peer committed and we
             // are the designated inviter (higher fingerprint), retry up to maxPeerRetries times.
             // Without this, a transient socket failure permanently strands the session because
             // the browser won't re-fire onPeerDiscovered for a peer it already found.
             guard self.isProximityJoin, self.isSessionOpen, !wasCommitted, !wasKickedLocally else { return }
             guard self.shouldInitiateInvite(to: peer) else { return }
-            let retryCount = self.peerRetryCount[peer.id, default: 0]
+            let retryCount = self.peerRetryCount[peer.endpoint, default: 0]
             guard retryCount < Self.maxPeerRetries else { return }
-            self.peerRetryCount[peer.id] = retryCount + 1
+            self.peerRetryCount[peer.endpoint] = retryCount + 1
             Task { [weak self] in
                 // A cancelled retry must not invite (R7).
                 do {
@@ -1894,7 +1898,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 }
                 guard let self, self.isProximityJoin, self.isSessionOpen,
                       self.slots.count < Self.maxTotalSlots,
-                      !self.slots.contains(where: { $0.peer.isSameEndpoint(as: peer) }) else { return }
+                      !self.hasSlot(for: peer) else { return }
                 self.meshSession.invite(peer)
             }
         }
@@ -1933,7 +1937,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         discoveryError = nil
         isProximityJoin = false
         peerRetryCount.removeAll()
-        locallyKickedPeerIDs.removeAll()
+        locallyKickedEndpoints.removeAll()
         sentShopCatalogSlotIDs.removeAll()
         shopCatalogRequestResponseAt.removeAll()
         meshSession.stop()
@@ -2019,12 +2023,29 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return sessionID > peerSessionID
     }
 
+    /// This device's slot in the live session, matched the way every transport event must be
+    /// matched: by ``PeerHandle/isSameEndpoint(as:)``, never `==`.
+    ///
+    /// The one spelling of "does this peer already hold a seat?", so the seat gates, the invite
+    /// gates and the disconnect path cannot drift apart again — which they had (review finding #19,
+    /// plan §6.4 findings 1–2): the disconnect lookup used the endpoint test while the seat gates
+    /// beside it compared `id`, so a device the transport re-minted was admitted a second time by
+    /// the very guard that exists to refuse it.
+    private func slot(for peer: PeerHandle) -> PeerSlot? {
+        slots.first { $0.peer.isSameEndpoint(as: peer) }
+    }
+
+    /// True when `peer` already holds a slot. See ``slot(for:)``.
+    private func hasSlot(for peer: PeerHandle) -> Bool {
+        slot(for: peer) != nil
+    }
+
     private func handlePeerDiscovered(_ peer: PeerHandle) {
         // Proximity-join mode: auto-invite every peer silently; no browse list shown.
         if isProximityJoin {
             guard isSessionOpen else { return }
             guard shouldInitiateInvite(to: peer) else { return }
-            if slots.count < Self.maxTotalSlots, !slots.contains(where: { $0.peer.id == peer.id }) {
+            if slots.count < Self.maxTotalSlots, !hasSlot(for: peer) {
                 meshSession.invite(peer)
             }
             return
@@ -2034,20 +2055,47 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // temporary overflow candidate can be evaluated with real distance data.
         if let mesh = currentMesh, mesh.mode == .open {
             if slots.count < Self.maxTotalSlots || canEvaluateOverflowCandidate(peer) {
-                if !slots.contains(where: { $0.peer.id == peer.id }) {
+                if !hasSlot(for: peer) {
                     meshSession.invite(peer)
                 }
             }
         }
     }
 
+    /// What ``handleChannelReady`` does with a freshly connected channel.
+    ///
+    /// Extracted from the guard chain so the seat decision is reachable from a unit test: what
+    /// follows it in production is a live `ProximityCoordinator` over a real `NIRangingSession`,
+    /// which a unit test must not build, and the decision is the half that has been wrong.
+    enum ChannelAdmission: Equatable {
+        /// Seat the peer: build the coordinator and append a slot.
+        case seat
+        /// Refuse and free the MC link. A connected peer with no slot holds a zombie link — a
+        /// channel with no owner, one of the 8 MC peer slots — until the search stops.
+        case kick
+        /// This device already holds a live slot. Leave it entirely alone: kicking here would drop
+        /// the good connection, and seating would break the slot cap from the inside.
+        case alreadySeated
+    }
+
+    /// The seat decision for a freshly connected channel — see ``ChannelAdmission``.
+    func channelAdmission(for peer: PeerHandle) -> ChannelAdmission {
+        guard !isProximityJoin || isSessionOpen else { return .kick }
+        guard slots.count < Self.maxSlotsDuringOverflowEvaluation else { return .kick }
+        guard !hasSlot(for: peer) else { return .alreadySeated }
+        return .seat
+    }
+
     private func handleChannelReady(_ channel: PeerChannelTransport) {
-        // A connected MC peer this manager refuses to seat would otherwise hold a zombie link
-        // (channel with no owner, one of the 8 MC peer slots) until the search stops — kick it.
-        // The duplicate guard is different: that peer already owns a live slot.
-        guard !isProximityJoin || isSessionOpen else { kickEvictedPeer(channel.peer); return }
-        guard slots.count < Self.maxSlotsDuringOverflowEvaluation else { kickEvictedPeer(channel.peer); return }
-        guard !slots.contains(where: { $0.peer.id == channel.peer.id }) else { return }
+        switch channelAdmission(for: channel.peer) {
+        case .kick:
+            kickEvictedPeer(channel.peer)
+            return
+        case .alreadySeated:
+            return
+        case .seat:
+            break
+        }
 
         let isOverflowCandidate = slots.count >= Self.maxTotalSlots
         let kind: SlotKind = activeSlots.count < Self.maxActiveSlots ? .active : .lightweight
@@ -2141,11 +2189,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// because `invite` refuses connected peers and `.connected` never re-fires — made re-forming a
     /// slot with that peer impossible for the rest of the search. Best-effort with the same caveat
     /// as the sibling managers (see `MeshMultipeerSession.disconnectPeer`); a no-op for a peer MC
-    /// already reported gone. Records the id so `onPeerDisconnected` does not treat the resulting
-    /// `.notConnected` as a transient drop to retry.
+    /// already reported gone. Records the endpoint so `onPeerDisconnected` does not treat the
+    /// resulting `.notConnected` as a transient drop to retry.
     private func kickEvictedPeer(_ peer: PeerHandle) {
-        if locallyKickedPeerIDs.count < Self.maxLocallyKickedPeers {
-            locallyKickedPeerIDs.insert(peer.id)
+        if locallyKickedEndpoints.count < Self.maxLocallyKickedPeers {
+            locallyKickedEndpoints.insert(peer.endpoint)
         }
         meshSession.disconnectPeer(peer)
     }
@@ -2543,8 +2591,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         pendingQRVerifications[slotID]?.challengeNonce
     }
 
-    private func canEvaluateOverflowCandidate(_ peer: PeerHandle) -> Bool {
-        guard !slots.contains(where: { $0.peer.id == peer.id }) else { return false }
+    /// Whether a full mesh may admit `peer` as the one temporary overflow candidate — a seat above
+    /// the cap, held only long enough to compare real distance data against the farthest
+    /// lightweight slot.
+    ///
+    /// The first guard is the asymmetry plan §6.4 named: it used to compare `peer.id`, so a device
+    /// already holding a lightweight slot that came back under a re-minted handle was accepted as
+    /// its own overflow candidate — a second seat for one device, at the exact moment the session
+    /// is over capacity. `internal` so that decision is testable without live radios.
+    func canEvaluateOverflowCandidate(_ peer: PeerHandle) -> Bool {
+        guard !hasSlot(for: peer) else { return false }
         guard slots.count < Self.maxSlotsDuringOverflowEvaluation else { return false }
         guard !slots.contains(where: { $0.isOverflowCandidate }) else { return false }
         return farthestLightweightSlotWithStableDistance() != nil
@@ -4102,25 +4158,62 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// the production slot path is driven by a live `MCSession` a unit test cannot fake. A non-nil
     /// `fingerprint` models a COMMITTED slot (post-dwell); nil models a pre-commit candidate, which the
     /// Phase-3a registry gate must drop. `internal` for `@testable` unit tests only.
+    ///
+    /// `kind` and `stableDistanceMeters` are settable because the overflow gate reads both: only a
+    /// LIGHTWEIGHT slot with a settled distance makes a full mesh willing to evaluate one more
+    /// candidate, which is the state the duplicate-seat check has to be exercised against.
     func addSlotForTesting(
         coordinator: ProximityCoordinator,
         peer: PeerHandle,
         fingerprint: String?,
         verifiedKeyAgreementPublicKey: Data? = nil,
-        peerCapabilities: [String]? = nil
+        peerCapabilities: [String]? = nil,
+        kind: SlotKind = .active,
+        stableDistanceMeters: Double? = nil
     ) {
         var slot = PeerSlot(
             id: peer.id,
             peer: peer,
             channel: PeerChannelTransport(peer: peer, session: meshSession),
             coordinator: coordinator,
-            kind: .active,
+            kind: kind,
             fingerprint: fingerprint
         )
         slot.verifiedKeyAgreementPublicKey = verifiedKeyAgreementPublicKey
         slot.peerCapabilities = peerCapabilities
+        slot.stableDistanceMeters = stableDistanceMeters
         slots.append(slot)
     }
+
+    /// The transport this manager owns, so a unit test can fire the session callbacks the MC
+    /// delegates drive in production (`onPeerDisconnected` above all — the retry/local-kick
+    /// bookkeeping has no other entry point). Mirrors
+    /// `ProximityRecipeShareManager.multipeerSessionForTesting`.
+    var multipeerSessionForTesting: MeshMultipeerSession { meshSession }
+
+    /// Enters proximity-join mode WITHOUT starting the radios. `startJoin()` calls
+    /// `startSearching()`, which starts real advertising and browsing — a unit test must never do
+    /// that. Mirrors `ProximityRecipeShareManager.markRunningForTesting`.
+    func markProximityJoinForTesting() {
+        isProximityJoin = true
+    }
+
+    /// How many DISTINCT devices currently hold a re-invite budget.
+    ///
+    /// Deliberately the entry count and not one entry's value: the value is the same either way, so
+    /// it cannot tell a per-device budget from a per-handle one. The count can — a single device
+    /// that reconnected under a fresh handle used to open a second entry with a full fresh budget,
+    /// which is visible here and nowhere else.
+    var peerRetryEntryCountForTesting: Int { peerRetryCount.count }
+
+    /// Re-invite attempts already spent on `peer`'s device.
+    func peerRetryCountForTesting(for peer: PeerHandle) -> Int {
+        peerRetryCount[peer.endpoint, default: 0]
+    }
+
+    /// Devices kicked locally whose `.notConnected` has not arrived yet — the note that stops a
+    /// deliberate eviction from being re-invited by its own retry path.
+    var locallyKickedEndpointCountForTesting: Int { locallyKickedEndpoints.count }
 
     /// Evicts a slot through the production removal funnel (`removeSlot` — the path
     /// `onPeerDisconnected` and the stale-coordinator sweep share), so unit tests can drive

@@ -69,6 +69,25 @@ final class PeerChannelTransport: PeerTransport {
     }
 }
 
+// MARK: - SessionPeerIdentity
+
+/// One remote endpoint's identity for the life of a transport session: the `id` every
+/// ``PeerHandle`` minted for that endpoint carries, and the ``PeerEndpointKey`` behind it.
+///
+/// The two are minted together, stored together, and evicted together, so they can never disagree.
+/// That pairing is what makes ``PeerHandle/id`` a real identity rather than a per-discovery cache
+/// handle: `PeerSlot.id` is `peer.id`, so a slot, a QR ceremony binding, and an admission request
+/// all survive the discovery churn that used to re-mint it.
+///
+/// Deliberately not stored in ``MeshMultipeerSession``'s discovery caches — being *outside* the
+/// dictionary that discovery prunes is the whole mechanism.
+private struct SessionPeerIdentity {
+    /// The stable ``PeerHandle/id`` for this endpoint, for as long as the session holds it.
+    let id: UUID
+    /// The transport's opaque endpoint key, handed to every handle minted for this endpoint.
+    let endpoint: PeerEndpointKey
+}
+
 // MARK: - MeshMultipeerSession
 
 /// The shared MultipeerConnectivity radio: one MCSession, advertiser, and browser, multiplexed
@@ -115,25 +134,32 @@ final class MeshMultipeerSession: NSObject {
     private(set) var channels: [MCPeerID: PeerChannelTransport] = [:]
     private(set) var peerInfoCache: [MCPeerID: [String: String]] = [:]
     private var peerMap: [MCPeerID: PeerHandle] = [:]
-    /// `MCPeerID ↔ PeerEndpointKey`, the private half of transport neutrality: the framework peer
-    /// type stops at this class, and everything above it compares ``PeerEndpointKey``s.
+    /// `MCPeerID →` the session-stable identity minted for it. The private half of transport
+    /// neutrality (the framework peer type stops at this class) **and** the reason
+    /// ``PeerHandle/id`` is stable for the life of a session.
     ///
-    /// Deliberately NOT pruned alongside `peerMap`. `peerMap` is evicted on `lostPeer` (when no
-    /// channel exists), which is exactly what re-mints a peer's `id` and is exactly why the
-    /// endpoint key exists. `MCPeerID` equality — the thing these maps stand in for — is unaffected
-    /// by our cache, so pruning here would narrow the identity test rather than preserve it, and
-    /// an owner still holding a record for that device would stop recognizing it.
+    /// Deliberately NOT pruned alongside `peerMap`, and that split is the point. `peerMap` is
+    /// evicted on `lostPeer` when no channel exists; while the two shared one dictionary, that
+    /// eviction re-minted the peer's `id` on its next sighting, so every record an owner held under
+    /// the old `id` — a slot, a re-invite budget, a local-kick note, a QR binding — silently
+    /// stopped recognizing the device. Discovery churn now costs a ``PeerHandle`` rebuild and
+    /// nothing more.
     ///
     /// Bounded by ``maxTrackedEndpoints`` with oldest-first eviction (Power of 10 rule 3). Evicting
     /// only re-exposes the pre-existing false negative — a returning device read as new — never a
-    /// false positive, since a key is minted once per distinct `MCPeerID`.
+    /// false positive, since an identity is minted once per distinct `MCPeerID`.
     ///
-    /// Memory-only, per session instance: never persisted, never advertised, never on the wire. It
-    /// links nothing the presence radio's ephemeral-`MCPeerID` posture does not already link, and
-    /// owes no persisted-surface wipe row for the same reason.
-    private var endpointKeyByPeerID: [MCPeerID: PeerEndpointKey] = [:]
+    /// **Session-scoped and memory-only**: never persisted, never advertised, never on the wire,
+    /// and cleared in ``stop()`` with everything else the radio was holding. Clearing it at
+    /// teardown is what keeps it off the privacy-wipe ledger (nothing survives to be wiped) and
+    /// what keeps the presence radio's per-start-random posture intact — a map that outlived a
+    /// stop/start would link two runs of that radio to one device.
+    private var identityByPeerID: [MCPeerID: SessionPeerIdentity] = [:]
+    /// The reverse direction, so an owner's ``PeerHandle`` routes back to a framework peer.
+    /// Written and evicted only alongside ``identityByPeerID``.
     private var peerIDByEndpointKey: [PeerEndpointKey: MCPeerID] = [:]
-    private var endpointKeyOrder: [MCPeerID] = []
+    /// First-seen order, for ``identityByPeerID``'s bounded oldest-first eviction.
+    private var identityOrder: [MCPeerID] = []
     private var mcSession: MCSession?
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
@@ -269,11 +295,14 @@ final class MeshMultipeerSession: NSObject {
         peerMap.removeAll()
         pendingConnectionPeers.removeAll()
         isDiscoveryPaused = false
-        // `endpointKeyByPeerID` / `peerIDByEndpointKey` deliberately survive: they stand in for
-        // `MCPeerID` equality, which a local teardown does not change either. Clearing them would
-        // make a device that reconnects after a stop/start look new to an owner still holding its
-        // record — precisely the identity churn this mapping exists to absorb. Growth stays bounded
-        // by `maxTrackedEndpoints`, so a long-lived session cannot leak through them.
+        // Session identities die with the session (privacy constraint, plan §6.5). Every owner of
+        // this class drops its own peer-keyed records in the same teardown that calls stop() —
+        // mesh clears slots/retries/kicks, recipe clears connections and recipients, presence
+        // discards the whole session object — so nothing survives to be confused by the re-mint,
+        // and keeping the map would be pure cross-run linkability with no reader.
+        identityByPeerID.removeAll()
+        peerIDByEndpointKey.removeAll()
+        identityOrder.removeAll()
     }
 
     func invite(_ peer: PeerHandle) {
@@ -388,15 +417,16 @@ final class MeshMultipeerSession: NSObject {
             peerInfoCache[mcPeerID] = info
             return updated
         }
-        // The `id` below is fresh on every cache miss — that re-mint is the whole reason
-        // PeerEndpointKey exists — but the endpoint key is REUSED for a peer ID seen before, so a
-        // returning device stays recognizable to owners holding a record under its old `id`.
+        // A `peerMap` miss rebuilds the handle but NOT the identity: both `id` and endpoint key are
+        // reused for any peer this session has seen before, so a returning device arrives as the
+        // same peer to every owner holding a record for it.
+        let identity = sessionIdentity(for: mcPeerID)
         let p = PeerHandle(
-            id: UUID(),
+            id: identity.id,
             displayHint: mcPeerID.displayName,
             discoveryInfo: info,
             advertisedFingerprint: info?["fp"],
-            endpoint: endpointKey(for: mcPeerID)
+            endpoint: identity.endpoint
         )
         peerMap[mcPeerID] = p
         if let discoveryInfo { peerInfoCache[mcPeerID] = discoveryInfo }
@@ -405,24 +435,26 @@ final class MeshMultipeerSession: NSObject {
 
     // MARK: - Endpoint identity
 
-    /// The stable key for `mcPeerID`, minting one on first sight.
+    /// The session-stable identity for `mcPeerID`, minting one on first sight.
     ///
-    /// Oldest-first eviction at ``maxTrackedEndpoints`` keeps both directions of the mapping in
-    /// step; a re-seen peer refreshes nothing, so the order is strictly first-seen and an evicted
-    /// device is simply re-minted as new on its next appearance.
-    private func endpointKey(for mcPeerID: MCPeerID) -> PeerEndpointKey {
-        if let existing = endpointKeyByPeerID[mcPeerID] { return existing }
-        if endpointKeyOrder.count >= Self.maxTrackedEndpoints {
-            let oldest = endpointKeyOrder.removeFirst()
-            if let staleKey = endpointKeyByPeerID.removeValue(forKey: oldest) {
-                peerIDByEndpointKey.removeValue(forKey: staleKey)
+    /// The single mint point: `id` and endpoint key are born together here and nowhere else, which
+    /// is what makes them a bijection for as long as the session lasts. Oldest-first eviction at
+    /// ``maxTrackedEndpoints`` keeps both directions of the mapping in step; a re-seen peer
+    /// refreshes nothing, so the order is strictly first-seen and an evicted device is simply
+    /// re-minted as new on its next appearance.
+    private func sessionIdentity(for mcPeerID: MCPeerID) -> SessionPeerIdentity {
+        if let existing = identityByPeerID[mcPeerID] { return existing }
+        if identityOrder.count >= Self.maxTrackedEndpoints {
+            let oldest = identityOrder.removeFirst()
+            if let stale = identityByPeerID.removeValue(forKey: oldest) {
+                peerIDByEndpointKey.removeValue(forKey: stale.endpoint)
             }
         }
-        let key = PeerEndpointKey()
-        endpointKeyByPeerID[mcPeerID] = key
-        peerIDByEndpointKey[key] = mcPeerID
-        endpointKeyOrder.append(mcPeerID)
-        return key
+        let identity = SessionPeerIdentity(id: UUID(), endpoint: PeerEndpointKey())
+        identityByPeerID[mcPeerID] = identity
+        peerIDByEndpointKey[identity.endpoint] = mcPeerID
+        identityOrder.append(mcPeerID)
+        return identity
     }
 
     /// The framework peer behind a handle, or nil once its endpoint has aged out of the bounded
@@ -442,18 +474,27 @@ final class MeshMultipeerSession: NSObject {
         // first — otherwise `hasPendingConnections(besides:)` could not exclude it and the gates
         // under test would read a synthetic entry as somebody else's in-flight connection.
         let peerID = mcPeerID(for: peer) ?? MCPeerID(displayName: peer.displayHint)
-        bindEndpointForTesting(peer.endpoint, to: peerID)
+        bindIdentityForTesting(peer, to: peerID)
         pendingConnectionPeers[peerID] = UUID()
     }
 
-    /// Registers an externally-minted endpoint key against a framework peer, so a handle a test
-    /// built by hand routes like a discovered one.
-    func bindEndpointForTesting(_ key: PeerEndpointKey, to peerID: MCPeerID) {
-        guard peerIDByEndpointKey[key] == nil else { return }
-        endpointKeyByPeerID[peerID] = key
-        peerIDByEndpointKey[key] = peerID
-        endpointKeyOrder.append(peerID)
+    /// Registers an externally-minted handle's identity against a framework peer, so a handle a
+    /// test built by hand routes like a discovered one. Takes the whole handle rather than its
+    /// endpoint key alone: `id` and endpoint are one identity now, and binding half of one would
+    /// let a test observe a pairing the transport can never produce.
+    func bindIdentityForTesting(_ peer: PeerHandle, to peerID: MCPeerID) {
+        // Both directions, so a second bind can never leave one map pointing at an identity the
+        // other has replaced — the bijection is the property everything above depends on.
+        guard peerIDByEndpointKey[peer.endpoint] == nil, identityByPeerID[peerID] == nil else { return }
+        identityByPeerID[peerID] = SessionPeerIdentity(id: peer.id, endpoint: peer.endpoint)
+        peerIDByEndpointKey[peer.endpoint] = peerID
+        identityOrder.append(peerID)
     }
+
+    /// How many remote endpoints this session currently holds an identity for. The read that lets a
+    /// test assert the session-scoping constraint directly — that ``stop()`` leaves nothing behind
+    /// — instead of inferring it from a re-mint.
+    var trackedEndpointCountForTesting: Int { identityByPeerID.count }
 }
 
 // MARK: - MCSessionDelegate
