@@ -154,8 +154,16 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// Peers currently discovered nearby (the PeerHandle objects), so a send can invite the
     /// exact peer whose tag matched the intended friend.
     @ObservationIgnored private var discoveredPeers: [UUID: PeerHandle] = [:]
-    /// Outbound sends awaiting their MC channel: peer UUID → (friend, attempt count).
-    @ObservationIgnored private var pendingHeartSends: [UUID: (friend: ProximityTrustedPeerRecord, attempt: Int)] = [:]
+    /// Outbound sends awaiting their MC channel: peer UUID → (the invited handle, friend, attempt
+    /// count).
+    ///
+    /// The handle rides in the VALUE because the key cannot answer the only question this map is
+    /// ever asked — "is the device now connecting the one my send is for?". A key is a
+    /// ``PeerHandle/id``, and a device that re-appears after a bounded identity-map eviction or a
+    /// transport `stop()`/restart arrives under a fresh one; every read goes through
+    /// ``pendingHeartSend(for:)``, which matches the stored handle by endpoint.
+    @ObservationIgnored private var pendingHeartSends:
+        [UUID: (peer: PeerHandle, friend: ProximityTrustedPeerRecord, attempt: Int)] = [:]
     @ObservationIgnored private var heartObservationTask: Task<Void, Never>?
     @ObservationIgnored private var heartConnectTimeoutTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var clearHeartStatusTask: Task<Void, Never>?
@@ -654,7 +662,10 @@ public final class PresenceManager: ProximityPayloadHandling {
         }
         heartSendState = .connecting(recipientName: friend.displayName)
         recordDiagnostic("Connecting to send a heart.")
-        pendingHeartSends[peer.id] = (friend, 0)
+        // Exactly one pending send per DEVICE: a leftover entry filed under an earlier handle for
+        // this same device would make `pendingHeartSend(for:)`'s `first` a coin flip.
+        removePendingHeartSend(for: peer)
+        pendingHeartSends[peer.id] = (peer, friend, 0)
         session?.invite(peer)
         armHeartConnectTimeout(peerID: peer.id, peer: peer, friend: friend)
     }
@@ -711,11 +722,33 @@ public final class PresenceManager: ProximityPayloadHandling {
     ///
     /// The one spelling of "are we already connected to this device?", matched the way every stored
     /// record must be matched against a transport event — by ``PeerHandle/isSameEndpoint(as:)``,
-    /// never `==` — so the inbound-invitation gate, the channel-ready gate and the outbound
-    /// ``sendHeart(to:)`` gate cannot drift apart again. `removeHeartConnection(matching:)` filters
-    /// on the same test.
+    /// never `==` — so the inbound-invitation gate, the channel-ready gate, the outbound
+    /// ``sendHeart(to:)`` gate and the pre-connect retry cannot drift apart again.
+    /// `removeHeartConnection(matching:)` filters on the same test.
     private func hasHeartConnection(with peer: PeerHandle) -> Bool {
         heartConnections.contains { $0.peer.isSameEndpoint(as: peer) }
+    }
+
+    /// The outbound send in flight to `peer`'s DEVICE, if any.
+    ///
+    /// The companion to ``hasHeartConnection(with:)`` for ``pendingHeartSends``: every read of that
+    /// map asks a device question, so every read matches the stored handle by endpoint rather than
+    /// subscripting with an `id` the device may no longer be carrying. Subscripting was what let a
+    /// churned handle strand a send — the channel came up, `pendingHeartSends[channel.peer.id]`
+    /// missed, and the connection was seated with no `intendedFriend`, so the verified handshake
+    /// never delivered the heart it was opened for.
+    private func pendingHeartSend(
+        for peer: PeerHandle
+    ) -> (peer: PeerHandle, friend: ProximityTrustedPeerRecord, attempt: Int)? {
+        pendingHeartSends.values.first { $0.peer.isSameEndpoint(as: peer) }
+    }
+
+    /// Drops the outbound send filed for `peer`'s DEVICE, whatever handle it was filed under.
+    /// The removal half of ``pendingHeartSend(for:)`` — an id-keyed `removeValue` after a churn
+    /// left the entry behind for the manager's lifetime.
+    private func removePendingHeartSend(for peer: PeerHandle) {
+        let staleKeys = pendingHeartSends.filter { $0.value.peer.isSameEndpoint(as: peer) }.map(\.key)
+        for key in staleKeys { pendingHeartSends.removeValue(forKey: key) }
     }
 
     /// What ``handleHeartChannelReady`` does with a freshly connected heart channel.
@@ -764,8 +797,8 @@ public final class PresenceManager: ProximityPayloadHandling {
         }
         // The MC channel is up — cancel the pre-connect retry timer (the coordinator's own 25 s
         // handshake budget governs from here).
-        cancelHeartConnectTimeout(peerID: channel.peer.id)
-        let intended = pendingHeartSends[channel.peer.id]?.friend
+        cancelHeartConnectTimeout(for: channel.peer)
+        let intended = pendingHeartSend(for: channel.peer)?.friend
 
         // SEALED-INTRODUCTION rule (Phase 4b): the heart handshake must never emit our identity in
         // the clear. Both sides seal the intro/ack to the intended friend's vault KA key. Presence
@@ -777,7 +810,7 @@ public final class PresenceManager: ProximityPayloadHandling {
               !expectedFriendKA.isEmpty else {
             recordDiagnostic("Refused a heart connection with no friend key.")
             session?.disconnectPeer(channel.peer)
-            pendingHeartSends.removeValue(forKey: channel.peer.id)
+            removePendingHeartSend(for: channel.peer)
             if intended != nil, isHeartSendInProgress {
                 failHeart("Couldn't verify this friend — no heart was sent.")
             }
@@ -894,7 +927,7 @@ public final class PresenceManager: ProximityPayloadHandling {
             // A failed handshake never fires an MC disconnect — best-effort kick the zombie.
             session?.disconnectPeer(connection.peer)
             heartConnections.removeAll { $0.id == connection.id }
-            pendingHeartSends.removeValue(forKey: connection.id)
+            removePendingHeartSend(for: connection.peer)
             // A failed heart handshake doesn't mean the peer left presence — keep it if still
             // advertising; prune only if it has already departed (Group 4).
             pruneDiscoveredPeerIfDeparted(connection.id)
@@ -942,8 +975,10 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// record — so a completed/failed heart never leaves a zombie connection toward the 8-peer cap.
     private func teardownHeartConnection(id: UUID) {
         guard let connection = heartConnections.first(where: { $0.id == id }) else { return }
-        pendingHeartSends.removeValue(forKey: id)
-        cancelHeartConnectTimeout(peerID: id)
+        // Cancel BEFORE the removal: `cancelHeartConnectTimeout(for:)` finds the arming handle
+        // through the pending send, so dropping that first would strand a churned-handle timer.
+        cancelHeartConnectTimeout(for: connection.peer)
+        removePendingHeartSend(for: connection.peer)
         let coordinator = connection.coordinator
         Task { await coordinator.cancel() }
         session?.disconnectPeer(connection.peer)
@@ -983,7 +1018,7 @@ public final class PresenceManager: ProximityPayloadHandling {
             Task { await coordinator.cancel() }
         }
         let droppedOutbound = dropped.contains { $0.intendedFriend != nil }
-        pendingHeartSends.removeValue(forKey: peer.id)
+        removePendingHeartSend(for: peer)
         // The heart channel's MC disconnect does not mean the peer left presence — it may still be
         // advertising. Keep it in discoveredPeers so reachable and sendable agree; prune only if it
         // has already departed presence (Group 4).
@@ -1012,20 +1047,40 @@ public final class PresenceManager: ProximityPayloadHandling {
         }
     }
 
+    /// Whether the pre-connect retry has been overtaken by events and must stand down: the DEVICE
+    /// is already connected, or the send the retry belongs to is gone or superseded.
+    ///
+    /// The timeout body and its delayed re-invite ask exactly this, which is why it is one
+    /// function: they used to ask it twice, and both spellings compared `heartConnections`
+    /// `id`s against the invited handle's `id` (plan §6.4). A device that connected under a
+    /// churned handle — a bounded identity-map eviction, a transport `stop()`/restart — therefore
+    /// read as a stranger to a manager whose every other same-device question is
+    /// ``PeerHandle/isSameEndpoint(as:)``: the timeout `disconnectPeer`'d the live connection it
+    /// already held and re-invited it, and the delayed task invited a device already connected.
+    ///
+    /// Internal so a unit test can pin the decision: the production path only reaches it after a
+    /// real `Task.sleep` behind a live radio.
+    func heartConnectRetryIsMoot(for peer: PeerHandle, friend: ProximityTrustedPeerRecord) -> Bool {
+        if hasHeartConnection(with: peer) { return true }
+        return pendingHeartSend(for: peer)?.friend.fingerprint != friend.fingerprint
+    }
+
     private func handleHeartConnectTimeout(peerID: UUID, peer: PeerHandle, friend: ProximityTrustedPeerRecord) {
-        // A channel already came up — the handshake budget governs; nothing to do.
-        guard !heartConnections.contains(where: { $0.id == peerID }) else { return }
-        guard let pending = pendingHeartSends[peerID], pending.friend.fingerprint == friend.fingerprint else { return }
+        // A channel already came up (the handshake budget governs from there), or the send is
+        // gone — nothing to do either way.
+        guard !heartConnectRetryIsMoot(for: peer, friend: friend),
+              let pending = pendingHeartSend(for: peer) else { return }
         let nextAttempt = pending.attempt + 1
         guard nextAttempt < Self.maxHeartInviteAttempts else {
-            pendingHeartSends.removeValue(forKey: peerID)
+            removePendingHeartSend(for: peer)
             session?.disconnectPeer(peer)
             failHeart("\(Self.firstName(of: friend.displayName)) didn't answer — try again in a moment.")
             return
         }
         // Pre-discovery race: clear the stale invite, then re-invite after a short delay (mirrors
         // the mesh re-invite pattern the recipe cap uses).
-        pendingHeartSends[peerID] = (friend, nextAttempt)
+        removePendingHeartSend(for: peer)
+        pendingHeartSends[peerID] = (peer, friend, nextAttempt)
         session?.disconnectPeer(peer)
         recordDiagnostic("Retrying heart invite.")
         Task { @MainActor [weak self] in
@@ -1036,11 +1091,18 @@ public final class PresenceManager: ProximityPayloadHandling {
                 return
             }
             guard !Task.isCancelled, let self else { return }
-            guard self.pendingHeartSends[peerID]?.friend.fingerprint == friend.fingerprint,
-                  !self.heartConnections.contains(where: { $0.id == peerID }) else { return }
+            guard !self.heartConnectRetryIsMoot(for: peer, friend: friend) else { return }
             self.session?.invite(peer)
             self.armHeartConnectTimeout(peerID: peerID, peer: peer, friend: friend)
         }
+    }
+
+    /// Cancels the pre-connect timer armed for `peer`'s DEVICE. The timer is filed under the handle
+    /// the send was issued to, so a channel that comes up under a churned handle must look the
+    /// arming handle up through ``pendingHeartSend(for:)`` rather than cancel by its own `id` and
+    /// leave the real timer running.
+    private func cancelHeartConnectTimeout(for peer: PeerHandle) {
+        cancelHeartConnectTimeout(peerID: pendingHeartSend(for: peer)?.peer.id ?? peer.id)
     }
 
     private func cancelHeartConnectTimeout(peerID: UUID) {
@@ -1186,6 +1248,14 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// `discoveredPeers.count` — so a test can prove the peer-object map shrinks with the match map
     /// (a re-evaluation that drops a match must release the peer, not orphan it until `stop()`).
     var discoveredPeerCountForTesting: Int { discoveredPeers.count }
+
+    /// Fires the pre-connect retry exactly as the armed timer would, without waiting out
+    /// `heartConnectTimeoutSeconds` — the arming path needs a live radio a unit test must not
+    /// start, and the retry's own effects (a `disconnectPeer` of a live pairing, a re-invite) are
+    /// what the churned-handle regression turns on.
+    func fireHeartConnectTimeoutForTesting(peer: PeerHandle, friend: ProximityTrustedPeerRecord) {
+        handleHeartConnectTimeout(peerID: peer.id, peer: peer, friend: friend)
+    }
 
     /// Drives the production MC-disconnect removal path (`removeHeartConnection(matching:)`)
     /// exactly as the transport's `onPeerDisconnected` would — the writer needs a live radio a

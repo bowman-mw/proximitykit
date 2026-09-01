@@ -240,7 +240,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         // Hard 2-device cap (outbound): refuse — visibly, never silently — while a connection
         // to a DIFFERENT peer exists. The radio is paused while paired, so an invite could not
         // go out anyway (see MeshMultipeerSession.pauseDiscovery contract).
-        if let connection = connections.first, connection.id != recipient.id {
+        if let connection = connections.first, !isSameDevice(connection, as: recipient) {
             let name = displayName(for: connection)
             sendState = .failed(message: "Still sharing with \(name) — recipe sharing links two Fernlets at a time.")
             recordDiagnostic("Refused share to \(recipient.displayName): already paired with \(name).")
@@ -254,7 +254,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         engagedRecipientID = recipient.id
         recordDiagnostic("Connecting to \(recipient.displayName).")
 
-        if let connection = connections.first(where: { $0.id == recipient.id }),
+        if let connection = connection(with: recipient),
            connection.verifiedKeyAgreementPublicKey != nil {
             Task { [weak self] in await self?.sendPendingPayload(via: connection) }
             return
@@ -443,6 +443,36 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         connections.contains { $0.peer.isSameEndpoint(as: peer) }
     }
 
+    /// True when `connection` is with the DEVICE the picker row `recipient` names.
+    ///
+    /// The recipient half of ``isConnected(to:)``. Every transport-facing gate in this file
+    /// recognizes a device by ``PeerHandle/isSameEndpoint(as:)``, but the send pipeline compares a
+    /// row `id` against a connection `id` — and both are ``PeerHandle/id``s, so a device that
+    /// re-appears under a churned handle (a bounded identity-map eviction, a transport
+    /// `stop()`/restart) fails the comparison against its own live pairing. Three arms, cheapest
+    /// first: the id the row was minted from, the handshake-proven fingerprint (durable identity,
+    /// available once verified), and the endpoint of the handle the row was minted from. None can
+    /// match a different device — ids and endpoints are minted as a pair, and the fingerprint is
+    /// proven — so the disjunction only ever recovers matches an id test would have lost.
+    private func isSameDevice(
+        _ connection: RecipeShareConnection,
+        as recipient: ProximityRecipeShareRecipient
+    ) -> Bool {
+        if connection.id == recipient.id { return true }
+        if let verified = connection.fingerprint, let claimed = recipient.fingerprint,
+           IdentityService.fingerprintsMatch(verified, claimed) {
+            return true
+        }
+        guard let handle = discoveredPeers[recipient.id] else { return false }
+        return connection.peer.isSameEndpoint(as: handle)
+    }
+
+    /// The live connection with the DEVICE `recipient` names, if any — see
+    /// ``isSameDevice(_:as:)``.
+    private func connection(with recipient: ProximityRecipeShareRecipient) -> RecipeShareConnection? {
+        connections.first { isSameDevice($0, as: recipient) }
+    }
+
     /// Belt-and-braces admission check for a just-connected MC channel (hard 2-device cap):
     /// true only when no connection exists or the peer already holds it. A third peer can
     /// still slip past both invitation gates in the connecting window; this is the last line.
@@ -536,7 +566,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         // The connect stage for the engaged recipient is over: from here the coordinator's own
         // 25 s handshake budget (plus the parked sweep) governs — the shorter pre-connect timer
         // must not fire and best-effort kick a pairing that is progressing.
-        if pendingOutgoing?.recipient.id == connection.id {
+        if let outgoing = pendingOutgoing, isSameDevice(connection, as: outgoing.recipient) {
             connectTimeoutTask?.cancel()
             connectTimeoutTask = nil
         }
@@ -582,7 +612,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
                     ensureRecipient(for: connections[index], identity: peerIdentity)
                     recordDiagnostic("Verified \(peerIdentity.displayName).")
                 }
-                if pendingOutgoing?.recipient.id == connections[index].id {
+                if let outgoing = pendingOutgoing, isSameDevice(connections[index], as: outgoing.recipient) {
                     let connection = connections[index]
                     Task { [weak self] in await self?.sendPendingPayload(via: connection) }
                 }
@@ -657,8 +687,20 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     /// Derived observable: connection first (it outlives the send), pending outgoing second.
+    ///
+    /// The sheet reads this back as a ROW id, so when the connection is with the device the user
+    /// picked, publish the id of the row they picked — a connection seated under a churned handle
+    /// carries an id no row has, which would lock out every row including the engaged one.
     private func updateEngagedRecipient() {
-        engagedRecipientID = connections.first?.id ?? pendingOutgoing?.recipient.id
+        guard let connection = connections.first else {
+            engagedRecipientID = pendingOutgoing?.recipient.id
+            return
+        }
+        if let outgoing = pendingOutgoing, isSameDevice(connection, as: outgoing.recipient) {
+            engagedRecipientID = outgoing.recipient.id
+            return
+        }
+        engagedRecipientID = connection.id
     }
 
     private func displayName(for connection: RecipeShareConnection) -> String {
@@ -683,7 +725,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             // Belt-and-braces stage check (registerConnection already cancels this task): a
             // connection record means the connect stage succeeded — never fail or kick a
             // handshake in progress from here.
-            guard !self.connections.contains(where: { $0.id == recipient.id }) else { return }
+            guard self.connection(with: recipient) == nil else { return }
             self.pendingOutgoing = nil
             self.sendState = .failed(message: "No answer from \(recipient.displayName) — that Fernlet may be busy sharing with someone else.")
             self.recordDiagnostic("Connect timeout: \(recipient.displayName) did not answer.")
@@ -765,7 +807,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     private func sendPendingPayload(via connection: RecipeShareConnection) async {
         guard let outgoing = pendingOutgoing,
-              outgoing.recipient.id == connection.id else { return }
+              isSameDevice(connection, as: outgoing.recipient) else { return }
         connectTimeoutTask?.cancel()  // connected + verified — the connect phase is over
         pendingOutgoing = nil
         updateEngagedRecipient()
@@ -799,7 +841,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     private func peer(for recipient: ProximityRecipeShareRecipient) -> PeerHandle? {
-        if let connection = connections.first(where: { $0.id == recipient.id }) {
+        if let connection = connection(with: recipient) {
             return connection.peer
         }
         return discoveredPeers[recipient.id]
