@@ -1549,7 +1549,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             dispatchRemovalPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
         case .meshEncryptedMetadata, .meshCoordinatorBeacon, .meshRotationSync, .meshKeyRotation, .meshKeyAck:
             dispatchGroupKeyPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
-        case .meshMemberDeparture, .meshTerminated, .meshInventoryDigest:
+        case .meshMemberDeparture, .meshMemberRemoval, .meshTerminated, .meshInventoryDigest:
             dispatchMembershipEventPayload(payloadType, plaintext: plaintext, decoder: decoder, slot: slot)
         case .sessionGoodbye:
             // Parsed, never emitted (plan §8.3). A goodbye is UNSIGNED, so it can only mean "this
@@ -1695,12 +1695,76 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// Sends one membership frame to every slot, awaiting each write.
-    private func broadcastMembershipFrame(_ type: PayloadType, _ payload: some Encodable) async {
+    /// Sends one membership frame, awaiting each write.
+    ///
+    /// - Parameters:
+    ///   - type: The frozen wire token.
+    ///   - payload: The frame.
+    ///   - recipients: The fingerprints allowed to receive it, or nil for every slot. A named set
+    ///     also excludes every UNCOMMITTED slot, which has no fingerprint to be in it — membership
+    ///     frames are member business.
+    private func broadcastMembershipFrame(
+        _ type: PayloadType,
+        _ payload: some Encodable,
+        to recipients: Set<String>? = nil
+    ) async {
         for slot in slots {
+            guard let recipients else {
+                await sendEnvelope(type, encodable: payload, via: slot)
+                continue
+            }
+            guard let fingerprint = slot.fingerprint, recipients.contains(fingerprint) else { continue }
             await sendEnvelope(type, encodable: payload, via: slot)
         }
         onMembershipEventSentForTesting?(type)
+    }
+
+    /// **The removal emission seam** — the counterpart of ``emitMembershipEvent(_:)`` for the one
+    /// record this device does not sign *about itself*.
+    ///
+    /// Separate because the record is already minted: quorum completes in
+    /// ``emitApprovedRemovalRecord(_:)``, which signs the evidence it counted, files it through the
+    /// verifier and only then hands the finished record here. ``sendMembershipEvent(_:)`` mints
+    /// what it sends, and a removal that was re-minted at send time could bind a different voter
+    /// list from the one that was filed.
+    ///
+    /// - Parameter record: The completed, already-signed removal.
+    func emitRemovalRecord(_ record: SignedRemovalRecord) {
+        Task { @MainActor [weak self] in
+            await self?.sendRemovalRecord(record)
+        }
+    }
+
+    /// Broadcasts a completed removal to every member except the one it removes (plan §8.3).
+    ///
+    /// - Parameter record: The completed, already-signed removal.
+    func sendRemovalRecord(_ record: SignedRemovalRecord) async {
+        await broadcastMembershipFrame(
+            .meshMemberRemoval,
+            MeshMemberRemovalPayload(record: record),
+            to: membershipEventRecipients(excluding: record.memberFingerprint)
+        )
+    }
+
+    /// Who a membership frame about `fingerprint` may reach: item 5's key-distribution exclusion
+    /// rule, reused verbatim rather than restated.
+    ///
+    /// Reusing ``MeshRotationPolicy/recipients(acked:selfFingerprint:derivedRoster:locallyRemoved:)``
+    /// is the point: the set that gets the new epoch's key and the set that gets the record saying
+    /// why must not be two rules that can drift apart. The subject is unioned into the removed set
+    /// here, so exclusion is a property of this function rather than of the order
+    /// ``applyApprovedRemoval(_:)`` happens to do things in.
+    ///
+    /// - Parameter fingerprint: The member the frame is about, always excluded.
+    /// - Returns: The fingerprints allowed to receive it. It contains this device, which holds no
+    ///   slot of its own, so a caller filtering slots by it simply never matches self.
+    func membershipEventRecipients(excluding fingerprint: String) -> Set<String> {
+        MeshRotationPolicy.recipients(
+            acked: Set(slots.compactMap(\.fingerprint)),
+            selfFingerprint: identity.localFingerprint,
+            derivedRoster: membershipVerifier?.roster,
+            locallyRemoved: removedMemberFingerprints.union([fingerprint])
+        )
     }
 
     /// **Removal record minting lives here**: the moment a removal vote reaches quorum on this
@@ -1708,22 +1772,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// it goes through the same verify-then-insert door a received one would, so the roster change
     /// — and the rotation that follows it (plan §8.3) — happen by one path whoever tallied.
     ///
-    /// ## The seam this leaves open, stated plainly
+    /// ## What still rides on the legacy path, stated plainly
     ///
-    /// A removal record **has no wire frame yet**. `SignedRemovalRecord` and its signing purpose
-    /// (`FernletCryptoPurpose.Signature.meshMemberRemovalV1`) both exist, but item 3 deliberately
-    /// gave frames to only three of the four record kinds — there is no
-    /// `fernlet.mesh.member-removal.v1` `PayloadType` and no payload struct to carry one — so this
-    /// device mints and files its own record and the peers learn of the removal exactly as they do
-    /// today: from the live `.meshRemovalSecond` broadcast and the re-gossiped descriptor. Minting
-    /// that token is a wire change of item 3's shape, and it is what a later item owes.
+    /// Item 3b gave the record its frame, so the peers now learn of a completed removal from the
+    /// signed record itself (`.meshMemberRemoval`) **as well as** from the live `.meshRemovalSecond`
+    /// broadcast and the re-gossiped descriptor. Both paths stay: the legacy pair is what an
+    /// already-shipped build understands, and `removedMemberFingerprints` remains the interim
+    /// exclusion authority until item 7 makes the derived roster the shipping one. The two agree
+    /// by construction — the record's target and the set's entry are the same fingerprint, filed in
+    /// the same call.
     ///
-    /// A second shortfall closes with item 7: this ledger holds no admission records yet, so the
-    /// insert below is refused `signerNotAdmitted` — fail-closed and logged. The live
-    /// `removedMemberFingerprints` set is what actually keeps a voted-out member out of the next
-    /// epoch's key today, which is why
-    /// ``MeshRotationPolicy/recipients(acked:selfFingerprint:derivedRoster:locallyRemoved:)`` takes
-    /// both it and the derived roster.
+    /// The remaining shortfall closes with item 7: this ledger holds no admission records yet, so
+    /// the insert below is refused `signerNotAdmitted` — fail-closed and logged. The frame is
+    /// broadcast anyway, because it is honestly signed by this device and a peer that DOES hold a
+    /// ledger verifies it on its own merged roster; refusing to tell anyone because this device
+    /// cannot yet file its own record would be the wrong half to fail closed on.
     private func emitApprovedRemovalRecord(_ proposal: MeshRemovalProposalPayload) {
         guard let mesh = currentMesh else { return }
         do {
@@ -1736,10 +1799,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             let snapshot = membershipVerifier
             let before = membershipVerifier?.roster
-            recordRejection(membershipVerifier?.insert(record), type: .meshRemovalSecond)
-            if membershipVerifier?.roster != before {
-                _ = commitVerifiedRecord(rollingBackTo: snapshot, type: .meshRemovalSecond)
+            recordRejection(membershipVerifier?.insert(record), type: .meshMemberRemoval)
+            // Durable before acknowledged (plan §3.6): a record this device could not write down is
+            // rolled back, and a rolled-back record is not announced to anybody.
+            if membershipVerifier?.roster != before,
+               !commitVerifiedRecord(rollingBackTo: snapshot, type: .meshMemberRemoval) {
+                return
             }
+            emitRemovalRecord(record)
         } catch {
             FernletAuditLog.log(
                 "mesh.membershipEvent.signFailed",
@@ -2282,8 +2349,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return rejections
     }
 
-    /// `.meshMemberDeparture` / `.meshTerminated` / `.meshInventoryDigest` — the membership-event
-    /// family of the dispatch switch (R4: one function per case family).
+    /// `.meshMemberDeparture` / `.meshMemberRemoval` / `.meshTerminated` / `.meshInventoryDigest` —
+    /// the membership-event family of the dispatch switch (R4: one function per case family).
     ///
     /// Member business, so a COMMITTED slot is required: the same boundary the removal, photo and
     /// registry families enforce. Records are then handed to ``MeshMembershipRecordVerifier``,
@@ -2305,11 +2372,42 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let snapshot = membershipVerifier
         let rosterBefore = membershipVerifier?.roster
+        let removed = insertMembershipRecord(type, plaintext: plaintext, decoder: decoder)
+        // P3 item 6, plan §3.6: a record that moved the roster is durable before it counts. The
+        // rollback inside `commitVerifiedRecord` is what keeps "verified" and "remembered" the
+        // same set after a refused seal.
+        guard membershipVerifier?.roster != rosterBefore else { return }
+        guard commitVerifiedRecord(rollingBackTo: snapshot, type: type) else { return }
+        if removed == identity.localFingerprint {
+            applyVerifiedSelfRemoval()
+            return
+        }
+        rotateIfRosterChanged(from: rosterBefore)
+    }
+
+    /// Decodes one membership frame and offers its record to the verifier.
+    ///
+    /// - Returns: The fingerprint an ACCEPTED removal record names, and nil for every other
+    ///   outcome — another kind of record, a frame that did not decode, or a record the verifier
+    ///   refused. A refused removal must not be able to end anybody's session, which is why the
+    ///   fingerprint is returned only when `insert` answered nil.
+    private func insertMembershipRecord(
+        _ type: PayloadType,
+        plaintext: Data,
+        decoder: JSONDecoder
+    ) -> String? {
         switch type {
         case .meshMemberDeparture:
             if let payload = try? decoder.decode(MeshMemberDeparturePayload.self, from: plaintext) {
                 recordRejection(membershipVerifier?.insert(payload.record), type: type)
             }
+        case .meshMemberRemoval:
+            guard let payload = try? decoder.decode(MeshMemberRemovalPayload.self, from: plaintext) else {
+                return nil
+            }
+            let rejection = membershipVerifier?.insert(payload.record)
+            recordRejection(rejection, type: type)
+            return rejection == nil ? payload.record.memberFingerprint : nil
         case .meshTerminated:
             if let payload = try? decoder.decode(MeshTerminationPayload.self, from: plaintext) {
                 recordRejection(membershipVerifier?.insert(payload.record), type: type)
@@ -2321,12 +2419,25 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         default:
             break
         }
-        // P3 item 6, plan §3.6: a record that moved the roster is durable before it counts. The
-        // rollback inside `commitVerifiedRecord` is what keeps "verified" and "remembered" the
-        // same set after a refused seal.
-        guard membershipVerifier?.roster != rosterBefore else { return }
-        guard commitVerifiedRecord(rollingBackTo: snapshot, type: type) else { return }
-        rotateIfRosterChanged(from: rosterBefore)
+        return nil
+    }
+
+    /// A verified removal record named **this device** (plan §8.2's `removed` edge, §8.3).
+    ///
+    /// Item 6 built the edge and deliberately left it unapplied: deciding that a *received* record
+    /// names this device needed the derived shipping roster item 7 owes. A removal needs no roster
+    /// to answer that — the record names the removed fingerprint outright and this device knows its
+    /// own — so the edge is wired here and `.terminationVerified` stays item 7's.
+    ///
+    /// The order is plan §3.6's. The record is already durable when this runs (the caller commits
+    /// first), then `.removed` writes the ending mark and raises the permanent rejoin bar, and only
+    /// then does the local teardown run — the same ``leaveSession()`` the legacy
+    /// `.meshRemovalSecond` path takes when the vote names this device, so both paths end in one
+    /// state. No rotation is requested: a device that is no longer a member has no key to hand out.
+    private func applyVerifiedSelfRemoval() {
+        FernletAuditLog.log("mesh.membershipEvent.selfRemoved")
+        applySessionEvent(.removed)
+        leaveSession()
     }
 
     /// Plan §8.3's roster-change trigger: a verified record that MOVED the derived roster rotates
@@ -5392,6 +5503,28 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// only observation point for a frame whose wire write a unit test cannot see (the slot channel
     /// is detached). Mirrors `onSessionHeartSendForTesting`.
     @ObservationIgnored var onMembershipEventSentForTesting: ((PayloadType) -> Void)?
+
+    /// Puts a ledger on this manager without a merge, so a test can start FROM a roster instead of
+    /// building one through the merge path — which would spend the rotation trigger the test is
+    /// about. `internal` for `@testable` unit tests only: production code has exactly one door into
+    /// a ledger (``MeshMembershipRecordVerifier``), and this is deliberately not it, which is why
+    /// the records a test seeds must still be honestly signed if anything is to verify against them.
+    ///
+    /// - Parameters:
+    ///   - meshID: The mesh the ledger belongs to.
+    ///   - founderSigningPublicKey: The key that may bootstrap an admission.
+    ///   - ledger: The records to start from.
+    func seedMembershipLedgerForTesting(
+        meshID: UUID,
+        founderSigningPublicKey: Data?,
+        ledger: MeshMembershipLedger
+    ) {
+        membershipVerifier = MeshMembershipRecordVerifier(
+            meshID: meshID,
+            founderSigningPublicKey: founderSigningPublicKey,
+            ledger: ledger
+        )
+    }
 
     /// Puts this manager on a named epoch without a rotation, so a test can start from the counter
     /// cap (plan §8.4's terminate-rather-than-trap edge) or from a superseded predecessor.

@@ -442,7 +442,7 @@ from (plan §8.1): `MeshMembershipRecordKind`, `MeshMembershipRecord`, `MeshMemb
 `MeshSessionSealRefusal`, `MeshSessionDeferral`, `MeshSessionCorruption`, `MeshSessionSaveError`,
 `MeshSessionSealKey` and `MeshSessionSealKeyOutcome`. P3 item 3 added the membership events that
 move those records between devices: `MeshMembershipEventFormat`, `MeshRecordIdentity`,
-`MeshInventoryDigest`, `MeshMemberDeparturePayload`, `MeshTerminationPayload`,
+`MeshInventoryDigest`, `MeshMemberDeparturePayload`, `MeshMemberRemovalPayload`, `MeshTerminationPayload`,
 `MeshInventoryDigestPayload`, `MeshMembershipRecordVerifier`, `MeshMembershipRecordRejection`,
 `MeshLegacyGoodbyeOutcome` and `MeshMembershipGoodbyeInterop`. P3 item 4 added the epoch model:
 `MeshEpochRef`, `MeshEpochBounds`, `MeshEpochRefParseError`, `MeshEpochRefOrder`,
@@ -479,7 +479,18 @@ thing it can mean is "this link is going away" — the peer is **disconnected, n
 an unsigned frame that could mint one would make eviction forgeable by anybody who can reach the
 link, with no way to undo it. New builds send ``PayloadType/meshMemberDeparture`` instead; deciding
 *when* is a state-machine transition, and `MeshNetworkManager.emitMembershipEvent(_:)` is the seam
-plan items 5–6 fill.
+plan items 5–6 filled.
+
+**The removal frame does not go to the member it removes** (plan §8.3, P3 item 3b).
+``PayloadType/meshMemberRemoval`` carries a `MeshMemberRemovalPayload` — one quorum-signed
+`SignedRemovalRecord` and nothing else — to every member *except* the removed one, who is excluded
+by the same rule that keeps them out of the new epoch's key distribution
+(`MeshRotationPolicy.recipients`, reused verbatim so "who gets the key" and "who is told why"
+cannot drift apart). They learn of the removal as a key that no longer opens anything. On the
+receiving side the record goes through ``MeshMembershipRecordVerifier`` — quorum re-derived on the
+receiver's own merged roster — then through `commitVerifiedRecord(rollingBackTo:type:)`, so it is
+durable before it counts; a record naming THIS device applies plan §8.2's `removed` edge and tears
+participation down, which is the one state-machine edge item 6 built and could not yet wire.
 
 **The one durable surface, and the four that stay memory-only.** P3 item 2 reversed this module's
 old blanket "ProximityKit persists nothing" rule (plan §17.3), and the reversal is narrow on

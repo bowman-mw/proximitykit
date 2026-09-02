@@ -4,9 +4,10 @@
 // P3 item 3 (plan §8.3, §9, §10.5): the membership events that MOVE on the wire, and the signed
 // bytes underneath them.
 //
-// Item 1 built the records and the algebra; this file gives three of them a frame, a signing
-// factory and a bound, and adds the inventory digest a peer sends so a counterpart can notice it is
-// MISSING records and ask for a re-gossip. The frozen English tokens are the same three spellings
+// Item 1 built the records and the algebra; this file gives them a frame, a signing factory and a
+// bound, and adds the inventory digest a peer sends so a counterpart can notice it is MISSING
+// records and ask for a re-gossip. Item 3 framed three of the four record kinds and item 3b framed
+// the fourth (`member-removal.v1`). The frozen English tokens are the same spellings
 // in every layer — `MeshMembershipRecordKind`, `PayloadType`, `FernletCryptoPurpose.Signature` —
 // so one grep finds the record, the frame and the domain.
 //
@@ -209,6 +210,41 @@ nonisolated struct MeshMemberDeparturePayload: Codable, Equatable, Sendable {
 
     /// Wraps a record for the wire.
     init(record: SignedDepartureRecord) {
+        self.record = record
+    }
+}
+
+// MARK: - MeshMemberRemovalPayload
+
+/// The `fernlet.mesh.member-removal.v1` frame: one completed, quorum-signed removal record and
+/// nothing else (plan §8.3, §10.4).
+///
+/// The same shape as ``MeshMemberDeparturePayload``, for the same reason and one more. The record
+/// already names the removed member, the proposal, the voters that made quorum, the instant and
+/// the tallier — all under one signature — so a second unsigned copy of any of it in the frame
+/// could only create the possibility that the two disagree. And an envelope claim would carry no
+/// authority even when it agreed: the receiver re-derives quorum from its **own** merged roster
+/// (``MeshMembershipRecordVerifier/insert(_:)-(SignedRemovalRecord)``), never from the tallier's
+/// arithmetic and never from the frame.
+///
+/// **Bounds.** The voter list is capped at ``MeshMembershipBounds/maxVoters`` by
+/// ``SignedRemovalRecord``'s own initializer *and* by its `Decodable` conformance, so a frame that
+/// arrives carrying more voters than the mesh can hold is clamped on the way in rather than
+/// trimmed after it is trusted — and the clamp changes the bytes the tallier signed, so a relay
+/// that padded the list gets ``MeshMembershipRecordRejection/signatureInvalid``, not a quorum it
+/// inflated.
+///
+/// **Who does not get one.** The removed member. Plan §8.3 excludes them from the new epoch's key
+/// distribution, so the fact reaches them as a key that no longer opens anything; sending them the
+/// record as well would hand a hostile ex-member the exact voter list to retaliate against, for no
+/// membership benefit — every other member needs the record, and they do not.
+nonisolated struct MeshMemberRemovalPayload: Codable, Equatable, Sendable {
+
+    /// The tallier's signed statement that quorum completed.
+    let record: SignedRemovalRecord
+
+    /// Wraps a record for the wire.
+    init(record: SignedRemovalRecord) {
         self.record = record
     }
 }
