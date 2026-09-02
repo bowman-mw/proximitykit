@@ -444,7 +444,9 @@ from (plan §8.1): `MeshMembershipRecordKind`, `MeshMembershipRecord`, `MeshMemb
 move those records between devices: `MeshMembershipEventFormat`, `MeshRecordIdentity`,
 `MeshInventoryDigest`, `MeshMemberDeparturePayload`, `MeshMemberRemovalPayload`, `MeshTerminationPayload`,
 `MeshInventoryDigestPayload`, `MeshMembershipRecordVerifier`, `MeshMembershipRecordRejection`,
-`MeshLegacyGoodbyeOutcome` and `MeshMembershipGoodbyeInterop`. P3 item 4 added the epoch model:
+`MeshLegacyGoodbyeOutcome` and `MeshMembershipGoodbyeInterop`. P3 item 7 added the admission frame
+and the joiner's ledger bootstrap: `MeshMemberAdmissionPayload`, `MeshLedgerAdoption`,
+`MeshLedgerAdoptionOutcome` and `MeshLedgerAdoptionRefusal`. P3 item 4 added the epoch model:
 `MeshEpochRef`, `MeshEpochBounds`, `MeshEpochRefParseError`, `MeshEpochRefOrder`,
 `MeshEpochKeyring`, `MeshEpochKeyringRotationRefusal`, `MeshEpochAcceptance`,
 `MeshEpochRotationVerdict`, `MeshEpochRotationRefusal`, `MeshEpochIntroductionVerdict`,
@@ -491,6 +493,43 @@ receiving side the record goes through ``MeshMembershipRecordVerifier`` — quor
 receiver's own merged roster — then through `commitVerifiedRecord(rollingBackTo:type:)`, so it is
 durable before it counts; a record naming THIS device applies plan §8.2's `removed` edge and tears
 participation down, which is the one state-machine edge item 6 built and could not yet wire.
+
+**The introduction authority answers from the derived roster** (plan §8.1, §20.4.4, P3 item 7).
+`MeshNetworkManager.roster` is `MeshDerivedRoster.introductionRoster(additionalBarred:)`, so the
+QUIC radio judges a peer against `admitted − departed − removed` and nothing else. This closes plan
+§20.1's recorded gap: the manager used to keep removals by *fingerprint* and hold no signing key for
+a member it had dropped, so `barred` was empty in production and a removed peer refused as an
+anonymous `unknownIdentity` — matrix row 3 (`barredMember`) was produced by a DEBUG chaos hook. The
+admission record keeps the member's signing key, so a verified removal or departure names a key and
+`barred` has real contents; the hook survives only to reach the branch on a two-node lane, where no
+quorum for a real removal exists. With **no** ledger the answer falls back to the gossiped
+descriptor's members and logs `mesh.introductionAuthority.legacyRosterFallback` once — reachable
+only in tests and in interop with a build predating these records, because a founder files its own
+admission at `startNewMesh(name:)` and a joiner files its granted one at `armJoinerLedger(_:)`.
+
+**A joiner adopts a ledger; it does not merge into one** (plan §8.3, §10.5, P3 item 7). A founder
+bootstraps from its own signing key, but a joiner does not know the founder's — it knows only the
+admission token its transport-authenticated peer signed. So ``MeshLedgerAdoption`` does it in two
+steps. **Bootstrap**: arm a verifier whose root is the *admitter's* key and file this device's own
+admission, giving a one-member roster that can sign and file records at once. **Adopt**: when a
+peer's ledger arrives, re-verify it from *its own* root and accept that root as the founder only if
+the result admits this device's admitter under exactly the key its token names — the chain §8.3
+describes, checked end to end. Merging record-by-record could never converge: to a ledger rooted at
+the admitter, the founder's self-admission is `unauthorizedAdmitter`. Convergence is one round trip:
+the joiner sends `fernlet.mesh.inventory-digest.v1`, a peer holding at least as many records answers
+with a bounded re-gossip of the frames that already carry them (once per peer per session), and a
+record frame never provokes another digest. `fernlet.mesh.member-admission.v1` exists for that
+re-gossip and for the live case — an admission happens between two devices alone, and a third member
+that never learns of it derives a roster one short, which `MeshRotationPolicy` then turns into a
+member who silently never receives the group key. It moves **no new signed bytes**: the record wraps
+the existing `MeshAdmissionToken`, still signed under `meshAdmissionTokenV2`.
+
+**Plan §8.2's `terminationVerified` edge** (P3 item 7). A verified `fernlet.mesh.terminated.v1`
+whose signer the *merged* roster agrees was in the final pair ends the session — ending mark,
+teardown, permanent rejoin bar. Whether it ends the mesh is not the sender's decision and not the
+dispatch path's: ``MeshDerivedRoster`` applies §8.3's downgrade rule first, so a termination signed
+by a member of a roster larger than two costs its signer their own membership and nobody else's, and
+reaches the manager as an ordinary roster change that rotates the key.
 
 **The one durable surface, and the four that stay memory-only.** P3 item 2 reversed this module's
 old blanket "ProximityKit persists nothing" rule (plan §17.3), and the reversal is narrow on

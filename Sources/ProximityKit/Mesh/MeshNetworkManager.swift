@@ -1144,9 +1144,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         currentMesh = created
         // P3 item 3: this device founded the mesh, so its own signing key is the one key that can
-        // authorize the bootstrap admission. Joining an existing mesh adopts a ledger instead —
-        // that path belongs to item 7, where the shipping roster starts deriving from records.
+        // authorize the bootstrap admission. P3 item 7: it files that admission here, so the
+        // founder is on its OWN derived roster from the first instant — an empty ledger would
+        // refuse every record this device signs, including the removals it tallies.
         prepareMembershipLedger(meshID: created.meshID, founderSigningPublicKey: identity.localSigningPublicKey)
+        guard seedFounderAdmission(meshID: created.meshID) else {
+            abandonUnpersistedSession()
+            return
+        }
         // P3 item 6, plan §3.6: the context reaches the disk BEFORE the UI is shown a mesh. A mesh
         // this device could not write down is a mesh it would not remember founding after a
         // force-quit, so it is abandoned rather than half-created.
@@ -1227,6 +1232,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // record about member X in mesh A be read against mesh B's roster.
         membershipVerifier = nil
         peerInventoryDigests.removeAll()
+        reGossipedToFingerprints.removeAll()
+        pendingAdoptionLedger = .empty
         isSessionOpen = true
         pendingAdmissionRequests.removeAll()
         pendingRemovalProposals.removeAll()
@@ -1437,59 +1444,80 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         currentMesh = mesh
         Task { [weak self] in
-            guard let self else { return }
-            let token: MeshAdmissionToken
-            do {
-                token = try MeshAdmissionToken.signed(
-                    meshID: mesh.meshID,
-                    joinerFingerprint: request.requesterFingerprint,
-                    joinerSigningPublicKey: request.requesterSigningPublicKey,
-                    admitterIdentity: self.identity
-                )
-            } catch {
-                // Recovery is "no grant" — the requester keeps waiting — so the drop is NAMED (R7);
-                // without this the admitter looks like it simply ignored the request.
-                FernletAuditLog.log(
-                    "mesh.admissionGrant.signFailed",
-                    context: ["error": String(describing: error)]
-                )
-                self.meshError = "Couldn't let them in just now — ask them to try again."
-                return
-            }
-
-            // Phase 3: wrap the current group key to the slot's handshake-verified KA key,
-            // not the request's claimed key, to prevent key-substitution attacks.
-            var encryptedKey: Data? = nil
-            var keyEpoch = 0
-            if let groupKey = self.currentGroupKey {
-                let kaKey = self.slots.first(where: { $0.fingerprint == request.requesterFingerprint })?
-                    .verifiedKeyAgreementPublicKey ?? request.requesterKeyAgreementPublicKey
-                do {
-                    encryptedKey = try self.identity.encryptGroupKey(groupKey.keyBytes, for: kaKey)
-                } catch {
-                    // The grant still goes out (the joiner is admitted, keyless) — but a wrap
-                    // failure means they will decrypt nothing until the next rotation, so name it (R7).
-                    FernletAuditLog.log(
-                        "mesh.admissionGrant.keyWrapFailed",
-                        context: ["error": String(describing: error)]
-                    )
-                }
-                keyEpoch = groupKey.epoch
-            }
-
-            let grant = MeshAdmissionGrantPayload(
-                meshID: mesh.meshID,
-                requesterFingerprint: request.requesterFingerprint,
-                token: token,
-                encryptedCurrentKey: encryptedKey,
-                currentKeyEpoch: keyEpoch
-            )
-            if let slot = self.slots.first(where: { $0.fingerprint == request.requesterFingerprint }) {
-                await self.sendEnvelope(.meshAdmissionGrant, encodable: grant, via: slot)
-            }
-            self.broadcastMeshDescriptor()
+            await self?.grantAdmission(to: request, meshID: mesh.meshID)
         }
     }
+
+    /// Mints, files and sends one admission grant.
+    ///
+    /// Split out of ``allowAdmission(_:)`` so each half stays inside the 60-line rule and so the
+    /// ORDER is readable in one screen: sign the token, wrap the key, **file the record durably**,
+    /// then answer the requester. Plan §3.6 puts the filing before the answer — a member this
+    /// device could not write down is one the next rotation would exclude from the key while the
+    /// joiner believed it was in.
+    ///
+    /// - Parameters:
+    ///   - request: The admission request being granted.
+    ///   - meshID: The mesh it is granted into.
+    private func grantAdmission(to request: MeshAdmissionRequestPayload, meshID: UUID) async {
+        let token: MeshAdmissionToken
+        do {
+            token = try MeshAdmissionToken.signed(
+                meshID: meshID,
+                joinerFingerprint: request.requesterFingerprint,
+                joinerSigningPublicKey: request.requesterSigningPublicKey,
+                admitterIdentity: identity
+            )
+        } catch {
+            // Recovery is "no grant" — the requester keeps waiting — so the drop is NAMED (R7);
+            // without this the admitter looks like it simply ignored the request.
+            FernletAuditLog.log("mesh.admissionGrant.signFailed", context: ["error": String(describing: error)])
+            meshError = Self.admissionGrantFailureMessage
+            return
+        }
+        let wrapped = wrappedKeyForGrant(to: request)
+        // P3 item 7, plan §3.6: the admitter files its own admission record — durably — BEFORE the
+        // grant goes out, and the record is what carries the joiner onto every member's roster.
+        guard recordGrantedAdmission(token) else {
+            FernletAuditLog.log("mesh.admissionGrant.droppedNotDurable")
+            meshError = Self.admissionGrantFailureMessage
+            return
+        }
+        let grant = MeshAdmissionGrantPayload(
+            meshID: meshID,
+            requesterFingerprint: request.requesterFingerprint,
+            token: token,
+            encryptedCurrentKey: wrapped.key,
+            currentKeyEpoch: wrapped.epoch
+        )
+        if let slot = slots.first(where: { $0.fingerprint == request.requesterFingerprint }) {
+            await sendEnvelope(.meshAdmissionGrant, encodable: grant, via: slot)
+        }
+        broadcastMeshDescriptor()
+    }
+
+    /// Phase 3: wraps the current group key to the slot's handshake-verified key-agreement key, not
+    /// the request's claimed one, so a key-substitution attempt cannot redirect the wrap.
+    ///
+    /// - Returns: The wrapped key and its epoch — `(nil, 0)` when this device holds no group key,
+    ///   which is a keyless grant and not a failure.
+    private func wrappedKeyForGrant(to request: MeshAdmissionRequestPayload) -> (key: Data?, epoch: Int) {
+        guard let groupKey = currentGroupKey else { return (nil, 0) }
+        let kaKey = slots.first(where: { $0.fingerprint == request.requesterFingerprint })?
+            .verifiedKeyAgreementPublicKey ?? request.requesterKeyAgreementPublicKey
+        do {
+            return (try identity.encryptGroupKey(groupKey.keyBytes, for: kaKey), groupKey.epoch)
+        } catch {
+            // The grant still goes out (the joiner is admitted, keyless) — but a wrap failure means
+            // they will decrypt nothing until the next rotation, so name it (R7).
+            FernletAuditLog.log("mesh.admissionGrant.keyWrapFailed", context: ["error": String(describing: error)])
+            return (nil, groupKey.epoch)
+        }
+    }
+
+    /// What the admitter's own screen says when a grant could not be signed or could not be made
+    /// durable. Display copy, held once so the two refusal paths cannot drift apart.
+    private static let admissionGrantFailureMessage = "Couldn't let them in just now — ask them to try again."
 
     public func declineAdmission(_ request: MeshAdmissionRequestPayload) {
         pendingAdmissionRequests.removeAll { $0.requesterSigningPublicKey == request.requesterSigningPublicKey }
@@ -1549,7 +1577,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             dispatchRemovalPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
         case .meshEncryptedMetadata, .meshCoordinatorBeacon, .meshRotationSync, .meshKeyRotation, .meshKeyAck:
             dispatchGroupKeyPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
-        case .meshMemberDeparture, .meshMemberRemoval, .meshTerminated, .meshInventoryDigest:
+        case .meshMemberAdmission, .meshMemberDeparture, .meshMemberRemoval, .meshTerminated,
+             .meshInventoryDigest:
             dispatchMembershipEventPayload(payloadType, plaintext: plaintext, decoder: decoder, slot: slot)
         case .sessionGoodbye:
             // Parsed, never emitted (plan §8.3). A goodbye is UNSIGNED, so it can only mean "this
@@ -1610,16 +1639,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// The verified membership ledger for the current mesh (plan §8.1).
     ///
-    /// **Receive-side only, deliberately.** Item 3 wires the three membership-event frames as far
-    /// as *decode → verify → insert*; nothing here emits, and nothing yet derives the shipping
-    /// roster from it — pointing `MeshIntroductionAuthority` at `admitted − departed − removed` is
-    /// item 7, and persisting it through ``MeshSessionStore`` is item 6. Until then it is the
-    /// authoritative record of what this device has verified, and it is fail-closed by
-    /// construction: with no admission records, every departure arrives from a fingerprint the
-    /// ledger cannot produce a key for and is refused as ``MeshMembershipRecordRejection/signerNotAdmitted``.
+    /// **The shipping roster source** from P3 item 7 on: ``MeshIntroductionAuthority/roster`` is
+    /// `admitted − departed − removed` derived from these records, and ``MeshRotationPolicy``
+    /// narrows key distribution to the same set. It is armed on both doors — a founder files its
+    /// own admission in ``startNewMesh(name:)``, a joiner files the one it was granted in
+    /// ``armJoinerLedger(_:)`` — so the empty-ledger fallback below it is reachable only in tests
+    /// and in interop with a build predating these records.
     ///
-    /// Memory-only, like every other mesh-session value the manager holds; it owes no wipe row
-    /// until item 6 gives it a sealed home.
+    /// Fail-closed by construction: a record whose signer this ledger has no admission for is
+    /// refused as ``MeshMembershipRecordRejection/signerNotAdmitted``, never guessed at.
+    ///
+    /// Its durable half is ``MeshSessionContext/ledger`` (item 6), so it owes no wipe row of its
+    /// own — the sealed context carries the disposition.
     @ObservationIgnored private(set) var membershipVerifier: MeshMembershipRecordVerifier?
 
     /// The last inventory digest each peer told us it holds, keyed by fingerprint (plan §10.5).
@@ -1627,6 +1658,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// A hint, never an authority: it says only whether a full record exchange is worth its bytes.
     /// Bounded by the roster cap so a peer cannot grow it, and cleared with the session.
     @ObservationIgnored private(set) var peerInventoryDigests: [String: MeshInventoryDigest] = [:]
+
+    /// Whether the "roster came from gossip, not from records" line has been written for this
+    /// manager. One line, not one per introduction: the fact is about the manager's state, and a
+    /// per-read log would drown the diagnostic it exists to give.
+    @ObservationIgnored private var loggedLegacyRosterFallback = false
+
+    /// Peers this device has already answered with a bounded record re-gossip, so a peer cannot
+    /// spend this device's bytes by re-sending digests. Cleared with the session, bounded by the
+    /// roster cap (plan §10.5).
+    @ObservationIgnored private var reGossipedToFingerprints: Set<String> = []
 
     /// Prepares the verified ledger for a mesh, keyed to the founder's signing key.
     ///
@@ -1639,6 +1680,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             founderSigningPublicKey: founderSigningPublicKey
         )
         peerInventoryDigests.removeAll()
+        reGossipedToFingerprints.removeAll()
+        pendingAdoptionLedger = .empty
     }
 
     /// **The emission seam** — the one place to look for who sends which membership event.
@@ -1840,6 +1883,201 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         if moved { requestRotation(cause: .merge) }
         return rejections
+    }
+
+    // MARK: - Ledger bootstrap and convergence (network migration P3 item 7, plan §8.3, §10.5)
+
+    /// Files this device's own admission when it FOUNDS a mesh, so the ledger starts one member
+    /// long instead of empty.
+    ///
+    /// The record is a self-admission: joiner and admitter are both this device, and the token is
+    /// signed with the same key ``prepareMembershipLedger(meshID:founderSigningPublicKey:)`` just
+    /// named as the root — which is exactly the bootstrap
+    /// ``MeshMembershipRecordVerifier/insert(_:)-(SignedAdmissionRecord)`` allows into an empty
+    /// ledger, and the one every joiner later re-verifies as the chain's root.
+    ///
+    /// It is also what closes item 3b's gap: with the founder on its own roster, the local insert
+    /// in ``emitApprovedRemovalRecord(_:)`` stops being refused `signerNotAdmitted`.
+    ///
+    /// - Returns: `false` when the record could not be signed or was refused — a mesh with no
+    ///   ledger root would derive an empty roster on its own founder, so the founding is abandoned
+    ///   rather than half-done.
+    private func seedFounderAdmission(meshID: UUID) -> Bool {
+        do {
+            let token = try MeshAdmissionToken.signed(
+                meshID: meshID,
+                joinerFingerprint: identity.localFingerprint,
+                joinerSigningPublicKey: identity.localSigningPublicKey,
+                admitterIdentity: identity
+            )
+            let rejection = membershipVerifier?.insert(SignedAdmissionRecord(token: token))
+            recordRejection(rejection, type: .meshMemberAdmission)
+            return rejection == nil
+        } catch {
+            FernletAuditLog.log(
+                "mesh.membershipEvent.signFailed",
+                context: ["type": "founder-admission", "error": String(describing: error)]
+            )
+            return false
+        }
+    }
+
+    /// Arms a JOINER's ledger from the admission it has just verified (plan §8.3, §20.4.4).
+    ///
+    /// The root is the admitter's key rather than the founder's, because the admitter's key is the
+    /// one this device authenticated: `admissionGrantIsAuthorized` refuses a grant whose token root
+    /// is not the envelope's authenticated sender, and a current member of the mesh at that. The
+    /// provisional root is replaced by the real founder the moment a peer's ledger arrives and
+    /// ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:)`` proves the chain reaches this
+    /// device's admitter.
+    ///
+    /// Idempotent: a ledger that has already grown past its bootstrap is left alone, so a
+    /// re-delivered grant cannot discard verified records.
+    ///
+    /// `internal` rather than `private` for the same reason the other join seams are: the grant path
+    /// it sits on needs a live QUIC peer to drive end to end, and this is the tier-1 door.
+    ///
+    /// - Returns: `false` only when the verified admission was itself refused — which would leave
+    ///   this device believing it had joined a mesh whose roster does not contain it.
+    func armJoinerLedger(_ grant: MeshAdmissionGrantPayload) -> Bool {
+        let ownAdmission = SignedAdmissionRecord(token: grant.token)
+        if let existing = membershipVerifier, existing.meshID == grant.meshID,
+           !existing.ledger.admissions.isEmpty {
+            return true
+        }
+        switch MeshLedgerAdoption.bootstrapVerifier(meshID: grant.meshID, ownAdmission: ownAdmission) {
+        case .adopted(let verifier):
+            membershipVerifier = verifier
+            peerInventoryDigests.removeAll()
+            reGossipedToFingerprints.removeAll()
+            pendingAdoptionLedger = .empty
+            FernletAuditLog.log("mesh.membershipLedger.bootstrapped")
+            return true
+        case .refused(let refusal):
+            FernletAuditLog.log(
+                "mesh.membershipLedger.bootstrapRefused",
+                context: ["reason": refusal.diagnosticDescription]
+            )
+            return false
+        }
+    }
+
+    /// Sends this device's signed inventory digest to one peer — the ask half of plan §10.5's
+    /// exchange. A digest is a hint: it says only whether a record exchange is worth its bytes.
+    ///
+    /// - Parameter fingerprint: The member to ask, or nil for every committed slot.
+    func sendInventoryDigest(to fingerprint: String? = nil) async {
+        guard let mesh = currentMesh, let verifier = membershipVerifier else { return }
+        do {
+            let payload = try MeshInventoryDigestPayload.signed(
+                meshID: mesh.meshID, ledger: verifier.ledger, identity: identity
+            )
+            await broadcastMembershipFrame(
+                .meshInventoryDigest, payload, to: fingerprint.map { Set([$0]) }
+            )
+        } catch {
+            FernletAuditLog.log(
+                "mesh.membershipEvent.signFailed",
+                context: ["type": PayloadType.meshInventoryDigest.rawValue,
+                          "error": String(describing: error)]
+            )
+        }
+    }
+
+    /// The answer half of plan §10.5: a bounded re-gossip of every record this device holds, as the
+    /// frames that already carry them.
+    ///
+    /// No new wire token — §10.5 names none, and each record kind already has a frame it is
+    /// verified from, so a peer applies a re-gossiped record through exactly the door a live one
+    /// comes through. Bounded twice over: the four record sets are capped by
+    /// ``MeshMembershipBounds`` (16/16/16/1), and ``maxReGossipFrames`` caps the batch itself.
+    ///
+    /// **Once per peer per session.** ``reGossipedToFingerprints`` is what stops a peer spending
+    /// this device's bytes by re-sending digests, and it is why the exchange converges in one round
+    /// trip instead of looping: a record frame never provokes another digest.
+    ///
+    /// - Parameter fingerprint: The member to answer.
+    private func reGossipRecords(to fingerprint: String) async {
+        guard let verifier = membershipVerifier else { return }
+        guard reGossipedToFingerprints.count < MeshMembershipBounds.maxRosterMembers,
+              reGossipedToFingerprints.insert(fingerprint).inserted else { return }
+        let recipients: Set<String> = [fingerprint]
+        var sent = 0
+        let ledger = verifier.ledger
+        for record in ledger.admissions.all.prefix(Self.maxReGossipFrames) {
+            await broadcastMembershipFrame(
+                .meshMemberAdmission, MeshMemberAdmissionPayload(record: record), to: recipients
+            )
+            sent += 1
+        }
+        for record in ledger.departures.all.prefix(max(0, Self.maxReGossipFrames - sent)) {
+            await broadcastMembershipFrame(
+                .meshMemberDeparture, MeshMemberDeparturePayload(record: record), to: recipients
+            )
+            sent += 1
+        }
+        for record in ledger.removals.all.prefix(max(0, Self.maxReGossipFrames - sent)) {
+            await broadcastMembershipFrame(
+                .meshMemberRemoval, MeshMemberRemovalPayload(record: record), to: recipients
+            )
+            sent += 1
+        }
+        for record in ledger.terminations.all.prefix(max(0, Self.maxReGossipFrames - sent)) {
+            await broadcastMembershipFrame(
+                .meshTerminated, MeshTerminationPayload(record: record), to: recipients
+            )
+        }
+        FernletAuditLog.log("mesh.membershipLedger.reGossiped", context: ["frames": String(sent)])
+    }
+
+    /// The most record frames one re-gossip may send: exactly a full ledger at plan §9's caps
+    /// (16 + 16 + 16 + 1). Derived from the bounds rather than picked, so a batch can never leave a
+    /// peer short of records this device holds — and it is still a hard constant ceiling (R2/R3).
+    static let maxReGossipFrames = MeshMembershipBounds.maxRecordsPerKind * 3
+        + MeshMembershipBounds.maxTerminationRecords
+
+    /// Broadcasts a freshly minted admission record to the members that were NOT part of minting
+    /// it, so a joiner appears on every member's derived roster.
+    ///
+    /// Without it the admitting member is the only device that knows, and
+    /// ``MeshRotationPolicy/recipients(acked:selfFingerprint:derivedRoster:locallyRemoved:)``
+    /// narrows the next epoch's key distribution to the derived roster — so an unpropagated
+    /// admission is a member who silently never receives the group key.
+    ///
+    /// - Parameter record: The admission this device signed.
+    func emitAdmissionRecord(_ record: SignedAdmissionRecord) {
+        Task { @MainActor [weak self] in
+            await self?.broadcastMembershipFrame(
+                .meshMemberAdmission,
+                MeshMemberAdmissionPayload(record: record),
+                to: self?.membershipEventRecipients(excluding: record.memberFingerprint)
+            )
+        }
+    }
+
+    /// Files the admission this device just granted, durably, before the grant is answered.
+    ///
+    /// Plan §3.6 in its admitter form: a member this device could not write down is a member it
+    /// would not remember admitting after a force-quit, and the roster the next rotation narrows
+    /// its key distribution to would disagree with the one the joiner believes it is on.
+    ///
+    /// - Parameter token: The credential this device signed for the joiner.
+    /// - Returns: `true` when the record is verified and durable, so the grant may go out.
+    func recordGrantedAdmission(_ token: MeshAdmissionToken) -> Bool {
+        guard membershipVerifier != nil else { return true }
+        let record = SignedAdmissionRecord(token: token)
+        let snapshot = membershipVerifier
+        let before = membershipVerifier?.roster
+        let rejection = membershipVerifier?.insert(record)
+        recordRejection(rejection, type: .meshMemberAdmission)
+        guard rejection == nil else { return false }
+        guard membershipVerifier?.roster != before else { return true }
+        guard commitVerifiedRecord(rollingBackTo: snapshot, type: .meshMemberAdmission) else {
+            return false
+        }
+        emitAdmissionRecord(record)
+        requestRotation(cause: .membership)
+        return true
     }
 
     // MARK: - Durable session context (network migration P3 item 5, plan §3.6, §8.1)
@@ -2349,8 +2587,28 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return rejections
     }
 
-    /// `.meshMemberDeparture` / `.meshMemberRemoval` / `.meshTerminated` / `.meshInventoryDigest` —
-    /// the membership-event family of the dispatch switch (R4: one function per case family).
+    /// One membership frame, decoded and bounded but **not** trusted (P3 item 7).
+    ///
+    /// Decoding is separated from insertion because a joiner still on its bootstrap ledger cannot
+    /// insert anything a peer sends — its provisional root is the member that admitted it, so the
+    /// mesh's real founder is `unauthorizedAdmitter` to it. Those records go into a pending ledger
+    /// that ``MeshLedgerAdoption`` re-verifies as a whole, and both paths want the same decode.
+    private enum DecodedMembershipRecord: Equatable {
+        /// An admitter-signed admission.
+        case admission(SignedAdmissionRecord)
+        /// A leaver's own signed departure.
+        case departure(SignedDepartureRecord)
+        /// A completed, quorum-signed removal.
+        case removal(SignedRemovalRecord)
+        /// A member's signed statement that the mesh is over.
+        case termination(SignedTerminationRecord)
+        /// A peer's signed summary of what it holds.
+        case digest(MeshInventoryDigestPayload)
+    }
+
+    /// The membership-event family of the dispatch switch (R4: one function per case family) —
+    /// `.meshMemberAdmission` / `.meshMemberDeparture` / `.meshMemberRemoval` / `.meshTerminated` /
+    /// `.meshInventoryDigest`.
     ///
     /// Member business, so a COMMITTED slot is required: the same boundary the removal, photo and
     /// registry families enforce. Records are then handed to ``MeshMembershipRecordVerifier``,
@@ -2362,7 +2620,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         decoder: JSONDecoder,
         slot: PeerSlot?
     ) {
-        guard slot?.fingerprint != nil else {
+        guard let senderFingerprint = slot?.fingerprint else {
             FernletAuditLog.log("mesh.membershipEvent.droppedUncommittedSlot", context: ["type": type.rawValue])
             return
         }
@@ -2370,64 +2628,97 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.membershipEvent.droppedNoLedger", context: ["type": type.rawValue])
             return
         }
+        guard let decoded = Self.decodeMembershipFrame(type, plaintext: plaintext, decoder: decoder) else {
+            return
+        }
+        if case .digest(let payload) = decoded {
+            receiveInventoryDigest(payload)
+            return
+        }
+        if bufferedForAdoption(decoded, from: senderFingerprint) { return }
         let snapshot = membershipVerifier
         let rosterBefore = membershipVerifier?.roster
-        let removed = insertMembershipRecord(type, plaintext: plaintext, decoder: decoder)
+        let accepted = insertMembershipRecord(decoded, type: type)
         // P3 item 6, plan §3.6: a record that moved the roster is durable before it counts. The
         // rollback inside `commitVerifiedRecord` is what keeps "verified" and "remembered" the
         // same set after a refused seal.
         guard membershipVerifier?.roster != rosterBefore else { return }
         guard commitVerifiedRecord(rollingBackTo: snapshot, type: type) else { return }
-        if removed == identity.localFingerprint {
-            applyVerifiedSelfRemoval()
-            return
-        }
-        rotateIfRosterChanged(from: rosterBefore)
+        applyRosterMove(accepted, from: rosterBefore)
     }
 
-    /// Decodes one membership frame and offers its record to the verifier.
+    /// Decodes one membership frame into the record it carries, applying the type's own bounds.
     ///
-    /// - Returns: The fingerprint an ACCEPTED removal record names, and nil for every other
-    ///   outcome — another kind of record, a frame that did not decode, or a record the verifier
-    ///   refused. A refused removal must not be able to end anybody's session, which is why the
-    ///   fingerprint is returned only when `insert` answered nil.
-    private func insertMembershipRecord(
+    /// - Returns: The decoded record, or nil for a frame that did not decode — never a partially
+    ///   trusted value.
+    private static func decodeMembershipFrame(
         _ type: PayloadType,
         plaintext: Data,
         decoder: JSONDecoder
-    ) -> String? {
+    ) -> DecodedMembershipRecord? {
         switch type {
+        case .meshMemberAdmission:
+            return (try? decoder.decode(MeshMemberAdmissionPayload.self, from: plaintext))
+                .map { .admission($0.record) }
         case .meshMemberDeparture:
-            if let payload = try? decoder.decode(MeshMemberDeparturePayload.self, from: plaintext) {
-                recordRejection(membershipVerifier?.insert(payload.record), type: type)
-            }
+            return (try? decoder.decode(MeshMemberDeparturePayload.self, from: plaintext))
+                .map { .departure($0.record) }
         case .meshMemberRemoval:
-            guard let payload = try? decoder.decode(MeshMemberRemovalPayload.self, from: plaintext) else {
-                return nil
-            }
-            let rejection = membershipVerifier?.insert(payload.record)
-            recordRejection(rejection, type: type)
-            return rejection == nil ? payload.record.memberFingerprint : nil
+            return (try? decoder.decode(MeshMemberRemovalPayload.self, from: plaintext))
+                .map { .removal($0.record) }
         case .meshTerminated:
-            if let payload = try? decoder.decode(MeshTerminationPayload.self, from: plaintext) {
-                recordRejection(membershipVerifier?.insert(payload.record), type: type)
-            }
+            return (try? decoder.decode(MeshTerminationPayload.self, from: plaintext))
+                .map { .termination($0.record) }
         case .meshInventoryDigest:
-            if let payload = try? decoder.decode(MeshInventoryDigestPayload.self, from: plaintext) {
-                receiveInventoryDigest(payload)
-            }
+            return (try? decoder.decode(MeshInventoryDigestPayload.self, from: plaintext))
+                .map { .digest($0) }
         default:
-            break
+            return nil
         }
-        return nil
+    }
+
+    /// Offers one decoded record to the verifier.
+    ///
+    /// - Returns: The record when the verifier ACCEPTED it, and nil for everything else — a record
+    ///   it refused, or a frame that carried nothing a roster can see. A refused removal must not
+    ///   be able to end anybody's session, which is why the value is returned only on `nil`
+    ///   rejection.
+    private func insertMembershipRecord(
+        _ decoded: DecodedMembershipRecord,
+        type: PayloadType
+    ) -> DecodedMembershipRecord? {
+        let rejection: MeshMembershipRecordRejection?
+        switch decoded {
+        case .admission(let record): rejection = membershipVerifier?.insert(record)
+        case .departure(let record): rejection = membershipVerifier?.insert(record)
+        case .removal(let record): rejection = membershipVerifier?.insert(record)
+        case .termination(let record): rejection = membershipVerifier?.insert(record)
+        case .digest: return nil
+        }
+        recordRejection(rejection, type: type)
+        return rejection == nil ? decoded : nil
+    }
+
+    /// What a durable, roster-moving record means for THIS device (plan §8.2's `removed` and
+    /// `terminationVerified` edges, §8.3's rotation trigger).
+    ///
+    /// Exactly one of the three happens. A removal naming this device ends the session; a
+    /// termination that the **merged** roster agrees with ends it too; anything else — including a
+    /// termination the merged roster downgrades to its signer's departure — is a roster change like
+    /// any other and rotates the key.
+    private func applyRosterMove(_ accepted: DecodedMembershipRecord?, from before: MeshDerivedRoster?) {
+        if case .removal(let record) = accepted, record.memberFingerprint == identity.localFingerprint {
+            applyVerifiedSelfRemoval()
+            return
+        }
+        if case .termination = accepted, membershipVerifier?.roster.status == .terminated {
+            applyVerifiedTermination()
+            return
+        }
+        rotateIfRosterChanged(from: before)
     }
 
     /// A verified removal record named **this device** (plan §8.2's `removed` edge, §8.3).
-    ///
-    /// Item 6 built the edge and deliberately left it unapplied: deciding that a *received* record
-    /// names this device needed the derived shipping roster item 7 owes. A removal needs no roster
-    /// to answer that — the record names the removed fingerprint outright and this device knows its
-    /// own — so the edge is wired here and `.terminationVerified` stays item 7's.
     ///
     /// The order is plan §3.6's. The record is already durable when this runs (the caller commits
     /// first), then `.removed` writes the ending mark and raises the permanent rejoin bar, and only
@@ -2440,6 +2731,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         leaveSession()
     }
 
+    /// A verified termination that this device's **merged** roster agrees with: the mesh is over
+    /// (plan §8.2's `terminationVerified` edge, §8.3, P3 item 7).
+    ///
+    /// Item 6 built the edge and left it unwired because deciding whether a received record ends
+    /// the mesh or only its signer's membership needs the derived roster — ``MeshDerivedRoster``
+    /// applies §8.3's downgrade rule, so by the time this runs the answer is already `terminated`
+    /// and the other branch never reaches here. Ending mark, then teardown, then the permanent
+    /// rejoin bar the mark raised: a terminated mesh can never be rejoined.
+    private func applyVerifiedTermination() {
+        FernletAuditLog.log("mesh.membershipEvent.terminationVerified")
+        applySessionEvent(.terminationVerified)
+        leaveSession()
+    }
+
     /// Plan §8.3's roster-change trigger: a verified record that MOVED the derived roster rotates
     /// the group key. A refused record, or one that changes nothing a roster can see (a duplicate
     /// re-gossip, an inventory digest), triggers nothing — which is what keeps a peer from spending
@@ -2449,8 +2754,90 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         requestRotation(cause: .membership)
     }
 
-    /// Verifies a peer's digest and remembers it, so a later item can ask for the records this
-    /// device is missing (plan §10.5). A digest that DIFFERS is not an error — that is the signal.
+    // MARK: Adoption (P3 item 7, plan §8.3, §10.5)
+
+    /// Records a joiner has been sent but cannot yet insert, held until they add up to a ledger.
+    ///
+    /// Non-nil only while this device is on its bootstrap ledger, fed only by the peer that
+    /// admitted it, and bounded by the record sets' own caps. It is untrusted throughout:
+    /// ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:)`` verifies every record in it from
+    /// the offered root before a single one counts.
+    @ObservationIgnored private var pendingAdoptionLedger = MeshMembershipLedger.empty
+
+    /// Whether a decoded record was taken for adoption rather than inserted.
+    ///
+    /// A joiner's provisional root is the member that admitted it, so the mesh's real founder — and
+    /// therefore every record chained from the founder — is `unauthorizedAdmitter` to it. Inserting
+    /// one at a time can never converge; the whole offered ledger has to be re-verified from its
+    /// own root. Buffering is restricted to the peer this device asked (its admitter), so a third
+    /// party cannot crowd the bounded buffer with low-timestamp junk before adoption verifies it.
+    ///
+    /// - Returns: `true` when the record was buffered and the caller must not insert it.
+    private func bufferedForAdoption(_ decoded: DecodedMembershipRecord, from senderFingerprint: String) -> Bool {
+        guard let verifier = membershipVerifier,
+              MeshLedgerAdoption.isBootstrap(verifier.ledger, selfFingerprint: identity.localFingerprint),
+              let ownAdmission = verifier.ledger.admissions.earliest,
+              senderFingerprint == ownAdmission.token.admitterFingerprint else {
+            return false
+        }
+        switch decoded {
+        case .admission(let record): pendingAdoptionLedger.admissions = pendingAdoptionLedger.admissions.inserting(record)
+        case .departure(let record): pendingAdoptionLedger.departures = pendingAdoptionLedger.departures.inserting(record)
+        case .removal(let record): pendingAdoptionLedger.removals = pendingAdoptionLedger.removals.inserting(record)
+        case .termination(let record): pendingAdoptionLedger.terminations = pendingAdoptionLedger.terminations.inserting(record)
+        case .digest: return false
+        }
+        attemptLedgerAdoption(ownAdmission: ownAdmission, meshID: verifier.meshID)
+        return true
+    }
+
+    /// Tries to rebase this device off its bootstrap ledger onto the one the buffer now describes.
+    ///
+    /// Failure is not an error and is not final: the chain to this device's admitter simply is not
+    /// proven yet, so the buffer keeps growing until the peer's re-gossip has delivered the records
+    /// that prove it. Success is durable before it counts (plan §3.6) — a rebase this device could
+    /// not seal is rolled back to the bootstrap ledger.
+    private func attemptLedgerAdoption(ownAdmission: SignedAdmissionRecord, meshID: UUID) {
+        let outcome = MeshLedgerAdoption.adopt(
+            offered: pendingAdoptionLedger, ownAdmission: ownAdmission, meshID: meshID
+        )
+        guard case .adopted(let adopted) = outcome else { return }
+        let snapshot = membershipVerifier
+        membershipVerifier = adopted
+        guard commitVerifiedRecord(rollingBackTo: snapshot, type: .meshMemberAdmission) else { return }
+        pendingAdoptionLedger = .empty
+        FernletAuditLog.log(
+            "mesh.membershipLedger.adopted",
+            context: ["members": String(adopted.roster.memberCount)]
+        )
+        applyAdoptedRosterVerdict(adopted.roster)
+    }
+
+    /// What a freshly adopted roster says about THIS device.
+    ///
+    /// The adoption path bypasses ``applyRosterMove(_:from:)`` — it rebases rather than inserting —
+    /// so the two endings that can arrive *inside* the adopted ledger have to be applied here too.
+    /// A joiner whose admitter hands it a ledger already carrying its own removal, or a termination,
+    /// must end its session rather than sit in a mesh whose every member will refuse it at the next
+    /// introduction. Narrow but real: the removal can land during the one round trip a bootstrap
+    /// takes.
+    private func applyAdoptedRosterVerdict(_ roster: MeshDerivedRoster) {
+        if roster.status == .terminated {
+            applyVerifiedTermination()
+            return
+        }
+        guard !roster.contains(fingerprint: identity.localFingerprint) else { return }
+        applyVerifiedSelfRemoval()
+    }
+
+    /// Verifies a peer's digest, remembers it, and answers with the records this device holds when
+    /// the two ledgers differ (plan §10.5). A digest that DIFFERS is not an error — that is the
+    /// signal, and the answer is one bounded re-gossip per peer per session.
+    ///
+    /// Both sides answer, because "I hold fewer records" and "I hold different records" are not the
+    /// same thing and a count cannot tell them apart. The loop is closed elsewhere: the batch is
+    /// once per peer per session, and a record frame never provokes another digest — so a fresh
+    /// joiner converges in one round trip rather than in a ping-pong.
     private func receiveInventoryDigest(_ payload: MeshInventoryDigestPayload) {
         guard let verifier = membershipVerifier else { return }
         if let rejection = verifier.verify(payload) {
@@ -2461,11 +2848,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             return
         }
-        guard peerInventoryDigests[payload.senderFingerprint] != nil
-                || peerInventoryDigests.count < MeshMembershipBounds.maxRosterMembers else {
-            return   // R3: a bounded map, so a churning peer set cannot grow it without limit
+        if peerInventoryDigests[payload.senderFingerprint] != nil
+            || peerInventoryDigests.count < MeshMembershipBounds.maxRosterMembers {
+            peerInventoryDigests[payload.senderFingerprint] = payload.digest   // R3: bounded map
         }
-        peerInventoryDigests[payload.senderFingerprint] = payload.digest
+        guard !verifier.matchesLocalInventory(payload.digest) else { return }
+        Task { @MainActor [weak self] in await self?.reGossipRecords(to: payload.senderFingerprint) }
     }
 
     /// Logs a refused record. Frozen English diagnostics, never user copy.
@@ -4047,10 +4435,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.admissionGrant.droppedStaleEpoch")
             return
         }
+        // P3 item 7, plan §8.3/§20.4.4: the admission is verified, so this device arms its ledger
+        // with it. Until item 7 a joiner held no ledger at all and refused every membership record
+        // it was sent as `signerNotAdmitted`; from here it is a member of its own roster.
+        let ledgerBeforeJoin = membershipVerifier
+        guard armJoinerLedger(grant) else { return }
         // P3 item 6, plan §3.6: the admission is verified, so the context is written BEFORE this
         // device adopts the epoch, unwraps the key or starts a beacon — before, in other words,
         // anything tells the user or the peers that it has joined.
-        guard recordVerifiedAdmissionDurably() else { return }
+        guard recordVerifiedAdmissionDurably() else {
+            membershipVerifier = ledgerBeforeJoin
+            return
+        }
 
         // Single use: the request it answered is now spent.
         if let slot { outstandingAdmissionRequestBySlot.removeValue(forKey: slot.id) }
@@ -4076,6 +4472,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             localJoinedEpoch = grant.currentKeyEpoch
         }
         startBeaconLoop()
+        // One round trip to convergence (plan §10.5): ask the peer that admitted us what it holds.
+        // Its reply is the bounded record re-gossip, and `MeshLedgerAdoption` rebases this device's
+        // provisional root onto the mesh's real founder when it arrives.
+        if let fingerprint = slot?.fingerprint {
+            Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: fingerprint) }
+        }
     }
 
     // MARK: - Photo handling
@@ -5769,21 +6171,50 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
         epochKeyring?.head.canonicalString ?? ""
     }
 
-    /// Who may connect right now, derived fresh from the mesh descriptor.
+    /// Who may connect right now: **the derived roster** `admitted − departed − removed`
+    /// (P3 item 7, plan §8.1/§20.4.4), read fresh on every introduction.
     ///
-    /// `barred` is deliberately empty in production: a removed member is already absent from
-    /// `members`, so it verdicts `.stranger` and is refused either way, and this manager keeps
-    /// removals by FINGERPRINT (`removedMemberFingerprints`) — it holds no signing key for a member
-    /// it has dropped, so it cannot honestly name one as barred. The refusal is identical; only the
-    /// diagnostic differs.
+    /// `barred` has real contents from here on. The gap plan §20.1 recorded — "the manager records
+    /// removals by fingerprint and holds no signing key for a member it has dropped" — is closed by
+    /// ``SignedAdmissionRecord``, which keeps the admitted member's signing key inside the record,
+    /// so a removal or a departure names a *key*. A peer with a verified removal record is now
+    /// refused as ``MeshRosterVerdict/barred`` by the shipping authority's own answer, where before
+    /// it fell out of `members` and refused as an anonymous ``MeshRosterVerdict/stranger``.
+    ///
+    /// ## The legacy fallback, and when it can be reached
+    ///
+    /// With no ledger — or an empty one — the answer falls back to the gossiped descriptor's
+    /// members. A founder has a one-member ledger from the instant it founds
+    /// (``startNewMesh(name:)``) and a joiner from the instant its admission verifies
+    /// (``handleAdmissionGrant(_:slot:senderSigningPublicKey:)``), so on a shipping path this is
+    /// reachable only where a mesh descriptor arrived without either: a test that sets
+    /// `currentMesh` directly, or interop with a build predating P3's records. It is logged once
+    /// per manager under a distinct key so "the roster came from gossip" is never a silent answer.
     ///
     /// ``MeshIntroductionChaos/additionalBarredKeys`` is `[]` in every Release build and in every
-    /// DEBUG launch that does not ask for it, so the production answer is unchanged. It exists so
-    /// the ``MeshRosterVerdict/barred`` branch — otherwise reachable only at tier 1, for the reason
-    /// just given — can be observed over a real radio. It can only ever *refuse* a peer this roster
-    /// would have admitted (barred wins over member), never the reverse.
+    /// DEBUG launch that does not ask for it, so the production answer is unchanged. It survives
+    /// item 7 as the ONLY way to reach the barred branch on a two-node lane, where no quorum for a
+    /// real removal exists (item 9's 3-node lane retires it). It can only ever *refuse* a peer this
+    /// roster would have admitted (barred wins over member), never the reverse.
     var roster: MeshIntroductionRoster {
-        MeshIntroductionRoster(
+        guard let derived = membershipVerifier?.roster, !derived.members.isEmpty else {
+            return legacyIntroductionRoster()
+        }
+        return derived.introductionRoster(additionalBarred: MeshIntroductionChaos.additionalBarredKeys)
+    }
+
+    /// The pre-records answer: the gossiped descriptor's members, with nobody nameably barred.
+    /// Logged once per manager, because a roster derived from gossip rather than from signed
+    /// records is a fact a reader of the log needs (plan §20.1).
+    private func legacyIntroductionRoster() -> MeshIntroductionRoster {
+        if !loggedLegacyRosterFallback {
+            loggedLegacyRosterFallback = true
+            FernletAuditLog.log(
+                "mesh.introductionAuthority.legacyRosterFallback",
+                context: ["members": String(currentMesh?.members.count ?? 0)]
+            )
+        }
+        return MeshIntroductionRoster(
             members: currentMesh?.members.map(\.signingPublicKey) ?? [],
             barred: MeshIntroductionChaos.additionalBarredKeys
         )

@@ -214,6 +214,38 @@ nonisolated struct MeshMemberDeparturePayload: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - MeshMemberAdmissionPayload
+
+/// The `fernlet.mesh.member-admission.v1` frame: one admitter-signed admission record and nothing
+/// else (plan §8.3, §10.5; network migration P3 item 7).
+///
+/// **It moves no new signed bytes.** ``SignedAdmissionRecord`` wraps the existing
+/// ``MeshAdmissionToken`` whole, still signed by the admitter under `meshAdmissionTokenV2`, so this
+/// frame names a wire token and never a signing domain — there is no second admission format, no
+/// second canonical encoder, and no golden vector to move.
+///
+/// **Why the frame exists at all.** The other three record kinds reach a member because the member
+/// was there when they happened; an admission happens between the admitter and the joiner alone. A
+/// third member that never learns of it derives a roster one short, which is not merely a stale
+/// display: ``MeshRotationPolicy`` narrows the next epoch's key distribution to the derived roster,
+/// so an unpropagated admission is a member who never receives the group key. Item 7 therefore
+/// sends it twice over — once live to the other members when the vote to admit completes, and again
+/// in the bounded re-gossip a differing ``MeshInventoryDigest`` asks for.
+///
+/// A receiver trusts none of it on arrival: the record goes through
+/// ``MeshMembershipRecordVerifier/insert(_:)-(SignedAdmissionRecord)``, which checks the admitter
+/// was entitled to admit **on the receiver's own merged roster**.
+nonisolated struct MeshMemberAdmissionPayload: Codable, Equatable, Sendable {
+
+    /// The admitter's signed credential, kept whole.
+    let record: SignedAdmissionRecord
+
+    /// Wraps a record for the wire.
+    init(record: SignedAdmissionRecord) {
+        self.record = record
+    }
+}
+
 // MARK: - MeshMemberRemovalPayload
 
 /// The `fernlet.mesh.member-removal.v1` frame: one completed, quorum-signed removal record and

@@ -270,12 +270,21 @@ nonisolated struct MeshDerivedRoster: Equatable, Sendable {
     /// The roster in the shape the QUIC transport judges introductions against.
     ///
     /// Both lists are keys, not fingerprints, which is what makes `barred` a real answer rather than
-    /// the empty list the live manager has to fall back to (plan §20.1). Barred wins over member
+    /// the empty list the live manager used to fall back to (plan §20.1). Barred wins over member
     /// inside ``MeshIntroductionRoster``, and the two lists here are disjoint by construction anyway.
-    func introductionRoster() -> MeshIntroductionRoster {
+    ///
+    /// This is the **shipping** answer from P3 item 7 on: `MeshIntroductionAuthority.roster` is
+    /// this function, so a peer holding a verified removal or departure record is refused at the
+    /// introduction as ``MeshRosterVerdict/barred`` — named — rather than falling out of `members`
+    /// and refusing as an anonymous stranger.
+    ///
+    /// - Parameter additionalBarred: Keys to bar on top of the derived ones. Only ever ADDS a
+    ///   refusal (barred wins over member), so it cannot open a door the records closed; the
+    ///   diagnostic chaos hook is its one caller.
+    func introductionRoster(additionalBarred: [Data] = []) -> MeshIntroductionRoster {
         MeshIntroductionRoster(
             members: members.map(\.signingPublicKey),
-            barred: barred.map(\.signingPublicKey)
+            barred: barred.map(\.signingPublicKey) + additionalBarred
         )
     }
 

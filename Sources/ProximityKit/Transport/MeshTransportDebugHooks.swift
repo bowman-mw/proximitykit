@@ -84,6 +84,10 @@ nonisolated enum MeshIntroductionChaosBehaviour: String, CaseIterable, Sendable 
 /// member (``MeshIntroductionRoster``) — so it can only turn an accept into a refusal. The
 /// direction is one-way by construction, which is why this is a diagnostic hook and not an escape
 /// hatch.
+///
+/// **Scope narrowed at P3 item 7.** `barred` is no longer empty in production: the derived roster
+/// fills it from signed removal and departure records, so ``additionalBarredKeys`` is now only what
+/// makes the branch reachable where no quorum for a real removal exists — a two-node lane.
 nonisolated enum MeshIntroductionChaos {
 
     #if DEBUG
@@ -97,10 +101,17 @@ nonisolated enum MeshIntroductionChaos {
     /// The misbehaviours this process performs. Read once, at first use.
     static let behaviours = parseBehaviours(ProcessInfo.processInfo.environment[behaviourKey])
 
-    /// Signing keys the roster must treat as departed/removed, so the ``MeshRosterVerdict/barred``
-    /// branch is reachable over a real radio. The shipping authority never populates `barred` — it
-    /// keeps removals by fingerprint and holds no key for a member it dropped — so without this the
-    /// branch is only reachable at tier 1.
+    /// Extra signing keys to bar, **on top of** the ones the derived roster already bars.
+    ///
+    /// P3 item 7 changed what this is for. The shipping authority now fills `barred` itself, from
+    /// verified departure and removal records that carry the member's signing key — so the
+    /// ``MeshRosterVerdict/barred`` branch is the mesh's own answer, walled at tier 1 in
+    /// `MeshIntroductionAuthorityTests`. What remains is the two-node lane: a real removal needs
+    /// ⌊|roster|/2⌋ + 1 votes, so two Simulators cannot produce one, and Lane C's matrix row 3 uses
+    /// this to reach the branch until item 9's 3-node lane can vote a member out for real.
+    ///
+    /// It still only ever ADDS a refusal — barred wins over member — so it cannot open a door the
+    /// records closed.
     static let additionalBarredKeys = parseKeys(ProcessInfo.processInfo.environment[barredKeysKey])
 
     /// The one nonce a ``MeshIntroductionChaosBehaviour/frozenNonce`` process reuses. Still drawn
