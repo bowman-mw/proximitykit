@@ -39,6 +39,13 @@ public enum SlotKind {
 /// registry gate must drop. `verifiedKeyAgreementPublicKey` is the sealing target for every
 /// pairwise-sealed send (never descriptor gossip); `peerCapabilities` gates room broadcasts.
 /// Memory-only session state, never persisted.
+///
+/// **Read that against ``MeshSessionContext`` (P3 item 2), which is the documented reversal of the
+/// module's old blanket "ProximityKit persists nothing" rule (plan §17.3).** What is durable now is
+/// *membership* — the signed records a mesh's roster is derived from — sealed by
+/// ``MeshSessionStore``. A slot is not membership: it is one live channel plus the keys that
+/// channel verified, and losing sockets never ends membership (plan §8.2). So this stays
+/// memory-only, and after a process death the slots are rebuilt by reconnecting, not reloaded.
 public struct PeerSlot: Identifiable {
     public let id: UUID  // == peer.id
     public let peer: PeerHandle
@@ -77,6 +84,19 @@ public struct PeerSlot: Identifiable {
 /// Distributed pairwise-wrapped by the elected coordinator (`encryptGroupKey`) and rotated every
 /// 15 minutes; used for closed-mode photo/metadata AES-GCM. Never written to disk or keychain;
 /// lost on app termination or mesh leave.
+///
+/// ## "Never persisted" is now load-bearing, not incidental (plan §8.1, §17.3)
+///
+/// Until P3 nothing in this module was persisted, so this sentence cost nothing. P3 added
+/// ``MeshSessionContext`` — a sealed, on-disk record of a session's membership — and this key is
+/// **deliberately excluded from it**. The exclusion is safe because content does not depend on the
+/// control key (design invariant 3): after a process death the session resumes by reconnecting and
+/// performing a fresh membership-driven rotation, so persisting the key would buy nothing and
+/// would put a live group secret in a file whose whole justification is that it holds only signed,
+/// already-public membership records.
+///
+/// Concretely: do not add `Codable` here, do not add a field for it to ``MeshSessionContext``, and
+/// do not cache it in the keychain "just for resume". `MeshSessionStoreTests` pins the absence.
 public struct MeshGroupKey {
     public let epoch: Int
     public let keyBytes: Data   // 32 bytes

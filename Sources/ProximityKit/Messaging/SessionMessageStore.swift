@@ -20,6 +20,15 @@ import FernletDomainModel
 ///    moment that promotes `pendingFriendReview` / opens the shop window: stopSearching's teardown funnel,
 ///    removeSlot, disconnectSlot) AND on the next session formation (the first slot commit). Unlike the
 ///    shop's post-session window, messages do NOT outlive the session — they vanish immediately.
+///
+/// ## What P3's sealed store did and did not change (plan §17.3)
+///
+/// P3 gave ProximityKit its first durable surface, ``MeshSessionContext``, sealed by
+/// ``MeshSessionStore``. **This projection is untouched by that**, and the exclusion is deliberate
+/// rather than pending: the durable half of a session is *membership* — signed admission,
+/// departure, removal and termination records — not conversation. There is no sealed message inbox
+/// beneath this store and none is planned; a message that outlived its session would contradict the
+/// owner decision above, which the new store's existence does not reopen.
 @MainActor
 @Observable
 public final class SessionMessageStore {

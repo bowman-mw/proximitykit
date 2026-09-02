@@ -377,9 +377,45 @@ from (plan §8.1): `MeshMembershipRecordKind`, `MeshMembershipRecord`, `MeshMemb
 `MeshMembershipRecordOrder`, `SignedAdmissionRecord`, `SignedDepartureRecord`,
 `SignedRemovalRecord`, `SignedTerminationRecord`, `MeshCustodyHandoffSummary`,
 `MeshMembershipRecordSet`, `MeshMembershipLedger`, `MeshDerivedRoster`, `MeshRosterMember`,
-`MeshRosterStatus`.
+`MeshRosterStatus`. The sealed store's own internal vocabulary is `MeshSessionContext`,
+`MeshSessionContextSchema`, `MeshSessionContextDecodingError`, `MeshSessionLoad`,
+`MeshSessionSealRefusal`, `MeshSessionDeferral`, `MeshSessionCorruption`, `MeshSessionSaveError`,
+`MeshSessionSealKey` and `MeshSessionSealKeyOutcome`.
+
+**The one durable surface, and the four that stay memory-only.** P3 item 2 reversed this module's
+old blanket "ProximityKit persists nothing" rule (plan §17.3), and the reversal is narrow on
+purpose. `MeshSessionContext` — mesh id, protocol version, `createdAt`/`hardDeadline`, the
+membership ledger, epoch heads, the develop bar — is sealed at rest by ``MeshSessionStore`` under
+`FernletCryptoPurpose.KeyDerivation.meshSessionContextV1`, on a per-instance
+``MeshSessionStorageScope`` (directory *and* keychain service, so a wipe takes both together).
+`MeshGroupKey`, `PeerSlot`, `MeshSessionRosterEntry`/`MeshFriendReviewBatch` and the
+`SessionMessageStore` transcript are **still never persisted**, and `MeshGroupKey`'s doc guard is
+now load-bearing by contrast: content never depends on the control key, so resume reconnects and
+rotates rather than reloading a secret.
+
+**Loading it has five states, and three of them are not "empty".** `ColumnCrypto` is V3-only and
+*refuses* to seal without a `DeviceBindingID` (owner decision D4), so before first unlock this file
+cannot be written at all:
+
+| state | meaning |
+| --- | --- |
+| `loaded` | a context is in hand |
+| `absent` | no file — genuinely a green field |
+| `deferred` | ask again (locked file, transient keychain, retryable binding read error) |
+| `corrupt` | bytes exist and do not decode — quarantine explicitly, never overwrite |
+| `refused` | custody refused, by name (`MeshSessionSealRefusal`) |
+
+**Seal refused ≠ deferred ≠ absent.** A refusal that is filed as `absent` is the shape that
+overwrites live membership: a caller reading "no prior context" starts a fresh mesh and saves over
+records the user's friends still hold. Only `loaded` and `absent` vend a `MeshSessionStore.LoadToken`,
+and `save` cannot be called without one — so the distinction is enforced by the type system, not by
+a comment. `save` also honours durable-before-acknowledged (plan §3.6): it throws rather than
+returning success, so no membership record, custody receipt or "joined" is acknowledged over bytes
+that never reached the disk.
 
 - ``MeshNetworkManager``
+- ``MeshSessionStore``
+- ``MeshSessionStorageScope``
 - ``PeerSlot``
 - ``SlotKind``
 - ``MeshGroupKey``
