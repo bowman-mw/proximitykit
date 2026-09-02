@@ -997,7 +997,7 @@ private extension NetworkMeshSession {
     func admitVerifiedInbound(_ verified: MeshVerifiedPeer, pendingKey: MeshLinkKey) -> MeshLinkKey? {
         let key = links.key(advertisingSessionID: verified.sessionID) ?? pendingKey
         guard invitationGate?(handle(for: key)) ?? false else {
-            Self.logger.debug("inbound QUIC tunnel refused by its owner for \(key.rawValue, privacy: .public)")
+            noteInboundRefusal("owner", key: key)
             return nil
         }
         var admission = inboundAdmission(for: verified, at: key)
@@ -1005,7 +1005,7 @@ private extension NetworkMeshSession {
             admission = inboundAdmission(for: verified, at: key)
         }
         guard admission == .admit else {
-            Self.logger.debug("inbound QUIC tunnel refused for \(key.rawValue, privacy: .public)")
+            noteInboundRefusal("\(admission)", key: key)
             return nil
         }
         return key
@@ -2007,6 +2007,24 @@ private extension NetworkMeshSession {
     func noteHeartbeat(_ verb: String, key: MeshLinkKey, over channel: MeshHeartbeatChannel) {
         let line = "heartbeat \(verb) over \(channel) for \(key.rawValue)"
         Self.logger.debug("\(line, privacy: .public)")
+        MeshTransportConsoleLog.echo(line)
+    }
+
+    /// Records one inbound tunnel this session verified and then declined to keep.
+    ///
+    /// Mirrored to the console log rather than left at `debug`, because a declined inbound is
+    /// *silent on both ends otherwise*: the dialer sees only its own control stream die with an
+    /// `ENOTCONN`, and this side logs nothing a `--console-pty` transcript can read. That silence
+    /// is what made the runbook's three-node bring-up unreadable — an edge that never formed looked
+    /// identical to an edge nobody attempted. `notice`, not `error`: a duplicate collapsing or an
+    /// owner tidying a slot is ordinary, and only the *absence* of a reason was ever the fault.
+    ///
+    /// - Parameters:
+    ///   - reason: Frozen English naming who refused — `owner`, or the ``MeshLinkAdmission`` case.
+    ///   - key: The link the refused tunnel would have lived under.
+    func noteInboundRefusal(_ reason: String, key: MeshLinkKey) {
+        let line = "inbound tunnel refused \(reason) for \(key.rawValue)"
+        Self.logger.notice("\(line, privacy: .public)")
         MeshTransportConsoleLog.echo(line)
     }
 

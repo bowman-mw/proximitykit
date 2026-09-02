@@ -397,7 +397,10 @@ actually lives: `NetworkMeshSession`, `NetworkPeerChannel`, `MeshLinkTable`, `Me
 Internal to the module, DEBUG-only, and listed here so they are never mistaken for production
 behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroductionChaosBehaviour`.
 They exist so the rejection matrix above can be *observed on a real radio* rather than only
-enumerated at tier 1 — the runbook's Lane C, two Simulators on one Mac. The mirror echoes lines the
+enumerated at tier 1 — the runbook's Lane C, two Simulators on one Mac. Three Simulators run on
+the same lane (2026-09-02) and every pairwise property reproduces, but the graph they form is a
+spanning **star**, not a full mesh: one node holds two tunnels and the other two hold one each,
+to the hub. A run that needs every node to see every other is not yet a thing this lane carries. The mirror echoes lines the
 `Logger` already emitted and changes no decision; the chaos seam damages this side's own outbound
 introduction (a reused nonce, a flipped signature bit) or adds keys to the roster's barred set, so
 every switch can only cause a *refusal* that would not otherwise happen, never an admission. In a
