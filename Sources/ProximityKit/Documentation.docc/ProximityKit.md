@@ -331,6 +331,34 @@ without being "stale". `MeshEpochKeyring` holds the current key plus ≤ 3 prede
 for ≤ 5 minutes after supersession and rejected after it, on an injected clock — and it is
 **memory-only**, like the `MeshGroupKey`s inside it: only the epoch *names* persist.
 
+**Rotation triggers are the timer, any roster change and any merge** (plan §8.3, P3 item 5). The
+15-minute schedule is no longer the only way the group key turns over: a verified admission,
+departure, removal or termination record entering the ledger, and a ledger merge that moves the
+derived roster, each raise a trigger too. That is what closes the confirmed
+voted-out-member-keeps-the-key gap — before it, a member the mesh had just removed held a working
+group key until the next tick. `MeshRotationTriggerQueue` is the single front door: it **coalesces a
+burst into one rotation** inside a two-second window (`MeshRotationTriggerBounds`, chosen so a
+healing partition's re-gossip does not mint an epoch per record, and small beside the ≤ 5-minute
+predecessor grace it delays), and it is **non-reentrant** — a trigger raised while a rotation is in
+flight is deferred and re-armed, never dropped and never run concurrently. The `meshKeyRotation`
+frame carries a frozen English `MeshKeyRotationCause` (`timer` / `membership` / `merge`); the frame
+is unsigned (it rides the signed identity envelope), so the field moved no signature transcript and
+no existing golden vector — `MeshKeyRotationCauseWireTests` pins the extended JSON, and a frame with
+no `cause` decodes as `timer`, which is the only rotation older builds ever performed.
+
+`MeshRotationPolicy` holds the two decisions. `plan` mints the successor and runs it through
+`MeshEpochAcceptance` before anything moves — at the counter cap it answers `terminate`, and the
+manager emits `terminated.v1` and ends the session rather than trapping. `recipients` is the
+exclusion rule: **removed and departed members get no copy of the new key**, subtracting both the
+derived roster's `barred` set and the live vote-out set, and narrowing to the roster's members once
+the ledger knows one. It is deliberately subtractive rather than positive, because a positive rule
+over a ledger that is still empty in shipping builds would distribute the key to nobody at all.
+`MeshNetworkManager` now **holds** its `MeshEpochKeyring` rather than re-deriving an epoch on every
+read — `epochRef` is the head's canonical string — and persists the new head into
+`MeshSessionContext.epochHeads` through `persistSessionContext(addingEpochHead:)` **before** the
+rotation is distributed or acknowledged (plan §3.6): a refused or deferred seal abandons the
+rotation and names the reason, it does not hand out a key no restart could explain.
+
 **Replay protection does not ride epochs** (plan §8.4). Once a predecessor key can still open a
 frame and a merge can bring two branches together, "the epoch no longer opens it" stops being a
 replay answer. `MeshFrameReplayWindow` is the replacement: dedup by frame id, per **authenticated**
@@ -420,7 +448,10 @@ move those records between devices: `MeshMembershipEventFormat`, `MeshRecordIden
 `MeshEpochRef`, `MeshEpochBounds`, `MeshEpochRefParseError`, `MeshEpochRefOrder`,
 `MeshEpochKeyring`, `MeshEpochKeyringRotationRefusal`, `MeshEpochAcceptance`,
 `MeshEpochRotationVerdict`, `MeshEpochRotationRefusal`, `MeshEpochIntroductionVerdict`,
-`MeshFrameReplayWindow` and `MeshFrameReplayVerdict`.
+`MeshFrameReplayWindow` and `MeshFrameReplayVerdict`. P3 item 5 added the rotation triggers:
+`MeshKeyRotationCause` (on `MeshKeyRotationPayload`), `MeshRotationTriggerBounds`,
+`MeshRotationTriggerOutcome`, `MeshRotationTriggerQueue`, `MeshRotationPlan`, `MeshRotationRefusal`
+and `MeshRotationPolicy`.
 
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME

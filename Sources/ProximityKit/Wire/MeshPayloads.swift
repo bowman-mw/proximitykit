@@ -266,28 +266,74 @@ public nonisolated struct MeshFriendVouchListPayload: Codable, Equatable, Sendab
 
 // MARK: - Phase 3 Group Encryption Payloads
 
+/// Why a key rotation is happening (network migration P3 item 5, plan §8.3).
+///
+/// Plan §8.3 makes the triggers "15-minute timer ∪ any roster change ∪ any merge", and this token
+/// is how a receiver — and a log line, and a test — can tell the three apart. Without it every
+/// rotation looks like the timer, and "the mesh rotated because somebody was voted out" is
+/// indistinguishable from "the mesh rotated because fifteen minutes passed".
+///
+/// **Frozen English wire tokens.** These `rawValue`s ride the `meshKeyRotation` frame and are
+/// compared byte-for-byte by peers; they never localize and never change spelling. There is no
+/// display text here at all — the cause is diagnostic, and no surface shows it to a person.
+public nonisolated enum MeshKeyRotationCause: String, Codable, Equatable, Sendable, CaseIterable {
+    /// The 15-minute schedule came round. The only cause a pre-P3 build could ever have meant,
+    /// which is why it is what a frame with no `cause` field decodes as.
+    case timer
+    /// A roster change: a verified admission, departure, removal or termination record entered the
+    /// ledger. This is the cause that closes the voted-out-member-keeps-the-key gap.
+    case membership
+    /// A ledger merge changed the derived roster — two branches reconciling (P4, plan §10.3).
+    case merge
+}
+
 /// Broadcast by the elected coordinator once per rotation: the new epoch plus each member
 /// fingerprint's pairwise-encrypted copy of the 32-byte group key.
 ///
 /// A member absent from `perMember` was excluded from the rotation and must re-request
 /// admission. Receivers require the authenticated sender to be both the elected coordinator and
 /// the payload's claimed coordinator.
+///
+/// ## The `cause` field, and why an absent one is `timer`
+///
+/// P3 item 5 extends the frame with ``MeshKeyRotationCause``. The payload is **unsigned** — it
+/// rides the signed `FernletIdentityEnvelope`, so no signature transcript and no golden vector
+/// moved when the field was added; `MeshKeyRotationWireTests` pins the extended JSON instead.
+/// A frame from a build that predates the field decodes as ``MeshKeyRotationCause/timer``, which
+/// is not a guess: the 15-minute schedule is the only rotation those builds ever perform.
 public nonisolated struct MeshKeyRotationPayload: Codable, Equatable, Sendable {
     public let newEpoch: Int
     public let perMember: [String: Data]
     public let rotationInitiatedAt: Date
     public let coordinatorFingerprint: String
+    /// Which of plan §8.3's three triggers fired. Defaults to `.timer` on both write and read, so
+    /// neither an older call site nor an older peer's frame is a decode failure.
+    public let cause: MeshKeyRotationCause
 
     public init(
         newEpoch: Int,
         perMember: [String: Data],
         rotationInitiatedAt: Date,
-        coordinatorFingerprint: String
+        coordinatorFingerprint: String,
+        cause: MeshKeyRotationCause = .timer
     ) {
         self.newEpoch = newEpoch
         self.perMember = perMember
         self.rotationInitiatedAt = rotationInitiatedAt
         self.coordinatorFingerprint = coordinatorFingerprint
+        self.cause = cause
+    }
+
+    /// Decodes a rotation frame, treating a missing `cause` as ``MeshKeyRotationCause/timer`` and
+    /// an *unrecognised* one the same way — a future build's fourth cause must not stop this one
+    /// adopting a key it can otherwise read. Every other field stays required.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        newEpoch = try container.decode(Int.self, forKey: .newEpoch)
+        perMember = try container.decode([String: Data].self, forKey: .perMember)
+        rotationInitiatedAt = try container.decode(Date.self, forKey: .rotationInitiatedAt)
+        coordinatorFingerprint = try container.decode(String.self, forKey: .coordinatorFingerprint)
+        cause = (try? container.decodeIfPresent(MeshKeyRotationCause.self, forKey: .cause)) ?? .timer
     }
 }
 

@@ -263,7 +263,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// unit tests can't observe the real sealed channel. Lets the capability-gated-send test assert a
     /// legacy peer was skipped.
     @ObservationIgnored var onTempMessageSendForTesting: ((UUID) -> Void)?
-    @ObservationIgnored private var removedMemberFingerprints: Set<String> = []
+    @ObservationIgnored private(set) var removedMemberFingerprints: Set<String> = []
     @ObservationIgnored private var approvedRemovalProposalIDs: Set<UUID> = []
     @ObservationIgnored private var sessionID = UUID().uuidString
     private static let maxPeerRetries = 3
@@ -291,6 +291,35 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var manifestAnnouncedPhotoAuthors: Set<String> = []
 
     @ObservationIgnored private(set) var currentGroupKey: MeshGroupKey?
+
+    /// The epoch this device is on, plus the predecessors still inside their grace window
+    /// (P3 item 5, plan §8.4). Nil until this device holds a group key.
+    ///
+    /// **Held, not derived.** Item 4's `epochRef` recomputed a ``MeshEpochRef`` on every read from
+    /// `currentGroupKey.epoch` and whatever the descriptor roster said at that instant, which meant
+    /// the ref could change without a rotation and gave old keys nowhere to live. The keyring is
+    /// the single source of both answers now: ``MeshIntroductionAuthority/epochRef`` reads its
+    /// head, and an old key stops working at the stated moment
+    /// (``MeshEpochBounds/predecessorGraceSeconds``) rather than when the last reference goes away.
+    /// Memory-only, forever — only the *refs* are persisted, into `MeshSessionContext.epochHeads`.
+    @ObservationIgnored private(set) var epochKeyring: MeshEpochKeyring?
+
+    /// Plan §8.3's coalescing, non-reentrant rotation front door: the 15-minute timer, every roster
+    /// change and every merge pass through it.
+    @ObservationIgnored private(set) var rotationTriggers = MeshRotationTriggerQueue()
+
+    /// The single armed debounce task (R3: cancel-and-replace, never one task per trigger).
+    @ObservationIgnored private var rotationDebounceTask: Task<Void, Never>?
+
+    /// Why the last rotation this device initiated happened, and why the last one that did not
+    /// happen was refused. Frozen English diagnostics, read by tests and audit lines — never
+    /// display copy, and never shown to a person.
+    @ObservationIgnored private(set) var lastRotationCause: MeshKeyRotationCause?
+
+    /// The reason the most recent rotation attempt was abandoned, or nil if none was. A blocked
+    /// rotation is SURFACED here and in the audit log rather than swallowed (plan §3.6).
+    @ObservationIgnored private(set) var lastRotationBlockReason: String?
+
     // Task that fires at nextRotationAt to drive the rotation protocol as coordinator.
     @ObservationIgnored private var rotationTimer: Task<Void, Never>?
     // Task that fires every ~20s to broadcast or check for a coordinator beacon.
@@ -316,6 +345,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var photoSendsInFlight: Set<UUID> = []
 
     private static let rotationInterval: TimeInterval = 15 * 60   // 15 minutes
+    /// Plan §8.2's absolute membership ceiling, stamped into the persisted
+    /// `MeshSessionContext.hardDeadline` at creation. **Recording it is item 5's; enforcing it is
+    /// item 6's** — nothing here ends a session on it yet.
+    private static let sessionCeilingSeconds: TimeInterval = 6 * 60 * 60   // 6 hours
     private static let beaconInterval: TimeInterval = 20          // 20 seconds
     private static let beaconLivenessTimeout: TimeInterval = 45   // 45 seconds
     /// How long the coordinator waits for sync-acks before minting the next key, and how often it
@@ -454,6 +487,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     isolated deinit {
         observationTask?.cancel()
         rotationTimer?.cancel()
+        rotationDebounceTask?.cancel()
         beaconTimer?.cancel()
         rotationSyncTask?.cancel()
         sessionHeartStateClearTask?.cancel()
@@ -968,19 +1002,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         leaveMesh()
     }
 
-    /// Ends the session and tears down transport.
+    /// Ends the session, telling every peer why first.
     ///
-    /// **No longer sends `.sessionGoodbye`** (network migration P3 item 3, plan §8.3): the legacy
-    /// goodbye is parsed, never emitted. It was an unsigned courtesy frame, so a receiver could
-    /// only ever read it as "this link is going away" — which is exactly what the transport
-    /// disconnect that follows already says. The signed replacement is
-    /// ``PayloadType/meshMemberDeparture``, and deciding WHEN to send one is a state-machine
-    /// transition: ``emitMembershipEvent(_:)`` is the seam items 5–6 fill, because a departure
-    /// must ship together with the rotation that excludes the leaver from the new epoch.
+    /// **Sends a signed `.meshMemberDeparture`, never the legacy `.sessionGoodbye`** (plan §8.3).
+    /// Item 3 removed the unsigned goodbye and left this function sending nothing at all; item 5
+    /// closes that gap with the signed replacement, because a departure and the rotation it causes
+    /// are one act — a receiver inserts the record, its derived roster loses this device, and its
+    /// coordinator rotates the group key without waiting for the 15-minute tick.
     ///
-    /// The name is kept so the app's leave path does not move in the same commit as the wire
-    /// change; peers still see the session end, via the disconnect rather than via a frame.
+    /// The send is **awaited before the teardown**, which is the whole reason this function is
+    /// `async` and separate from ``leaveSession()``: `leaveSession` stops the radio, so a
+    /// fire-and-forget departure would race the transport it needs.
     public func leaveSessionAfterNotifyingPeers() async {
+        await sendMembershipEvent(.meshMemberDeparture)
         leaveSession()
     }
 
@@ -1207,9 +1241,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     private func clearGroupKeyState() {
-        currentGroupKey = nil
+        clearEpochKeyring()
         // An outstanding join request only authorizes a grant for the session that issued it.
         outstandingAdmissionRequestBySlot.removeAll()
+        rotationTriggers.reset()
+        rotationDebounceTask?.cancel()
+        rotationDebounceTask = nil
+        lastRotationCause = nil
+        lastRotationBlockReason = nil
         rotationTimer?.cancel()
         rotationTimer = nil
         beaconTimer?.cancel()
@@ -1547,20 +1586,199 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         peerInventoryDigests.removeAll()
     }
 
-    /// **The emission seam, deliberately empty in item 3.**
+    /// **The emission seam** — the one place to look for who sends which membership event.
     ///
-    /// Membership events are *sent* on state changes — a member developing and leaving, a quorum
-    /// completing, a final pair ending the mesh — and every one of those transitions belongs to a
-    /// later item: the state machine is item 6 and membership-driven rotation is item 5, which must
-    /// fire a rotation in the same breath as the event (plan §8.3). Wiring an emitter here, before
-    /// either exists, is how a departure ships without the rotation that makes it mean anything.
-    ///
-    /// So this is the one function items 5 and 6 fill in, and the one place to look for who sends
-    /// what. It logs the intent today so a caller wired early is visible rather than silent.
+    /// Fire-and-forget: it hands the work to ``sendMembershipEvent(_:)`` on a task, for callers on
+    /// a synchronous path. A caller that must know the frame reached the wire *before* it does
+    /// something else — above all ``leaveSessionAfterNotifyingPeers()``, which tears the transport
+    /// down immediately afterwards — awaits ``sendMembershipEvent(_:)`` directly instead.
     ///
     /// - Parameter event: the signed frame to broadcast to every committed slot.
     func emitMembershipEvent(_ event: PayloadType) {
-        FernletAuditLog.log("mesh.membershipEvent.emitNotWiredYet", context: ["type": event.rawValue])
+        Task { @MainActor [weak self] in
+            await self?.sendMembershipEvent(event)
+        }
+    }
+
+    /// Mints, signs and broadcasts one membership event, returning when the sends have been
+    /// attempted (plan §8.3).
+    ///
+    /// Item 5 wires the two events this manager can honestly sign for itself: its own departure and
+    /// the termination it signs as a final-pair member. **Removal emission is deliberately not
+    /// here** — see ``emitApprovedRemovalRecord(_:)``, which is where the vote completes.
+    ///
+    /// - Parameter event: `.meshMemberDeparture` or `.meshTerminated`. Anything else is refused and
+    ///   named rather than silently dropped.
+    func sendMembershipEvent(_ event: PayloadType) async {
+        guard let mesh = currentMesh else {
+            FernletAuditLog.log("mesh.membershipEvent.emitNoMesh", context: ["type": event.rawValue])
+            return
+        }
+        do {
+            switch event {
+            case .meshMemberDeparture:
+                let record = try SignedDepartureRecord.signed(meshID: mesh.meshID, identity: identity)
+                await broadcastMembershipFrame(event, MeshMemberDeparturePayload(record: record))
+            case .meshTerminated:
+                let record = try SignedTerminationRecord.signed(
+                    meshID: mesh.meshID,
+                    identity: identity,
+                    rosterAtSigning: presentedRotationRoster()
+                )
+                await broadcastMembershipFrame(event, MeshTerminationPayload(record: record))
+            default:
+                FernletAuditLog.log(
+                    "mesh.membershipEvent.emitUnsupported", context: ["type": event.rawValue]
+                )
+            }
+        } catch {
+            // A membership event this device could not SIGN is never sent, and never silent (R7).
+            FernletAuditLog.log(
+                "mesh.membershipEvent.signFailed",
+                context: ["type": event.rawValue, "error": String(describing: error)]
+            )
+        }
+    }
+
+    /// Sends one membership frame to every slot, awaiting each write.
+    private func broadcastMembershipFrame(_ type: PayloadType, _ payload: some Encodable) async {
+        for slot in slots {
+            await sendEnvelope(type, encodable: payload, via: slot)
+        }
+        onMembershipEventSentForTesting?(type)
+    }
+
+    /// **Removal record minting lives here**: the moment a removal vote reaches quorum on this
+    /// device (`applyApprovedRemoval`). The signed record binds the voters this device counted, and
+    /// it goes through the same verify-then-insert door a received one would, so the roster change
+    /// — and the rotation that follows it (plan §8.3) — happen by one path whoever tallied.
+    ///
+    /// ## The seam this leaves open, stated plainly
+    ///
+    /// A removal record **has no wire frame yet**. `SignedRemovalRecord` and its signing purpose
+    /// (`FernletCryptoPurpose.Signature.meshMemberRemovalV1`) both exist, but item 3 deliberately
+    /// gave frames to only three of the four record kinds — there is no
+    /// `fernlet.mesh.member-removal.v1` `PayloadType` and no payload struct to carry one — so this
+    /// device mints and files its own record and the peers learn of the removal exactly as they do
+    /// today: from the live `.meshRemovalSecond` broadcast and the re-gossiped descriptor. Minting
+    /// that token is a wire change of item 3's shape, and it is what a later item owes.
+    ///
+    /// A second shortfall closes with item 7: this ledger holds no admission records yet, so the
+    /// insert below is refused `signerNotAdmitted` — fail-closed and logged. The live
+    /// `removedMemberFingerprints` set is what actually keeps a voted-out member out of the next
+    /// epoch's key today, which is why
+    /// ``MeshRotationPolicy/recipients(acked:selfFingerprint:derivedRoster:locallyRemoved:)`` takes
+    /// both it and the derived roster.
+    private func emitApprovedRemovalRecord(_ proposal: MeshRemovalProposalPayload) {
+        guard let mesh = currentMesh else { return }
+        do {
+            let record = try SignedRemovalRecord.signed(
+                meshID: mesh.meshID,
+                identity: identity,
+                memberFingerprint: proposal.targetFingerprint,
+                proposalID: proposal.id,
+                voterFingerprints: [proposal.proposerFingerprint, identity.localFingerprint]
+            )
+            recordRejection(membershipVerifier?.insert(record), type: .meshRemovalSecond)
+        } catch {
+            FernletAuditLog.log(
+                "mesh.membershipEvent.signFailed",
+                context: ["type": "removal-record", "error": String(describing: error)]
+            )
+        }
+    }
+
+    /// Merges another device's ledger into this one and rotates if the roster moved (plan §8.3's
+    /// third trigger). P4 owns full partition merge; this is the seam it calls.
+    ///
+    /// - Returns: One rejection per record the verifier refused — never a silent drop.
+    @discardableResult
+    func mergeMembershipLedger(_ other: MeshMembershipLedger) -> [MeshMembershipRecordRejection] {
+        let before = membershipVerifier?.roster
+        let rejections = membershipVerifier?.merge(other) ?? []
+        for rejection in rejections {
+            FernletAuditLog.log(
+                "mesh.membershipEvent.rejected",
+                context: ["type": "merge", "reason": rejection.diagnosticDescription]
+            )
+        }
+        if membershipVerifier?.roster != before { requestRotation(cause: .merge) }
+        return rejections
+    }
+
+    // MARK: - Durable session context (network migration P3 item 5, plan §3.6, §8.1)
+
+    /// **The single save seam.** Writes this device's `MeshSessionContext` through the sealed store,
+    /// optionally adding one epoch head first.
+    ///
+    /// Item 5 wires exactly one caller pair — the rotation, on both the coordinator and the member
+    /// side, before the new epoch is distributed or acknowledged. The general "who saves when"
+    /// cadence (admission, heartbeat, develop, ceiling) is item 6's, and it extends this function
+    /// rather than adding a second writer: two writers over one five-state load is how a refusal
+    /// becomes an overwrite.
+    ///
+    /// - Parameter head: The epoch head to merge into `epochHeads`, or nil to save the context as
+    ///   it stands.
+    /// - Returns: `true` when the bytes are on disk. `false` means the caller must **not** proceed:
+    ///   the load refused, deferred or found a corrupt file, or the seal itself refused. Every
+    ///   false is named in ``lastRotationBlockReason`` and the audit log (plan §3.6).
+    @discardableResult
+    func persistSessionContext(addingEpochHead head: MeshEpochRef?) -> Bool {
+        guard let mesh = currentMesh else {
+            recordRotationBlock("There is no mesh to persist a session context for.")
+            return false
+        }
+        let sessionStore = MeshSessionStore(scope: store.meshSessionStorage)
+        let existing: MeshSessionContext?
+        let token: MeshSessionStore.LoadToken
+        switch sessionStore.load() {
+        case .loaded(let context, let loadToken):
+            existing = context
+            token = loadToken
+        case .absent(let loadToken):
+            existing = nil
+            token = loadToken
+        case .deferred(let deferral):
+            recordRotationBlock("The sealed session context could not be read: \(deferral.reason.rawValue).")
+            return false
+        case .corrupt(let corruption):
+            recordRotationBlock("The sealed session context is unreadable: \(String(describing: corruption.detail)).")
+            return false
+        case .refused(let refusal):
+            recordRotationBlock("The sealed session context refused to open: \(refusal.cause.rawValue).")
+            return false
+        }
+        return writeSessionContext(
+            base: existing, mesh: mesh, head: head, token: token, store: sessionStore
+        )
+    }
+
+    /// Builds the context to write (reusing the loaded one when its mesh matches) and seals it.
+    private func writeSessionContext(
+        base: MeshSessionContext?,
+        mesh: MeshDescriptor,
+        head: MeshEpochRef?,
+        token: MeshSessionStore.LoadToken,
+        store sessionStore: MeshSessionStore
+    ) -> Bool {
+        // A context for ANOTHER mesh is replaced, never merged: records never cross meshes.
+        var context = (base?.meshID == mesh.meshID ? base : nil) ?? MeshSessionContext(
+            meshID: mesh.meshID,
+            protocolVersion: MeshChannelIntroductionFormat.protocolVersion,
+            createdAt: mesh.createdAt,
+            hardDeadline: mesh.createdAt.addingTimeInterval(Self.sessionCeilingSeconds)
+        )
+        if let ledger = membershipVerifier?.ledger { context.ledger = ledger }
+        if let head {
+            context.epochHeads = MeshEpochAcceptance.mergedHeads(context.epochHeads, adding: head)
+        }
+        do {
+            try sessionStore.save(context, token: token)
+            return true
+        } catch {
+            recordRotationBlock("The session context could not be sealed: \(String(describing: error)).")
+            return false
+        }
     }
 
     /// `.meshMemberDeparture` / `.meshTerminated` / `.meshInventoryDigest` — the membership-event
@@ -1584,6 +1802,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.membershipEvent.droppedNoLedger", context: ["type": type.rawValue])
             return
         }
+        let rosterBefore = membershipVerifier?.roster
         switch type {
         case .meshMemberDeparture:
             if let payload = try? decoder.decode(MeshMemberDeparturePayload.self, from: plaintext) {
@@ -1600,6 +1819,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         default:
             break
         }
+        rotateIfRosterChanged(from: rosterBefore)
+    }
+
+    /// Plan §8.3's roster-change trigger: a verified record that MOVED the derived roster rotates
+    /// the group key. A refused record, or one that changes nothing a roster can see (a duplicate
+    /// re-gossip, an inventory digest), triggers nothing — which is what keeps a peer from spending
+    /// this device's rotations by replaying records it already holds.
+    private func rotateIfRosterChanged(from before: MeshDerivedRoster?) {
+        guard membershipVerifier?.roster != before else { return }
+        requestRotation(cause: .membership)
     }
 
     /// Verifies a peer's digest and remembers it, so a later item can ask for the records this
@@ -2482,7 +2711,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // authorization guards in `handleAdmissionGrant`. Deliberately just the two fields, not
         // `clearGroupKeyState()` — no rotation/beacon timer is running pre-mesh, and cancelling
         // them here would be an unrelated behaviour change.
-        currentGroupKey = nil
+        clearEpochKeyring()
         localJoinedEpoch = 0
         let now = Date()
         let localFP = identity.localFingerprint
@@ -3047,6 +3276,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if let slot = slots.first(where: { $0.fingerprint == proposal.targetFingerprint }) {
             disconnectSlot(slot)
         }
+        // Plan §8.3: a completed removal is a roster change, so it rotates the group key at once
+        // rather than letting the voted-out member keep it until the next 15-minute tick. The
+        // record is minted first so the rotation's exclusion rule can see it.
+        emitApprovedRemovalRecord(proposal)
+        requestRotation(cause: .membership)
         if var mesh = currentMesh {
             mesh.members.removeAll { $0.fingerprint == proposal.targetFingerprint }
             currentMesh = mesh
@@ -3180,6 +3414,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
            let keyData = unwrappedAdmissionGrantKey(bundle) {
             let newKey = MeshGroupKey(epoch: grant.currentKeyEpoch, keyBytes: keyData, activeSince: Date())
             currentGroupKey = newKey
+            // The joiner names the epoch from the roster it just joined — the same deterministic
+            // coordinator every member of that branch computes (plan §8.4).
+            if let ref = epochRef(
+                counter: grant.currentKeyEpoch, coordinatorFingerprint: epochCoordinatorFingerprint
+            ) {
+                adoptEpoch(ref, key: newKey)
+            }
             localJoinedEpoch = grant.currentKeyEpoch
             recordEpoch(grant.currentKeyEpoch, since: newKey.activeSince)
         } else {
@@ -4095,19 +4336,114 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 return
             }
             guard !Task.isCancelled, let self else { return }
-            if self.isLocalCoordinator() {
-                await self.initiateRotation()
-            }
+            self.requestRotation(cause: .timer)
         }
+    }
+
+    // MARK: - Rotation triggers (network migration P3 item 5, plan §8.3)
+
+    /// The ONE entry point to key rotation: the 15-minute timer, any roster change, any merge.
+    ///
+    /// Every caller goes through ``MeshRotationTriggerQueue``, which is what makes a burst of
+    /// records rotate once and what stops a second rotation starting while one is in flight. The
+    /// coordinator check happens at *fire* time rather than here, so a trigger raised moments
+    /// before this device takes over coordination is not silently dropped.
+    func requestRotation(cause: MeshKeyRotationCause) {
+        let outcome = rotationTriggers.request(cause, at: Date())
+        switch outcome {
+        case .scheduled(let target, _):
+            armRotationDebounce(firingAt: target)
+        case .coalesced, .queuedBehindInFlight:
+            return   // a window (or a rotation) already owns this cause
+        }
+    }
+
+    /// Arms the SINGLE debounce task (R3: cancel-and-replace, one task at most).
+    private func armRotationDebounce(firingAt target: Date) {
+        rotationDebounceTask?.cancel()
+        let delay = max(0, target.timeIntervalSinceNow)
+        rotationDebounceTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return   // cancelled: a cancelled window must never rotate (R7)
+            }
+            guard !Task.isCancelled, let self else { return }
+            await self.runDebouncedRotation()
+        }
+    }
+
+    /// Claims the debounced cause and runs one rotation, then re-arms anything that arrived while
+    /// it was in flight. Non-coordinators claim nothing — they consume the trigger and stop.
+    private func runDebouncedRotation() async {
+        guard let cause = rotationTriggers.claim(at: Date()) else { return }
+        if isLocalCoordinator() {
+            await initiateRotation(cause: cause)
+        }
+        rearmDeferredRotation()
+    }
+
+    /// Re-arms the window for a trigger that arrived mid-rotation, so a deferred trigger is
+    /// deferred rather than dropped.
+    private func rearmDeferredRotation() {
+        guard let outcome = rotationTriggers.finish(at: Date()) else { return }
+        if case .scheduled(let target, _) = outcome { armRotationDebounce(firingAt: target) }
     }
 
     // MARK: - Phase 3: Rotation protocol
 
-    /// Coordinator entry point for a 15-minute key rotation.
-    private func initiateRotation() async {
+    /// Coordinator entry point for a key rotation, whatever triggered it (plan §8.3).
+    ///
+    /// The order of the four steps is load-bearing. The epoch is **planned** before anything moves
+    /// (a plan that cannot mint a successor ends the session instead of serving a permanent key),
+    /// the drain runs, the head is **persisted before the rotation is acknowledged or distributed**
+    /// (plan §3.6 — a rotation nobody could write down must not be one peers act on), and only then
+    /// is the key wrapped for the recipients the exclusion rule allows.
+    private func initiateRotation(cause: MeshKeyRotationCause) async {
         let closingEpoch = currentGroupKey?.epoch ?? 0
+        guard let plan = plannedRotation() else { return }
+        guard case .rotate(let nextEpoch) = plan else {
+            if case .terminate = plan { await terminateForExhaustedEpochs() }
+            return
+        }
+        let acked = await drainForRotation(closingEpoch: closingEpoch)
+        guard let acked else { return }   // cancelled mid-drain: nothing was distributed
 
-        // Step 1: Broadcast sync + update the beacon with the next rotation timestamp.
+        // Durable BEFORE acknowledged (plan §3.6): a refused or deferred save abandons the
+        // rotation with the reason named, rather than handing out a key no restart can explain.
+        guard persistSessionContext(addingEpochHead: nextEpoch) else { return }
+
+        lastRotationCause = cause
+        lastRotationBlockReason = nil
+        await distributeRotation(nextEpoch, cause: cause, acked: acked, closingEpoch: closingEpoch)
+    }
+
+    /// Plans the next epoch, or names why there will not be one.
+    ///
+    /// - Returns: nil when this device cannot even name a coordinator (no mesh yet) — the same
+    ///   "do nothing" as a refusal, logged the same way.
+    private func plannedRotation() -> MeshRotationPlan? {
+        guard let coordinator = epochCoordinatorFingerprint,
+              coordinator == identity.localFingerprint else {
+            recordRotationBlock("This device is not the deterministic coordinator of its roster.")
+            return nil
+        }
+        let plan = MeshRotationPolicy.plan(
+            head: epochKeyring?.head,
+            coordinatorFingerprint: coordinator,
+            meshID: meshID,
+            presentedRoster: presentedRotationRoster()
+        )
+        if case .refuse(let refusal) = plan {
+            recordRotationBlock(refusal.diagnosticDescription)
+        }
+        return plan
+    }
+
+    /// Step 1–2: announce the closing epoch, re-arm the timer, and collect the drain acks.
+    ///
+    /// - Returns: The acking fingerprints, or nil when the rotation was cancelled mid-drain.
+    private func drainForRotation(closingEpoch: Int) async -> Set<String>? {
         let sync = MeshRotationSyncPayload(closingEpoch: closingEpoch)
         for slot in slots {
             await sendEnvelope(.meshRotationSync, encodable: sync, via: slot)
@@ -4117,7 +4453,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         scheduleRotationTimer(fireAt: nextAt)
         broadcastCoordinatorBeacon()
 
-        // Step 2: Collect sync-acks for up to 10 seconds.
         pendingRotationAcks.removeAll()
         pendingRotationClosingEpoch = closingEpoch
         let expectedAckers = Set(activeSlots.compactMap(\.fingerprint))
@@ -4132,22 +4467,51 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 // nobody is waiting for (R7).
                 pendingRotationClosingEpoch = nil
                 pendingRotationAcks.removeAll()
-                return
+                return nil
             }
         }
         pendingRotationClosingEpoch = nil
+        return pendingRotationAcks.intersection(expectedAckers)
+    }
 
-        // Step 3: Generate new key and distribute to acked members + self.
+    /// Step 3: mint the key, wrap it for the permitted recipients only, send, and adopt.
+    private func distributeRotation(
+        _ nextEpoch: MeshEpochRef,
+        cause: MeshKeyRotationCause,
+        acked: Set<String>,
+        closingEpoch: Int
+    ) async {
         // `SystemRandomNumberGenerator` (behind `UInt8.random`) is the platform CSPRNG, so this is
         // the same key material without the pointer seam (R9) or the discarded OSStatus (R7) the
         // SecRandomCopyBytes spelling had — a failed RNG can no longer ship an all-zero group key.
         let newKeyBytes = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
-        let newEpoch = closingEpoch + 1
-        let ackedFingerprints = pendingRotationAcks.intersection(expectedAckers)
-        let allRecipients = ackedFingerprints.union([identity.localFingerprint])
+        let recipients = MeshRotationPolicy.recipients(
+            acked: acked,
+            selfFingerprint: identity.localFingerprint,
+            derivedRoster: membershipVerifier?.roster,
+            locallyRemoved: removedMemberFingerprints
+        )
+        let perMember = wrappedGroupKey(newKeyBytes, for: recipients)
+        let rotation = MeshKeyRotationPayload(
+            newEpoch: closingEpoch + 1,
+            perMember: perMember,
+            rotationInitiatedAt: Date(),
+            coordinatorFingerprint: identity.localFingerprint,
+            cause: cause
+        )
+        for slot in slots {
+            await sendEnvelope(.meshKeyRotation, encodable: rotation, via: slot)
+        }
+        // Apply new key locally (unwrap self-encrypted copy).
+        applyRotatedKeyLocally(perMember[identity.localFingerprint], ref: nextEpoch)
+        pendingRotationAcks.removeAll()
+    }
 
+    /// Pairwise-wraps one group key for each recipient that has a handshake-verified key-agreement
+    /// key. A recipient with no verified key gets no copy — never the descriptor's gossiped value.
+    private func wrappedGroupKey(_ keyBytes: Data, for recipients: Set<String>) -> [String: Data] {
         var perMember: [String: Data] = [:]
-        for fp in allRecipients {
+        for fp in recipients {
             let kaKey: Data
             if fp == identity.localFingerprint {
                 kaKey = identity.localKeyAgreementPublicKey
@@ -4159,7 +4523,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 continue
             }
             do {
-                perMember[fp] = try identity.encryptGroupKey(newKeyBytes, for: kaKey)
+                perMember[fp] = try identity.encryptGroupKey(keyBytes, for: kaKey)
             } catch {
                 // That member simply gets no copy this epoch (they rejoin on the next grant) —
                 // named rather than silent (R7). Context carries no fingerprint.
@@ -4169,20 +4533,35 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 )
             }
         }
+        return perMember
+    }
 
-        let rotation = MeshKeyRotationPayload(
-            newEpoch: newEpoch,
-            perMember: perMember,
-            rotationInitiatedAt: Date(),
-            coordinatorFingerprint: identity.localFingerprint
-        )
-        for slot in slots {
-            await sendEnvelope(.meshKeyRotation, encodable: rotation, via: slot)
+    /// The roster this device presents with a rotation: the derived roster when the ledger knows
+    /// one, else the gossiped descriptor's members plus self.
+    ///
+    /// It must be the same set ``epochCoordinatorFingerprint`` takes its minimum from, or this
+    /// device would present a roster it is not the coordinator of and refuse its own rotation.
+    private func presentedRotationRoster() -> [String] {
+        if let roster = membershipVerifier?.roster, !roster.members.isEmpty {
+            return roster.memberFingerprints
         }
+        let members = currentMesh?.members.map(\.fingerprint) ?? []
+        return Array(Set(members + [identity.localFingerprint])).sorted()
+    }
 
-        // Apply new key locally (unwrap self-encrypted copy).
-        applyRotatedKeyLocally(perMember[identity.localFingerprint], epoch: newEpoch)
-        pendingRotationAcks.removeAll()
+    /// Records a rotation that did not happen: audit line plus the readable reason (R7 — a blocked
+    /// rotation is never silent).
+    private func recordRotationBlock(_ reason: String) {
+        lastRotationBlockReason = reason
+        FernletAuditLog.log("mesh.keyRotation.blocked", context: ["reason": reason])
+    }
+
+    /// Plan §8.4's counter cap, reached: this mesh can mint no further epoch, so it cannot retire
+    /// the key it is serving. Emit the signed termination and end the session — never a trap.
+    private func terminateForExhaustedEpochs() async {
+        recordRotationBlock("The mesh has exhausted its epoch counters and must end.")
+        await sendMembershipEvent(.meshTerminated)
+        leaveSession()
     }
 
     /// Unwraps a grant's group-key bundle. A generic failure still falls through to the keyless
@@ -4203,21 +4582,63 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Unwraps the coordinator's own copy of a freshly minted key. A failure here means the
     /// coordinator distributed a key it cannot itself read, so it is surfaced and the key dropped
     /// rather than silently keeping the closed epoch (R7).
-    private func applyRotatedKeyLocally(_ selfBundle: Data?, epoch: Int) {
+    private func applyRotatedKeyLocally(_ selfBundle: Data?, ref: MeshEpochRef) {
         guard let selfBundle else { return }
         do {
             let keyData = try identity.decryptGroupKey(selfBundle)
-            let newKey = MeshGroupKey(epoch: epoch, keyBytes: keyData, activeSince: Date())
+            let newKey = MeshGroupKey(epoch: Int(ref.counter), keyBytes: keyData, activeSince: Date())
             currentGroupKey = newKey
-            recordEpoch(epoch, since: newKey.activeSince)
+            adoptEpoch(ref, key: newKey)
+            recordEpoch(newKey.epoch, since: newKey.activeSince)
         } catch {
             FernletAuditLog.log(
                 "mesh.keyRotation.selfUnwrapFailed",
                 context: ["error": String(describing: error)]
             )
             meshError = "Couldn't start the new session key. Rejoining…"
-            currentGroupKey = nil
+            clearEpochKeyring()
         }
+    }
+
+    /// Moves the held ``MeshEpochKeyring`` onto a newly adopted epoch, starting the old head's
+    /// grace window (plan §8.4).
+    ///
+    /// A refusal from the keyring is **logged, not fatal**: it means the ref did not strictly
+    /// supersede the head (a replay, or a divergent branch at the same counter), and the caller has
+    /// already applied its own monotonicity guard to the key itself. Rebuilding the keyring on a
+    /// refusal would silently retire predecessors that are still inside their grace window.
+    private func adoptEpoch(_ ref: MeshEpochRef, key: MeshGroupKey) {
+        guard var keyring = epochKeyring else {
+            epochKeyring = MeshEpochKeyring(head: ref, key: key)
+            return
+        }
+        do {
+            try keyring.rotate(to: ref, key: key, at: Date())
+            epochKeyring = keyring
+        } catch {
+            FernletAuditLog.log(
+                "mesh.epochKeyring.rotationRefused",
+                context: ["reason": String(describing: error)]
+            )
+        }
+    }
+
+    /// Drops the keyring with the key it names. Called wherever `currentGroupKey` goes to nil, so
+    /// the two never disagree about whether this device is on an epoch.
+    private func clearEpochKeyring() {
+        currentGroupKey = nil
+        epochKeyring = nil
+    }
+
+    /// The ``MeshEpochRef`` a peer's rotation or grant names, derived from the counter and the
+    /// coordinator both sides already agree on — no wire change, exactly as item 4 designed it.
+    private func epochRef(counter: Int, coordinatorFingerprint: String?) -> MeshEpochRef? {
+        guard counter >= 0, let coordinator = coordinatorFingerprint else { return nil }
+        return MeshEpochRef.minted(
+            counter: UInt32(clamping: counter),
+            coordinatorFingerprint: coordinator,
+            meshID: meshID
+        )
     }
 
     /// Arms the SINGLE in-flight rotation-sync drain (R3: bounded task fan-out).
@@ -4264,9 +4685,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
 
         guard let myBundle = payload.perMember[identity.localFingerprint] else {
-            // Excluded from this rotation — surface a non-modal warning and initiate rejoin.
+            // Excluded from this rotation — surface a non-modal warning and initiate rejoin. This
+            // is the branch a removed or departed member lands in (plan §8.3), and the reason its
+            // old key still opens in-flight frames for at most the predecessor grace window.
             meshError = "You were excluded from the key rotation. Rejoining…"
-            currentGroupKey = nil
+            clearEpochKeyring()
             if let mesh = currentMesh {
                 sendAdmissionRequest(for: mesh)
             }
@@ -4284,7 +4707,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 context: ["error": String(describing: error)]
             )
             meshError = "Couldn't join the new session key. Rejoining…"
-            currentGroupKey = nil
+            clearEpochKeyring()
             if let mesh = currentMesh {
                 sendAdmissionRequest(for: mesh)
             }
@@ -4292,13 +4715,32 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let newKey = MeshGroupKey(epoch: payload.newEpoch, keyBytes: keyData, activeSince: Date())
         currentGroupKey = newKey
+        adoptRotatedEpoch(payload, key: newKey)
         recordEpoch(payload.newEpoch, since: newKey.activeSince)
 
+        // Durable BEFORE acknowledged (plan §3.6): the ack is this member's statement that it is on
+        // the new epoch, so the head is written first. A blocked save skips the ack — named, never
+        // silent — rather than claiming a state a restart could not reproduce.
+        guard persistSessionContext(addingEpochHead: epochKeyring?.head) else { return }
         // Send rotation-ack back to the coordinator.
         let ack = MeshKeyAckPayload(epoch: payload.newEpoch, memberFingerprint: identity.localFingerprint)
         if let coordinatorSlot = slots.first(where: { $0.fingerprint == payload.coordinatorFingerprint }) {
             await sendEnvelope(.meshKeyAck, encodable: ack, via: coordinatorSlot)
         }
+    }
+
+    /// Moves the keyring onto the epoch a coordinator's rotation names, re-deriving the ref from
+    /// the counter and coordinator the frame already carries (no wire change — item 4's design).
+    /// The rotation's `cause` is recorded for diagnostics only; it never changes what is accepted.
+    private func adoptRotatedEpoch(_ payload: MeshKeyRotationPayload, key: MeshGroupKey) {
+        lastRotationCause = payload.cause
+        guard let ref = epochRef(
+            counter: payload.newEpoch, coordinatorFingerprint: payload.coordinatorFingerprint
+        ) else {
+            FernletAuditLog.log("mesh.epochKeyring.refNotDerivable")
+            return
+        }
+        adoptEpoch(ref, key: key)
     }
 
     /// Coordinator: collect acks from members.
@@ -4399,6 +4841,28 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The radio this manager is driving, so a test can assert WHICH one it selected — and, when it
     /// injected a fake, read back what the manager asked the radio to do.
     var transportForTesting: any MeshTransportSession { transport }
+
+    /// This manager's identity, so a unit test can mint the signed membership records the verifier
+    /// would otherwise refuse. `internal` for `@testable` unit tests only.
+    var identityForTesting: IdentityService { identity }
+
+    /// Fires with the membership event that reached ``sendMembershipEvent(_:)``'s broadcast — the
+    /// only observation point for a frame whose wire write a unit test cannot see (the slot channel
+    /// is detached). Mirrors `onSessionHeartSendForTesting`.
+    @ObservationIgnored var onMembershipEventSentForTesting: ((PayloadType) -> Void)?
+
+    /// Puts this manager on a named epoch without a rotation, so a test can start from the counter
+    /// cap (plan §8.4's terminate-rather-than-trap edge) or from a superseded predecessor.
+    func seedEpochKeyringForTesting(head: MeshEpochRef, key: MeshGroupKey) {
+        currentGroupKey = key
+        epochKeyring = MeshEpochKeyring(head: head, key: key)
+    }
+
+    /// Runs one rotation immediately, bypassing the debounce window (which
+    /// `MeshRotationTriggerQueueTests` covers on its own, with no wall clock).
+    func rotateNowForTesting(cause: MeshKeyRotationCause) async {
+        await initiateRotation(cause: cause)
+    }
 
     /// The callbacks this manager installed on its radio, so a unit test can fire the events a live
     /// radio drives in production (`onPeerDisconnected` above all — the retry and local-kick
@@ -4598,36 +5062,36 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
     /// gossiped descriptor's members and this device (plan §8.4's "deterministic coordinator
     /// (lowest fingerprint) of the roster set they present").
     ///
-    /// Deliberately the **descriptor** roster and not `activeSlots`: the descriptor is the roster
-    /// both ends of a converged mesh gossip and agree on, so both compute the same coordinator and
-    /// therefore the same ``MeshEpochRef`` for the same key. Two devices whose rosters have
-    /// diverged compute different coordinators — which is precisely the divergence the strict
-    /// epoch gate is meant to see, not a bug in this accessor.
+    /// Deliberately the **gossiped roster** and not `activeSlots`: the roster is what both ends of a
+    /// converged mesh agree on, so both compute the same coordinator and therefore the same
+    /// ``MeshEpochRef`` for the same key. Two devices whose rosters have diverged compute different
+    /// coordinators — which is precisely the divergence the strict epoch gate is meant to see, not
+    /// a bug in this accessor.
+    ///
+    /// It reads the **same set** ``presentedRotationRoster()`` presents — the ledger's derived
+    /// roster once it knows one, else the descriptor's members plus self. The two must move
+    /// together (P3 item 5): a coordinator taken from one set and a roster presented from another
+    /// is a rotation this device would refuse on arrival from anybody else.
     private var epochCoordinatorFingerprint: String? {
-        guard let mesh = currentMesh else { return nil }
-        return (mesh.members.map(\.fingerprint) + [identity.localFingerprint]).min()
+        guard currentMesh != nil else { return nil }
+        return presentedRotationRoster().min()
     }
 
     /// This device's current membership epoch as a canonical ``MeshEpochRef`` string, or empty when
     /// it holds no group key.
     ///
-    /// Empty is meaningful and is now a *named* case of the acceptance rule rather than a wildcard:
+    /// Empty is meaningful and is a *named* case of the acceptance rule rather than a wildcard:
     /// a peer that has not been given the group key yet cannot name an epoch, so it introduces as
     /// "no epoch" and adopts the keyed side's (``MeshEpochAcceptance/introductionVerdict(local:peer:)``).
     ///
-    /// It is also the answer when this device holds a key but cannot name the epoch honestly — no
-    /// descriptor, a non-canonical fingerprint, or a counter past ``MeshEpochBounds/counterCap``.
-    /// Claiming an epoch it cannot derive would be worse than claiming none: none is refusable by
-    /// the peer's own rule, a wrong one is a lie both sides would sign.
+    /// **Read off the held keyring** (P3 item 5), not re-derived per read. Item 4 minted a ref from
+    /// `currentGroupKey.epoch` and whatever the descriptor roster said at that instant, which meant
+    /// a descriptor merge could silently rename this device's epoch with no rotation behind it. The
+    /// keyring's head is set exactly once per adopted key, by the same derivation, from the roster
+    /// that was current when the key arrived — so it is stable for the life of the epoch and it is
+    /// the same value every other member of that branch computes.
     var epochRef: String {
-        guard let key = currentGroupKey,
-              let coordinator = epochCoordinatorFingerprint,
-              let ref = MeshEpochRef.minted(
-                  counter: UInt32(clamping: key.epoch),
-                  coordinatorFingerprint: coordinator,
-                  meshID: meshID
-              ) else { return "" }
-        return ref.canonicalString
+        epochKeyring?.head.canonicalString ?? ""
     }
 
     /// Who may connect right now, derived fresh from the mesh descriptor.

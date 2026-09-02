@@ -49,9 +49,39 @@ public protocol ProximityHost: AnyObject {
     /// sealed, and their key is wiped by service, so isolating them means isolating a
     /// ``HeartDropStorageScope`` (directory + keychain service), not just a directory.
     var proximitySupportDirectory: URL { get }
+
+    /// This host's sealed mesh-session scope (network migration P3): the directory holding
+    /// `MeshSessionContext.sealed` and the keychain service holding the key that seals it.
+    ///
+    /// Routed through the host for the same reason ``proximitySupportDirectory`` is, and with one
+    /// axis more: the seal key is wiped **by service**, so a store isolated only by directory would
+    /// still have its files un-openable the moment a concurrently-running suite ran delete-all.
+    /// The app's `FernletStore` derives both halves from seams other walls already enforce
+    /// (`MeshSessionStoreIsolationTests`); the default below keeps a test double's scope private to
+    /// its own sidecar root rather than lodging it on the production keychain row.
+    var meshSessionStorage: MeshSessionStorageScope { get }
 }
 
 public extension ProximityHost {
+
+    /// Default for hosts that do not carry their own scope (test doubles). Production resolves to
+    /// `Application Support/Fernlet` + `com.fernlet.mesh-session`, unchanged; a host on any other
+    /// sidecar root gets a service named after that root, so it can never wipe — or be wiped by —
+    /// the production row or another double's.
+    var meshSessionStorage: MeshSessionStorageScope {
+        let directory = proximitySupportDirectory
+        guard directory != ProximitySupportLayout.defaultDirectory else {
+            return MeshSessionStorageScope(
+                directory: directory,
+                keychainService: MeshSessionStorageScope.productionKeychainService
+            )
+        }
+        return MeshSessionStorageScope(
+            directory: directory,
+            keychainService: MeshSessionStorageScope.productionKeychainService
+                + ".host." + directory.lastPathComponent
+        )
+    }
     /// Default for hosts that predate the hearts opt-out (e.g. test doubles). The app's
     /// `FernletStore` overrides this with the live setting.
     var allowNearbyHearts: Bool { true }
