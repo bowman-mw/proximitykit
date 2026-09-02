@@ -281,6 +281,31 @@ comparison the dial tie-break makes, so both devices name one connection and nei
 one the other kept. The loser's close is benign: no dial-budget charge, no `onPeerDisconnected`, no
 transport error, and its own `redundantTunnelClosed` reason so a log never reads it as a refusal.
 
+**Membership is a set of signed records; the roster is derived from them** (plan §8.1). The roster
+the introduction is judged against is not stored state that somebody updates — it is
+`admitted − departed − removed`, recomputed on every read from four grow-only record sets:
+`SignedAdmissionRecord` (which keeps the existing `MeshAdmissionToken` whole rather than minting a
+second signed admission format), `SignedDepartureRecord`, `SignedRemovalRecord` and
+`SignedTerminationRecord`. `MeshMembershipRecordSet` holds one kind — deduplicated by member,
+ordered by a total order over the record's own fields, and capped — and `MeshMembershipLedger` holds
+the four; `MeshDerivedRoster` is the pure function from a ledger to who is in, who is barred, and
+whether the mesh still exists, plus the three things everything else reads off it: the
+lowest-fingerprint coordinator, the ⌊|roster|/2⌋ + 1 quorum, and whether this is the final pair.
+Because a merge is a set union, it is commutative, associative and idempotent **including its caps**
+— keeping the earliest *k* of a set is the same answer whether you cap before or after merging — so
+two devices that have seen the same records agree on the roster no matter what order, or over which
+radio, they saw them in. That is why a reconnect after a blip, a merge after a partition and a
+reload after a process death can be one code path. Two derivations are deliberately read-time rather
+than merge-time: a termination whose signer is still on a roster larger than two downgrades to that
+signer's departure, and a termination signed by a non-member is ignored — applying either at merge
+time would have made the union depend on arrival order. Departure is permanent by construction: the
+sets only grow, so a re-admission record for a departed fingerprint is subtracted straight back out,
+and rejoining means a new mesh. Nothing in this layer verifies a signature — `signature` is opaque
+bytes a record carries — so records must be signature-checked by the layer that owns the crypto
+purpose *before* they reach a ledger a roster is derived from. `MeshMembershipBounds` states the
+plan §9 caps in one place, and reuses `MeshIntroductionRoster`'s own constants rather than
+restating them: roster 8, sixteen records per kind, one termination.
+
 - ``PeerTransport``
 - ``PeerHandle``
 - ``PeerEndpointKey``
@@ -346,6 +371,13 @@ Release build the environment-reading half is compiled out entirely.
 - ``VerifyResponsePayload``
 
 ### Friend mesh sessions
+
+Internal to the module, and listed here because they are the membership model the roster is derived
+from (plan §8.1): `MeshMembershipRecordKind`, `MeshMembershipRecord`, `MeshMembershipBounds`,
+`MeshMembershipRecordOrder`, `SignedAdmissionRecord`, `SignedDepartureRecord`,
+`SignedRemovalRecord`, `SignedTerminationRecord`, `MeshCustodyHandoffSummary`,
+`MeshMembershipRecordSet`, `MeshMembershipLedger`, `MeshDerivedRoster`, `MeshRosterMember`,
+`MeshRosterStatus`.
 
 - ``MeshNetworkManager``
 - ``PeerSlot``
