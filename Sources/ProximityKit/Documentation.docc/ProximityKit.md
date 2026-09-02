@@ -519,10 +519,92 @@ which is defensible only because of *when* it happened: the store shipped in thi
 build that wrote a v1 file has ever run on a device, and `corrupt` is exactly the state that refuses
 to overwrite a file this build cannot account for. The sealing token stays `…session-context.v1`
 because it names the **crypto domain**, which did not change; `current` is what carries the shape.
+Item 6 added one field, `localTermination`, and did **not** bump: an additive optional whose absence
+decodes to nil changes no at-rest shape, and the bump rule is about narrowing, not growing.
+
+**The lifecycle is a value, and it is total** (P3 item 6, plan §8.2). ``MeshSessionState`` has ten
+states and ``MeshSessionStateMachine/transition(from:on:)`` is a pure function over (state, event):
+every pair either moves — with an ordered ``MeshSessionEffect`` list — or is refused by name
+(``MeshSessionTransitionRejection``). There is no trap, because most of these events arrive from the
+wire. Effect **order** is the durable-before-acknowledged rule made mechanical: `persistContext`
+precedes every effect that tells anybody anything, and `MeshNetworkManager` abandons the rest of the
+list when a save fails.
+
+The edges, as a list:
+
+| from | event | to | effects |
+| --- | --- | --- | --- |
+| `idle` | `founded` / `joined` | `joining` | persist |
+| `idle` | `contextRestored(.resumable)` | `localIdleStop` | offer resume |
+| `idle` | `contextRestored(.terminated/.departed)` | `terminated` / `departed` | — |
+| `idle` | `contextRestored(.expired)` | `expired` | mark, persist |
+| `joining` | `peerCommitted` | `activeForeground` | persist, clear idle timer |
+| `joining` | `linksLost` | `joining` | — (nothing committed is not a partition) |
+| `activeForeground` | `backgrounded` | `continuingInBackground` | — |
+| `continuingInBackground` | `foregrounded` | `activeForeground` | — |
+| `activeForeground` / `continuingInBackground` | `linksLost` | `partitioned` | arm idle timer |
+| `partitioned` | `linksRestored` / `peerCommitted` | `activeForeground` | clear idle timer, **merge** |
+| `partitioned` | `idleLapsed` | `localIdleStop` | stop participation |
+| `localIdleStop` | `resumedAfterLapse` | `activeForeground` | start radios, **merge** |
+| any live | `developed` | `handingOff` | mark, persist, stop |
+| any live | `departureRequested` / `terminationRequested` | `handingOff` | mark, persist |
+| any live | `terminationVerified` | `terminated` | mark, persist, stop |
+| any live | `removed` | `departed` | mark, persist, stop |
+| any live | `hardDeadlineReached` | `expired` | mark, persist, stop |
+| `handingOff` | `departureSent` / `terminationSent` | `departed` / `terminated` | stop |
+| `departed` / `terminated` / `expired` | anything | — | refused `sessionAlreadyEnded` |
+
+**A disconnect is not a removal** (invariant 1): losing the last committed link moves the *session*
+to `partitioned` and mints nothing — the ledger, the derived roster and the peer's admission are
+untouched, so the reconnect needs no re-admission and the returning member is still a key recipient.
+A member the roster actually *removed* stays excluded by `MeshRotationPolicy.recipients`.
+
+**Idle-lapse resume and partition heal are one mechanism**, and it is the merge path (plan §10.3):
+`resumeSessionAfterLapse(mergingLedger:peerEpochHead:)` goes through `mergeMembershipLedger(_:)` and
+`MeshEpochAcceptance`, where two branches that rotated independently at the same counter **coexist**
+in `epochHeads` until a merge mints a strictly greater successor. Never a fresh session, never a
+silent re-key.
+
+**The ceiling is guarded at both bounds.** ``MeshSessionCeiling`` holds the signed absolute
+`hardDeadline` (± 120 s skew) *and* a local monotonic budget measured with `ContinuousClock`, clamped
+to six hours at construction. A wall clock set backwards cannot lengthen a session (the monotonic
+guard ends it anyway); one set forwards ends it only by the signed bound, and the recorded
+``MeshSessionTerminationReason`` names which bound did it.
+
+**The launch restore maps the five load states onto seven outcomes**
+(``MeshSessionRestoreOutcome``): a terminated context restores terminated, a live one inside its
+ceiling restores as `localIdleStop` with a resume on offer (a relaunch never auto-reconnects,
+invariant 5), a live one past its ceiling expires *and writes the mark*, `absent` is no session, a
+deferral and a refusal are retried apart and bounded at `MeshSessionRestoreBounds.maxAttempts`, and a
+corrupt file is quarantined. The three token-less states start no session and run no writer.
+
+**The save cadence extends the one writer**, `persistSessionContext(addingEpochHead:terminating:)` —
+there is deliberately no second door over a five-state load. It saves on founding, on a verified
+admission, on every verified record that moves the roster, on every merge, on every rotation, on a
+termination and on a departure; each caller treats a `false` as "the thing did not happen", which is
+why a refused seal abandons a founding, blocks a join acknowledgement, and **rolls a verified record
+back out of the ledger**. A developed, departed or terminated mesh is barred from rejoining by
+``MeshSessionRejoinBar``, re-derived from the sealed file at every launch so a restart cannot lift it.
 
 - ``MeshNetworkManager``
 - ``MeshSessionStore``
 - ``MeshSessionStorageScope``
+- ``MeshSessionState``
+- ``MeshSessionEvent``
+- ``MeshSessionEffect``
+- ``MeshSessionTransition``
+- ``MeshSessionTransitionRejection``
+- ``MeshSessionStateMachine``
+- ``MeshSessionCeiling``
+- ``MeshSessionCeilingBound``
+- ``MeshSessionCeilingVerdict``
+- ``MeshSessionRestore``
+- ``MeshSessionRestoreOutcome``
+- ``MeshSessionRestoredDisposition``
+- ``MeshSessionRestoreBounds``
+- ``MeshSessionRejoinBar``
+- ``MeshSessionTerminationReason``
+- ``MeshSessionLocalTermination``
 - ``PeerSlot``
 - ``SlotKind``
 - ``MeshGroupKey``

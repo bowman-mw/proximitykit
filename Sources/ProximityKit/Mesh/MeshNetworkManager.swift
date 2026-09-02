@@ -345,10 +345,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var photoSendsInFlight: Set<UUID> = []
 
     private static let rotationInterval: TimeInterval = 15 * 60   // 15 minutes
-    /// Plan §8.2's absolute membership ceiling, stamped into the persisted
-    /// `MeshSessionContext.hardDeadline` at creation. **Recording it is item 5's; enforcing it is
-    /// item 6's** — nothing here ends a session on it yet.
-    private static let sessionCeilingSeconds: TimeInterval = 6 * 60 * 60   // 6 hours
     private static let beaconInterval: TimeInterval = 20          // 20 seconds
     private static let beaconLivenessTimeout: TimeInterval = 45   // 45 seconds
     /// How long the coordinator waits for sync-acks before minting the next key, and how often it
@@ -1013,8 +1009,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The send is **awaited before the teardown**, which is the whole reason this function is
     /// `async` and separate from ``leaveSession()``: `leaveSession` stops the radio, so a
     /// fire-and-forget departure would race the transport it needs.
+    /// **Durable before acknowledged (P3 item 6, plan §3.6).** The departure is written into the
+    /// sealed context first; only then does the signed frame go out. A save that fails abandons the
+    /// emit — a device that told its peers it left and then came back thinking it had not is worse
+    /// than one that leaves quietly — and the local teardown happens either way, because refusing
+    /// to end a session the user asked to end is not an option this code gets to take.
     public func leaveSessionAfterNotifyingPeers() async {
-        await sendMembershipEvent(.meshMemberDeparture)
+        let transition = applySessionEvent(.departureRequested)
+        // A REFUSED transition (no session was ever started through the machine) leaves the emit
+        // alone; only a taken transition whose save failed blocks it.
+        let blockedByStore = transition.nextState != nil && lastSessionEffectFailure != nil
+        if !blockedByStore {
+            await sendMembershipEvent(.meshMemberDeparture)
+            applySessionEvent(.departureSent)
+        }
         leaveSession()
     }
 
@@ -1139,7 +1147,48 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // authorize the bootstrap admission. Joining an existing mesh adopts a ledger instead —
         // that path belongs to item 7, where the shipping roster starts deriving from records.
         prepareMembershipLedger(meshID: created.meshID, founderSigningPublicKey: identity.localSigningPublicKey)
+        // P3 item 6, plan §3.6: the context reaches the disk BEFORE the UI is shown a mesh. A mesh
+        // this device could not write down is a mesh it would not remember founding after a
+        // force-quit, so it is abandoned rather than half-created.
+        resetSessionStateMachine(keepingTerminalState: false)
+        startSessionCeiling(
+            hardDeadline: created.createdAt.addingTimeInterval(MeshSessionCeiling.ceilingSeconds),
+            startedAt: now
+        )
+        applySessionEvent(.founded)
+        guard lastSessionEffectFailure == nil else {
+            abandonUnpersistedSession()
+            return
+        }
         startSearching()
+    }
+
+    /// Undoes a session start whose context could not be sealed (plan §3.6). Deliberately narrow —
+    /// it unwinds exactly what ``startNewMesh(name:)`` had set, and never touches the rejoin bar.
+    private func abandonUnpersistedSession() {
+        FernletAuditLog.log("mesh.session.abandonedNotDurable")
+        currentMesh = nil
+        membershipVerifier = nil
+        sessionQuotaMeshID = nil
+        resetSessionStateMachine(keepingTerminalState: false)
+    }
+
+    /// Clears the run-scoped halves of the state machine.
+    ///
+    /// - Parameter keepingTerminalState: `true` when a session ENDED — `departed`/`terminated`/
+    ///   `expired` is the answer to "what happened to it", and only a new session resets that. The
+    ///   rejoin bar is never cleared here; it is the durable half and it outlives every session.
+    private func resetSessionStateMachine(keepingTerminalState: Bool) {
+        sessionCeiling = nil
+        sessionMonotonicOrigin = nil
+        stagedTermination = nil
+        lastSessionEffectFailure = nil
+        lastSessionTransitionRejection = nil
+        awaitingResumeMerge = false
+        offersForegroundResume = false
+        idleLapseDeadline = nil
+        restoredSessionContext = nil
+        if !keepingTerminalState || !sessionState.hasEnded { sessionState = .idle }
     }
 
     /// Entry point for the Connect-tab proximity-join flow.
@@ -1161,6 +1210,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         approvedRemovalProposalIDs.removeAll()
         photoSessionStartedAt = Date()
         activePhotoSessionID = UUID()
+        // A new search cycle is a new session: the machine goes back to `idle` even if the last one
+        // ended (the rejoin bar for THAT mesh survives — see `resetSessionStateMachine`).
+        resetSessionStateMachine(keepingTerminalState: false)
         startSearching()
     }
 
@@ -1186,6 +1238,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         receiveQuotaMeshID = nil
         clearGroupKeyState()
         clearActiveVerifyQR()
+        // P3 item 6: the run-scoped halves of the machine go with the session; a TERMINAL state
+        // stays, because "this device departed" is the answer until a new session is started.
+        resetSessionStateMachine(keepingTerminalState: true)
         stopSearching()
     }
 
@@ -1679,7 +1734,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 proposalID: proposal.id,
                 voterFingerprints: [proposal.proposerFingerprint, identity.localFingerprint]
             )
+            let snapshot = membershipVerifier
+            let before = membershipVerifier?.roster
             recordRejection(membershipVerifier?.insert(record), type: .meshRemovalSecond)
+            if membershipVerifier?.roster != before {
+                _ = commitVerifiedRecord(rollingBackTo: snapshot, type: .meshRemovalSecond)
+            }
         } catch {
             FernletAuditLog.log(
                 "mesh.membershipEvent.signFailed",
@@ -1694,6 +1754,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Returns: One rejection per record the verifier refused — never a silent drop.
     @discardableResult
     func mergeMembershipLedger(_ other: MeshMembershipLedger) -> [MeshMembershipRecordRejection] {
+        let snapshot = membershipVerifier
         let before = membershipVerifier?.roster
         let rejections = membershipVerifier?.merge(other) ?? []
         for rejection in rejections {
@@ -1702,7 +1763,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 context: ["type": "merge", "reason": rejection.diagnosticDescription]
             )
         }
-        if membershipVerifier?.roster != before { requestRotation(cause: .merge) }
+        awaitingResumeMerge = false
+        let moved = membershipVerifier?.roster != before
+        // P3 item 6: a merge that moved the roster is only ACTED on once it is durable — the
+        // rotation it would trigger distributes a key against a roster this device could not write
+        // down otherwise (plan §3.6).
+        if moved, !commitVerifiedRecord(rollingBackTo: snapshot, type: .meshMemberDeparture) {
+            return rejections
+        }
+        if moved { requestRotation(cause: .merge) }
         return rejections
     }
 
@@ -1717,14 +1786,34 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// rather than adding a second writer: two writers over one five-state load is how a refusal
     /// becomes an overwrite.
     ///
-    /// - Parameter head: The epoch head to merge into `epochHeads`, or nil to save the context as
-    ///   it stands.
+    /// ## The save cadence (item 6, plan §3.6)
+    ///
+    /// Every one of these points calls THIS function, and every one of them treats a `false` as
+    /// "the thing did not happen":
+    ///
+    /// | when | what is not acknowledged if the save fails |
+    /// | --- | --- |
+    /// | founding a mesh | the mesh is abandoned; the UI is never shown one |
+    /// | a verified admission grant | the epoch and key are not adopted; no beacon starts |
+    /// | a verified membership record | the record is rolled back out of the ledger |
+    /// | a merge | the merged ledger is rolled back and no rotation is requested |
+    /// | every rotation (item 5) | the new epoch is not distributed |
+    /// | a departure | the signed departure is not sent |
+    /// | a termination or the ceiling | `terminated.v1` is not sent |
+    ///
+    /// - Parameters:
+    ///   - head: The epoch head to merge into `epochHeads`, or nil to save the context as it stands.
+    ///   - termination: The durable ending mark to write, or nil for a live save. A mark whose
+    ///     reason is `.developed` also sets `developedLocally`.
     /// - Returns: `true` when the bytes are on disk. `false` means the caller must **not** proceed:
     ///   the load refused, deferred or found a corrupt file, or the seal itself refused. Every
     ///   false is named in ``lastRotationBlockReason`` and the audit log (plan §3.6).
     @discardableResult
-    func persistSessionContext(addingEpochHead head: MeshEpochRef?) -> Bool {
-        guard let mesh = currentMesh else {
+    func persistSessionContext(
+        addingEpochHead head: MeshEpochRef?,
+        terminating termination: MeshSessionLocalTermination? = nil
+    ) -> Bool {
+        guard let identity = sessionContextIdentity else {
             recordRotationBlock("There is no mesh to persist a session context for.")
             return false
         }
@@ -1749,28 +1838,60 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return false
         }
         return writeSessionContext(
-            base: existing, mesh: mesh, head: head, token: token, store: sessionStore
+            base: existing, identity: identity, head: head,
+            terminating: termination, token: token, store: sessionStore
         )
+    }
+
+    /// The mesh this device would persist a context for: the live one, or — during a launch
+    /// restore, when nothing is joined yet — the one that was just loaded.
+    ///
+    /// The restored half is what lets the expiry found at launch be WRITTEN (plan §8.2's ceiling
+    /// has to survive the relaunch that noticed it), without giving the writer a second door.
+    private var sessionContextIdentity: SessionContextIdentity? {
+        if let mesh = currentMesh {
+            return SessionContextIdentity(
+                meshID: mesh.meshID,
+                createdAt: mesh.createdAt,
+                hardDeadline: mesh.createdAt.addingTimeInterval(MeshSessionCeiling.ceilingSeconds)
+            )
+        }
+        guard let restored = restoredSessionContext else { return nil }
+        return SessionContextIdentity(
+            meshID: restored.meshID, createdAt: restored.createdAt, hardDeadline: restored.hardDeadline
+        )
+    }
+
+    /// The three values a context is keyed and bounded by, from whichever source is authoritative.
+    private struct SessionContextIdentity {
+        let meshID: UUID
+        let createdAt: Date
+        let hardDeadline: Date
     }
 
     /// Builds the context to write (reusing the loaded one when its mesh matches) and seals it.
     private func writeSessionContext(
         base: MeshSessionContext?,
-        mesh: MeshDescriptor,
+        identity meshIdentity: SessionContextIdentity,
         head: MeshEpochRef?,
+        terminating termination: MeshSessionLocalTermination?,
         token: MeshSessionStore.LoadToken,
         store sessionStore: MeshSessionStore
     ) -> Bool {
         // A context for ANOTHER mesh is replaced, never merged: records never cross meshes.
-        var context = (base?.meshID == mesh.meshID ? base : nil) ?? MeshSessionContext(
-            meshID: mesh.meshID,
+        var context = (base?.meshID == meshIdentity.meshID ? base : nil) ?? MeshSessionContext(
+            meshID: meshIdentity.meshID,
             protocolVersion: MeshChannelIntroductionFormat.protocolVersion,
-            createdAt: mesh.createdAt,
-            hardDeadline: mesh.createdAt.addingTimeInterval(Self.sessionCeilingSeconds)
+            createdAt: meshIdentity.createdAt,
+            hardDeadline: meshIdentity.hardDeadline
         )
         if let ledger = membershipVerifier?.ledger { context.ledger = ledger }
         if let head {
             context.epochHeads = MeshEpochAcceptance.mergedHeads(context.epochHeads, adding: head)
+        }
+        if let termination {
+            context.localTermination = termination
+            if termination.reason == .developed { context.developedLocally = true }
         }
         do {
             try sessionStore.save(context, token: token)
@@ -1779,6 +1900,386 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             recordRotationBlock("The session context could not be sealed: \(String(describing: error)).")
             return false
         }
+    }
+
+    // MARK: - Session state machine (network migration P3 item 6, plan §8.2)
+
+    /// Where this device is in plan §8.2's lifecycle. Memory-only — the DURABLE half is the sealed
+    /// context, and a relaunch re-derives this from it (``restoreSessionContextAtLaunch(now:)``).
+    @ObservationIgnored private(set) var sessionState: MeshSessionState = .idle
+
+    /// The dual-bound ceiling for this run, armed when a session starts or is restored.
+    @ObservationIgnored private(set) var sessionCeiling: MeshSessionCeiling?
+
+    /// The monotonic origin the ceiling's second bound measures from. `ContinuousClock` keeps
+    /// counting across a wall-clock change and across device sleep, which is exactly the property
+    /// that stops a clock set backwards from lengthening a session.
+    @ObservationIgnored private var sessionMonotonicOrigin: ContinuousClock.Instant?
+
+    /// The ending mark staged by ``MeshSessionEffect/markTerminated`` for the save that follows it.
+    @ObservationIgnored private var stagedTermination: MeshSessionLocalTermination?
+
+    /// The effect that failed, if the last transition abandoned its list. Non-nil is the signal a
+    /// caller checks before acknowledging anything (plan §3.6).
+    @ObservationIgnored private(set) var lastSessionEffectFailure: MeshSessionEffect?
+
+    /// The last refused (state, event) pair, named. A refusal is never silent.
+    @ObservationIgnored private(set) var lastSessionTransitionRejection: MeshSessionTransitionRejection?
+
+    /// True between a resume/partition-heal and the merge that completes it — the flag that says
+    /// this session is being MERGED back, not started fresh (plan §10.3).
+    @ObservationIgnored private(set) var awaitingResumeMerge = false
+
+    /// Whether the foreground may offer a resume for a restored or idle-stopped session.
+    @ObservationIgnored private(set) var offersForegroundResume = false
+
+    /// When the idle window lapses, or nil when it is not armed. A value, not a timer: it is
+    /// evaluated on demand (``evaluateIdleLapse(now:)``) so nothing spins.
+    @ObservationIgnored private(set) var idleLapseDeadline: Date?
+
+    /// The mesh this device may never rejoin, and why (plan §8.2's permanent bar). Re-derived from
+    /// the sealed context at every launch, so a restart cannot resurrect an ended session.
+    @ObservationIgnored private(set) var rejoinBar: MeshSessionRejoinBar?
+
+    /// The context a launch restore opened, kept only until a session is joined or the restore is
+    /// discarded. It is what lets an expiry found at launch be written back.
+    @ObservationIgnored private(set) var restoredSessionContext: MeshSessionContext?
+
+    /// How many times the launch restore has been attempted, bounded by
+    /// ``MeshSessionRestoreBounds/maxAttempts``.
+    @ObservationIgnored private(set) var sessionRestoreAttempts = 0
+
+    /// What the last restore attempt concluded.
+    @ObservationIgnored private(set) var lastSessionRestoreOutcome: MeshSessionRestoreOutcome?
+
+    /// Plan §8.2's 30-minute idle window: no authenticated external heartbeat for this long ends
+    /// local *participation*, never membership.
+    static let idleWindowSeconds: TimeInterval = 30 * 60
+
+    /// Offers one event to the pure machine and performs whatever it returns.
+    ///
+    /// Effects run in the order the machine gave them and stop at the first failure, which is how
+    /// durable-before-acknowledged is enforced mechanically rather than remembered at each call
+    /// site: ``MeshSessionEffect/persistContext`` precedes every effect that tells anybody
+    /// anything, so a refused seal leaves the rest of the list undone and
+    /// ``lastSessionEffectFailure`` set.
+    ///
+    /// - Parameter event: What happened.
+    /// - Returns: The transition taken, or the named refusal.
+    @discardableResult
+    func applySessionEvent(_ event: MeshSessionEvent) -> MeshSessionTransition {
+        let transition = MeshSessionStateMachine.transition(from: sessionState, on: event)
+        switch transition {
+        case .rejected(let rejection):
+            lastSessionTransitionRejection = rejection
+            FernletAuditLog.log(
+                "mesh.sessionState.rejected",
+                context: ["state": sessionState.rawValue, "reason": rejection.rawValue]
+            )
+        case .moved(let next, let effects):
+            lastSessionTransitionRejection = nil
+            lastSessionEffectFailure = nil
+            sessionState = next
+            performSessionEffects(effects, for: event)
+        }
+        return transition
+    }
+
+    /// Performs an effect list in order, abandoning the remainder at the first failure.
+    private func performSessionEffects(_ effects: [MeshSessionEffect], for event: MeshSessionEvent) {
+        // R2: bounded by a constant, not by whatever the machine returned.
+        for effect in effects.prefix(MeshSessionStateMachine.maxEffectsPerTransition) {
+            guard performSessionEffect(effect, for: event) else {
+                lastSessionEffectFailure = effect
+                FernletAuditLog.log(
+                    "mesh.sessionState.effectAbandoned",
+                    context: ["effect": effect.rawValue, "state": sessionState.rawValue]
+                )
+                return
+            }
+        }
+    }
+
+    /// Performs one effect.
+    ///
+    /// - Returns: `false` only for a save that did not reach the disk — the one failure that must
+    ///   stop the rest of the list.
+    private func performSessionEffect(_ effect: MeshSessionEffect, for event: MeshSessionEvent) -> Bool {
+        switch effect {
+        case .markDeveloped, .markTerminated:
+            stageEnding(from: event)
+        case .persistContext:
+            guard persistSessionContext(addingEpochHead: nil, terminating: stagedTermination) else {
+                return false
+            }
+            stagedTermination = nil
+        case .beginMerge:
+            awaitingResumeMerge = true
+        case .startParticipation:
+            startSearching()
+        case .stopParticipation:
+            stopSearching()
+        case .armIdleTimer:
+            idleLapseDeadline = Date().addingTimeInterval(Self.idleWindowSeconds)
+        case .clearIdleTimer:
+            idleLapseDeadline = nil
+        case .offerForegroundResume:
+            offersForegroundResume = true
+        }
+        return true
+    }
+
+    /// Stages the durable ending mark for the save that follows it, and raises the in-memory rejoin
+    /// bar in the same breath — the mark and the bar are one fact, recorded together.
+    ///
+    /// The bar goes up **before** the save succeeds, deliberately: if the seal fails, this device
+    /// has still decided the session is over, and staying out of a mesh it meant to leave is the
+    /// fail-closed side of that mistake.
+    private func stageEnding(from event: MeshSessionEvent) {
+        guard let reason = event.terminationReason else { return }
+        stagedTermination = MeshSessionLocalTermination(reason: reason, at: Date())
+        barRejoin(reason: reason)
+    }
+
+    /// Records the permanent rejoin bar for the mesh this device just left or ended.
+    private func barRejoin(reason: MeshSessionTerminationReason) {
+        guard let meshID = currentMesh?.meshID ?? restoredSessionContext?.meshID else { return }
+        rejoinBar = MeshSessionRejoinBar(meshID: meshID, reason: reason)
+        FernletAuditLog.log(
+            "mesh.sessionState.rejoinBarred",
+            context: ["reason": reason.rawValue]
+        )
+    }
+
+    /// Why this device may never rejoin `meshID`, or nil if it may.
+    ///
+    /// Checked before adopting a descriptor and before accepting an admission grant: plan §8.2's
+    /// "a developed or terminated mesh can never be rejoined", enforced at both doors.
+    ///
+    /// - Parameter meshID: The mesh being offered.
+    /// - Returns: The recorded reason, or nil.
+    func rejoinRefusal(for meshID: UUID) -> MeshSessionTerminationReason? {
+        guard let bar = rejoinBar, bar.meshID == meshID else { return nil }
+        return bar.reason
+    }
+
+    // MARK: The save cadence (plan §3.6)
+
+    /// **The join-ack gate.** The sealed context must reach the disk before this device behaves as
+    /// though it has joined — before it adopts an epoch, unwraps a group key, starts a beacon or
+    /// lets the UI say "joined".
+    ///
+    /// - Returns: `true` when the context is durable, or when there is nothing to write yet (a
+    ///   grant that arrived before the mesh descriptor: the descriptor's own adoption writes it).
+    @discardableResult
+    func recordVerifiedAdmissionDurably() -> Bool {
+        guard currentMesh != nil else { return true }
+        guard sessionState != .idle else { return joinDurably() }
+        guard persistSessionContext(addingEpochHead: nil) else {
+            FernletAuditLog.log("mesh.admissionGrant.droppedNotDurable")
+            return false
+        }
+        return true
+    }
+
+    /// The first admission on a device with no session yet: `idle → joining`, which saves. A save
+    /// that fails puts the machine back where it was — a half-joined state is not a state.
+    private func joinDurably() -> Bool {
+        applySessionEvent(.joined)
+        guard lastSessionEffectFailure == nil else {
+            sessionState = .idle
+            FernletAuditLog.log("mesh.admissionGrant.droppedNotDurable")
+            return false
+        }
+        return true
+    }
+
+    /// Keeps a just-verified record only if the context that now contains it reached the disk.
+    ///
+    /// The rollback is the point: plan §3.6 says a record is not "inserted for roster purposes"
+    /// until it is durable, and the verifier is a value, so restoring the snapshot is exactly the
+    /// ledger as it was. Without it, a force-quit between a verified insert and a refused seal
+    /// would leave two devices deriving different rosters from the "same" records.
+    ///
+    /// - Parameters:
+    ///   - snapshot: The verifier as it was before the insert.
+    ///   - type: The frame the record arrived in, for the audit line.
+    /// - Returns: `true` when the record is durable and may be acted on.
+    private func commitVerifiedRecord(
+        rollingBackTo snapshot: MeshMembershipRecordVerifier?,
+        type: PayloadType
+    ) -> Bool {
+        guard persistSessionContext(addingEpochHead: nil) else {
+            membershipVerifier = snapshot
+            FernletAuditLog.log("mesh.membershipEvent.notDurable", context: ["type": type.rawValue])
+            return false
+        }
+        return true
+    }
+
+    // MARK: Ceiling (both bounds)
+
+    /// Arms the dual-bound ceiling for this run.
+    ///
+    /// - Parameters:
+    ///   - hardDeadline: The signed absolute deadline from the descriptor or restored context.
+    ///   - startedAt: The wall-clock instant this run began; read once, here.
+    func startSessionCeiling(hardDeadline: Date, startedAt: Date) {
+        sessionCeiling = MeshSessionCeiling(hardDeadline: hardDeadline, startedAt: startedAt)
+        sessionMonotonicOrigin = ContinuousClock.now
+    }
+
+    /// Judges the session against both ceiling bounds without changing anything.
+    ///
+    /// - Parameters:
+    ///   - now: The wall-clock instant, for the signed bound.
+    ///   - monotonicElapsed: Seconds of local runtime since the ceiling was armed. Nil measures it
+    ///     from the held `ContinuousClock` origin; tests pass a value instead of waiting.
+    /// - Returns: The verdict, or nil when no ceiling is armed.
+    func sessionCeilingVerdict(now: Date, monotonicElapsed: TimeInterval?) -> MeshSessionCeilingVerdict? {
+        guard let ceiling = sessionCeiling else { return nil }
+        let elapsed = monotonicElapsed ?? measuredMonotonicElapsed()
+        return ceiling.verdict(now: now, monotonicElapsed: elapsed)
+    }
+
+    /// Seconds since the ceiling was armed, from the monotonic clock. Zero when nothing is armed.
+    private func measuredMonotonicElapsed() -> TimeInterval {
+        guard let origin = sessionMonotonicOrigin else { return 0 }
+        let elapsed = origin.duration(to: ContinuousClock.now)
+        return TimeInterval(elapsed.components.seconds)
+    }
+
+    /// Enforces the ceiling: at either bound the session is marked terminated, the mark is
+    /// persisted, `terminated.v1` is sent, and local participation ends (plan §8.2).
+    ///
+    /// The emit is **awaited** rather than fired through ``emitMembershipEvent(_:)``'s task,
+    /// exactly as ``terminateForExhaustedEpochs()`` does and for the same reason: the teardown that
+    /// follows stops the radio the frame needs. A refused save abandons the emit — an expiry
+    /// nobody could write down is not announced (plan §3.6).
+    ///
+    /// - Parameters:
+    ///   - now: The wall-clock instant to judge against.
+    ///   - monotonicElapsed: Local runtime seconds, or nil to measure.
+    /// - Returns: The verdict, or nil when no ceiling is armed.
+    @discardableResult
+    func enforceSessionCeiling(now: Date, monotonicElapsed: TimeInterval?) async -> MeshSessionCeilingVerdict? {
+        guard let verdict = sessionCeilingVerdict(now: now, monotonicElapsed: monotonicElapsed) else {
+            return nil
+        }
+        guard case .reached(let bound) = verdict else { return verdict }
+        let transition = applySessionEvent(.hardDeadlineReached(bound))
+        guard transition.nextState == .expired, lastSessionEffectFailure == nil else { return verdict }
+        await sendMembershipEvent(.meshTerminated)
+        leaveSession()
+        return verdict
+    }
+
+    /// Plan §8.2's idle window, evaluated on demand.
+    ///
+    /// - Parameter now: The instant to measure against.
+    /// - Returns: `true` when the window had lapsed and the lapse was applied.
+    @discardableResult
+    func evaluateIdleLapse(now: Date) -> Bool {
+        guard let deadline = idleLapseDeadline, now >= deadline else { return false }
+        return applySessionEvent(.idleLapsed).nextState == .localIdleStop
+    }
+
+    // MARK: Launch restore (the durable half)
+
+    /// Loads the sealed context at launch and maps all five load states onto what a launch may do.
+    ///
+    /// Nothing here reconnects: invariant 5 says a relaunch never auto-reconnects, so even a
+    /// perfectly live context lands in ``MeshSessionState/localIdleStop`` with a resume on offer.
+    /// The three states that carry no `LoadToken` start no session and run no writer — a deferral
+    /// and a refusal are retried (bounded, and logged apart), and a corrupt file is quarantined
+    /// rather than overwritten.
+    ///
+    /// - Parameter now: The instant the ceiling is judged against.
+    /// - Returns: The outcome, also kept in ``lastSessionRestoreOutcome``.
+    @discardableResult
+    func restoreSessionContextAtLaunch(now: Date) -> MeshSessionRestoreOutcome {
+        sessionRestoreAttempts += 1
+        let sessionStore = MeshSessionStore(scope: store.meshSessionStorage)
+        let outcome = MeshSessionRestore.outcome(
+            for: sessionStore.load(), selfFingerprint: identity.localFingerprint, now: now
+        )
+        lastSessionRestoreOutcome = outcome
+        FernletAuditLog.log("mesh.sessionRestore.outcome", context: ["outcome": outcome.logToken])
+        if case .quarantineCorruptFile(let corruption) = outcome {
+            quarantineRestoredContext(corruption, store: sessionStore)
+        }
+        restoredSessionContext = outcome.context
+        if let context = outcome.context {
+            startSessionCeiling(hardDeadline: context.hardDeadline, startedAt: now)
+        }
+        // An ending the FILE already records bars the rejoin straight away: the transition below
+        // carries no new reason for it (nothing was discovered, it was read), so the bar is set
+        // here rather than left to `barRejoin(reason:)`.
+        if case .terminated(let context, let reason) = outcome {
+            rejoinBar = MeshSessionRejoinBar(meshID: context.meshID, reason: reason)
+        }
+        applySessionEvent(.contextRestored(outcome.disposition))
+        return outcome
+    }
+
+    /// Sets a corrupt file aside. The quarantine is the ONLY route from `corrupt` to a writer, and
+    /// this device does not take it any further — no session starts on a file it could not read.
+    private func quarantineRestoredContext(_ corruption: MeshSessionCorruption, store sessionStore: MeshSessionStore) {
+        do {
+            _ = try sessionStore.quarantineCorruptFile(corruption)
+        } catch {
+            FernletAuditLog.log(
+                "mesh.sessionRestore.quarantineFailed",
+                context: ["error": String(describing: error)]
+            )
+        }
+    }
+
+    /// Re-attempts a restore that deferred or was refused, up to
+    /// ``MeshSessionRestoreBounds/maxAttempts`` in total.
+    ///
+    /// Called on unlock or foreground, never on a timer: a deferral means "ask again when custody
+    /// changes", and a bounded count of asks is the difference between that and a busy loop.
+    ///
+    /// - Parameter now: The instant the ceiling is judged against.
+    /// - Returns: The new outcome, or nil when nothing was pending or the attempts are spent.
+    @discardableResult
+    func retrySessionRestoreIfPending(now: Date) -> MeshSessionRestoreOutcome? {
+        guard let last = lastSessionRestoreOutcome, last.isRetryable else { return nil }
+        guard sessionRestoreAttempts < MeshSessionRestoreBounds.maxAttempts else {
+            FernletAuditLog.log("mesh.sessionRestore.attemptsExhausted")
+            return nil
+        }
+        return restoreSessionContextAtLaunch(now: now)
+    }
+
+    /// Resumes a lapsed or partitioned session **through the merge path** (plan §8.2, §10.3).
+    ///
+    /// Idle-lapse resume and partition heal are deliberately one mechanism: the ledgers are merged
+    /// through ``mergeMembershipLedger(_:)``, and the peer's epoch head is merged into
+    /// `epochHeads`, where a same-counter divergent epoch **coexists** with this device's own
+    /// (plan §8.4) until a merge mints a strictly greater successor. Nothing here starts a fresh
+    /// session, and nothing re-keys silently — the rotation, if any, comes from the roster having
+    /// moved, with cause `.merge`.
+    ///
+    /// - Parameters:
+    ///   - other: The ledger the returning peer presented.
+    ///   - head: The epoch head that peer presented, if any.
+    /// - Returns: One rejection per record the verifier refused — never a silent drop.
+    @discardableResult
+    func resumeSessionAfterLapse(
+        mergingLedger other: MeshMembershipLedger,
+        peerEpochHead head: MeshEpochRef?
+    ) -> [MeshMembershipRecordRejection] {
+        let transition = applySessionEvent(.resumedAfterLapse)
+        if transition.nextState == nil {
+            applySessionEvent(.linksRestored)
+        }
+        let rejections = mergeMembershipLedger(other)
+        if let head {
+            persistSessionContext(addingEpochHead: head)
+        }
+        return rejections
     }
 
     /// `.meshMemberDeparture` / `.meshTerminated` / `.meshInventoryDigest` — the membership-event
@@ -1802,6 +2303,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.membershipEvent.droppedNoLedger", context: ["type": type.rawValue])
             return
         }
+        let snapshot = membershipVerifier
         let rosterBefore = membershipVerifier?.roster
         switch type {
         case .meshMemberDeparture:
@@ -1819,6 +2321,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         default:
             break
         }
+        // P3 item 6, plan §3.6: a record that moved the roster is durable before it counts. The
+        // rollback inside `commitVerifiedRecord` is what keeps "verified" and "remembered" the
+        // same set after a refused seal.
+        guard membershipVerifier?.roster != rosterBefore else { return }
+        guard commitVerifiedRecord(rollingBackTo: snapshot, type: type) else { return }
         rotateIfRosterChanged(from: rosterBefore)
     }
 
@@ -2312,6 +2819,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             removeSlot(slot)
         }
         locallyKickedEndpoints.remove(peer.endpoint)
+        // P3 item 6 / invariant 1: **a disconnect is not a removal.** Losing the last committed
+        // link moves the SESSION to `partitioned` and arms the idle window; it mints no record,
+        // does not touch the ledger, and leaves the derived roster exactly as it was, so the peer
+        // that comes back needs no re-admission.
+        if wasCommitted, currentMesh != nil, !slots.contains(where: { $0.fingerprint != nil }) {
+            applySessionEvent(.linksLost)
+        }
         // In proximity join: if the link dropped before the peer committed and we are the
         // designated inviter (higher session id), retry up to maxPeerRetries times. Without this, a
         // transient socket failure permanently strands the session because the browser won't
@@ -2690,6 +3204,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         // Exchange vouch lists after every successful identity verification
         Task { [weak self] in await self?.sendVouchList(to: slot) }
+
+        // P3 item 6: the first committed peer makes a joining session active (plan §8.2).
+        if currentMesh != nil { applySessionEvent(.peerCommitted) }
 
         // Phase 3: start the beacon loop and, if we are the coordinator, schedule the first rotation.
         if currentMesh != nil && beaconTimer == nil {
@@ -3119,6 +3636,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.descriptor.droppedOversizedMembership")
             return
         }
+        // P3 item 6, plan §8.2: a mesh this device developed, left or saw terminated is never
+        // re-entered, so its descriptor is not adopted or merged — not even after a relaunch, which
+        // re-derives the bar from the sealed context.
+        if let reason = rejoinRefusal(for: descriptor.meshID) {
+            FernletAuditLog.log("mesh.descriptor.droppedRejoinBarred", context: ["reason": reason.rawValue])
+            return
+        }
         let incoming = Self.sanitizedDescriptor(descriptor)
         if let existing = currentMesh {
             mergeMeshDescriptor(existing, incoming: incoming)
@@ -3382,6 +3906,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                                       slot: PeerSlot?,
                                       senderSigningPublicKey: Data?) {
         guard currentMesh == nil || currentMesh?.meshID == grant.meshID else { return }
+        // P3 item 6, plan §8.2: a developed or terminated mesh can never be rejoined, and the bar
+        // is re-derived from the sealed context at launch, so a restart does not lift it.
+        if let reason = rejoinRefusal(for: grant.meshID) {
+            FernletAuditLog.log("mesh.admissionGrant.droppedRejoinBarred", context: ["reason": reason.rawValue])
+            return
+        }
         guard admissionGrantIsAuthorized(grant, slot: slot, senderSigningPublicKey: senderSigningPublicKey) else {
             return
         }
@@ -3406,6 +3936,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.admissionGrant.droppedStaleEpoch")
             return
         }
+        // P3 item 6, plan §3.6: the admission is verified, so the context is written BEFORE this
+        // device adopts the epoch, unwraps the key or starts a beacon — before, in other words,
+        // anything tells the user or the peers that it has joined.
+        guard recordVerifiedAdmissionDurably() else { return }
+
         // Single use: the request it answered is now spent.
         if let slot { outstandingAdmissionRequestBySlot.removeValue(forKey: slot.id) }
 
@@ -4560,7 +5095,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// the key it is serving. Emit the signed termination and end the session — never a trap.
     private func terminateForExhaustedEpochs() async {
         recordRotationBlock("The mesh has exhausted its epoch counters and must end.")
-        await sendMembershipEvent(.meshTerminated)
+        // P3 item 6: the ending is written down before it is announced (plan §3.6). A refused save
+        // still ends the session locally — the mesh genuinely cannot mint another epoch — but it
+        // does not tell the peers something this device could not record.
+        let transition = applySessionEvent(.terminationRequested(.epochCounterExhausted))
+        if transition.nextState == nil || lastSessionEffectFailure == nil {
+            await sendMembershipEvent(.meshTerminated)
+            applySessionEvent(.terminationSent)
+        }
         leaveSession()
     }
 

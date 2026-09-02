@@ -67,6 +67,82 @@ nonisolated enum MeshSessionContextDecodingError: Error, Equatable, Sendable {
     case unsupportedSchemaVersion(Int)
 }
 
+// MARK: - MeshSessionTerminationReason
+
+/// Why this device's participation in a mesh ended, for good (plan §8.2).
+///
+/// Frozen English `rawValue`s: they are written into the sealed context and read back after a
+/// relaunch, so they are at-rest tokens and never localize. The display copy that a UI would show
+/// for "this session has ended" is forked separately and does not live here.
+///
+/// The distinction ``endsTheMeshForEveryone`` draws is plan §8.3's: a departure or a removal takes
+/// **this device** out of a mesh that carries on without it, while a termination, a development or
+/// the ceiling ends the mesh itself.
+nonisolated enum MeshSessionTerminationReason: String, Codable, Equatable, Sendable, CaseIterable {
+
+    /// This device sent its own signed departure record.
+    case ownDeparture = "own-departure"
+
+    /// A verified removal record named this device (plan §10.4's vote completed elsewhere).
+    case removedFromRoster = "removed-from-roster"
+
+    /// A peer's `terminated.v1` verified against the merged roster.
+    case verifiedTerminationRecord = "verified-termination"
+
+    /// This device signed the termination as a member of the final pair.
+    case finalPairTermination = "final-pair"
+
+    /// The signed absolute `hardDeadline` was reached.
+    case hardDeadlineSigned = "hard-deadline-signed"
+
+    /// The local monotonic guard reached the ceiling first — a wall clock that moved backwards
+    /// cannot lengthen a session (plan §8.2).
+    case hardDeadlineMonotonic = "hard-deadline-monotonic"
+
+    /// The epoch counter cap was reached, so no further key can be minted (plan §8.4).
+    case epochCounterExhausted = "epoch-counter-exhausted"
+
+    /// The user developed the mesh: a permanent rejoin bar.
+    case developed = "developed"
+
+    /// Whether this reason ends the mesh for every member, as opposed to only for this device.
+    var endsTheMeshForEveryone: Bool {
+        switch self {
+        case .ownDeparture, .removedFromRoster: return false
+        case .verifiedTerminationRecord, .finalPairTermination, .hardDeadlineSigned,
+             .hardDeadlineMonotonic, .epochCounterExhausted, .developed:
+            return true
+        }
+    }
+}
+
+// MARK: - MeshSessionLocalTermination
+
+/// The durable mark that this device's participation in a mesh ended (plan §8.2's rejoin bar).
+///
+/// Written into the sealed context **before** the frame that tells anybody about it is sent (plan
+/// §3.6), which is what makes the bar survive a force-quit: a session that ended and then died
+/// before it could say so still comes back ended.
+nonisolated struct MeshSessionLocalTermination: Codable, Equatable, Sendable {
+
+    /// Why it ended. A frozen token.
+    let reason: MeshSessionTerminationReason
+
+    /// When this device recorded the ending. Diagnostic and ordering only — the *authority* is the
+    /// signed record or the ceiling, never this timestamp.
+    let at: Date
+
+    /// Builds a mark.
+    ///
+    /// - Parameters:
+    ///   - reason: Why the session ended.
+    ///   - at: When this device recorded it.
+    init(reason: MeshSessionTerminationReason, at: Date) {
+        self.reason = reason
+        self.at = at
+    }
+}
+
 // MARK: - MeshSessionContext
 
 /// Everything one device durably knows about one mesh session (plan §8.1).
@@ -147,6 +223,22 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
     /// have to move when routing lands. Nil until P5 writes one; never a display string.
     var routingInventoryDigest: String?
 
+    /// The durable ending mark (P3 item 6, plan §8.2). Nil while this device is still a member.
+    ///
+    /// **Additive, so the schema stays at 2.** The at-rest shape does not move: a context written
+    /// before this field existed decodes with a nil mark (``init(from:)`` uses `decodeIfPresent`),
+    /// and a context written with one is refused by no reader that ever shipped, because no build
+    /// with the old shape has ever run on a device (see ``MeshSessionContextSchema``). A bump would
+    /// be owed only if the field NARROWED an existing one, which is precisely what took epochHeads
+    /// from 1 to 2.
+    ///
+    /// The ledger cannot carry this on its own: an ending recorded here is often one this device
+    /// signed for itself (its own departure, the ceiling), and the verifier is fail-closed against
+    /// a ledger that holds no admission for the signer — so the ending would be refused into the
+    /// very record set that was supposed to remember it. This field is the honest home until item
+    /// 7 gives joiners a real ledger.
+    var localTermination: MeshSessionLocalTermination?
+
     /// Builds a context, stamping the current schema version and clamping ``epochHeads``.
     ///
     /// - Parameters:
@@ -159,6 +251,7 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
     ///   - lastExternalHeartbeat: Last authenticated heartbeat, if any.
     ///   - developedLocally: Whether this device has developed the mesh.
     ///   - routingInventoryDigest: P5's inventory digest, if any.
+    ///   - localTermination: The durable ending mark, if this device's participation has ended.
     init(
         meshID: UUID,
         protocolVersion: Int,
@@ -168,7 +261,8 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         epochHeads: [MeshEpochRef] = [],
         lastExternalHeartbeat: Date? = nil,
         developedLocally: Bool = false,
-        routingInventoryDigest: String? = nil
+        routingInventoryDigest: String? = nil,
+        localTermination: MeshSessionLocalTermination? = nil
     ) {
         self.schemaVersion = MeshSessionContextSchema.current
         self.meshID = meshID
@@ -180,6 +274,25 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         self.lastExternalHeartbeat = lastExternalHeartbeat
         self.developedLocally = developedLocally
         self.routingInventoryDigest = routingInventoryDigest
+        self.localTermination = localTermination
+    }
+
+    /// The ending this context already records, or nil while this device is still a member.
+    ///
+    /// Four independent authorities, checked in the order of how *specific* they are: the durable
+    /// mark this device wrote, its own development flag, a verified termination record in the
+    /// ledger, and its own departure record. Any one of them is a permanent bar — plan §8.2's
+    /// "a developed or terminated mesh can never be rejoined" — and a relaunch re-derives it from
+    /// exactly these bytes, which is what stops a restart resurrecting an ended session.
+    ///
+    /// - Parameter selfFingerprint: This device's fingerprint, for the own-departure check.
+    /// - Returns: The reason, or nil.
+    func recordedEndingReason(selfFingerprint: String) -> MeshSessionTerminationReason? {
+        if let mark = localTermination { return mark.reason }
+        if developedLocally { return .developed }
+        if ledger.termination != nil { return .verifiedTerminationRecord }
+        if ledger.departures.contains(fingerprint: selfFingerprint) { return .ownDeparture }
+        return nil
     }
 
     /// Decodes a context, refusing any schema version this build does not own and clamping the
@@ -206,5 +319,8 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         lastExternalHeartbeat = try container.decodeIfPresent(Date.self, forKey: .lastExternalHeartbeat)
         developedLocally = try container.decodeIfPresent(Bool.self, forKey: .developedLocally) ?? false
         routingInventoryDigest = try container.decodeIfPresent(String.self, forKey: .routingInventoryDigest)
+        localTermination = try container.decodeIfPresent(
+            MeshSessionLocalTermination.self, forKey: .localTermination
+        )
     }
 }
