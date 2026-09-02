@@ -380,7 +380,39 @@ from (plan §8.1): `MeshMembershipRecordKind`, `MeshMembershipRecord`, `MeshMemb
 `MeshRosterStatus`. The sealed store's own internal vocabulary is `MeshSessionContext`,
 `MeshSessionContextSchema`, `MeshSessionContextDecodingError`, `MeshSessionLoad`,
 `MeshSessionSealRefusal`, `MeshSessionDeferral`, `MeshSessionCorruption`, `MeshSessionSaveError`,
-`MeshSessionSealKey` and `MeshSessionSealKeyOutcome`.
+`MeshSessionSealKey` and `MeshSessionSealKeyOutcome`. P3 item 3 added the membership events that
+move those records between devices: `MeshMembershipEventFormat`, `MeshRecordIdentity`,
+`MeshInventoryDigest`, `MeshMemberDeparturePayload`, `MeshTerminationPayload`,
+`MeshInventoryDigestPayload`, `MeshMembershipRecordVerifier`, `MeshMembershipRecordRejection`,
+`MeshLegacyGoodbyeOutcome` and `MeshMembershipGoodbyeInterop`.
+
+**Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
+the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
+frozen English spelling, so one grep finds every layer that touches those bytes:
+
+| token | record | signed by | crypto domain |
+| --- | --- | --- | --- |
+| `fernlet.mesh.member-admission.v1` | `SignedAdmissionRecord` | an existing member, or the founder | `Signature.meshAdmissionTokenV2` (the token's own) |
+| `fernlet.mesh.member-departure.v1` | `SignedDepartureRecord` | the departing member | `Signature.meshMemberDepartureV1` |
+| `fernlet.mesh.member-removal.v1` | `SignedRemovalRecord` | the tallier, citing ⌊\|roster\|/2⌋ + 1 votes | `Signature.meshMemberRemovalV1` |
+| `fernlet.mesh.terminated.v1` | `SignedTerminationRecord` | a final-pair member | `Signature.meshTerminatedV1` |
+| `fernlet.mesh.inventory-digest.v1` | — (a message, not a record) | any member | `Signature.meshInventoryDigestV1` over a `Hash.meshInventoryDigestV1` digest |
+
+**Nothing enters a ledger unverified.** ``MeshMembershipRecordSet`` is pure algebra and will merge
+whatever it is handed; ``MeshMembershipRecordVerifier`` is the only door. That matters because the
+sets are capped at sixteen and keep the EARLIEST records, so unverified junk with a low timestamp
+would crowd a real removal out of the set on every device it reached. Signing keys come from the
+ledger's own admissions, never from the record being checked; the single exception is the bootstrap
+admission, rooted in a founder key the caller authenticated elsewhere.
+
+**Legacy `fernlet.session.bye.v1`: parsed, never emitted.** A goodbye is unsigned, so the strongest
+thing it can mean is "this link is going away" — the peer is **disconnected, not departed** (plan
+§8.2). ``MeshMembershipGoodbyeInterop`` states that rule in code, including a
+`departureRecord(forGoodbyeFrom:)` that is always nil: departures are grow-only and permanent, so
+an unsigned frame that could mint one would make eviction forgeable by anybody who can reach the
+link, with no way to undo it. New builds send ``PayloadType/meshMemberDeparture`` instead; deciding
+*when* is a state-machine transition, and `MeshNetworkManager.emitMembershipEvent(_:)` is the seam
+plan items 5–6 fill.
 
 **The one durable surface, and the four that stay memory-only.** P3 item 2 reversed this module's
 old blanket "ProximityKit persists nothing" rule (plan §17.3), and the reversal is narrow on
@@ -442,6 +474,9 @@ that never reached the disk.
 - ``MeshCoordinatorBeaconPayload``
 - ``MeshEncryptedMetadataPayload``
 - ``EncryptedMetadataInner``
+
+Membership-event frames are internal to the module and listed above, not here: they carry signed
+records rather than app-visible state.
 
 ### Presence and closeness
 

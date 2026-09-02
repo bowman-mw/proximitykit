@@ -968,14 +968,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         leaveMesh()
     }
 
-    /// Notify connected peers before tearing down transport so they can review their session photos.
+    /// Ends the session and tears down transport.
+    ///
+    /// **No longer sends `.sessionGoodbye`** (network migration P3 item 3, plan §8.3): the legacy
+    /// goodbye is parsed, never emitted. It was an unsigned courtesy frame, so a receiver could
+    /// only ever read it as "this link is going away" — which is exactly what the transport
+    /// disconnect that follows already says. The signed replacement is
+    /// ``PayloadType/meshMemberDeparture``, and deciding WHEN to send one is a state-machine
+    /// transition: ``emitMembershipEvent(_:)`` is the seam items 5–6 fill, because a departure
+    /// must ship together with the rotation that excludes the leaver from the new epoch.
+    ///
+    /// The name is kept so the app's leave path does not move in the same commit as the wire
+    /// change; peers still see the session end, via the disconnect rather than via a frame.
     public func leaveSessionAfterNotifyingPeers() async {
-        for slot in slots {
-            // DO NOT LOCALIZE "Session ended" — for `.sessionGoodbye` the summary IS the whole body,
-            // so this literal is signed wire bytes AND the row every peer sees in its Connection
-            // Inspector. See `FernletIdentityEnvelope.payloadSummary`.
-            await sendEnvelope(.sessionGoodbye, encodable: PayloadSummary(title: "Session ended"), via: slot)
-        }
         leaveSession()
     }
 
@@ -1084,7 +1089,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             keyAgreementPublicKey: identity.localKeyAgreementPublicKey,
             joinedAt: now
         )
-        currentMesh = MeshDescriptor(
+        let created = MeshDescriptor(
             meshID: UUID(),
             name: meshName,
             mode: .open,
@@ -1095,6 +1100,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             modeSetBy: localFP,
             createdAt: now
         )
+        currentMesh = created
+        // P3 item 3: this device founded the mesh, so its own signing key is the one key that can
+        // authorize the bootstrap admission. Joining an existing mesh adopts a ledger instead —
+        // that path belongs to item 7, where the shipping roster starts deriving from records.
+        prepareMembershipLedger(meshID: created.meshID, founderSigningPublicKey: identity.localSigningPublicKey)
         startSearching()
     }
 
@@ -1127,6 +1137,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     public func leaveMesh() {
         currentMesh = nil
+        // Membership records are scoped to one mesh; carrying a ledger across meshes would let a
+        // record about member X in mesh A be read against mesh B's roster.
+        membershipVerifier = nil
+        peerInventoryDigests.removeAll()
         isSessionOpen = true
         pendingAdmissionRequests.removeAll()
         pendingRemovalProposals.removeAll()
@@ -1441,8 +1455,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             dispatchRemovalPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
         case .meshEncryptedMetadata, .meshCoordinatorBeacon, .meshRotationSync, .meshKeyRotation, .meshKeyAck:
             dispatchGroupKeyPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
+        case .meshMemberDeparture, .meshTerminated, .meshInventoryDigest:
+            dispatchMembershipEventPayload(payloadType, plaintext: plaintext, decoder: decoder, slot: slot)
         case .sessionGoodbye:
-            if let slot { removeSlot(slot) }
+            // Parsed, never emitted (plan §8.3). A goodbye is UNSIGNED, so it can only mean "this
+            // link is going away" — `MeshMembershipGoodbyeInterop` is where that rule is stated and
+            // where it is proven that no departure record can be derived from one. Membership is
+            // untouched: the peer stays on the derived roster and may reconnect.
+            if case .disconnected = MeshMembershipGoodbyeInterop.outcome(forGoodbyeFrom: peer?.fingerprint),
+               let slot {
+                removeSlot(slot)
+            }
         default:
             dispatchRegistryPayload(payloadType, envelope: envelope, plaintext: plaintext, peer: peer, slot: slot)
         }
@@ -1487,6 +1510,124 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         default:
             break
         }
+    }
+
+    // MARK: - Membership events (network migration P3 item 3, plan §8.3)
+
+    /// The verified membership ledger for the current mesh (plan §8.1).
+    ///
+    /// **Receive-side only, deliberately.** Item 3 wires the three membership-event frames as far
+    /// as *decode → verify → insert*; nothing here emits, and nothing yet derives the shipping
+    /// roster from it — pointing `MeshIntroductionAuthority` at `admitted − departed − removed` is
+    /// item 7, and persisting it through ``MeshSessionStore`` is item 6. Until then it is the
+    /// authoritative record of what this device has verified, and it is fail-closed by
+    /// construction: with no admission records, every departure arrives from a fingerprint the
+    /// ledger cannot produce a key for and is refused as ``MeshMembershipRecordRejection/signerNotAdmitted``.
+    ///
+    /// Memory-only, like every other mesh-session value the manager holds; it owes no wipe row
+    /// until item 6 gives it a sealed home.
+    @ObservationIgnored private(set) var membershipVerifier: MeshMembershipRecordVerifier?
+
+    /// The last inventory digest each peer told us it holds, keyed by fingerprint (plan §10.5).
+    ///
+    /// A hint, never an authority: it says only whether a full record exchange is worth its bytes.
+    /// Bounded by the roster cap so a peer cannot grow it, and cleared with the session.
+    @ObservationIgnored private(set) var peerInventoryDigests: [String: MeshInventoryDigest] = [:]
+
+    /// Prepares the verified ledger for a mesh, keyed to the founder's signing key.
+    ///
+    /// Idempotent for the same mesh so a re-broadcast descriptor cannot discard verified records;
+    /// a DIFFERENT mesh id replaces the ledger outright, because records never cross meshes.
+    func prepareMembershipLedger(meshID: UUID, founderSigningPublicKey: Data?) {
+        if let existing = membershipVerifier, existing.meshID == meshID { return }
+        membershipVerifier = MeshMembershipRecordVerifier(
+            meshID: meshID,
+            founderSigningPublicKey: founderSigningPublicKey
+        )
+        peerInventoryDigests.removeAll()
+    }
+
+    /// **The emission seam, deliberately empty in item 3.**
+    ///
+    /// Membership events are *sent* on state changes — a member developing and leaving, a quorum
+    /// completing, a final pair ending the mesh — and every one of those transitions belongs to a
+    /// later item: the state machine is item 6 and membership-driven rotation is item 5, which must
+    /// fire a rotation in the same breath as the event (plan §8.3). Wiring an emitter here, before
+    /// either exists, is how a departure ships without the rotation that makes it mean anything.
+    ///
+    /// So this is the one function items 5 and 6 fill in, and the one place to look for who sends
+    /// what. It logs the intent today so a caller wired early is visible rather than silent.
+    ///
+    /// - Parameter event: the signed frame to broadcast to every committed slot.
+    func emitMembershipEvent(_ event: PayloadType) {
+        FernletAuditLog.log("mesh.membershipEvent.emitNotWiredYet", context: ["type": event.rawValue])
+    }
+
+    /// `.meshMemberDeparture` / `.meshTerminated` / `.meshInventoryDigest` — the membership-event
+    /// family of the dispatch switch (R4: one function per case family).
+    ///
+    /// Member business, so a COMMITTED slot is required: the same boundary the removal, photo and
+    /// registry families enforce. Records are then handed to ``MeshMembershipRecordVerifier``,
+    /// which is what stops a peer inserting junk with a low timestamp and crowding a real record
+    /// out of a sixteen-slot set.
+    private func dispatchMembershipEventPayload(
+        _ type: PayloadType,
+        plaintext: Data,
+        decoder: JSONDecoder,
+        slot: PeerSlot?
+    ) {
+        guard slot?.fingerprint != nil else {
+            FernletAuditLog.log("mesh.membershipEvent.droppedUncommittedSlot", context: ["type": type.rawValue])
+            return
+        }
+        guard membershipVerifier != nil else {
+            FernletAuditLog.log("mesh.membershipEvent.droppedNoLedger", context: ["type": type.rawValue])
+            return
+        }
+        switch type {
+        case .meshMemberDeparture:
+            if let payload = try? decoder.decode(MeshMemberDeparturePayload.self, from: plaintext) {
+                recordRejection(membershipVerifier?.insert(payload.record), type: type)
+            }
+        case .meshTerminated:
+            if let payload = try? decoder.decode(MeshTerminationPayload.self, from: plaintext) {
+                recordRejection(membershipVerifier?.insert(payload.record), type: type)
+            }
+        case .meshInventoryDigest:
+            if let payload = try? decoder.decode(MeshInventoryDigestPayload.self, from: plaintext) {
+                receiveInventoryDigest(payload)
+            }
+        default:
+            break
+        }
+    }
+
+    /// Verifies a peer's digest and remembers it, so a later item can ask for the records this
+    /// device is missing (plan §10.5). A digest that DIFFERS is not an error — that is the signal.
+    private func receiveInventoryDigest(_ payload: MeshInventoryDigestPayload) {
+        guard let verifier = membershipVerifier else { return }
+        if let rejection = verifier.verify(payload) {
+            FernletAuditLog.log(
+                "mesh.membershipEvent.rejected",
+                context: ["type": PayloadType.meshInventoryDigest.rawValue,
+                          "reason": rejection.diagnosticDescription]
+            )
+            return
+        }
+        guard peerInventoryDigests[payload.senderFingerprint] != nil
+                || peerInventoryDigests.count < MeshMembershipBounds.maxRosterMembers else {
+            return   // R3: a bounded map, so a churning peer set cannot grow it without limit
+        }
+        peerInventoryDigests[payload.senderFingerprint] = payload.digest
+    }
+
+    /// Logs a refused record. Frozen English diagnostics, never user copy.
+    private func recordRejection(_ rejection: MeshMembershipRecordRejection?, type: PayloadType) {
+        guard let rejection else { return }
+        FernletAuditLog.log(
+            "mesh.membershipEvent.rejected",
+            context: ["type": type.rawValue, "reason": rejection.diagnosticDescription]
+        )
     }
 
     /// The friend-photo family: one shared photo, a manifest, or a request for missing ids
@@ -2227,12 +2368,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func disconnectSlot(_ slot: PeerSlot) {
         Task { [weak self] in
-            // DO NOT LOCALIZE "Session ended" — signed wire bytes and the receiver's Inspector row;
-            // for `.sessionGoodbye` the summary is the entire payload. See
-            // `FernletIdentityEnvelope.payloadSummary`.
-            await self?.sendEnvelope(.sessionGoodbye, encodable: PayloadSummary(title: "Session ended"), via: slot)
+            // No `.sessionGoodbye` (P3 item 3, plan §8.3): parsed, never emitted. Cancelling the
+            // coordinator IS the disconnect the goodbye used to announce, and a disconnect is all
+            // an unsigned frame could ever have meant — membership ends only via a signed
+            // departure or removal record.
             await slot.coordinator.cancel()
-            // Kick only once the goodbye is on the wire — the peer's own removal path reads it.
             self?.kickEvictedPeer(slot.peer)
         }
         clearActiveVerifyQRIfBound(to: slot.id)
