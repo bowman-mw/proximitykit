@@ -1759,6 +1759,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             guard let fingerprint = slot.fingerprint, recipients.contains(fingerprint) else { continue }
             await sendEnvelope(type, encodable: payload, via: slot)
         }
+        // The send-side half of the same DEBUG-only diagnostic ``insertMembershipRecord`` carries:
+        // a transcript that shows a frame written on one node and nothing on the other names the
+        // transport, not the membership rules. Compiled to nothing in Release.
+        MeshTransportConsoleLog.echo(
+            "membershipFrame sent \(type.rawValue) slots=\(slots.count) "
+                + "recipients=\(recipients.map { String($0.count) } ?? "all")"
+        )
         onMembershipEventSentForTesting?(type)
     }
 
@@ -2696,6 +2703,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .digest: return nil
         }
         recordRejection(rejection, type: type)
+        // A DEBUG-only console echo, for the same reason P2 item 0 gave the transport's inbound
+        // refusals one: without it, "the frame never arrived" and "the frame arrived and was
+        // refused" read identically in a `--console-pty` transcript, and a lane cannot tell a
+        // transport fault from a membership one. Compiled to nothing in Release.
+        MeshTransportConsoleLog.echo(
+            "membershipRecord \(type.rawValue) "
+                + (rejection.map(\.diagnosticDescription) ?? "accepted")
+        )
         return rejection == nil ? decoded : nil
     }
 
@@ -6224,3 +6239,132 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
         try identity.sign(transcript, purpose: FernletCryptoPurpose.Signature.meshChannelIntroductionV1)
     }
 }
+
+// MARK: - Lane C harness seam (network migration P3 item 9)
+
+#if DEBUG
+extension MeshNetworkManager {
+
+    /// Founds a mesh on the id this device ALREADY holds, instead of minting a new one.
+    ///
+    /// Lane C's founder/joiner shape needs this and nothing smaller. The QUIC transport is
+    /// members-only by construction — `MeshChannelIntroductionExchange.receive` refuses a foreign
+    /// mesh id and a stranger key — so two Simulators cannot meet at all unless each already names
+    /// the other's mesh and holds the other's key. That is what the seeded descriptor
+    /// (`FERNLET_MESH_MATRIX_MEMBERS`) is for, and it is why ``startNewMesh(name:)``, which mints a
+    /// random id and a one-member descriptor, is unreachable from the harness.
+    ///
+    /// This is the same founding, re-ordered: the seeded two-member descriptor opens the tunnel,
+    /// and then this call collapses the descriptor to **what `startNewMesh` would have produced —
+    /// this device alone** — and arms the real ledger on it (`prepareMembershipLedger` +
+    /// `seedFounderAdmission`, the shipping pair). Everything after it is the shipping path: the
+    /// joiner asks, this device grants, and the derived roster grows by a signed record.
+    ///
+    /// It does **not** drive the session state machine or restart the radios: `startNewMesh` calls
+    /// `startSearching()`, which would re-mint the Bonjour name mid-run and drop the very tunnel
+    /// the founding depends on.
+    ///
+    /// - Returns: `false` when there is no mesh, a ledger already exists, the founder admission
+    ///   could not be signed, or the context could not be sealed — each of which leaves the device
+    ///   exactly where it was.
+    public func armFounderLedgerForHarness() -> Bool {
+        guard let mesh = currentMesh, membershipVerifier == nil else { return false }
+        let founder = MeshMember(
+            fingerprint: identity.localFingerprint,
+            displayName: displayName,
+            signingPublicKey: identity.localSigningPublicKey,
+            keyAgreementPublicKey: identity.localKeyAgreementPublicKey,
+            joinedAt: Date()
+        )
+        let seeded = currentMesh
+        currentMesh = MeshDescriptor(
+            meshID: mesh.meshID, name: mesh.name, mode: mesh.mode, members: [founder],
+            nameSetAt: mesh.nameSetAt, nameSetBy: mesh.nameSetBy,
+            modeSetAt: mesh.modeSetAt, modeSetBy: mesh.modeSetBy, createdAt: mesh.createdAt
+        )
+        prepareMembershipLedger(
+            meshID: mesh.meshID, founderSigningPublicKey: identity.localSigningPublicKey
+        )
+        guard seedFounderAdmission(meshID: mesh.meshID), persistSessionContext(addingEpochHead: nil) else {
+            membershipVerifier = nil
+            currentMesh = seeded
+            return false
+        }
+        return true
+    }
+
+    /// Asks every committed slot to admit this device — the shipping emitter
+    /// (`sendAdmissionRequest(for:)`), triggered by the harness instead of by a descriptor arrival.
+    ///
+    /// The descriptor trigger is unreachable here: the joiner's seeded descriptor already lists it
+    /// as a member, so `handleMeshDescriptor` never asks. Nothing else about the join is stood in
+    /// for — the request, the grant, the token verification and the ledger bootstrap are all
+    /// shipping code.
+    ///
+    /// - Returns: `false` when there is no mesh, no committed slot, or this device already holds a
+    ///   ledger (so the join has already happened).
+    public func requestAdmissionForHarness() -> Bool {
+        guard let mesh = currentMesh, membershipVerifier == nil,
+              slots.contains(where: { $0.fingerprint != nil }) else { return false }
+        sendAdmissionRequest(for: mesh)
+        return true
+    }
+
+    /// Files a genuinely signed ``SignedRemovalRecord`` against `targetFingerprint`, bypassing
+    /// **only** plan §10.4's quorum arithmetic.
+    ///
+    /// A real quorum is impossible on two nodes: the threshold is ⌊2/2⌋ + 1 = 2 votes and the
+    /// target is not an eligible voter, so exactly one vote can ever exist and
+    /// `MeshMembershipRecordVerifier` refuses the record `quorumNotMet(required: 2, presented: 1)`.
+    /// Everything else about the record is real — this device's signature under
+    /// `meshMemberRemovalV1`, the mesh id, the target — and the *consequence* is entirely the
+    /// shipping derivation: `MeshDerivedRoster` drops the target out of `members` and into
+    /// `barred`, and the introduction refuses the peer as ``MeshIntroductionRejection/barredMember``
+    /// on its own authority, not on a hook's.
+    ///
+    /// - Returns: `false` when there is no mesh or ledger, the record could not be signed, or the
+    ///   ledger that now contains it could not be sealed.
+    public func seedRemovalRecordForHarness(targetFingerprint: String) -> Bool {
+        guard let mesh = currentMesh, let verifier = membershipVerifier else { return false }
+        do {
+            let record = try SignedRemovalRecord.signed(
+                meshID: mesh.meshID,
+                identity: identity,
+                memberFingerprint: targetFingerprint,
+                proposalID: UUID(),
+                voterFingerprints: [identity.localFingerprint]
+            )
+            var ledger = verifier.ledger
+            ledger.removals = ledger.removals.inserting(record)
+            seedMembershipLedgerForTesting(
+                meshID: verifier.meshID,
+                founderSigningPublicKey: verifier.founderSigningPublicKey,
+                ledger: ledger
+            )
+            return persistSessionContext(addingEpochHead: nil)
+        } catch {
+            FernletAuditLog.log(
+                "mesh.membershipEvent.signFailed",
+                context: ["type": "harness-removal", "error": String(describing: error)]
+            )
+            return false
+        }
+    }
+
+    /// Whether this device holds a records ledger at all — the difference between a derived roster
+    /// and the legacy descriptor fallback, which is precisely what Lane C could not read before.
+    public var harnessHasLedger: Bool { membershipVerifier != nil }
+
+    /// One line naming the **derived** roster and the epoch head, for the console transcript.
+    ///
+    /// Frozen diagnostic English, never localized and never on a wire. `ledger=absent` is the
+    /// honest answer for a device whose introduction roster is still the gossiped descriptor.
+    public var harnessMembershipSummary: String {
+        guard let derived = membershipVerifier?.roster else {
+            return "ledger=absent derived=0 barred=0 status=none epochRef=none"
+        }
+        return "ledger=present derived=\(derived.memberCount) barred=\(derived.barred.count) "
+            + "status=\(derived.status) epochRef=\(epochRef.isEmpty ? "none" : epochRef)"
+    }
+}
+#endif
