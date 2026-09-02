@@ -837,6 +837,55 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// This applies before pairwise sessions are promoted to a mesh descriptor.
     public private(set) var isSessionOpen = true
 
+    /// Whether this device may open or accept a *link* to a discovered peer right now.
+    ///
+    /// A closed mesh refuses new **members**; it does not refuse new **links**, and conflating the
+    /// two is what made three Simulators form a spanning star instead of a mesh (plan §8.7 finding
+    /// 1, runbook "Lane C — THREE nodes"). ``isSessionOpen`` is re-derived from the *gossiped*
+    /// descriptor's mode in ``handleMeshDescriptor(_:from:)``, so on a `.closed` mesh the first
+    /// committed peer's descriptor latched it false on every node — and from that instant the node
+    /// neither dialed nor accepted anybody, its own co-members included. Whichever node happened to
+    /// have both of its edges in flight before that merge became the hub, which is why the hub was
+    /// a different Simulator every run.
+    ///
+    /// Once this device holds a mesh, the roster — not this flag — decides who may connect, and it
+    /// decides it where the peer's identity is actually known: the QUIC introduction is
+    /// members-only (``roster`` answers `stranger`/`barred` before any app frame), MC's slot
+    /// coordinator refuses at its identity introduction, and joining still needs an admission the
+    /// user grants. Closing a session also still evicts uncommitted slots
+    /// (``setSessionOpen(_:)``). So a link opened here can only ever reach a peer the roster would
+    /// admit anyway — and a mesh that cannot re-dial its own members cannot heal a dropped link.
+    var mayLinkToDiscoveredPeers: Bool {
+        isSessionOpen || currentMesh != nil
+    }
+
+    /// Whether a slot whose peer identity has **just verified** may keep its seat.
+    ///
+    /// The other half of ``mayLinkToDiscoveredPeers``, and the half that keeps "closed" meaning
+    /// what it says. Relaxing the three link gates is safe on the QUIC radio because its signed
+    /// channel introduction is members-only *before any app frame*; **MC has no such stage** — it
+    /// is the shipping default (`MeshTransportFactory.shippingDefault`), its invitation carries no
+    /// identity, and the identity introduction one layer up is gated on revoked/blocked keys, not
+    /// on the roster. Without this check a stranger seated on a closed mesh would be sent this
+    /// device's signed identity introduction and then, on any ``broadcastMeshDescriptor()``, a
+    /// **plaintext** descriptor naming the mesh, every member's fingerprint, display name and both
+    /// public keys — and `setSessionOpen(false)`'s eviction of uncommitted slots would be undone by
+    /// the next discovery.
+    ///
+    /// So: an **open** mesh (and a device with no mesh) is unchanged — admitting strangers is the
+    /// join flow. A **closed** mesh keeps only peers its own roster names, asked through
+    /// ``roster`` — the single spelling of "who may connect", derived records first and the
+    /// gossiped descriptor as the documented fallback, with `barred` honoured. Admit-by-prompt
+    /// still works because ``allowAdmission(_:)`` appends the member to `currentMesh` *before* it
+    /// grants, so the requester is a member by the time it re-connects; what it does not get is a
+    /// seat it can hold while the prompt is unanswered.
+    ///
+    /// - Parameter signingPublicKey: The Ed25519 key the identity introduction verified.
+    func maySeatVerifiedPeer(signingPublicKey: Data) -> Bool {
+        guard currentMesh != nil, !isSessionOpen else { return true }
+        return roster.verdict(for: signingPublicKey) == .member
+    }
+
     /// True when at least one peer is committed (pairwise) or a mesh exists.
     public var isInSession: Bool {
         currentMesh != nil || slots.contains(where: { $0.fingerprint != nil })
@@ -3304,7 +3353,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         handlers.shouldAcceptInvitation = { [weak self] peer in
             guard let self else { return false }
             // Blocklist is enforced at identity-introduction time by the slot coordinator.
-            if self.isProximityJoin && !self.isSessionOpen { return false }
+            // A closed *mesh* must still accept its own members' links — see
+            // ``mayLinkToDiscoveredPeers``; this closure is the QUIC radio's `invitationGate`, and
+            // a false answer here is a tunnel the far side sees die with no reason on either end.
+            if self.isProximityJoin && !self.mayLinkToDiscoveredPeers { return false }
             if self.slots.count < Self.maxTotalSlots { return true }
             return self.canEvaluateOverflowCandidate(peer)
         }
@@ -3344,7 +3396,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // designated inviter (higher session id), retry up to maxPeerRetries times. Without this, a
         // transient socket failure permanently strands the session because the browser won't
         // re-fire onPeerDiscovered for a peer it already found.
-        guard isProximityJoin, isSessionOpen, !wasCommitted, !wasKickedLocally else { return }
+        guard isProximityJoin, mayLinkToDiscoveredPeers, !wasCommitted, !wasKickedLocally else { return }
         guard shouldInitiateInvite(to: peer) else { return }
         let retryCount = peerRetryCount[peer.endpoint, default: 0]
         guard retryCount < Self.maxPeerRetries else { return }
@@ -3356,7 +3408,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             } catch {
                 return
             }
-            guard let self, self.isProximityJoin, self.isSessionOpen,
+            guard let self, self.isProximityJoin, self.mayLinkToDiscoveredPeers,
                   self.slots.count < Self.maxTotalSlots,
                   !self.hasSlot(for: peer) else { return }
             self.transport.invite(peer)
@@ -3512,7 +3564,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func handlePeerDiscovered(_ peer: PeerHandle) {
         // Proximity-join mode: auto-invite every peer silently; no browse list shown.
         if isProximityJoin {
-            guard isSessionOpen else { return }
+            guard mayLinkToDiscoveredPeers else { return }
             guard shouldInitiateInvite(to: peer) else { return }
             if slots.count < Self.maxTotalSlots, !hasSlot(for: peer) {
                 transport.invite(peer)
@@ -3548,8 +3600,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// The seat decision for a freshly connected channel — see ``ChannelAdmission``.
+    ///
+    /// The third of the three link gates ``mayLinkToDiscoveredPeers`` corrects, and the one that
+    /// survived the first two being fixed: a member of a `.closed` mesh dialed its co-member,
+    /// completed the signed introduction, and was then **evicted here** — which the far side reads
+    /// as its control stream dying mid-frame (`MeshTransportError.invalidFrameLength`), re-dials,
+    /// and is evicted again. A `localEviction` loop, not a transport defect.
     func channelAdmission(for peer: PeerHandle) -> ChannelAdmission {
-        guard !isProximityJoin || isSessionOpen else { return .kick }
+        guard !isProximityJoin || mayLinkToDiscoveredPeers else { return .kick }
         guard slots.count < Self.maxSlotsDuringOverflowEvaluation else { return .kick }
         guard !hasSlot(for: peer) else { return .alreadySeated }
         return .seat
@@ -4220,17 +4278,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         currentMesh = merged
     }
 
+    /// Sends the current descriptor to every **committed** slot.
+    ///
+    /// The commit gate is defence in depth beside
+    /// ``maySeatVerifiedPeer(signingPublicKey:)``: the descriptor is a plaintext envelope naming
+    /// the mesh, every member's fingerprint, display name and both public keys, and an
+    /// uncommitted slot is by definition one whose peer has not finished proving who it is. The
+    /// loop used to walk every slot, so a pre-commit candidate — on MC, any device that had merely
+    /// connected — received it.
     private func broadcastMeshDescriptor() {
         guard let mesh = currentMesh else { return }
         let payload = MeshStateChangePayload(descriptor: mesh)
-        for slot in slots {
+        for slot in slots where slot.fingerprint != nil {
             Task { [weak self] in await self?.sendEnvelope(.meshDescriptor, encodable: payload, via: slot) }
         }
         updateDiscoveryInfo()
     }
 
+    /// Sends the current descriptor to one slot. Same gate, same reason as
+    /// ``broadcastMeshDescriptor()`` — every caller is a commit path, and the guard says so.
     private func sendMeshDescriptor(to slot: PeerSlot) async {
-        guard let mesh = currentMesh else { return }
+        guard let mesh = currentMesh, slot.fingerprint != nil else { return }
         await sendEnvelope(.meshDescriptor, encodable: MeshStateChangePayload(descriptor: mesh), via: slot)
     }
 
@@ -5850,10 +5918,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     private func checkCoordinatorStates() {
+        // Slots refused by the closed-mesh roster check, evicted AFTER the loop: `removeSlot`
+        // mutates `slots`, and the indices this loop walks must stay valid.
+        var refused: [PeerSlot] = []
         for index in slots.indices {
             if case .connected(let peerIdentity) = slots[index].coordinator.state {
                 let fp = peerIdentity.fingerprint
                 if slots[index].fingerprint != fp {
+                    // BEFORE `onSlotConnected`, which is what sends the mesh descriptor, the photo
+                    // manifest and the vouch list. A stranger on a closed mesh must never reach it
+                    // — see ``maySeatVerifiedPeer(signingPublicKey:)``. The slot's `fingerprint`
+                    // stays nil, so nothing downstream reads it as committed.
+                    guard maySeatVerifiedPeer(signingPublicKey: peerIdentity.signingPublicKey) else {
+                        FernletAuditLog.log("mesh.slot.refusedClosedMeshStranger")
+                        refused.append(slots[index])
+                        continue
+                    }
                     slots[index].fingerprint = fp
                     slots[index].verifiedSigningPublicKey = peerIdentity.signingPublicKey
                     // Store the handshake-verified KA key; used for group key wrapping (Phase 3).
@@ -5865,6 +5945,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 }
             }
         }
+        for slot in refused { removeSlot(slot) }
         // Evict slots whose coordinators have ended (e.g. timeout or transport loss).
         let stale = slots.filter { slot in
             switch slot.coordinator.state {
@@ -5885,6 +5966,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `kind` and `stableDistanceMeters` are settable because the overflow gate reads both: only a
     /// LIGHTWEIGHT slot with a settled distance makes a full mesh willing to evaluate one more
     /// candidate, which is the state the duplicate-seat check has to be exercised against.
+    /// `channel` defaults to a ``DetachedPeerChannel``, whose `send` throws — a test that does not
+    /// care what crosses the wire must not be able to pass over a send that never happened. Pass a
+    /// recording channel to assert the opposite: that a frame was NOT sent to this slot.
     func addSlotForTesting(
         coordinator: ProximityCoordinator,
         peer: PeerHandle,
@@ -5892,12 +5976,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         verifiedKeyAgreementPublicKey: Data? = nil,
         peerCapabilities: [String]? = nil,
         kind: SlotKind = .active,
-        stableDistanceMeters: Double? = nil
+        stableDistanceMeters: Double? = nil,
+        channel: (any MeshPeerChannel)? = nil
     ) {
         var slot = PeerSlot(
             id: peer.id,
             peer: peer,
-            channel: DetachedPeerChannel(peer: peer),
+            channel: channel ?? DetachedPeerChannel(peer: peer),
             coordinator: coordinator,
             kind: kind,
             fingerprint: fingerprint

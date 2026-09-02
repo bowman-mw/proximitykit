@@ -319,6 +319,17 @@ final class NetworkMeshSession {
     /// than by a timer per connection.
     nonisolated static let introductionDeadlineSeconds: TimeInterval = 10
 
+    /// Seconds between sweeps that re-offer a browsed peer this session holds no link to.
+    ///
+    /// Discovery announces a peer **once** — ``noteBrowsed(_:key:at:)`` fires only when an
+    /// advertisement is new or has changed — so an announcement the owner declines at that instant
+    /// is never repeated, and the pair is stranded for the life of the session even after whatever
+    /// made the owner decline has gone. That is one of the two halves of the three-node star (plan
+    /// §8.7 finding 1): the owner's link gate was shut when the third peer appeared, and nothing
+    /// ever asked it again. Five seconds is slow enough to be free next to a 1 Hz poll and fast
+    /// enough that a room converges while people are still standing in it.
+    nonisolated static let reproposeIntervalSeconds: TimeInterval = 5
+
     /// Whether Apple peer-to-peer Wi-Fi is requested. Simulators have no AWDL radio and reach each
     /// other over infrastructure only, which is the lane the feasibility probe validated.
     #if targetEnvironment(simulator)
@@ -437,6 +448,11 @@ final class NetworkMeshSession {
     private var advertisedFields: [String: String] = [:]
     private var listenerIsReady = false
     private var listenerIsAdvertised = false
+    /// When the re-propose sweep last ran. Nil until the first sweep, so the **first** poll tick
+    /// after the radio starts sweeps immediately and the interval governs every tick after it.
+    private var lastReproposedAt: Date?
+    /// Size of the last browse result set that was printed, so an unchanged set prints once.
+    private var lastBrowseSetCount = 0
     private(set) var isRunning = false
 
     /// Channels for every live tunnel, in no particular order.
@@ -527,6 +543,8 @@ final class NetworkMeshSession {
         tlsIdentity = nil
         listenerIsReady = false
         listenerIsAdvertised = false
+        lastReproposedAt = nil
+        lastBrowseSetCount = 0
         isRunning = false
     }
 
@@ -541,7 +559,12 @@ final class NetworkMeshSession {
         guard isRunning, let key = identities.key(for: peer) else { return }
         let admission = links.admitDial(to: key, now: Date())
         guard admission == .admit else {
-            Self.logger.debug("dial refused for \(key.rawValue, privacy: .public)")
+            // `notice` + console mirror, for the same reason ``noteInboundRefusal(_:key:)`` is:
+            // a refused dial and a dial nobody made are indistinguishable in a `--console-pty`
+            // transcript otherwise, and telling those two apart is the whole of a topology bug.
+            let line = "dial refused \(admission) for \(key.rawValue)"
+            Self.logger.notice("\(line, privacy: .public)")
+            MeshTransportConsoleLog.echo(line)
             return
         }
         startOutboundTunnel(to: key)
@@ -870,6 +893,71 @@ private extension NetworkMeshSession {
         }
         for key in Array(browsedEndpoints.keys) where !seen.contains(key) {
             noteLost(key)
+        }
+        noteBrowseSet(seen)
+    }
+
+    /// Records the browse result set whenever it changes size.
+    ///
+    /// Discovery was the one stage of the QUIC radio with no transcript at all, and the three-node
+    /// bring-up needed exactly this line: "this node never browsed that peer" and "this node
+    /// browsed it and declined to dial" are different defects with different owners, and without
+    /// the set they read identically. Size, not identity, is the trigger — a TXT record arriving
+    /// late re-announces the same peer and must not re-print the set.
+    func noteBrowseSet(_ keys: Set<MeshLinkKey>) {
+        guard keys.count != lastBrowseSetCount else { return }
+        lastBrowseSetCount = keys.count
+        let names = keys.map(\.rawValue).sorted().joined(separator: ",")
+        let line = "browsed peers=\(keys.count) [\(names)]"
+        Self.logger.notice("\(line, privacy: .public)")
+        MeshTransportConsoleLog.echo(line)
+    }
+
+    /// Re-offers every browsed peer this session holds no link to, at most once per
+    /// ``reproposeIntervalSeconds``.
+    ///
+    /// Only ``MeshLinkPhase/idle`` links are re-offered, and that is the whole safety argument: a
+    /// peer this side is dialing, connected to, backing off from or has exhausted its budget on is
+    /// left exactly as it is, so the sweep can neither double-dial nor spend a retry budget. What
+    /// it recovers is the one case discovery cannot: an announcement the owner declined — because
+    /// its session was momentarily shut, or its slots momentarily full — which
+    /// ``noteBrowsed(_:key:at:)`` will never make again for an advertisement that has not changed.
+    ///
+    /// Three things are skipped, and each closes a loop rather than an inefficiency:
+    ///
+    /// * **A peer already reachable under another key.** The losing half of a collapsed duplicate is
+    ///   returned to ``MeshLinkPhase/idle`` deliberately, so re-offering that key would re-dial a
+    ///   device this session is already connected to, every interval, forever. The comparison is the
+    ///   advertised `sid` against the `sid` on each live tunnel's ``MeshVerifiedPeer`` — the same
+    ///   value the inbound path resolves keys by.
+    /// * **Every peer, while any inbound introduction is in flight.** A pending inbound is keyed by
+    ///   its *connection id*, not by a browsed key — the peer has not said who it is yet — so this
+    ///   radio cannot tell whether the connection mid-introduction is from the very peer the sweep
+    ///   is about to dial. Deferring the whole sweep is the honest answer and it is bounded:
+    ///   ``expirePendingInbound(now:)`` runs first in the same tick and drops anything past
+    ///   ``NetworkMeshSession/introductionDeadlineSeconds``. The interval is deliberately *not*
+    ///   stamped on this path, so the sweep resumes on the first tick after the introductions
+    ///   settle rather than waiting out another interval.
+    /// * **A peer whose re-proposal budget is spent** (``MeshLinkTable/admitRepropose(_:)``). The
+    ///   owner has reasons to refuse a seat that this radio cannot see — a locally-kicked peer, a
+    ///   removed member, a capacity race — and each refusal ends the tunnel, which returns the link
+    ///   to `idle` with a full *dial* budget. Without a separate, never-refilled budget here that is
+    ///   an unbounded connect/refuse/re-dial cycle at 0.2 Hz.
+    ///
+    /// Bounded by ``browsedEndpoints``, itself bounded by ``MeshSessionIdentityMap/maxTrackedEndpoints``.
+    func reproposeIdleBrowsedPeers(now: Date) {
+        guard pendingInbound.isEmpty else { return }
+        if let last = lastReproposedAt, now.timeIntervalSince(last) < Self.reproposeIntervalSeconds {
+            return
+        }
+        lastReproposedAt = now
+        let live = Set(tunnels.values.compactMap { $0.verified?.sessionID })
+        for key in browsedEndpoints.keys.sorted(by: { $0.rawValue < $1.rawValue })
+        where tunnels[key] == nil && links.phase(of: key) == .idle {
+            let advertised = links.cachedEndpoint(key)?.advertisement[MeshLinkAdvertisement.sessionIDKey]
+            guard let advertised, !live.contains(advertised) else { continue }
+            guard links.admitRepropose(key) else { continue }
+            onPeerDiscovered?(handle(for: key))
         }
     }
 
@@ -1918,6 +2006,7 @@ private extension NetworkMeshSession {
     /// both loops are bounded by construction.
     func tick(now: Date) {
         expirePendingInbound(now: now)
+        reproposeIdleBrowsedPeers(now: now)
         for key in links.dueRetries(now: now) {
             guard browsedEndpoints[key] != nil else {
                 links.forget(key)

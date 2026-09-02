@@ -397,10 +397,16 @@ actually lives: `NetworkMeshSession`, `NetworkPeerChannel`, `MeshLinkTable`, `Me
 Internal to the module, DEBUG-only, and listed here so they are never mistaken for production
 behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroductionChaosBehaviour`.
 They exist so the rejection matrix above can be *observed on a real radio* rather than only
-enumerated at tier 1 — the runbook's Lane C, two Simulators on one Mac. Three Simulators run on
-the same lane (2026-09-02) and every pairwise property reproduces, but the graph they form is a
-spanning **star**, not a full mesh: one node holds two tunnels and the other two hold one each,
-to the hub. A run that needs every node to see every other is not yet a thing this lane carries. The mirror echoes lines the
+enumerated at tier 1 — the runbook's Lane C, two Simulators on one Mac. **Three** Simulators run on
+the same lane and form a **full mesh** (3/3 runs, 2026-09-02): every node reaches `slots total=2
+committed=2`, the derived roster converges to `derived=3` on all three, one epoch head is agreed by
+all three, and a clean departure is accepted by both survivors. They first formed a spanning *star*,
+and the cause was not in this module: `MeshNetworkManager.isSessionOpen` — the mesh-wide "admits new
+**members**" rule — was gating whether a **link** could be opened at all, so the first `.closed`
+descriptor a node merged stopped it dialing, accepting and seating its own co-members. See
+``MeshNetworkManager`` `mayLinkToDiscoveredPeers`. Two diagnostics landed with the fix and are worth
+knowing when reading a transcript: `browsed peers=<n> […]` (the browse set, on every size change) and
+`dial refused <admission> for <key>`. The mirror echoes lines the
 `Logger` already emitted and changes no decision; the chaos seam damages this side's own outbound
 introduction (a reused nonce, a flipped signature bit) or adds keys to the roster's barred set, so
 every switch can only cause a *refusal* that would not otherwise happen, never an admission. In a

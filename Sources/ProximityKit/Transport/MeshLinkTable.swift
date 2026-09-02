@@ -342,6 +342,18 @@ nonisolated struct MeshLinkTable {
     /// and departures stay re-dialable, small enough that the cache is obviously bounded.
     static let maxCachedEndpoints = 32
 
+    /// Times the re-propose sweep may offer one endpoint to the owner in a session.
+    ///
+    /// **Deliberately never reset**, unlike ``maxDialAttempts``, which `noteReady` refills on every
+    /// successful connect. That refill is right for dialing — a peer that connects and later drops
+    /// deserves a fresh campaign — and wrong for re-proposing, because the loop this bounds is
+    /// exactly *connect → the owner refuses the seat → disconnect → idle with a full budget*: a
+    /// locally-kicked peer, or a removed member, would otherwise be re-offered every sweep for the
+    /// life of the session. Six is generous for the case the sweep exists for (an owner whose gate
+    /// was momentarily shut) and finite for the case it must not sustain. Nothing else is capped by
+    /// it: the browser's own announcement and the dial retry budget are untouched.
+    static let maxReproposalsPerEndpoint = 6
+
     /// One endpoint's dial bookkeeping. Private because the phase is the only part callers reason
     /// about, and the attempt count must not be settable from outside the transitions that own it.
     private struct Link: Equatable {
@@ -351,6 +363,10 @@ nonisolated struct MeshLinkTable {
     }
 
     private var links: [MeshLinkKey: Link] = [:]
+    /// Re-proposals booked per endpoint. Bounded by the endpoint cache: entries are only ever added
+    /// for a browsed key, and they die with the cache entry in ``forget(_:)``, the oldest-first
+    /// eviction and ``removeAll()``.
+    private var reproposals: [MeshLinkKey: Int] = [:]
     private var cache: [MeshLinkKey: MeshEndpointRecord] = [:]
     /// First-seen order, for the cache's oldest-first eviction.
     private var cacheOrder: [MeshLinkKey] = []
@@ -379,6 +395,22 @@ nonisolated struct MeshLinkTable {
     /// Dial attempts already spent on this endpoint, for diagnostics and for the retry log line.
     func dialAttempts(for key: MeshLinkKey) -> Int {
         links[key]?.dialAttempts ?? 0
+    }
+
+    /// Books one re-proposal of `key` to the owner and says whether the sweep may make it.
+    ///
+    /// Booking on the *refused* answer too is the point: a cap that only counted accepted offers
+    /// would never be reached by the loop it exists to stop. See ``maxReproposalsPerEndpoint``.
+    mutating func admitRepropose(_ key: MeshLinkKey) -> Bool {
+        let spent = reproposals[key, default: 0]
+        guard spent < Self.maxReproposalsPerEndpoint else { return false }
+        reproposals[key] = spent + 1
+        return true
+    }
+
+    /// Re-proposals booked for this endpoint so far — the read a test asserts the cap through.
+    func reproposalCount(of key: MeshLinkKey) -> Int {
+        reproposals[key, default: 0]
     }
 
     // MARK: - Dialing
@@ -506,6 +538,7 @@ nonisolated struct MeshLinkTable {
     /// reports the endpoint lost *and* nothing is connected to it.
     mutating func forget(_ key: MeshLinkKey) {
         links.removeValue(forKey: key)
+        reproposals.removeValue(forKey: key)
         cache.removeValue(forKey: key)
         cacheOrder.removeAll { $0 == key }
     }
@@ -514,6 +547,7 @@ nonisolated struct MeshLinkTable {
     /// session, which is the privacy constraint that keeps this table off the wipe ledger.
     mutating func removeAll() {
         links.removeAll()
+        reproposals.removeAll()
         cache.removeAll()
         cacheOrder.removeAll()
     }
@@ -583,6 +617,9 @@ nonisolated struct MeshLinkTable {
         }
         cacheOrder.removeFirst()
         cache.removeValue(forKey: oldest)
+        // The re-propose budget is keyed by browsed endpoint, so it is bounded by this cache and
+        // must be evicted with it — otherwise a busy room grows one map without end.
+        reproposals.removeValue(forKey: oldest)
     }
 
     /// Refreshes an existing cache entry's `lastSeenAt` without inventing one for an endpoint the
