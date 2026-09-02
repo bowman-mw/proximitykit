@@ -504,8 +504,10 @@ QUIC radio judges a peer against `admitted − departed − removed` and nothing
 a member it had dropped, so `barred` was empty in production and a removed peer refused as an
 anonymous `unknownIdentity` — matrix row 3 (`barredMember`) was produced by a DEBUG chaos hook. The
 admission record keeps the member's signing key, so a verified removal or departure names a key and
-`barred` has real contents; the hook survives only to reach the branch on a two-node lane, where no
-quorum for a real removal exists. With **no** ledger the answer falls back to the gossiped
+`barred` has real contents. P3 item 9 then drove the `barredMember` branch on the radio with
+`FERNLET_MESH_CHAOS_BARRED` **unset** — a pair, a really-signed removal record, and the shipping
+derived roster's own refusal — so the hook survives only where a *real* quorum is needed
+(⌊2/2⌋ + 1 = 2 votes with the target excluded leaves one eligible voter), which takes three nodes. With **no** ledger the answer falls back to the gossiped
 descriptor's members and logs `mesh.introductionAuthority.legacyRosterFallback` once — reachable
 only in tests and in interop with a build predating these records, because a founder files its own
 admission at `startNewMesh(name:)` and a joiner files its granted one at `armJoinerLedger(_:)`.
