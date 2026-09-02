@@ -4594,12 +4594,40 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
 
     var meshID: UUID { currentMesh?.meshID ?? Self.unboundMeshID }
 
-    /// The current group-key epoch as a decimal string, or empty when this device holds no group
-    /// key. Empty is meaningful: the introduction's epoch gate admits equal-or-one-empty, because a
-    /// peer that has not been given the group key yet cannot name an epoch.
+    /// The deterministic coordinator of this mesh's epochs: the lowest fingerprint among the
+    /// gossiped descriptor's members and this device (plan §8.4's "deterministic coordinator
+    /// (lowest fingerprint) of the roster set they present").
+    ///
+    /// Deliberately the **descriptor** roster and not `activeSlots`: the descriptor is the roster
+    /// both ends of a converged mesh gossip and agree on, so both compute the same coordinator and
+    /// therefore the same ``MeshEpochRef`` for the same key. Two devices whose rosters have
+    /// diverged compute different coordinators — which is precisely the divergence the strict
+    /// epoch gate is meant to see, not a bug in this accessor.
+    private var epochCoordinatorFingerprint: String? {
+        guard let mesh = currentMesh else { return nil }
+        return (mesh.members.map(\.fingerprint) + [identity.localFingerprint]).min()
+    }
+
+    /// This device's current membership epoch as a canonical ``MeshEpochRef`` string, or empty when
+    /// it holds no group key.
+    ///
+    /// Empty is meaningful and is now a *named* case of the acceptance rule rather than a wildcard:
+    /// a peer that has not been given the group key yet cannot name an epoch, so it introduces as
+    /// "no epoch" and adopts the keyed side's (``MeshEpochAcceptance/introductionVerdict(local:peer:)``).
+    ///
+    /// It is also the answer when this device holds a key but cannot name the epoch honestly — no
+    /// descriptor, a non-canonical fingerprint, or a counter past ``MeshEpochBounds/counterCap``.
+    /// Claiming an epoch it cannot derive would be worse than claiming none: none is refusable by
+    /// the peer's own rule, a wrong one is a lie both sides would sign.
     var epochRef: String {
-        guard let key = currentGroupKey else { return "" }
-        return String(key.epoch)
+        guard let key = currentGroupKey,
+              let coordinator = epochCoordinatorFingerprint,
+              let ref = MeshEpochRef.minted(
+                  counter: UInt32(clamping: key.epoch),
+                  coordinatorFingerprint: coordinator,
+                  meshID: meshID
+              ) else { return "" }
+        return ref.canonicalString
     }
 
     /// Who may connect right now, derived fresh from the mesh descriptor.

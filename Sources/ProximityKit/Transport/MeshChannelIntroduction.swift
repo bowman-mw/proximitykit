@@ -43,9 +43,23 @@ nonisolated enum MeshChannelIntroductionFormat {
     /// Length of the TLS-exporter channel binding, which is a SHA-256 digest.
     static let channelBindingByteCount = 32
 
-    /// Cap on the epoch reference's UTF-8 length. Today's value is a short decimal counter and P3's
-    /// is a counter plus a UUID plus a 16-character fingerprint, so 96 clears both with room.
+    /// Cap on the epoch reference's UTF-8 length. P3's value is a counter plus a UUID plus a
+    /// 16-character fingerprint — ``MeshEpochBounds/canonicalStringMaxLength`` — so 96 clears it
+    /// with room. The cap is unchanged from P2 and neither is the field's length-prefixed framing:
+    /// item 4 changed the *vocabulary* written into this field, not a byte of its shape.
     static let maxEpochRefLength = 96
+
+    /// Whether an `epochRef` string is one this build will read: empty (this side holds no epoch)
+    /// or a canonical ``MeshEpochRef``.
+    ///
+    /// This is the structural half of plan §20.1's tightening. P2 accepted any string here as long
+    /// as the *other* side was empty; a reference that is not one of these two shapes is now
+    /// ``MeshIntroductionRejection/malformedHello``, checked with the other field widths before a
+    /// single epoch is compared.
+    static func isAcceptableEpochRef(_ epochRef: String) -> Bool {
+        guard epochRef.utf8.count <= maxEpochRefLength else { return false }
+        return epochRef.isEmpty || MeshEpochRef.isCanonical(epochRef)
+    }
 
     /// Cap on the session id's UTF-8 length. The same bound ``MeshLinkAdvertisement`` puts on the
     /// `sid` it publishes, deliberately: the value in the hello and the value in the TXT record are
@@ -85,8 +99,9 @@ nonisolated struct MeshChannelHello: Codable, Equatable, Sendable {
     let protocolVersion: Int
     /// The mesh this side believes the tunnel belongs to.
     let meshID: UUID
-    /// This side's current membership-epoch reference, or the empty string when it has none yet —
-    /// see ``MeshChannelIntroductionExchange`` for what "no epoch" means and why it is allowed.
+    /// This side's current membership epoch as a canonical ``MeshEpochRef`` string, or the empty
+    /// string when it has none yet — see ``MeshChannelIntroductionExchange`` for what "no epoch"
+    /// means and why it is allowed. Any other shape is a malformed hello.
     let epochRef: String
     /// This side's long-term Ed25519 signing public key: the identity the roster is checked against.
     let signingPublicKey: Data
@@ -108,7 +123,7 @@ nonisolated struct MeshChannelHello: Codable, Equatable, Sendable {
     var isWellFormed: Bool {
         signingPublicKey.count == MeshChannelIntroductionFormat.signingKeyByteCount
             && nonce.count == MeshChannelIntroductionFormat.nonceByteCount
-            && epochRef.utf8.count <= MeshChannelIntroductionFormat.maxEpochRefLength
+            && MeshChannelIntroductionFormat.isAcceptableEpochRef(epochRef)
             && sessionID.utf8.count <= MeshChannelIntroductionFormat.maxSessionIDLength
     }
 }
@@ -402,11 +417,14 @@ nonisolated enum MeshChannelIntroductionOutcome: Equatable, Sendable {
 ///
 /// **meshID must be equal.** A peer naming another mesh is refused (plan §7.2's "foreign meshID").
 ///
-/// **epochRef must converge**: equal, or one side has none (the empty string). "None" is what a
-/// peer being admitted has — it holds no group key yet — so requiring equality outright would make
-/// admission impossible. Two peers that each hold a *different* epoch are on diverged branches,
-/// which P2 has no machinery to merge, so refusing is the honest answer until plan §8.4's merge
-/// lands and relaxes this to "any epoch; the merge mints max + 1".
+/// **epochRef must converge, strictly** (plan §8.4, §20.1). Every non-empty reference must be a
+/// canonical ``MeshEpochRef`` — checked with the field widths, before any comparison — and two
+/// present references converge only when they are the *same epoch*, id and coordinator included.
+/// The empty string still means "this side holds no epoch", which is what a peer being admitted
+/// has, and that case is now a named branch of ``MeshEpochAcceptance/introductionVerdict(local:peer:)``
+/// rather than a short-circuit that skipped the comparison. Two peers on genuinely divergent
+/// branches still refuse: they coexist in the model, but they hold different group keys and P4's
+/// merge is what reconciles them.
 nonisolated struct MeshChannelIntroductionExchange {
 
     /// Which end of the tunnel this side is.
@@ -437,7 +455,11 @@ nonisolated struct MeshChannelIntroductionExchange {
             return .unsupportedProtocolVersion
         }
         guard hello.meshID == localHello.meshID else { return .foreignMesh }
-        guard Self.epochsConverge(localHello.epochRef, hello.epochRef) else { return .divergentEpoch }
+        switch MeshEpochAcceptance.introductionVerdict(local: localHello.epochRef, peer: hello.epochRef) {
+        case .converge: break
+        case .malformed: return .malformedHello
+        case .divergent: return .divergentEpoch
+        }
         guard hello.signingPublicKey != localHello.signingPublicKey else { return .selfIntroduction }
         guard hello.nonce != localHello.nonce, nonces.admit(hello.nonce) else { return .replayedNonce }
         switch roster.verdict(for: hello.signingPublicKey) {
@@ -501,9 +523,17 @@ nonisolated struct MeshChannelIntroductionExchange {
     /// nothing behind.
     var derivedTranscript: MeshChannelIntroductionTranscript? { transcript }
 
-    /// Whether two epoch references may share a tunnel: equal, or one side has none yet.
+    /// Whether two epoch references may share a tunnel, by plan §8.4's strict rule.
+    ///
+    /// A thin read of ``MeshEpochAcceptance/introductionVerdict(local:peer:)``, kept so a caller
+    /// that only wants the decision does not have to switch. It answers false for BOTH refusals —
+    /// a malformed reference and a divergent one — which is why ``receive(_:roster:nonces:)`` uses
+    /// the verdict itself: the two refusals are named differently on the wire.
     static func epochsConverge(_ local: String, _ peer: String) -> Bool {
-        local.isEmpty || peer.isEmpty || local == peer
+        switch MeshEpochAcceptance.introductionVerdict(local: local, peer: peer) {
+        case .converge: return true
+        case .malformed, .divergent: return false
+        }
     }
 
     /// The epoch reference the transcript carries: the initiator's, unless it has none.
@@ -534,8 +564,9 @@ protocol MeshIntroductionAuthority: AnyObject {
     /// The mesh the transport's tunnels belong to.
     var meshID: UUID { get }
 
-    /// This device's current membership-epoch reference, or the empty string when it holds none —
-    /// see ``MeshChannelIntroductionExchange`` for what the empty value means.
+    /// This device's current membership epoch as a canonical ``MeshEpochRef`` string, or the empty
+    /// string when it holds none — see ``MeshChannelIntroductionExchange`` for what the empty value
+    /// means. An authority that cannot name its epoch honestly must answer empty, never a guess.
     var epochRef: String { get }
 
     /// Who may connect right now, derived fresh so a removal takes effect on the next introduction.

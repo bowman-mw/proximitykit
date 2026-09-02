@@ -266,7 +266,13 @@ serialized by `canonicalBytes(for:)` under
 `FernletCryptoPurpose.Signature.meshChannelIntroductionV1`. `MeshChannelIntroductionExchange` holds
 the whole decision as a value type: a foreign mesh, a diverged epoch, a roster-absent or barred key,
 a replayed nonce, a mismatched channel binding and an invalid signature each name themselves, and
-every one tears the tunnel down. `MeshIntroductionAuthority` is the seam that supplies the mesh id,
+every one tears the tunnel down. **The epoch gate is strict as of P3 item 4** (plan §20.1): P2's
+soft rule was `local.isEmpty || peer.isEmpty || local == peer` on raw strings, which let junk
+through opposite an empty side and let two divergent branches that both rendered `"7"` agree they
+matched. Every non-empty reference must now be a canonical `MeshEpochRef` (checked with the field
+widths, so a bad one is `malformedHello`), equality is equality of the whole value, and the joiner
+that holds no key is a named branch of `MeshEpochAcceptance.introductionVerdict` rather than a
+short-circuit that skipped the comparison. `MeshIntroductionAuthority` is the seam that supplies the mesh id,
 epoch reference, roster and signing key; a session without one authenticates nobody and therefore
 admits nobody. The verified `sid` it yields is what lets an inbound tunnel be matched to the browsed
 advertisement it came from, so duplicate-tunnel suppression ranks the pair instead of admitting both.
@@ -305,6 +311,32 @@ bytes a record carries — so records must be signature-checked by the layer tha
 purpose *before* they reach a ledger a roster is derived from. `MeshMembershipBounds` states the
 plan §9 caps in one place, and reuses `MeshIntroductionRoster`'s own constants rather than
 restating them: roster 8, sixteen records per kind, one termination.
+
+**An epoch is a value, not a number** (plan §8.4, P3 item 4). `MeshEpochRef` is a Lamport counter
+(cap 4096, and a counter *at* the cap refuses to mint a successor rather than trapping — a mesh that
+cannot rotate must end rather than keep serving a key it cannot retire), an `epochID`, and the
+fingerprint of the coordinator that minted it. The id is **derived**, not drawn:
+`SHA-256(domain ‖ meshID ‖ counter ‖ coordinatorFingerprint)`, so every member of one branch
+computes the same id with no wire change, while two partitions differ because their deterministic
+coordinators — each partition's lowest fingerprint — cannot be the same member. That is what makes
+**divergent same-counter epochs representable**: two members who rotated independently at counter 7
+hold two distinct values, both belong in `MeshSessionContext.epochHeads`, and neither is wrong; they
+coexist (`MeshEpochRotationVerdict.coexist`) until a merge mints a strictly greater successor. The
+canonical string form `"<counter>.<32 hex>.<16 hex>"` is at most 54 characters, which is why a real
+epoch reference rides the introduction's existing 96-character `epochRef` field without moving a
+byte of wire framing. `MeshEpochAcceptance` is the rule — the presenter must be the deterministic
+coordinator of the roster it presents and the counter must strictly advance; **epoch continuity is
+never required**, so a member returning from a long partition at counter 5 syncs forward to 9
+without being "stale". `MeshEpochKeyring` holds the current key plus ≤ 3 predecessors, each usable
+for ≤ 5 minutes after supersession and rejected after it, on an injected clock — and it is
+**memory-only**, like the `MeshGroupKey`s inside it: only the epoch *names* persist.
+
+**Replay protection does not ride epochs** (plan §8.4). Once a predecessor key can still open a
+frame and a merge can bring two branches together, "the epoch no longer opens it" stops being a
+replay answer. `MeshFrameReplayWindow` is the replacement: dedup by frame id, per **authenticated**
+sender, with the frame's own expiry and an explicit mesh id, bounded at 8 senders × 64 ids — and it
+*refuses* at the cap rather than evicting, because an LRU would let a flood of fresh frames erase
+the history an attacker wants to replay into. It knows nothing about epochs, which is the point.
 
 - ``PeerTransport``
 - ``PeerHandle``
@@ -384,7 +416,11 @@ from (plan §8.1): `MeshMembershipRecordKind`, `MeshMembershipRecord`, `MeshMemb
 move those records between devices: `MeshMembershipEventFormat`, `MeshRecordIdentity`,
 `MeshInventoryDigest`, `MeshMemberDeparturePayload`, `MeshTerminationPayload`,
 `MeshInventoryDigestPayload`, `MeshMembershipRecordVerifier`, `MeshMembershipRecordRejection`,
-`MeshLegacyGoodbyeOutcome` and `MeshMembershipGoodbyeInterop`.
+`MeshLegacyGoodbyeOutcome` and `MeshMembershipGoodbyeInterop`. P3 item 4 added the epoch model:
+`MeshEpochRef`, `MeshEpochBounds`, `MeshEpochRefParseError`, `MeshEpochRefOrder`,
+`MeshEpochKeyring`, `MeshEpochKeyringRotationRefusal`, `MeshEpochAcceptance`,
+`MeshEpochRotationVerdict`, `MeshEpochRotationRefusal`, `MeshEpochIntroductionVerdict`,
+`MeshFrameReplayWindow` and `MeshFrameReplayVerdict`.
 
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
@@ -444,6 +480,14 @@ and `save` cannot be called without one — so the distinction is enforced by th
 a comment. `save` also honours durable-before-acknowledged (plan §3.6): it throws rather than
 returning success, so no membership record, custody receipt or "joined" is acknowledged over bytes
 that never reached the disk.
+
+**The at-rest schema is 2, and a v1 file is `corrupt` rather than migrated.** P3 item 4 narrowed
+`epochHeads` from an opaque `[String]` placeholder to `[MeshEpochRef]` — the same JSON shape, a
+strictly narrower meaning — and bumped `MeshSessionContextSchema.current`. There is no migration,
+which is defensible only because of *when* it happened: the store shipped in this same phase, so no
+build that wrote a v1 file has ever run on a device, and `corrupt` is exactly the state that refuses
+to overwrite a file this build cannot account for. The sealing token stays `…session-context.v1`
+because it names the **crypto domain**, which did not change; `current` is what carries the shape.
 
 - ``MeshNetworkManager``
 - ``MeshSessionStore``

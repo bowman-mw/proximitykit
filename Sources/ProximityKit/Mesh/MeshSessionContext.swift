@@ -23,15 +23,30 @@ import Foundation
 /// membership ledger is a roster that silently lost members.
 ///
 /// **Bumping it is a deliberate act.** Adding a field with a default is compatible and needs no
-/// bump; changing the MEANING of a field, or narrowing one, does. P3 item 4 is the next scheduled
-/// bump: `epochHeads` is a `[String]` placeholder here and becomes `[MeshEpochRef]` there.
+/// bump; changing the MEANING of a field, or narrowing one, does.
+///
+/// ## Version 2 (P3 item 4) — and why a v1 file is corrupt, not migrated
+///
+/// v2 narrows ``MeshSessionContext/epochHeads`` from an opaque `[String]` placeholder to
+/// `[MeshEpochRef]`: the same JSON shape (each head is still one string) with a strictly narrower
+/// meaning (each string must now be a canonical ``MeshEpochRef``). There is **no migration**, and
+/// a v1 file lands in the store's `corrupt` state like any other unreadable one. That is honest
+/// rather than lazy: the store shipped in this same phase and no build that wrote a v1 file has
+/// ever run on a device, so a v1 file on disk is not an old user's data — it is a file this build
+/// cannot account for, and `corrupt` is exactly the state that refuses to overwrite such a thing.
+/// If a v1 file could ever have held a real roster, this would have to be a migration instead.
 nonisolated enum MeshSessionContextSchema {
 
-    /// The schema version this build writes and the only one it reads.
-    static let current = 1
+    /// The schema version this build writes and the only one it reads. See the type's discussion
+    /// for what v2 changed and why v1 is refused rather than migrated.
+    static let current = 2
 
     /// The frozen token naming this at-rest shape. English forever — it is a persisted format
     /// name, never display copy.
+    ///
+    /// It stays `…v1` across the schema bump on purpose: this token is the **sealing domain**,
+    /// spelled identically to `FernletCryptoPurpose.KeyDerivation.meshSessionContextV1`, and the
+    /// key that opens the blob did not change. ``current`` is the value that carries the shape.
     static let token = "fernlet.mesh.session-context.v1"
 
     /// Epoch branch heads retained (plan §9 caps the keyring; 8 is the roster cap, and a mesh
@@ -103,14 +118,22 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
     /// field that grows, and its growth is bounded by ``MeshMembershipBounds``.
     var ledger: MeshMembershipLedger
 
-    /// Current epoch branch head(s).
+    /// Current epoch branch head(s) — plan §8.4's real model, as of schema 2.
     ///
-    /// **Placeholder, deliberately.** Plan §8.4 defines `MeshEpochRef` (a Lamport counter with a
-    /// merge rule) in item 4; until it exists the head is the same opaque `epochRef` string the
-    /// transport already carries on the wire, so this file can be written today without inventing
-    /// half of item 4's model. Capped at ``MeshSessionContextSchema/maxEpochHeads`` on both init
-    /// and decode — a bound, never a trap.
-    var epochHeads: [String]
+    /// **Plural on purpose.** Two members that rotated independently while partitioned hold
+    /// divergent epochs at the same counter, and §8.4 says neither is wrong: they *coexist* until
+    /// a merge mints a strictly greater successor. Both belong here, which is what makes that
+    /// state representable across a process death instead of only inside one run
+    /// (``MeshEpochAcceptance/mergedHeads(_:adding:limit:)`` is how one is added).
+    ///
+    /// Each head is stored as its canonical string, so the at-rest JSON shape is unchanged from
+    /// schema 1 while the meaning is strictly narrower — a head that is not a canonical
+    /// ``MeshEpochRef`` now fails the decode instead of being carried as an opaque token. Capped at
+    /// ``MeshSessionContextSchema/maxEpochHeads`` on both init and decode — a bound, never a trap.
+    ///
+    /// The **keys** those epochs name are not here and never will be: ``MeshEpochKeyring`` is
+    /// memory-only, exactly like the ``MeshGroupKey`` values it holds.
+    var epochHeads: [MeshEpochRef]
 
     /// Last authenticated external heartbeat, which resets the 30-minute idle timer (plan §8.2).
     /// Nil until one is seen.
@@ -142,7 +165,7 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         createdAt: Date,
         hardDeadline: Date,
         ledger: MeshMembershipLedger = .empty,
-        epochHeads: [String] = [],
+        epochHeads: [MeshEpochRef] = [],
         lastExternalHeartbeat: Date? = nil,
         developedLocally: Bool = false,
         routingInventoryDigest: String? = nil
@@ -178,7 +201,7 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         hardDeadline = try container.decode(Date.self, forKey: .hardDeadline)
         ledger = try container.decode(MeshMembershipLedger.self, forKey: .ledger)
-        let heads = try container.decodeIfPresent([String].self, forKey: .epochHeads) ?? []
+        let heads = try container.decodeIfPresent([MeshEpochRef].self, forKey: .epochHeads) ?? []
         epochHeads = Array(heads.prefix(MeshSessionContextSchema.maxEpochHeads))
         lastExternalHeartbeat = try container.decodeIfPresent(Date.self, forKey: .lastExternalHeartbeat)
         developedLocally = try container.decodeIfPresent(Bool.self, forKey: .developedLocally) ?? false

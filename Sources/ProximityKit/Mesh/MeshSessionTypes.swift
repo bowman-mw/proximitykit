@@ -97,6 +97,10 @@ public struct PeerSlot: Identifiable {
 ///
 /// Concretely: do not add `Codable` here, do not add a field for it to ``MeshSessionContext``, and
 /// do not cache it in the keychain "just for resume". `MeshSessionStoreTests` pins the absence.
+///
+/// The same guard extends to ``MeshEpochKeyring``, which holds this key and up to three
+/// predecessors: the keyring is memory-only too, and what `MeshSessionContext.epochHeads` persists
+/// is ``MeshEpochRef`` values — the *names* of epochs, which are already public — never their keys.
 public struct MeshGroupKey {
     public let epoch: Int
     public let keyBytes: Data   // 32 bytes
