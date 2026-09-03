@@ -462,7 +462,10 @@ and the joiner's ledger bootstrap: `MeshMemberAdmissionPayload`, `MeshLedgerAdop
 `MeshFrameReplayWindow` and `MeshFrameReplayVerdict`. P3 item 5 added the rotation triggers:
 `MeshKeyRotationCause` (on `MeshKeyRotationPayload`), `MeshRotationTriggerBounds`,
 `MeshRotationTriggerOutcome`, `MeshRotationTriggerQueue`, `MeshRotationPlan`, `MeshRotationRefusal`
-and `MeshRotationPolicy`.
+and `MeshRotationPolicy`. P5 item 1 added the routed-content wire family: `MeshRoutedManifestFormat`,
+`MeshRecipientKeyWrap`, `MeshRoutedManifest`, `MeshRoutedManifestPayload`, `MeshRoutedManifestMintError`,
+`MeshRoutedManifestVerifier`, `MeshRoutedManifestRejection`, `MeshRoutedWrapBinding`,
+`MeshRoutedKeyWrapError` and `MeshRoutedContentKeyWrapper`.
 
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
@@ -478,6 +481,7 @@ frozen English spelling, so one grep finds every layer that touches those bytes:
 | `fernlet.mesh.epoch-heads.v1` | — (a message, not a record) | any member | `Signature.meshEpochHeadsV1` |
 | `fernlet.mesh.removal-proposal.v1` | — (live state, not a record) | the proposer, whose proposal IS its vote | `Signature.meshRemovalProposalV1` |
 | `fernlet.mesh.removal-vote.v1` | — (live state, not a record) | any member except the target | `Signature.meshRemovalVoteV1` |
+| `fernlet.mesh.routed-manifest.v1` | `MeshRoutedManifest` (a content record, not a membership record) | the origin only — relays forward it verbatim, never re-sign | `Signature.meshRoutedManifestV1`; wraps under `KeyDerivation.meshRoutedContentKeyWrapV1` + `AEAD.meshRoutedContentKeyWrapV1` |
 
 **Nothing enters a ledger unverified.** ``MeshMembershipRecordSet`` is pure algebra and will merge
 whatever it is handed; ``MeshMembershipRecordVerifier`` is the only door. That matters because the
@@ -709,7 +713,8 @@ needed one frame of its own (P4 item 3): the digest describes records, and its s
 pinned by a golden, so widening it would have been a wire decision rather than a merge fix.
 `fernlet.mesh.epoch-heads.v1` is additive — its own token, its own registered signature domain
 `Signature.meshEpochHeadsV1`, its own golden, its own framing-transcript case — and no existing
-golden moved.
+golden moved. P5 item 1's `fernlet.mesh.routed-manifest.v1` followed the same rule — purposes
+pre-registered in P0, its own golden and framing case, no existing golden moved.
 
 **Both halves travel in both directions** (P4 item 2c). The ask sends the digest and the heads
 together, and the answer to a *mismatched* digest sends the bounded re-gossip and the heads together,
@@ -830,8 +835,8 @@ loosening them here. P5 owns the routed store and the drain; P6 owns feature rou
 only the rules.
 
 **Delivery targets: who content is for, held apart from how far each copy has got** (P4 item 8,
-plan §10.1). ``MeshDeliveryTarget`` is the vocabulary P5's `MeshRoutedManifest` expresses its
-destination set in. The set is the **full derived roster at creation time, minus this device** —
+plan §10.1). ``MeshDeliveryTarget`` is the vocabulary ``MeshRoutedManifest`` expresses its
+destination set in (P5 item 1). The set is the **full derived roster at creation time, minus this device** —
 never the connected set — and it is immutable for the life of the target: the initializer takes a
 ``MeshDerivedRoster``, there is no form that takes a reachable set or a ``MeshBranchView``, and no
 method removes a destination. Reachability enters only as a *delivery* state, so content created
@@ -856,6 +861,28 @@ store. The two existing seams are derivations rather than duplicates —
 ``MeshDevelopmentPlan/handoffTargets`` is `outstandingReachable(from:in:)` and
 ``MeshBranchView/temporarilyDisconnectedFingerprints`` is `outstandingUnreachable(from:in:)`, with
 neither type modified to say so.
+
+**Routed manifests: the origin-signed record a delivery target is for** (P5 item 1, plan §11).
+``MeshRoutedManifest`` binds item id, type token, ciphertext hash and size, `createdAt`, `expiresAt`
+(= the signed `hardDeadline` + 20 min, cross-checked by every receiver against its own context), the
+immutable destination set copied from ``MeshDeliveryTarget/destinations``, and one
+``MeshRecipientKeyWrap`` per destination — the random content key under ephemeral X25519 → HKDF →
+AES-GCM with the mesh, item, origin and recipient in the authenticated data, so a wrap cannot be
+moved between manifests or recipients. Signed by the origin only under
+`Signature.meshRoutedManifestV1`; a custodian forwards the exact object inside its own envelope and
+``MeshRoutedManifestVerifier`` resolves the key from the admission ledger by the manifest's own
+origin, never from the envelope's sender — does not require the origin to still be a member (a
+departed origin's manifest verifies: leaving is not a retraction) but refuses a quorum-removed
+origin's by name (``MeshRoutedManifestRejection/originRemoved``: removal is the mesh's moderation
+act, and the group-key rotation that enforces it on live traffic cannot reach a static-key wrap),
+does not look destinations up in the ledger (a destination outside the roster reads as departed,
+bounded by expiry and the relay caps), and refuses any type token outside the accepted set it is
+built with (item 11 substitutes the registry). The routed store keys on the signed pair
+`(originFingerprint, itemID)`, never on `itemID` alone — the frame is unsealed and any admitted
+member can mint under its own key reusing another origin's id. Verification needs public material only;
+``MeshRoutedContentKeyWrapper/unwrap(_:binding:localFingerprint:localKeyAgreementPublicKey:staticAgreement:)``
+is the separate, private-key half. The type carries no epoch, branch, custody or first-seen; nothing
+persists it yet (item 3); nothing dispatches it yet (item 6).
 
 **The ceiling is guarded at both bounds.** ``MeshSessionCeiling`` holds the signed absolute
 `hardDeadline` (± 120 s skew) *and* a local monotonic budget measured with `ContinuousClock`, clamped
@@ -897,6 +924,16 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshDeliveryStateToken``
 - ``MeshDeliveryRefusal``
 - ``MeshDeliveryOutcome``
+- ``MeshRoutedManifestFormat``
+- ``MeshRecipientKeyWrap``
+- ``MeshRoutedManifest``
+- ``MeshRoutedManifestPayload``
+- ``MeshRoutedManifestMintError``
+- ``MeshRoutedManifestVerifier``
+- ``MeshRoutedManifestRejection``
+- ``MeshRoutedWrapBinding``
+- ``MeshRoutedKeyWrapError``
+- ``MeshRoutedContentKeyWrapper``
 - ``MeshSessionCeiling``
 - ``MeshSessionCeilingBound``
 - ``MeshSessionCeilingVerdict``

@@ -188,6 +188,10 @@ private nonisolated let canonicalMeshRemovalProposalDomain =
     FernletCryptoPurpose.Signature.meshRemovalProposalV1.data
 private nonisolated let canonicalMeshRemovalVoteDomain =
     FernletCryptoPurpose.Signature.meshRemovalVoteV1.data
+// P5 item 1 (plan §11): the routed-content manifest is signed by the ORIGIN only and forwarded
+// verbatim; its domain must be distinct from every membership frame's so "what I am sending"
+// can never be replayed as "what I hold" (the inventory digest) or "what epoch I am on".
+private nonisolated let canonicalMeshRoutedManifestDomain = FernletCryptoPurpose.Signature.meshRoutedManifestV1.data
 
 // MARK: - Identity envelope
 
@@ -532,6 +536,49 @@ nonisolated func canonicalBytes(for vote: SignedRemovalVote) -> Data {
     writer.appendDate(vote.castAt)
     // signature: deliberately excluded.
     return writer.bytes
+}
+
+// MARK: - Routed content (network migration P5 item 1, plan §11)
+
+/// Canonical signing bytes for a ``MeshRoutedManifest`` — the origin's description of one routed
+/// item (plan §11). **Field order IS the schema**: identity first (mesh, item, origin), then the
+/// descriptor (type token, hash, size), then the two instants, then the two count-prefixed lists.
+///
+/// The destinations and the wraps are bound in the ORIGIN's authored order, each wrap field by
+/// field, so a relay that reordered, trimmed, relabelled or re-clamped either list would
+/// invalidate the signature rather than quietly changing who the item is for or who can open it.
+/// Signed by the origin only; a custodian forwards these exact fields and never re-derives them.
+nonisolated func canonicalBytes(for manifest: MeshRoutedManifest) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshRoutedManifestDomain)
+    writer.appendUUID(manifest.meshID)
+    writer.appendUUID(manifest.itemID)
+    writer.appendString(manifest.originFingerprint)
+    writer.appendString(manifest.typeToken)
+    writer.appendLengthPrefixed(manifest.contentHash)
+    writer.appendUInt64(manifest.size)
+    writer.appendDate(manifest.createdAt)
+    writer.appendDate(manifest.expiresAt)
+    writer.appendUInt64(UInt64(manifest.destinations.count))
+    for destination in manifest.destinations {
+        writer.appendString(destination)
+    }
+    writer.appendUInt64(UInt64(manifest.keyWraps.count))
+    for wrap in manifest.keyWraps {
+        appendCanonical(&writer, wrap)
+    }
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// One ``MeshRecipientKeyWrap`` inside a manifest's transcript: recipient, then the three
+/// fixed-width wrap fields, each length-prefixed so the layout is unambiguous even though the
+/// widths are fixed.
+private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ wrap: MeshRecipientKeyWrap) {
+    writer.appendString(wrap.recipientFingerprint)
+    writer.appendLengthPrefixed(wrap.ephemeralPublicKey)
+    writer.appendLengthPrefixed(wrap.nonce)
+    writer.appendLengthPrefixed(wrap.sealedKey)
 }
 
 /// The bytes a ``MeshInventoryDigest`` hashes, under the Hash-family purpose that names them.
