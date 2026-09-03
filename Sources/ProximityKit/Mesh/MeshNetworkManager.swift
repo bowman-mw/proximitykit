@@ -1088,16 +1088,62 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// emit — a device that told its peers it left and then came back thinking it had not is worse
     /// than one that leaves quietly — and the local teardown happens either way, because refusing
     /// to end a session the user asked to end is not an option this code gets to take.
+    ///
+    /// **P4 item 6 (plan §10.6): which ending this is depends on the MERGED derived roster.** A
+    /// development on a roster larger than two is a departure with a bounded 15-second handoff to
+    /// the reachable members; a genuine final pair — merged roster two, whether or not the partner
+    /// is reachable — signs the termination instead. ``MeshDevelopmentPlan`` is the whole decision,
+    /// and it never sees how many peers are connected.
     public func leaveSessionAfterNotifyingPeers() async {
-        let transition = applySessionEvent(.departureRequested)
+        await leaveSessionAfterNotifyingPeers(clock: { Date() })
+    }
+
+    /// The clock-injected form, so the 15-second handoff bound is asserted on a test clock rather
+    /// than by timing a real send (tier 1, plan §16.2: no wall-clock sleeps).
+    ///
+    /// - Parameter clock: Read twice — once when the handoff window opens, once when the sends
+    ///   have returned. The difference is what ``MeshDevelopmentPlan/handoffOutcome(finishedAt:)``
+    ///   judges against the window.
+    func leaveSessionAfterNotifyingPeers(clock: () -> Date) async {
+        let plan = developmentPlan(startedAt: clock())
+        lastDevelopmentPlan = plan
+        let transition = applySessionEvent(plan.ending.requestedEvent)
         // A REFUSED transition (no session was ever started through the machine) leaves the emit
         // alone; only a taken transition whose save failed blocks it.
         let blockedByStore = transition.nextState != nil && lastSessionEffectFailure != nil
         if !blockedByStore {
-            await sendMembershipEvent(.meshMemberDeparture)
-            applySessionEvent(.departureSent)
+            await sendMembershipEvent(plan.ending.membershipEvent, custodyHandoff: plan.handoffSummary)
+            applySessionEvent(plan.ending.sentEvent)
         }
+        recordDevelopmentHandoffOutcome(plan, finishedAt: clock())
         leaveSession()
+    }
+
+    /// Derives plan §10.6's development decision from the merged roster and the branch view.
+    ///
+    /// - Parameter startedAt: The instant the handoff window opens.
+    func developmentPlan(startedAt: Date) -> MeshDevelopmentPlan {
+        MeshDevelopmentPlan(
+            roster: membershipVerifier?.roster ?? .empty,
+            branch: branchView,
+            selfFingerprint: identity.localFingerprint,
+            startedAt: startedAt
+        )
+    }
+
+    /// Records how the bounded handoff ended. Never silent: a window that closed before the sends
+    /// returned is a named outcome, not a shrug (R7).
+    private func recordDevelopmentHandoffOutcome(_ plan: MeshDevelopmentPlan, finishedAt: Date) {
+        let outcome = plan.handoffOutcome(finishedAt: finishedAt)
+        lastDevelopmentHandoffOutcome = outcome
+        FernletAuditLog.log(
+            "mesh.development.handoff",
+            context: [
+                "ending": plan.ending.rawValue,
+                "outcome": outcome.rawValue,
+                "custodians": String(plan.handoffTargets.count)
+            ]
+        )
     }
 
     public func finishSessionPhotos(keeping keptPhotoIDs: Set<UUID>) {
@@ -1787,9 +1833,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// the termination it signs as a final-pair member. **Removal emission is deliberately not
     /// here** — see ``emitApprovedRemovalRecord(_:)``, which is where the vote completes.
     ///
-    /// - Parameter event: `.meshMemberDeparture` or `.meshTerminated`. Anything else is refused and
-    ///   named rather than silently dropped.
-    func sendMembershipEvent(_ event: PayloadType) async {
+    /// **P4 item 6 gate (plan §10.6).** A termination is refused at the signer when this device's
+    /// own merged derived roster is larger than two. The receivers were already safe — a
+    /// termination from a larger roster downgrades to the signer's departure when the roster is
+    /// derived — so this only stops a device spending its own membership on a record its own view
+    /// contradicts, and it is logged rather than silent.
+    ///
+    /// - Parameters:
+    ///   - event: `.meshMemberDeparture` or `.meshTerminated`. Anything else is refused and named
+    ///     rather than silently dropped.
+    ///   - custodyHandoff: What the leaver hands to the members it can still reach (plan §8.3).
+    ///     Only a departure carries one.
+    func sendMembershipEvent(
+        _ event: PayloadType, custodyHandoff: MeshCustodyHandoffSummary = .none
+    ) async {
         guard let mesh = currentMesh else {
             FernletAuditLog.log("mesh.membershipEvent.emitNoMesh", context: ["type": event.rawValue])
             return
@@ -1797,9 +1854,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         do {
             switch event {
             case .meshMemberDeparture:
-                let record = try SignedDepartureRecord.signed(meshID: mesh.meshID, identity: identity)
+                let record = try SignedDepartureRecord.signed(
+                    meshID: mesh.meshID, identity: identity, custodyHandoff: custodyHandoff
+                )
                 await broadcastMembershipFrame(event, MeshMemberDeparturePayload(record: record))
             case .meshTerminated:
+                guard MeshDevelopmentPlan.permitsTermination(membershipVerifier?.roster) else {
+                    FernletAuditLog.log("mesh.membershipEvent.terminationRefusedRosterAboveTwo")
+                    return
+                }
                 let record = try SignedTerminationRecord.signed(
                     meshID: mesh.meshID,
                     identity: identity,
@@ -2885,6 +2948,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Whether the foreground may offer a resume for a restored or idle-stopped session.
     @ObservationIgnored private(set) var offersForegroundResume = false
+
+    /// Plan §10.6's development decision, as the last development actually took it: which ending,
+    /// which custodians, and the instant the 15-second window opened. Memory-only — a decision, not
+    /// a fact about membership, and the durable half is the sealed ending mark.
+    @ObservationIgnored private(set) var lastDevelopmentPlan: MeshDevelopmentPlan?
+
+    /// How that development's bounded handoff ended.
+    @ObservationIgnored private(set) var lastDevelopmentHandoffOutcome: MeshDevelopmentHandoffOutcome?
 
     /// When the idle window lapses, or nil when it is not armed. A value, not a timer: it is
     /// evaluated on demand (``evaluateIdleLapse(now:)``) so nothing spins.

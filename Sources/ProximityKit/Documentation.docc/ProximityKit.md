@@ -680,6 +680,23 @@ present** and is exactly why two branches rotating independently at the same cou
 out for a current member's authenticated heartbeat, so a live branch of two or more stays alive
 while a partition of one runs to `localIdleStop` and resumes-as-merge.
 
+**Development under partition is decided on the merged roster** (P4 item 6, plan §10.6).
+``MeshDevelopmentPlan`` is the whole decision as one pure value, derived before anything is signed:
+the **merged derived roster** chooses the ending (``MeshDevelopmentEnding/termination`` only when
+`isFinalPair`, ``MeshDevelopmentEnding/departure`` otherwise) and the **branch view** chooses the
+custodians (`presentFingerprints − self`), with the 15-second window expressed as a deadline and
+``MeshDevelopmentHandoffOutcome`` as its named answer — completed, nobody reachable, or the window
+closed first. The type never sees how many peers are connected, so "a 2/2 split of a four-roster is
+two final pairs" is not a mistake the call site can make. `permitsTermination(_:)` is the same rule
+applied as an **issuance gate** inside `sendMembershipEvent(_:custodyHandoff:)`: a device whose own
+merged roster is larger than two will not sign a `terminated.v1` at all (a device with no ledger —
+the ceiling, the epoch-counter cap — still may, or an ending would be silenced rather than a wrong
+one prevented). The receiver's safety never depends on that gate: ``MeshDerivedRoster`` downgrades a
+termination from a larger roster to its signer's departure **at read**, which is why the union-merge
+stays commutative, associative and idempotent. The derivation is stateless, so a receiver whose
+roster later *grows* re-reads the same record as a departure; the one-way half is the local session,
+whose ending mark and rejoin bar are durable and permanent.
+
 **Any reconnect is a merge, and there is exactly one merge path** (P4 item 2, plan §10.3). A blip, a
 healed partition, an idle-lapse resume and a process restart are four doors onto
 `MeshNetworkManager.mergeReconnected(_:entry:)`, which is a named front door onto
