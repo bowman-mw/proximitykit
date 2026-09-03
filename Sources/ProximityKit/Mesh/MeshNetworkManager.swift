@@ -1918,8 +1918,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// Merges another device's ledger into this one and rotates if the roster moved (plan §8.3's
-    /// third trigger). P4 owns full partition merge; this is the seam it calls.
+    /// **The one merge path** (plan §10.3): merges another device's ledger into this one, rotates
+    /// if the roster moved, and applies what the merged roster says about *this* device.
+    ///
+    /// Every reconnect reaches it — a blip, a healed partition, an idle-lapse resume and a process
+    /// restart all arrive through ``mergeReconnected(_:entry:)``, which is a named front door onto
+    /// this call and nothing more. There is deliberately no second merge: a record arriving while a
+    /// merge is in flight is offered here too (``dispatchMembershipEventPayload(_:plaintext:decoder:slot:)``)
+    /// rather than through the live-record insert, so a returning peer's whole re-gossip mints
+    /// **one** `.merge` epoch instead of one `.membership` epoch per record.
     ///
     /// - Returns: One rejection per record the verifier refused — never a silent drop.
     @discardableResult
@@ -1933,7 +1940,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 context: ["type": "merge", "reason": rejection.diagnosticDescription]
             )
         }
-        awaitingResumeMerge = false
         let moved = membershipVerifier?.roster != before
         // P3 item 6: a merge that moved the roster is only ACTED on once it is durable — the
         // rotation it would trigger distributes a key against a roster this device could not write
@@ -1941,8 +1947,180 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if moved, !commitVerifiedRecord(rollingBackTo: snapshot, type: .meshMemberDeparture) {
             return rejections
         }
-        if moved { requestRotation(cause: .merge) }
+        // The verdict runs BEFORE the rotation, deliberately: a merge that hands this device its own
+        // removal, or a termination the merged roster agrees with, must not also ask for a key it
+        // is no longer entitled to hand out (``applyVerifiedSelfRemoval()``'s rule, at the merge
+        // seam). Everything else rotates exactly as P3 item 5 had it.
+        if moved { refreshBranchViewAfterMerge() }
+        if moved, !applyMergedRosterVerdict(from: before) {
+            requestRotation(cause: .merge)
+        }
         return rejections
+    }
+
+    /// Re-derives the branch view against the roster a merge just produced.
+    ///
+    /// ``MeshBranchView`` is a snapshot taken at the last ``evaluatePartition(reachable:now:)``, and
+    /// a merge moves the roster underneath it: a member whose departure record arrived in the union
+    /// would otherwise keep answering ``MeshMemberPresence/present`` until the next evaluation,
+    /// which contradicts item 1's own rule that **presence is only defined over the derived
+    /// roster**. Reachability is unchanged and is carried over verbatim.
+    ///
+    /// Deliberately **not** ``evaluatePartition(reachable:now:)``: that runs
+    /// ``MeshPartitionDetector`` and can raise `linksLost` / `linksRestored`, and a merge is not a
+    /// reachability change. Nothing here raises an event, and nothing reads a clock.
+    private func refreshBranchViewAfterMerge() {
+        guard let previous = branchView, let roster = membershipVerifier?.roster,
+              !roster.members.isEmpty else { return }
+        branchView = MeshBranchView(
+            roster: roster,
+            reachable: Set(previous.presentFingerprints),
+            selfFingerprint: identity.localFingerprint
+        )
+    }
+
+    /// What a merged roster says about **this** device (plan §10.3's "hard records win over soft
+    /// presence", in its sharpest form).
+    ///
+    /// The live-record path has ``applyRosterMove(_:from:)`` for this; the merge path needs its own
+    /// because a merge applies a whole ledger rather than one decoded frame, so there is no
+    /// "accepted record" to switch on. A departure or removal that happened in the other branch of
+    /// a split arrives *only* as a merged record, and a merge that quietly left this device
+    /// believing it was still a member — or still in a mesh whose termination it had just been
+    /// handed — would be the merge failing open.
+    ///
+    /// Deliberately conditional on having *been* a member: a ledger that grows from empty (a
+    /// founder mid-bootstrap, a joiner adopting) has never admitted this device, and that is not an
+    /// ejection.
+    ///
+    /// - Parameter before: The derived roster as it was before the merge.
+    /// - Returns: `true` when the merged roster ENDED this device's session, so the caller must not
+    ///   go on to request a rotation.
+    @discardableResult
+    private func applyMergedRosterVerdict(from before: MeshDerivedRoster?) -> Bool {
+        guard let after = membershipVerifier?.roster else { return false }
+        if after.status == .terminated {
+            applyVerifiedTermination()
+            return true
+        }
+        let wasMember = before?.contains(fingerprint: identity.localFingerprint) ?? false
+        guard wasMember, !after.contains(fingerprint: identity.localFingerprint) else { return false }
+        applyVerifiedSelfRemoval()
+        return true
+    }
+
+    // MARK: - The single merge path (network migration P4 item 2, plan §10.3)
+
+    /// Which reconnect the merge now in flight came through, or nil when none is.
+    ///
+    /// Set when a merge begins and read when the records answering it arrive, so the four entries
+    /// share one path *and* stay distinguishable in a log line. Memory-only: which door a merge
+    /// used is not a fact about membership.
+    @ObservationIgnored private(set) var pendingMergeEntry: MeshMergeEntry?
+
+    /// The entry of the last merge this device applied. A frozen diagnostic token, in the idiom of
+    /// ``lastRotationCause`` — read by suites and audit lines, never shown to a person.
+    @ObservationIgnored private(set) var lastMergeEntry: MeshMergeEntry?
+
+    /// How many offers have gone through ``mergeMembershipLedger(_:)`` via the front door.
+    ///
+    /// The observable seam behind "there is exactly one merge path": a suite drives all four
+    /// reconnects and asserts each one moved this counter, which no bypass could do.
+    @ObservationIgnored private(set) var mergeApplicationCount = 0
+
+    /// How many epoch heads a merge has dropped past ``MeshSessionContextSchema/maxEpochHeads``.
+    ///
+    /// Plan §21.3: the cap is an assertion, not a knob. Non-zero means the merge produced more
+    /// branch heads than any partition shape can justify, so it is surfaced here and in the audit
+    /// log rather than swallowed by a `prefix`.
+    @ObservationIgnored private(set) var droppedEpochHeadCount = 0
+
+    /// **The front door to the one merge path** (plan §10.3): applies a reconnecting peer's offer.
+    ///
+    /// The order is plan §3.6's. The peer's epoch heads are folded and sealed **first** — a head is
+    /// not a roster change, and a device that acts on a merged roster while still unable to name
+    /// the branch it is reconciling with has acknowledged something it cannot write down. Then the
+    /// records go through ``mergeMembershipLedger(_:)``, which commits before it rotates.
+    ///
+    /// Heads *coexist*: two branches that rotated at the same counter hold distinct refs (their
+    /// coordinators cannot be the same member), both survive here, and minting the strictly greater
+    /// successor that retires them is P4 item 3 — deliberately not this call.
+    ///
+    /// - Parameters:
+    ///   - offer: What the reconnecting side holds.
+    ///   - entry: Which reconnect this is. Recorded, never branched on.
+    /// - Returns: One rejection per record the verifier refused.
+    @discardableResult
+    func mergeReconnected(
+        _ offer: MeshMergeOffer, entry: MeshMergeEntry
+    ) -> [MeshMembershipRecordRejection] {
+        lastMergeEntry = entry
+        mergeApplicationCount += 1
+        foldEpochHeads(offer.epochHeads)
+        let rejections = mergeMembershipLedger(offer.ledger)
+        FernletAuditLog.log(
+            "mesh.merge.applied",
+            context: ["entry": entry.rawValue, "rejected": String(rejections.count)]
+        )
+        return rejections
+    }
+
+    /// Seals a reconnecting peer's epoch heads into ``MeshSessionContext/epochHeads``.
+    ///
+    /// One ``persistSessionContext(addingEpochHead:)`` per head, because that writer is the single
+    /// seam every head goes through and it already applies
+    /// ``MeshEpochAcceptance/mergedHeads(_:adding:limit:)``. The pre-fold exists only to *count*
+    /// what the cap would drop, which plan §21.3 says must be named rather than truncated silently.
+    ///
+    /// - Parameter heads: The heads the peer offered; empty is the common case and does nothing.
+    private func foldEpochHeads(_ heads: [MeshEpochRef]) {
+        guard !heads.isEmpty else { return }
+        let known = epochKeyring.map { [$0.head] } ?? []
+        let fold = MeshMergeOffer.foldedHeads(known, adding: heads)
+        if fold.droppedCount > 0 {
+            droppedEpochHeadCount += fold.droppedCount
+            FernletAuditLog.log(
+                "mesh.merge.epochHeadsDropped", context: ["count": String(fold.droppedCount)]
+            )
+        }
+        for head in heads.prefix(MeshMergeOffer.maxFoldedHeads) {
+            persistSessionContext(addingEpochHead: head)
+        }
+    }
+
+    /// Asks every committed peer what it holds — the **ask half** of plan §10.3's union exchange.
+    ///
+    /// No new frame: `fernlet.mesh.inventory-digest.v1` is the ask that already exists, and a
+    /// differing digest is answered with the bounded record re-gossip (§10.5), whose frames land
+    /// back in the one merge path because ``awaitingResumeMerge`` is set while this is outstanding.
+    /// A peer whose digest MATCHES is already converged, which is what ends the merge.
+    ///
+    /// - Parameter entry: Which reconnect opened this exchange.
+    private func beginMergeExchange(entry: MeshMergeEntry) {
+        // A launch restore arms `.processRestart` before any session event can run, and it outranks
+        // whichever door the user's resume happened to use: the ledger being merged FROM came off
+        // the disk, which is the fact worth recording.
+        let resolved = pendingMergeEntry == .processRestart ? MeshMergeEntry.processRestart : entry
+        pendingMergeEntry = resolved
+        awaitingResumeMerge = true
+        guard membershipVerifier != nil else { return }
+        FernletAuditLog.log("mesh.merge.exchangeOpened", context: ["entry": resolved.rawValue])
+        let recipients = Set(activeSlots.compactMap(\.fingerprint))
+        guard !recipients.isEmpty else { return }
+        Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: recipients) }
+    }
+
+    /// Ends the merge now in flight: this device and the peer hold the same records.
+    ///
+    /// Convergence is the honest completion signal, and it is one this protocol already computes —
+    /// ``MeshMembershipRecordVerifier/matchesLocalInventory(_:)`` over a signed digest. Closing on
+    /// a timer, or on the first record of a re-gossip, would each end the window while records were
+    /// still arriving and hand the rest of the batch to the live-record path instead.
+    private func concludeMerge() {
+        guard awaitingResumeMerge else { return }
+        awaitingResumeMerge = false
+        pendingMergeEntry = nil
+        FernletAuditLog.log("mesh.merge.converged")
     }
 
     // MARK: - Ledger bootstrap and convergence (network migration P3 item 7, plan §8.3, §10.5)
@@ -2025,16 +2203,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Sends this device's signed inventory digest to one peer — the ask half of plan §10.5's
     /// exchange. A digest is a hint: it says only whether a record exchange is worth its bytes.
     ///
-    /// - Parameter fingerprint: The member to ask, or nil for every committed slot.
-    func sendInventoryDigest(to fingerprint: String? = nil) async {
+    /// - Parameter recipients: The members to ask, or nil for every slot. P4 item 2 passes the
+    ///   committed set explicitly on a reconnect: a digest is member business, and an empty set is
+    ///   "nobody to ask", not "ask everybody".
+    func sendInventoryDigest(to recipients: Set<String>? = nil) async {
         guard let mesh = currentMesh, let verifier = membershipVerifier else { return }
+        if let recipients, recipients.isEmpty { return }
         do {
             let payload = try MeshInventoryDigestPayload.signed(
                 meshID: mesh.meshID, ledger: verifier.ledger, identity: identity
             )
-            await broadcastMembershipFrame(
-                .meshInventoryDigest, payload, to: fingerprint.map { Set([$0]) }
-            )
+            await broadcastMembershipFrame(.meshInventoryDigest, payload, to: recipients)
         } catch {
             FernletAuditLog.log(
                 "mesh.membershipEvent.signFailed",
@@ -2333,6 +2512,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Returns: The transition taken, or the named refusal.
     @discardableResult
     func applySessionEvent(_ event: MeshSessionEvent) -> MeshSessionTransition {
+        let previous = sessionState
         let transition = MeshSessionStateMachine.transition(from: sessionState, on: event)
         switch transition {
         case .rejected(let rejection):
@@ -2345,9 +2525,41 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             lastSessionTransitionRejection = nil
             lastSessionEffectFailure = nil
             sessionState = next
+            // Splitting again abandons whatever merge was in flight: the peer whose re-gossip this
+            // device was waiting on is out of reach, so the records that arrive next are live
+            // records again and rotate as `.membership`. The next heal opens a fresh exchange.
+            if next == .partitioned { abandonMergeExchange() }
             performSessionEffects(effects, for: event)
+            openBlipMergeIfReconnected(event, from: previous)
         }
         return transition
+    }
+
+    /// The one reconnect the machine expresses as a self-edge: a peer committing into a session
+    /// that was **already live** (plan §10.3's blip, and item 1's partial heal — a peer reappearing
+    /// on a branch still short of somebody, which raises no partition verdict by design).
+    ///
+    /// `activeForeground --peerCommitted--> activeForeground` carries no effects, so
+    /// ``MeshSessionEffect/beginMerge`` never fires for it and the reconnect would otherwise
+    /// silently resume against a roster that moved in the other branch. A `joining` session's first
+    /// commit is deliberately excluded: that is a join, and the admission-grant path already asks
+    /// its admitter what it holds.
+    ///
+    /// - Parameters:
+    ///   - event: The event just applied.
+    ///   - previous: The state it was applied from.
+    private func openBlipMergeIfReconnected(_ event: MeshSessionEvent, from previous: MeshSessionState) {
+        guard event == .peerCommitted, previous != .joining, previous.isLive else { return }
+        guard !awaitingResumeMerge else { return }
+        beginMergeExchange(entry: .blip)
+    }
+
+    /// Drops the merge in flight without concluding it — the session partitioned again, or ended.
+    private func abandonMergeExchange() {
+        guard awaitingResumeMerge || pendingMergeEntry != nil else { return }
+        awaitingResumeMerge = false
+        pendingMergeEntry = nil
+        FernletAuditLog.log("mesh.merge.abandoned")
     }
 
     /// Performs an effect list in order, abandoning the remainder at the first failure.
@@ -2379,7 +2591,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             }
             stagedTermination = nil
         case .beginMerge:
-            awaitingResumeMerge = true
+            beginMergeExchange(entry: Self.mergeEntry(for: event))
         case .startParticipation:
             startSearching()
         case .stopParticipation:
@@ -2392,6 +2604,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             offersForegroundResume = true
         }
         return true
+    }
+
+    /// Which of plan §10.3's four reconnects raised ``MeshSessionEffect/beginMerge``.
+    ///
+    /// A restart is not in the switch on purpose: the event that reaches the machine after a
+    /// relaunch is whatever the user's resume raises, and the restart-ness is carried by
+    /// ``pendingMergeEntry`` having been armed at restore time — which is why this reads it first
+    /// rather than overwriting it.
+    private static func mergeEntry(for event: MeshSessionEvent) -> MeshMergeEntry {
+        switch event {
+        case .linksRestored: return .partitionHeal
+        case .resumedAfterLapse: return .idleLapseResume
+        default: return .blip
+        }
     }
 
     /// Stages the durable ending mark for the save that follows it, and raises the in-memory rejoin
@@ -2691,6 +2917,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if let context = outcome.context {
             startSessionCeiling(hardDeadline: context.hardDeadline, startedAt: now)
         }
+        if case .resumable(let context) = outcome { restoreMembershipLedger(from: context) }
         // An ending the FILE already records bars the rejoin straight away: the transition below
         // carries no new reason for it (nothing was discovered, it was read), so the bar is set
         // here rather than left to `barRejoin(reason:)`.
@@ -2699,6 +2926,49 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         applySessionEvent(.contextRestored(outcome.disposition))
         return outcome
+    }
+
+    /// Puts the sealed ledger back on this device after a process death, so the reconnect that
+    /// follows is a **merge** rather than a fresh session (plan §10.3's fourth entry).
+    ///
+    /// Without this a relaunched member holds no ledger at all: every membership frame a returning
+    /// peer sends is dropped `droppedNoLedger`, and the derived roster falls back to whatever
+    /// descriptor happens to be gossiped — which is the "restart rebuilds the ledger instead of
+    /// merging what the peer sends" shape §10.3 exists to forbid.
+    ///
+    /// It is a **re-verification, not a trust**: ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:)``
+    /// re-derives the whole ledger from its own self-admitted root and proves the chain reaches
+    /// this device's own admission before a single record counts, exactly as it does for a joiner
+    /// being handed a peer's ledger. A file that does not prove that is left unadopted — the honest
+    /// answer for bytes that no longer describe a mesh this device is in.
+    ///
+    /// Schema stays at **2**: nothing new is written, this only reads what
+    /// ``MeshSessionContext/ledger`` has carried since P3 item 4.
+    ///
+    /// - Parameter context: The restored context.
+    private func restoreMembershipLedger(from context: MeshSessionContext) {
+        guard membershipVerifier == nil else { return }
+        let local = identity.localFingerprint
+        guard let own = context.ledger.admissions.all.first(where: { $0.memberFingerprint == local })
+        else { return }
+        switch MeshLedgerAdoption.adopt(
+            offered: context.ledger, ownAdmission: own, meshID: context.meshID
+        ) {
+        case .adopted(let verifier):
+            membershipVerifier = verifier
+            // Armed here, spent by the first `beginMerge`: whichever door the user's resume uses,
+            // the ledger being merged FROM came off the disk.
+            pendingMergeEntry = .processRestart
+            FernletAuditLog.log(
+                "mesh.sessionRestore.ledgerRestored",
+                context: ["members": String(verifier.roster.memberCount)]
+            )
+        case .refused(let refusal):
+            FernletAuditLog.log(
+                "mesh.sessionRestore.ledgerRefused",
+                context: ["reason": refusal.diagnosticDescription]
+            )
+        }
     }
 
     /// Sets a corrupt file aside. The quarantine is the ONLY route from `corrupt` to a writer, and
@@ -2754,11 +3024,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if transition.nextState == nil {
             applySessionEvent(.linksRestored)
         }
-        let rejections = mergeMembershipLedger(other)
-        if let head {
-            persistSessionContext(addingEpochHead: head)
-        }
-        return rejections
+        // P4 item 2: the resume does not merge for itself — it hands the returning peer's offer to
+        // the one path, exactly as a blip, a heal and a restart do.
+        return mergeReconnected(
+            MeshMergeOffer(ledger: other, head: head),
+            entry: pendingMergeEntry ?? .idleLapseResume
+        )
     }
 
     /// One membership frame, decoded and bounded but **not** trusted (P3 item 7).
@@ -2810,6 +3081,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return
         }
         if bufferedForAdoption(decoded, from: senderFingerprint) { return }
+        // P4 item 2, plan §10.3: a record arriving while a merge is in flight IS the merge — it is
+        // the bounded re-gossip answering this device's digest. It goes through the one merge path
+        // so the whole batch mints one `.merge` epoch, not one `.membership` epoch per record.
+        if awaitingResumeMerge, let offer = Self.mergeOffer(for: decoded) {
+            mergeReconnected(offer, entry: pendingMergeEntry ?? .blip)
+            return
+        }
         let snapshot = membershipVerifier
         let rosterBefore = membershipVerifier?.roster
         let accepted = insertMembershipRecord(decoded, type: type)
@@ -2849,6 +3127,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         default:
             return nil
         }
+    }
+
+    /// Wraps one decoded record as a merge offer — a ledger holding exactly it.
+    ///
+    /// A single record and a whole ledger are the same input to
+    /// ``MeshMembershipLedger/merging(_:)``, which is what lets the re-gossip that answers a
+    /// reconnect run through the merge path frame by frame without a second mechanism: the union is
+    /// idempotent, so a record already held changes nothing and rotates nothing.
+    ///
+    /// - Returns: The offer, or nil for a frame no roster can see (an inventory digest).
+    private static func mergeOffer(for decoded: DecodedMembershipRecord) -> MeshMergeOffer? {
+        var ledger = MeshMembershipLedger.empty
+        switch decoded {
+        case .admission(let record): ledger.admissions = ledger.admissions.inserting(record)
+        case .departure(let record): ledger.departures = ledger.departures.inserting(record)
+        case .removal(let record): ledger.removals = ledger.removals.inserting(record)
+        case .termination(let record): ledger.terminations = ledger.terminations.inserting(record)
+        case .digest: return nil
+        }
+        return MeshMergeOffer(ledger: ledger)
     }
 
     /// Offers one decoded record to the verifier.
@@ -3034,7 +3332,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             || peerInventoryDigests.count < MeshMembershipBounds.maxRosterMembers {
             peerInventoryDigests[payload.senderFingerprint] = payload.digest   // R3: bounded map
         }
-        guard !verifier.matchesLocalInventory(payload.digest) else { return }
+        // A matching digest is plan §10.3's merge, finished: the two sides hold the same records,
+        // so there is nothing to re-gossip and nothing left for the merge window to catch.
+        guard !verifier.matchesLocalInventory(payload.digest) else {
+            concludeMerge()
+            return
+        }
         Task { @MainActor [weak self] in await self?.reGossipRecords(to: payload.senderFingerprint) }
     }
 
@@ -3895,7 +4198,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Exchange vouch lists after every successful identity verification
         Task { [weak self] in await self?.sendVouchList(to: slot) }
 
-        // P3 item 6: the first committed peer makes a joining session active (plan §8.2).
+        // P3 item 6: the first committed peer makes a joining session active (plan §8.2). P4 item 2
+        // hangs the blip and the partial heal off the same event inside ``applySessionEvent(_:)``,
+        // so every reconnect entry is one call rather than a rule this site has to remember.
         if currentMesh != nil { applySessionEvent(.peerCommitted) }
 
         // Phase 3: start the beacon loop and, if we are the coordinator, schedule the first rotation.
@@ -4677,7 +4982,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Its reply is the bounded record re-gossip, and `MeshLedgerAdoption` rebases this device's
         // provisional root onto the mesh's real founder when it arrives.
         if let fingerprint = slot?.fingerprint {
-            Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: fingerprint) }
+            Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: [fingerprint]) }
         }
     }
 

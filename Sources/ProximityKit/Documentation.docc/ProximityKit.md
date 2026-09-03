@@ -641,11 +641,48 @@ present** and is exactly why two branches rotating independently at the same cou
 out for a current member's authenticated heartbeat, so a live branch of two or more stays alive
 while a partition of one runs to `localIdleStop` and resumes-as-merge.
 
-**Idle-lapse resume and partition heal are one mechanism**, and it is the merge path (plan §10.3):
-`resumeSessionAfterLapse(mergingLedger:peerEpochHead:)` goes through `mergeMembershipLedger(_:)` and
-`MeshEpochAcceptance`, where two branches that rotated independently at the same counter **coexist**
-in `epochHeads` until a merge mints a strictly greater successor. Never a fresh session, never a
-silent re-key.
+**Any reconnect is a merge, and there is exactly one merge path** (P4 item 2, plan §10.3). A blip, a
+healed partition, an idle-lapse resume and a process restart are four doors onto
+`MeshNetworkManager.mergeReconnected(_:entry:)`, which is a named front door onto
+`mergeMembershipLedger(_:)` and nothing more; ``MeshMergeEntry`` records *which* door without
+anything branching on it. The union each door carries is a ``MeshMergeOffer`` — the peer's records
+plus the epoch head(s) it holds — assembled from frames that already exist: the signed
+`fernlet.mesh.inventory-digest.v1` asks, and the bounded record re-gossip answers with the same
+record frames a live record arrives in. **No wire bytes moved for any of it.**
+
+Three consequences worth stating outright:
+
+- **A record arriving while a merge is in flight is merge traffic.** While `awaitingResumeMerge` is
+  set, `dispatchMembershipEventPayload` offers the decoded record to `mergeMembershipLedger(_:)`
+  rather than to the live-record insert, so a returning peer's whole re-gossip mints **one** `.merge`
+  epoch instead of one `.membership` epoch per record. The window opens on
+  ``MeshSessionEffect/beginMerge`` (and on the `peerCommitted` self-edge, which carries no effects —
+  that is the blip and item 1's partial heal), and closes on the honest completion signal the
+  protocol already computes: a peer digest that **matches** local inventory. Splitting again abandons
+  it rather than concluding it.
+- **A merge applies what the merged roster says about this device.** `applyMergedRosterVerdict(from:)`
+  is the merge-path counterpart of `applyRosterMove(_:from:)`: a departure or removal that happened
+  in the other branch of a split arrives *only* as a merged record, so a merge that left this device
+  believing it was still a member would be the merge failing open. It ejects only a device that
+  **was** on the roster and no longer is, so a ledger growing from empty is never mistaken for one.
+- **A merge refreshes presence.** `refreshBranchViewAfterMerge()` re-derives ``MeshBranchView``
+  against the roster the union just produced, carrying reachability over verbatim, so a member whose
+  departure record arrived in the merge stops answering ``MeshMemberPresence/present`` immediately
+  rather than at the next evaluation. It runs no detector and raises no event — a merge is not a
+  reachability change.
+- **A restart merges rather than rebuilding.** `restoreMembershipLedger(from:)` puts the sealed
+  ledger back through ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:)`` — a
+  re-verification from the ledger's own self-admitted root, not a trust — so a relaunched member has
+  something to merge *from* instead of dropping every membership frame `droppedNoLedger`. Schema
+  stays at **2**; nothing new is written.
+
+Epoch heads **coexist**: two branches that rotated at the same counter hold distinct
+``MeshEpochRef``s (their coordinators cannot be the same member), both survive
+``MeshMergeOffer/foldedHeads(_:adding:limit:)`` into `epochHeads`, and an overflow past
+`MeshSessionContextSchema.maxEpochHeads` is **named** (`droppedEpochHeadCount`, plan §21.3's "an
+assertion, not a knob") rather than silently truncated. Minting the strictly greater successor that
+retires both is P4 item 3, deliberately not the merge's job. Never a fresh session, never a silent
+re-key.
 
 **The ceiling is guarded at both bounds.** ``MeshSessionCeiling`` holds the signed absolute
 `hardDeadline` (± 120 s skew) *and* a local monotonic budget measured with `ContinuousClock`, clamped
