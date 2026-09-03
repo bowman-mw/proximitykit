@@ -341,6 +341,63 @@ nonisolated struct MeshMembershipRecordVerifier {
         return nil
     }
 
+    // MARK: - Removal quorum (P4 item 5)
+
+    /// Verifies a proposer's signed removal proposal (plan §10.4).
+    ///
+    /// The same five checks the inventory digest and the head set get, under the proposal's own
+    /// domain — and nothing more: **quorum is not checked here**, because a proposal on its own
+    /// carries exactly one vote and the arithmetic belongs to ``MeshRemovalQuorum``, re-derived
+    /// against the roster of the moment. What this settles is only "was this signed by a member
+    /// entitled to propose".
+    ///
+    /// A *live* object, never a record: nothing is inserted, and the ledger is untouched whatever
+    /// the answer.
+    ///
+    /// - Returns: the named rejection, or nil when the proposal verified.
+    func verify(_ proposal: SignedRemovalProposal) -> MeshMembershipRecordRejection? {
+        guard proposal.meshID == meshID else { return .foreignMesh }
+        guard proposal.isWellFormed else { return .malformedRecord }
+        guard let key = admittedSigningKey(for: proposal.proposerFingerprint) else {
+            return .signerNotAdmitted
+        }
+        guard roster.contains(fingerprint: proposal.proposerFingerprint) else { return .signerNotAMember }
+        guard proposal.targetFingerprint != proposal.proposerFingerprint else { return .voterNotEligible }
+        guard IdentityService.verify(
+            proposal.signature,
+            of: canonicalBytes(for: proposal),
+            by: key,
+            purpose: FernletCryptoPurpose.Signature.meshRemovalProposalV1
+        ) else {
+            return .signatureInvalid
+        }
+        return nil
+    }
+
+    /// Verifies one member's signed vote on a removal proposal (plan §10.4).
+    ///
+    /// The target's own vote is refused here as well as discarded by the tally — belt and braces,
+    /// because "the target cannot vote" is the rule that stops a mesh of two from ever removing
+    /// anybody, and a rule enforced in only one place is a rule one refactor away from gone.
+    ///
+    /// - Returns: the named rejection, or nil when the vote verified.
+    func verify(_ vote: SignedRemovalVote) -> MeshMembershipRecordRejection? {
+        guard vote.meshID == meshID else { return .foreignMesh }
+        guard vote.isWellFormed else { return .malformedRecord }
+        guard let key = admittedSigningKey(for: vote.voterFingerprint) else { return .signerNotAdmitted }
+        guard roster.contains(fingerprint: vote.voterFingerprint) else { return .signerNotAMember }
+        guard vote.voterFingerprint != vote.targetFingerprint else { return .voterNotEligible }
+        guard IdentityService.verify(
+            vote.signature,
+            of: canonicalBytes(for: vote),
+            by: key,
+            purpose: FernletCryptoPurpose.Signature.meshRemovalVoteV1
+        ) else {
+            return .signatureInvalid
+        }
+        return nil
+    }
+
     /// Whether a peer's digest describes exactly the records this ledger holds. `false` means one
     /// side is missing records and a full record exchange is worth its bytes.
     func matchesLocalInventory(_ digest: MeshInventoryDigest) -> Bool {

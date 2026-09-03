@@ -476,6 +476,8 @@ frozen English spelling, so one grep finds every layer that touches those bytes:
 | `fernlet.mesh.terminated.v1` | `SignedTerminationRecord` | a final-pair member | `Signature.meshTerminatedV1` |
 | `fernlet.mesh.inventory-digest.v1` | — (a message, not a record) | any member | `Signature.meshInventoryDigestV1` over a `Hash.meshInventoryDigestV1` digest |
 | `fernlet.mesh.epoch-heads.v1` | — (a message, not a record) | any member | `Signature.meshEpochHeadsV1` |
+| `fernlet.mesh.removal-proposal.v1` | — (live state, not a record) | the proposer, whose proposal IS its vote | `Signature.meshRemovalProposalV1` |
+| `fernlet.mesh.removal-vote.v1` | — (live state, not a record) | any member except the target | `Signature.meshRemovalVoteV1` |
 
 **Nothing enters a ledger unverified.** ``MeshMembershipRecordSet`` is pure algebra and will merge
 whatever it is handed; ``MeshMembershipRecordVerifier`` is the only door. That matters because the
@@ -503,6 +505,42 @@ receiving side the record goes through ``MeshMembershipRecordVerifier`` — quor
 receiver's own merged roster — then through `commitVerifiedRecord(rollingBackTo:type:)`, so it is
 durable before it counts; a record naming THIS device applies plan §8.2's `removed` edge and tears
 participation down, which is the one state-machine edge item 6 built and could not yet wire.
+
+### Quorum under partition (plan §10.4, P4 item 5)
+
+A removal takes **⌊|roster|/2⌋ + 1 distinct signed votes**, and every part of that sentence is
+re-derived at the *receiver*: ``MeshRemovalQuorum`` stores raw voter fingerprints and filters them
+against the roster handed in at **verdict** time, so a merge that grew the roster raises the bar and
+a departure that shrank it lowers the bar with nothing stored having changed. The proposal counts as
+the proposer's vote, the target's vote is discarded (and refused at the door), a duplicate signer
+counts once, and a signer who has since departed or been removed falls out of the roster and so out
+of the tally.
+
+**Proposals and votes are live state, never records.** They are held in memory on
+`MeshNetworkManager.removalQuorum`, never sealed — `MeshSessionContext` stays at schema 2 and no
+wipe row is owed — because a proposal is a five-minute conversation, not a fact about the mesh. An
+incomplete one expires and leaves **no** trace: expiry is a deletion, not a tombstone, so there is
+nothing to merge and nothing a late vote can reopen. Only the completed removal is durable.
+
+**Expiry reads no wall clock from the wire.** The five-minute window is measured from the receiver's
+own `firstSeenAt` on an injected clock. The signed `issuedAt` / `castAt` stamps are bound into the
+signature for the audit trail and are used only as a **bound** — §10.3's ±10 minutes, reused rather
+than restated — so a forged far-future stamp cannot extend a window and a forged far-past one cannot
+kill a live proposal.
+
+**Completion mints the existing record.** `evaluateRemovalQuorum` hands the voter list to
+`mintAndFileRemoval`, the one body both quorum paths end in, which signs a `member-removal.v1`,
+files it through the verifier, seals it, and only then announces it (plan §3.6). Two branches that
+complete independently mint two records for one member; ``MeshMembershipRecordSet`` deduplicates by
+member keeping the earliest, so the union converges on **one** effective removal with no merge
+special case and no second ledger commit. The removed member is not cut off mid-tunnel — the record
+refuses their *next* introduction as `barredMember`.
+
+**The legacy two-party vote is untouched.** `fernlet.mesh.removal.proposal.v1` /
+`fernlet.mesh.removal.second.v1` are UNSIGNED, hard-code quorum at two and read `Date()` directly.
+They stay frozen and are what already-shipped builds speak, exactly as `fernlet.session.bye.v1`
+stays frozen beside the signed departure record. The spelling is the tell: **dots** for the legacy
+pair, **hyphens** for the signed quorum.
 
 **The introduction authority answers from the derived roster** (plan §8.1, §20.4.4, P3 item 7).
 `MeshNetworkManager.roster` is `MeshDerivedRoster.introductionRoster(additionalBarred:)`, so the

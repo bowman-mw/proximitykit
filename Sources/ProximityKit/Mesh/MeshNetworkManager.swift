@@ -265,6 +265,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored var onTempMessageSendForTesting: ((UUID) -> Void)?
     @ObservationIgnored private(set) var removedMemberFingerprints: Set<String> = []
     @ObservationIgnored private var approvedRemovalProposalIDs: Set<UUID> = []
+    /// The live tally of signed removal proposals and votes (P4 item 5, plan §10.4).
+    ///
+    /// **In memory only.** A proposal is a five-minute conversation, not a fact about the mesh, so
+    /// it is never sealed: `MeshSessionContext` stays at schema 2 and no wipe row is owed. A device
+    /// that restarts mid-vote has simply missed it, and only the COMPLETED removal — an ordinary
+    /// `member-removal.v1` record — is durable and mergeable.
+    @ObservationIgnored private(set) var removalQuorum = MeshRemovalQuorum()
     @ObservationIgnored private var sessionID = UUID().uuidString
     private static let maxPeerRetries = 3
     private static let maxLocallyKickedPeers = 32
@@ -1284,6 +1291,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         pendingRemovalProposals.removeAll()
         removedMemberFingerprints.removeAll()
         approvedRemovalProposalIDs.removeAll()
+        removalQuorum.removeAll()
         photoSessionStartedAt = Date()
         activePhotoSessionID = UUID()
         // A new search cycle is a new session: the machine goes back to `idle` even if the last one
@@ -1310,6 +1318,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         pendingRemovalProposals.removeAll()
         removedMemberFingerprints.removeAll()
         approvedRemovalProposalIDs.removeAll()
+        removalQuorum.removeAll()
         photosAddedThisSession = 0
         sessionQuotaMeshID = nil
         receivedPhotoIDsByFingerprint.removeAll()
@@ -1646,6 +1655,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             }
         case .meshRemovalProposal, .meshRemovalSecond:
             dispatchRemovalPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
+        case .meshRemovalProposalSigned, .meshRemovalVote:
+            dispatchRemovalQuorumPayload(payloadType, plaintext: plaintext, decoder: decoder, slot: slot)
         case .meshEncryptedMetadata, .meshCoordinatorBeacon, .meshRotationSync, .meshKeyRotation, .meshKeyAck:
             dispatchGroupKeyPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
         case .meshMemberAdmission, .meshMemberDeparture, .meshMemberRemoval, .meshTerminated,
@@ -1909,14 +1920,38 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// ledger verifies it on its own merged roster; refusing to tell anyone because this device
     /// cannot yet file its own record would be the wrong half to fail closed on.
     private func emitApprovedRemovalRecord(_ proposal: MeshRemovalProposalPayload) {
-        guard let mesh = currentMesh else { return }
+        mintAndFileRemoval(
+            target: proposal.targetFingerprint,
+            proposalID: proposal.id,
+            voterFingerprints: [proposal.proposerFingerprint, identity.localFingerprint]
+        )
+    }
+
+    /// Mints, files durably and broadcasts one completed removal — the single body both quorum
+    /// paths end in (the legacy two-party second, and P4 item 5's signed quorum).
+    ///
+    /// Shared deliberately rather than copied: "verify, file, seal, only then announce" is plan
+    /// §3.6's order, and two copies of it are two places for the seal and the announcement to drift
+    /// apart. The voter list is the caller's, because it is the evidence *that* caller counted.
+    ///
+    /// - Parameters:
+    ///   - target: The member being removed.
+    ///   - proposalID: The proposal the quorum formed around.
+    ///   - voterFingerprints: The distinct eligible voters this device counted.
+    @discardableResult
+    private func mintAndFileRemoval(
+        target: String,
+        proposalID: UUID,
+        voterFingerprints: [String]
+    ) -> SignedRemovalRecord? {
+        guard let mesh = currentMesh else { return nil }
         do {
             let record = try SignedRemovalRecord.signed(
                 meshID: mesh.meshID,
                 identity: identity,
-                memberFingerprint: proposal.targetFingerprint,
-                proposalID: proposal.id,
-                voterFingerprints: [proposal.proposerFingerprint, identity.localFingerprint]
+                memberFingerprint: target,
+                proposalID: proposalID,
+                voterFingerprints: voterFingerprints
             )
             let snapshot = membershipVerifier
             let before = membershipVerifier?.roster
@@ -1925,15 +1960,193 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // rolled back, and a rolled-back record is not announced to anybody.
             if membershipVerifier?.roster != before,
                !commitVerifiedRecord(rollingBackTo: snapshot, type: .meshMemberRemoval) {
-                return
+                return nil
             }
             emitRemovalRecord(record)
+            return record
         } catch {
             FernletAuditLog.log(
                 "mesh.membershipEvent.signFailed",
                 context: ["type": "removal-record", "error": String(describing: error)]
             )
+            return nil
         }
+    }
+
+    // MARK: - Signed removal quorum (P4 item 5, plan §10.4)
+
+    /// Proposes removing a member under this device's own signature, and counts itself as the first
+    /// vote (plan §10.4: "the proposal counts as the proposer's vote").
+    ///
+    /// Additive beside ``proposeRemoval(of:)``, which is the frozen two-party path already-shipped
+    /// builds speak. Nothing is removed here and no record is minted: on a roster of two the
+    /// proposal can never reach quorum, which is §10.4's structural answer rather than a special
+    /// case anybody had to write.
+    ///
+    /// - Parameters:
+    ///   - targetFingerprint: The member proposed for removal.
+    ///   - now: The injected clock — the proposal's own `firstSeenAt` at this device.
+    /// - Returns: The signed proposal, or nil when this device could not honestly make one.
+    @discardableResult
+    func proposeSignedRemoval(of targetFingerprint: String, now: Date = Date()) -> SignedRemovalProposal? {
+        guard let mesh = currentMesh, let roster = membershipVerifier?.roster else { return nil }
+        guard targetFingerprint != identity.localFingerprint else { return nil }
+        do {
+            let proposal = try SignedRemovalProposal.signed(
+                meshID: mesh.meshID, identity: identity,
+                targetFingerprint: targetFingerprint, issuedAt: now
+            )
+            if let rejection = removalQuorum.open(
+                proposal, meshID: mesh.meshID, roster: roster, now: now
+            ) {
+                logQuorumRejection(rejection, type: .meshRemovalProposalSigned)
+                return nil
+            }
+            broadcastQuorumFrame(.meshRemovalProposalSigned, proposal, about: targetFingerprint)
+            evaluateRemovalQuorum(proposal.proposalID, now: now)
+            return proposal
+        } catch {
+            FernletAuditLog.log(
+                "mesh.removalQuorum.signFailed",
+                context: ["type": PayloadType.meshRemovalProposalSigned.rawValue,
+                          "error": String(describing: error)]
+            )
+            return nil
+        }
+    }
+
+    /// Votes on a proposal this device already holds.
+    ///
+    /// - Parameters:
+    ///   - proposalID: The open proposal.
+    ///   - now: The injected clock.
+    /// - Returns: The signed vote, or nil when this device may not cast one.
+    @discardableResult
+    func voteOnSignedRemoval(_ proposalID: UUID, now: Date = Date()) -> SignedRemovalVote? {
+        guard let mesh = currentMesh, let roster = membershipVerifier?.roster else { return nil }
+        guard let open = removalQuorum.proposal(proposalID) else { return nil }
+        do {
+            let vote = try SignedRemovalVote.signed(
+                on: open.proposal, identity: identity, castAt: now
+            )
+            if let rejection = removalQuorum.cast(
+                vote, meshID: mesh.meshID, roster: roster, now: now
+            ) {
+                logQuorumRejection(rejection, type: .meshRemovalVote)
+                return nil
+            }
+            broadcastQuorumFrame(.meshRemovalVote, vote, about: open.proposal.targetFingerprint)
+            evaluateRemovalQuorum(proposalID, now: now)
+            return vote
+        } catch {
+            FernletAuditLog.log(
+                "mesh.removalQuorum.signFailed",
+                context: ["type": PayloadType.meshRemovalVote.rawValue,
+                          "error": String(describing: error)]
+            )
+            return nil
+        }
+    }
+
+    /// Accepts a peer's signed proposal: verify the signer, then open the live tally.
+    ///
+    /// Verification and tallying are two different questions and stay two calls — the verifier says
+    /// "a member signed this", ``MeshRemovalQuorum`` says "and it is still live, and they may vote".
+    ///
+    /// - Parameters:
+    ///   - proposal: The proposal as it arrived.
+    ///   - now: The injected clock; becomes this device's `firstSeenAt` for the five-minute window.
+    func receiveSignedRemovalProposal(_ proposal: SignedRemovalProposal, now: Date = Date()) {
+        guard let mesh = currentMesh, let verifier = membershipVerifier else { return }
+        if let rejection = verifier.verify(proposal) {
+            logQuorumRejection(.signerRefused(rejection), type: .meshRemovalProposalSigned)
+            return
+        }
+        if let rejection = removalQuorum.open(
+            proposal, meshID: mesh.meshID, roster: verifier.roster, now: now
+        ) {
+            logQuorumRejection(rejection, type: .meshRemovalProposalSigned)
+            return
+        }
+        evaluateRemovalQuorum(proposal.proposalID, now: now)
+    }
+
+    /// Accepts a peer's signed vote and re-evaluates quorum on **this** device's merged roster.
+    ///
+    /// - Parameters:
+    ///   - vote: The vote as it arrived.
+    ///   - now: The injected clock.
+    func receiveSignedRemovalVote(_ vote: SignedRemovalVote, now: Date = Date()) {
+        guard let mesh = currentMesh, let verifier = membershipVerifier else { return }
+        if let rejection = verifier.verify(vote) {
+            logQuorumRejection(.signerRefused(rejection), type: .meshRemovalVote)
+            return
+        }
+        if let rejection = removalQuorum.cast(
+            vote, meshID: mesh.meshID, roster: verifier.roster, now: now
+        ) {
+            logQuorumRejection(rejection, type: .meshRemovalVote)
+            return
+        }
+        evaluateRemovalQuorum(vote.proposalID, now: now)
+    }
+
+    /// Re-derives plan §10.4's arithmetic for one proposal and, on completion, mints the permanent
+    /// record.
+    ///
+    /// **The quorum is this receiver's**, taken from its own merged roster at this instant — so the
+    /// same votes complete on a branch of three and stay short on a merged roster of six, with
+    /// nothing stored having changed. Completion is guarded by ``approvedRemovalProposalIDs``, the
+    /// set the legacy path already uses, so one proposal mints at most one record here however many
+    /// late votes arrive.
+    ///
+    /// Two devices completing independently across a split is expected and needs no coordination:
+    /// both records name the same member, and ``MeshMembershipRecordSet`` deduplicates by member
+    /// keeping the earliest, so the union converges on one effective removal.
+    private func evaluateRemovalQuorum(_ proposalID: UUID, now: Date) {
+        guard let roster = membershipVerifier?.roster else { return }
+        guard case .complete(let voters) = removalQuorum.verdict(
+            for: proposalID, roster: roster, at: now
+        ) else { return }
+        guard let target = removalQuorum.proposal(proposalID)?.proposal.targetFingerprint else { return }
+        removalQuorum.close(proposalID)
+        guard approvedRemovalProposalIDs.count < Self.maxRecordedRemovals else { return }
+        guard approvedRemovalProposalIDs.insert(proposalID).inserted else { return }
+        guard mintAndFileRemoval(
+            target: target, proposalID: proposalID, voterFingerprints: voters
+        ) != nil else { return }
+        // Only AFTER the record is minted, filed and durable: a device that locally forgot a member
+        // it could not write a record about would exclude them from the next key with nothing to
+        // show any peer for it (plan §3.6's order, at this seam).
+        if removedMemberFingerprints.count < Self.maxRecordedRemovals {
+            removedMemberFingerprints.insert(target)
+        }
+        // Plan §8.3: a completed removal is a roster change, so it rotates at once rather than
+        // letting the voted-out member hold the key until the next 15-minute tick. The live tunnel
+        // is deliberately NOT cut — a removal refuses the removed member's NEXT introduction
+        // (`barredMember`), which is the transport's own rule and not this seam's to duplicate.
+        requestRotation(cause: .membership)
+    }
+
+    /// Broadcasts one quorum frame to every member except the one it is about.
+    ///
+    /// The exclusion reuses ``membershipEventRecipients(excluding:)`` — the same rule that keeps a
+    /// completed removal from reaching its subject — because a target handed the proposal about
+    /// itself gains nothing it may act on and a voter list to retaliate against.
+    private func broadcastQuorumFrame(_ type: PayloadType, _ payload: some Encodable, about target: String) {
+        let recipients = membershipEventRecipients(excluding: target)
+        Task { @MainActor [weak self] in
+            await self?.broadcastMembershipFrame(type, payload, to: recipients)
+        }
+    }
+
+    /// Records one quorum refusal. Never silent (R7): a vote that did not count is a thing a
+    /// developer has to be able to see in a log.
+    private func logQuorumRejection(_ rejection: MeshRemovalQuorumRejection, type: PayloadType) {
+        FernletAuditLog.log(
+            "mesh.removalQuorum.rejected",
+            context: ["type": type.rawValue, "reason": rejection.diagnosticDescription]
+        )
     }
 
     /// **The one merge path** (plan §10.3): merges another device's ledger into this one, rotates
@@ -3747,6 +3960,36 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 return
             }
             handleRemovalSecond(payload, senderFingerprint: senderFingerprint, rebroadcast: false)
+        default:
+            break
+        }
+    }
+
+    /// The **signed** removal quorum family (P4 item 5, plan §10.4), gated at the wire boundary.
+    ///
+    /// A COMMITTED slot is required, as for every other member-business family. Unlike the legacy
+    /// two-party pair, the sender fingerprint is deliberately **not** compared to the claimed
+    /// proposer or voter: these frames carry their own signature over their own domain, and
+    /// ``MeshMembershipRecordVerifier`` checks it against the key the ledger's admissions bound. A
+    /// sender-must-be-author rule would additionally forbid relaying, which is the one thing a
+    /// partitioned quorum genuinely wants.
+    private func dispatchRemovalQuorumPayload(
+        _ type: PayloadType,
+        plaintext: Data,
+        decoder: JSONDecoder,
+        slot: PeerSlot?
+    ) {
+        guard slot?.fingerprint != nil else {
+            FernletAuditLog.log("mesh.removalQuorum.droppedUncommittedSlot", context: ["type": type.rawValue])
+            return
+        }
+        switch type {
+        case .meshRemovalProposalSigned:
+            guard let payload = try? decoder.decode(SignedRemovalProposal.self, from: plaintext) else { return }
+            receiveSignedRemovalProposal(payload)
+        case .meshRemovalVote:
+            guard let payload = try? decoder.decode(SignedRemovalVote.self, from: plaintext) else { return }
+            receiveSignedRemovalVote(payload)
         default:
             break
         }

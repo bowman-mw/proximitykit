@@ -180,6 +180,14 @@ private nonisolated let canonicalMeshInventoryDigestHashDomain =
     FernletCryptoPurpose.Hash.meshInventoryDigestV1.data
 private nonisolated let canonicalMeshEpochHeadsDomain =
     FernletCryptoPurpose.Signature.meshEpochHeadsV1.data
+// Quorum under partition (network migration P4 item 5, plan §10.4). Two more domains, distinct from
+// each other and from the completed removal's: a proposal binds `proposalID → (mesh, target,
+// proposer)` and a vote agrees with one, while `meshMemberRemovalV1` signs the permanent record. If
+// any two of the three cross-validated, one signed object could be replayed as another.
+private nonisolated let canonicalMeshRemovalProposalDomain =
+    FernletCryptoPurpose.Signature.meshRemovalProposalV1.data
+private nonisolated let canonicalMeshRemovalVoteDomain =
+    FernletCryptoPurpose.Signature.meshRemovalVoteV1.data
 
 // MARK: - Identity envelope
 
@@ -486,6 +494,42 @@ nonisolated func canonicalBytes(for payload: MeshEpochHeadsPayload) -> Data {
     for head in payload.heads {
         writer.appendString(head.canonicalString)
     }
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``SignedRemovalProposal`` (plan §10.4, P4 item 5).
+///
+/// The target is bound before the proposer so the two fingerprints can never be transposed into a
+/// valid transcript for the mirror-image proposal, and `issuedAt` is bound because it is audited —
+/// the five-minute window is measured at the receiver from first-seen, so binding the stamp costs
+/// nothing and an unbound one could be rewritten by a relay.
+nonisolated func canonicalBytes(for proposal: SignedRemovalProposal) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshRemovalProposalDomain)
+    writer.appendUUID(proposal.meshID)
+    writer.appendUUID(proposal.proposalID)
+    writer.appendString(proposal.targetFingerprint)
+    writer.appendString(proposal.proposerFingerprint)
+    writer.appendDate(proposal.issuedAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``SignedRemovalVote`` (plan §10.4, P4 item 5).
+///
+/// The same field order as the proposal's, with the voter where the proposer sits — and a different
+/// domain, so the two transcripts cannot be mistaken for one another even though they are the same
+/// shape. Binding the target here is what makes a vote countable only against the proposal it
+/// actually agrees with.
+nonisolated func canonicalBytes(for vote: SignedRemovalVote) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshRemovalVoteDomain)
+    writer.appendUUID(vote.meshID)
+    writer.appendUUID(vote.proposalID)
+    writer.appendString(vote.targetFingerprint)
+    writer.appendString(vote.voterFingerprint)
+    writer.appendDate(vote.castAt)
     // signature: deliberately excluded.
     return writer.bytes
 }
