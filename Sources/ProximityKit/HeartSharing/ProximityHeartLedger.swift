@@ -84,7 +84,9 @@ public final class ProximityHeartLedger {
     static let heartRetention: TimeInterval = 48 * 60 * 60
     /// The per-friend rate window, each direction: at most one heart per friend per 5 minutes.
     static let rateLimitInterval: TimeInterval = 5 * 60
-    static let maxStoredHearts = 32
+    /// Retention cap on stored hearts. `nonisolated` so `MeshMergedHeart.setCapacity` can reuse it
+    /// rather than restate it — the merged view and this ledger bound identically (plan §10.3).
+    nonisolated static let maxStoredHearts = 32
 
     /// Versioned sidecar shape: the two per-fingerprint rate-limit timestamp maps plus the
     /// received-heart records. Decodes v1 blobs tolerantly (see `init(from:)`).

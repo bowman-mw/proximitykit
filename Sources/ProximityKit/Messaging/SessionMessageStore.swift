@@ -70,7 +70,9 @@ public final class SessionMessageStore {
     static let burstAllowance: Double = 5
     static let refillPerSecond: Double = 1
     /// Hard cap on the in-memory transcript (a session is short; this only bounds a hostile flood).
-    static let maxMessages = 500
+    /// `nonisolated` so the merge layer can reuse it rather than restate it: `MeshMergedMessage`
+    /// is a `nonisolated` value type and its `setCapacity` is this number (plan §10.3).
+    nonisolated static let maxMessages = 500
 
     /// The current session's messages, oldest-first (append order). Empty outside a session.
     public private(set) var messages: [Message] = []

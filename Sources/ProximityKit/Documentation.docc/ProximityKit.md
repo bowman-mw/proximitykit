@@ -784,6 +784,43 @@ actually run — a device with no mesh or no ledger keeps
 ``MeshIntroductionRejection/divergentEpoch``, and the parameter's default is `false` so a caller that
 forgets it fails closed.
 
+**Content merges by ID-keyed union, and the gates re-run at the receiving member** (P4 item 7, plan
+§10.3 + §21.3). ``MeshContentLedger`` is the content twin of ``MeshMembershipLedger``: three
+``MeshContentSet``s — photos by manifest ID, messages by message ID, hearts by gift ID — each
+deduped by id, sorted by one total order and capped at the same bound its live surface already
+applies (`SessionMessageStore.maxMessages`, `ProximityHeartLedger.maxStoredHearts`,
+`FriendPhotoLimits.maxManifestEntries`, reused rather than restated). Union is commutative,
+associative and idempotent at the cap as well as below it, so an N-way partition tree converges with
+pairwise merges only and no special case. Nothing conflicting can exist — only missing — so nothing
+is ever overwritten, and nothing here is persisted or on the wire: `MeshSessionContext`'s schema
+stays **2**.
+
+The visible transcript is **re-derived**, never stored: total order `(claimedSentAt clamped to
+±10 min of first-seen, senderFingerprint, messageID)`, where *first-seen is the receiver's own
+clock*, never a stamp in the message. The clamp is a bound rather than a coordination mechanism — a
+claim inside its window is returned unchanged, which is why honest traffic sorts identically at every
+member, while a forged stamp moves at most ten minutes from where it actually arrived. Photos are
+hash-validated at reassembly by ``MeshPhotoReassembly``, whose `admitting(_:reassembled:into:)`
+returns the set **unchanged** unless the bytes match, so "silently kept" is not a reachable state.
+Hearts merge without a receipt field at all: a peer's receipt is not this member's, so
+``MeshHeartCommit`` drives the merged batch through the **existing** ``ProximityHeartLedger`` — its
+id-dedup, its five-minute per-sender cooldown — and a duplicate that crossed the split is collapsed
+by the union *before* the ledger sees it, so the cooldown is judged once rather than twice.
+
+**A branch's approval is not a free pass** (§21.3's decision, taken deliberately). The 13+ age gate
+and the local block/ban re-run at the *receiving* member through ``MeshContentGates``, folded once
+from the seams that already enforce them — `isChatAllowed`, ``ProximityHost/isBlockedFingerprint(_:)``,
+``ModerationBanStore/isPeerBanned(fingerprint:)``. They are a **view filter over an unmutated union**,
+the same shape as the termination downgrade: a blocked sender's message still unions everywhere, and
+a member whose age gate refuses chat simply renders no transcript — re-opening the gate reveals the
+merged records with no second merge. The photo ``MeshMergedPhoto/keyEpoch`` rides through the union
+untouched: `MeshNetworkManager`'s three `keyEpoch` gates (the manifest's
+`keyEpoch >= localJoinedEpoch` filter, the photo decrypt's `key.epoch == photo.keyEpoch`, and the
+metadata wrapper's `wrapper.keyEpoch == currentGroupKey?.epoch` in `handleEncryptedMetadata`) would each reject content minted in
+the other branch of a split, and plan §21.5 retires them **with the path P5 replaces** rather than
+loosening them here. P5 owns the routed store and the drain; P6 owns feature routing; this layer owns
+only the rules.
+
 **The ceiling is guarded at both bounds.** ``MeshSessionCeiling`` holds the signed absolute
 `hardDeadline` (± 120 s skew) *and* a local monotonic budget measured with `ContinuousClock`, clamped
 to six hours at construction. A wall clock set backwards cannot lengthen a session (the monotonic
