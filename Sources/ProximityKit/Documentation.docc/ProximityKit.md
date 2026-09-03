@@ -465,7 +465,10 @@ and the joiner's ledger bootstrap: `MeshMemberAdmissionPayload`, `MeshLedgerAdop
 and `MeshRotationPolicy`. P5 item 1 added the routed-content wire family: `MeshRoutedManifestFormat`,
 `MeshRecipientKeyWrap`, `MeshRoutedManifest`, `MeshRoutedManifestPayload`, `MeshRoutedManifestMintError`,
 `MeshRoutedManifestVerifier`, `MeshRoutedManifestRejection`, `MeshRoutedWrapBinding`,
-`MeshRoutedKeyWrapError` and `MeshRoutedContentKeyWrapper`.
+`MeshRoutedKeyWrapError` and `MeshRoutedContentKeyWrapper`. P5 item 2 added the routed CHUNK family
+— thirteen types: `MeshChunkFormat`, `MeshRoutedContentDigest`, `MeshChunk`, `MeshChunkPayload`,
+`MeshChunkRejection`, `MeshChunkVerifier`, `MeshChunkMintError`, `MeshChunker`, `MeshChunkRefusal`,
+`MeshChunkAdmission`, `MeshChunkBinding`, `MeshChunkCompletion` and `MeshChunkAssembly`.
 
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
@@ -482,6 +485,7 @@ frozen English spelling, so one grep finds every layer that touches those bytes:
 | `fernlet.mesh.removal-proposal.v1` | — (live state, not a record) | the proposer, whose proposal IS its vote | `Signature.meshRemovalProposalV1` |
 | `fernlet.mesh.removal-vote.v1` | — (live state, not a record) | any member except the target | `Signature.meshRemovalVoteV1` |
 | `fernlet.mesh.routed-manifest.v1` | `MeshRoutedManifest` (a content record, not a membership record) | the origin only — relays forward it verbatim, never re-sign | `Signature.meshRoutedManifestV1`; wraps under `KeyDerivation.meshRoutedContentKeyWrapV1` + `AEAD.meshRoutedContentKeyWrapV1` |
+| `fernlet.mesh.routed-chunk.v1` | `MeshChunk` (one slice of that item's ciphertext) | the origin only — a custodian forwards it verbatim, never re-signs | `Signature.meshRoutedChunkV1`; digests under `Hash.meshRoutedContentV1` (the whole item), `Hash.meshRoutedChunkV1` (one slice) and `Hash.meshRoutedChunkIDV1` (the derived replay-window id) |
 
 **Nothing enters a ledger unverified.** ``MeshMembershipRecordSet`` is pure algebra and will merge
 whatever it is handed; ``MeshMembershipRecordVerifier`` is the only door. That matters because the
@@ -714,7 +718,10 @@ pinned by a golden, so widening it would have been a wire decision rather than a
 `fernlet.mesh.epoch-heads.v1` is additive — its own token, its own registered signature domain
 `Signature.meshEpochHeadsV1`, its own golden, its own framing-transcript case — and no existing
 golden moved. P5 item 1's `fernlet.mesh.routed-manifest.v1` followed the same rule — purposes
-pre-registered in P0, its own golden and framing case, no existing golden moved.
+pre-registered in P0, its own golden and framing case, no existing golden moved. So did P5 item 2's
+`fernlet.mesh.routed-chunk.v1`: one new signature purpose, three new `Hash` purposes, four new
+vectors (the chunk transcript, the per-chunk hash, the item hash and the derived chunk id), its own
+framing-transcript case — and the manifest golden re-asserted, untouched, in the new suite.
 
 **Both halves travel in both directions** (P4 item 2c). The ask sends the digest and the heads
 together, and the answer to a *mismatched* digest sends the bounded re-gossip and the heads together,
@@ -884,6 +891,34 @@ member can mint under its own key reusing another origin's id. Verification need
 is the separate, private-key half. The type carries no epoch, branch, custody or first-seen; nothing
 persists it yet (item 3); nothing dispatches it yet (item 6).
 
+**Routed chunks: the item's ciphertext, sliced, signed by the origin and reassembled in any order**
+(P5 item 2, plan §11). ``MeshChunk`` carries mesh, item, origin, the whole item's `contentHash`,
+`chunkIndex` of `chunkCount`, the slice's own `chunkHash`, the item's expiry and the slice — at most
+``MeshChunkFormat/maxChunkPayloadBytes`` (256 KiB), at most ``MeshChunkFormat/maxChunkCount`` (1024,
+derived from the 256 MiB content cap). **Signed by the origin only**, and the payload is *excluded*
+from the signed transcript and bound **through** `chunkHash`, so a 256 KiB slice costs 32 transcript
+bytes and a custodian forwards the exact object — signature included — inside its own envelope. Two
+domain-tagged digests keep the item hash and a slice hash apart even for a one-chunk item
+(``MeshRoutedContentDigest``), and the replay-window id item 12 keys on is **derived**
+(``MeshChunk/chunkID``), never a wire field — its doc gives item 12 the wiring's shape plus the
+caveat that `MeshFrameReplayWindow`'s 64-per-sender cap is smaller than the 1024 chunks of a maximal
+item, so a P5 window must be sized before that id is keyed on. ``MeshChunker`` is the mint and
+refuses to mint for a manifest this device did not originate; ``MeshChunkVerifier`` is the receive
+door (mesh → shape → admitted key → not removed → signature → chunk hash → expiry, then the manifest
+cross-checks, whose identity test is the **triple** `(itemID, originFingerprint, contentHash)` so an
+admitted member cannot squat another origin's item id); ``MeshChunkAssembly`` collects slices in any
+order — a manifest may arrive last, and completion is impossible until one binds, and a chunk
+offered at an index already held is a duplicate no-op when its **signed transcript and payload**
+match (an honest re-mint differs only in its hedged signature) and
+``MeshChunkRefusal/conflictingChunk`` otherwise. ``MeshChunkCompletion/complete(blob:)`` is the
+whole-item hash check, **necessary but never
+sufficient** for a custody receipt, since it is a verdict over in-memory bytes and durability (plan
+§3.6) is item 3's separate gate. Chunks ride P2's existing per-transfer stream lane with **no
+transport change**: a 256 KiB payload in a signed envelope is above the 64 KiB bulk floor and below
+the 16 MiB ceiling, so `NetworkMeshSession` gives it a stream of its own by size alone. Nothing here
+seals the item (that is item 6 / P6 — item 2 chunks an opaque blob), forwards anything, persists
+anything, or tunes the transport.
+
 **The ceiling is guarded at both bounds.** ``MeshSessionCeiling`` holds the signed absolute
 `hardDeadline` (± 120 s skew) *and* a local monotonic budget measured with `ContinuousClock`, clamped
 to six hours at construction. A wall clock set backwards cannot lengthen a session (the monotonic
@@ -934,6 +969,19 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshRoutedWrapBinding``
 - ``MeshRoutedKeyWrapError``
 - ``MeshRoutedContentKeyWrapper``
+- ``MeshChunkFormat``
+- ``MeshRoutedContentDigest``
+- ``MeshChunk``
+- ``MeshChunkPayload``
+- ``MeshChunkRejection``
+- ``MeshChunkVerifier``
+- ``MeshChunkMintError``
+- ``MeshChunker``
+- ``MeshChunkRefusal``
+- ``MeshChunkAdmission``
+- ``MeshChunkBinding``
+- ``MeshChunkCompletion``
+- ``MeshChunkAssembly``
 - ``MeshSessionCeiling``
 - ``MeshSessionCeilingBound``
 - ``MeshSessionCeilingVerdict``

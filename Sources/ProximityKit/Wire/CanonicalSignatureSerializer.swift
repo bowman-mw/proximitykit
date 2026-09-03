@@ -192,6 +192,12 @@ private nonisolated let canonicalMeshRemovalVoteDomain =
 // verbatim; its domain must be distinct from every membership frame's so "what I am sending"
 // can never be replayed as "what I hold" (the inventory digest) or "what epoch I am on".
 private nonisolated let canonicalMeshRoutedManifestDomain = FernletCryptoPurpose.Signature.meshRoutedManifestV1.data
+// P5 item 2 (plan §11): one slice of that item's ciphertext. Its own domain, distinct from the
+// manifest's, because the two travel together for every routed item and describe different things —
+// a manifest says who an item is for and who can open it, a chunk says "these bytes are part of it".
+// A signature that satisfied both could let one stand in for the other, which is how a destination
+// set or a key wrap would be swapped under an authentic-looking transfer.
+private nonisolated let canonicalMeshRoutedChunkDomain = FernletCryptoPurpose.Signature.meshRoutedChunkV1.data
 
 // MARK: - Identity envelope
 
@@ -567,6 +573,31 @@ nonisolated func canonicalBytes(for manifest: MeshRoutedManifest) -> Data {
     for wrap in manifest.keyWraps {
         appendCanonical(&writer, wrap)
     }
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshChunk`` — one origin-signed slice of a routed item's
+/// ciphertext (plan §11, P5 item 2). **Field order IS the schema**: identity first (mesh, item,
+/// origin), then the descriptor (the item's content hash, this slice's position and its own hash),
+/// then the instant.
+///
+/// The **payload is deliberately excluded** and bound through `chunkHash` instead: 32 bytes in the
+/// transcript rather than 256 KiB copied into a signing buffer, with the same authenticity, since a
+/// receiver checks the hash against the bytes it holds. The `signature` is excluded as ever.
+/// Signed by the origin only; a custodian forwards these exact fields and never re-derives them.
+nonisolated func canonicalBytes(for chunk: MeshChunk) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshRoutedChunkDomain)
+    writer.appendUUID(chunk.meshID)
+    writer.appendUUID(chunk.itemID)
+    writer.appendString(chunk.originFingerprint)
+    writer.appendLengthPrefixed(chunk.contentHash)
+    writer.appendUInt64(UInt64(chunk.chunkIndex))
+    writer.appendUInt64(UInt64(chunk.chunkCount))
+    writer.appendLengthPrefixed(chunk.chunkHash)
+    writer.appendDate(chunk.expiresAt)
+    // payload: bound by chunkHash, deliberately excluded.
     // signature: deliberately excluded.
     return writer.bytes
 }

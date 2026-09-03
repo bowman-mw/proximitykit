@@ -18,7 +18,8 @@
 // reach the wire by mistake.
 //
 // What is deliberately NOT here: persistence (item 3, with its wipe row), dispatch and emission
-// (item 6), chunks and the item seal (item 2), the type-token registry (item 11), receipts (items
+// (item 6), chunks (item 2) and the item seal (item 6 / P6 — item 2 chunks an OPAQUE blob and
+// deliberately does not seal), the type-token registry (item 11), receipts (items
 // 3/4). `MeshRoutedManifestVerifier` is the receive-side door and `MeshRoutedContentKeyWrapper`
 // the crypto; this file is the record, its bounds and its mint.
 
@@ -55,7 +56,8 @@ nonisolated enum MeshRoutedManifestFormat {
     static let nonceByteCount = 12
     /// ``MeshRecipientKeyWrap/sealedKey`` width: 32-byte content-key ciphertext ‖ 16-byte GCM tag.
     static let sealedKeyByteCount = 48
-    /// The random content key's width — 32 bytes, carried as `Data` (AES-256 material; item 2 builds the `SymmetricKey(data:)`).
+    /// The random content key's width — 32 bytes, carried as `Data` (AES-256 material; item 6 / P6
+    /// builds the `SymmetricKey(data:)` at the seal).
     static let contentKeyByteCount = 32
     /// Plan §11's "20-minute development grace" past the mesh's signed `hardDeadline`. Frozen: it is
     /// bound into every origin signature via ``MeshRoutedManifest/expiresAt``.
@@ -149,7 +151,12 @@ nonisolated struct MeshRoutedManifest: Codable, Equatable, Sendable {
     let originFingerprint: String
     /// Frozen English routed-type token (item 11's registry gives it meaning; this file bounds it).
     let typeToken: String
-    /// SHA-256 of the item's ciphertext, 32 bytes. Opaque here (D2).
+    /// ``MeshRoutedContentDigest/contentHash(of:)`` over the **complete sealed blob**:
+    /// `SHA-256(lp(Hash.meshRoutedContentV1) ‖ blob)`, 32 bytes. **Never a bare `SHA256.hash`** for
+    /// routed bytes (P5 item 2, C12) — a manifest minted with an untagged digest is accepted by
+    /// every verifier (this field is opaque here, D2) and then no chunk can ever be minted for it
+    /// (`MeshChunkMintError.contentHashMismatch`). The 32 bytes are opaque to this type; the
+    /// domain they must be computed under is not.
     let contentHash: Data
     /// Ciphertext byte count, 1 … ``MeshRoutedManifestFormat/maxContentByteCount``.
     let size: UInt64
@@ -362,13 +369,15 @@ extension MeshRoutedManifest {
     ///   - meshID: The session's mesh id.
     ///   - target: The delivery target built from the derived roster; `target.contentID` is the item id.
     ///   - typeToken: Frozen English routed-type token.
-    ///   - contentHash: SHA-256 of the ciphertext, 32 bytes.
+    ///   - contentHash: ``MeshRoutedContentDigest/contentHash(of:)`` over the complete sealed blob
+    ///     — `SHA-256(lp(Hash.meshRoutedContentV1) ‖ blob)`, 32 bytes. Never a bare `SHA256.hash`
+    ///     (P5 item 2, C12): unchecked here, and a mismatch surfaces only at the chunk mint.
     ///   - size: Ciphertext byte count.
     ///   - createdAt: The origin's creation instant, injected — nothing here reads a clock.
     ///   - hardDeadline: The session's signed ceiling (`MeshSessionContext.hardDeadline`).
     ///   - contentKey: The random 32-byte content key (``MeshRoutedContentKeyWrapper/makeContentKey()``),
-    ///     as `Data` so no pointer API is needed to wrap it (Power of 10 R9); item 2 builds the
-    ///     `SymmetricKey(data:)` at the seal.
+    ///     as `Data` so no pointer API is needed to wrap it (Power of 10 R9); item 6 / P6 builds
+    ///     the `SymmetricKey(data:)` at the seal — item 2 chunks an opaque blob and never sees a key.
     ///   - recipientKeys: Handshake-verified X25519 public keys by destination fingerprint.
     ///   - identity: The origin. Its fingerprint becomes ``originFingerprint``.
     /// - Throws: ``MeshRoutedManifestMintError``, ``MeshRoutedKeyWrapError``, or the identity's

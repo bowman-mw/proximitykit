@@ -48,18 +48,26 @@ nonisolated struct MeshTransferID: Hashable, Sendable {
 /// **The behaviour above the transport is unchanged.** A transfer stream carries exactly one
 /// length-framed payload, delivered as exactly one `InboundPeerFrame`, with the same
 /// ``NetworkMeshSession/maxInboundWireBytes`` ceiling both radios enforce. There is no chunking, no
-/// resume, no ack for the *application* to see, and no new envelope: `MeshNetworkManager` sends a
-/// photo the same way it sends a chat message, over MC and over QUIC alike, and cannot tell which
-/// pipe carried it. The only thing that moved is which stream the bytes travelled on.
+/// resume, no ack for the *application* to see, and no new envelope **the transport is aware of**:
+/// `MeshNetworkManager` sends a photo the same way it sends a chat message, over MC and over QUIC
+/// alike, and cannot tell which pipe carried it. (`MeshChunkPayload` is a new envelope *above* this
+/// layer — routing here is still purely by size, and the transport still cannot tell which pipe
+/// carried what.) The only thing that moved is which stream the bytes travelled on.
 ///
 /// ## What ordering this gives up
 ///
 /// Frames on separate streams are not ordered against each other. That is why the floor is set high
-/// enough that only photo- and manifest-shaped payloads reach it: the coordinator's identity
-/// handshake, the chat/heart/capability/moderation traffic and every membership record stay on the
-/// control stream, in order, exactly as they are under MultipeerConnectivity. What crosses the floor
-/// is idempotent and causally gated by a round trip already — a photo is only ever sent in answer to
-/// a `FriendPhotoRequestPayload`, and a manifest is a diff that is re-sent at the next commit.
+/// enough that only photo-, manifest- and routed-chunk-shaped payloads reach it: the coordinator's
+/// identity handshake, the chat/heart/capability/moderation traffic and every membership record stay
+/// on the control stream, in order, exactly as they are under MultipeerConnectivity.
+///
+/// Two of the three payloads that cross the floor are idempotent and causally gated by a round trip
+/// already — a photo is only ever sent in answer to a `FriendPhotoRequestPayload`, and a manifest is
+/// a diff that is re-sent at the next commit. A **routed chunk** (network migration P5 item 2, plan
+/// §11) is neither: nothing requests it and nothing re-sends it at a later commit. Order
+/// independence for those is therefore the RECEIVER's job — `MeshChunkAssembly` admits chunks in
+/// any order and against a manifest that may itself arrive last — not the sender's, and not this
+/// table's.
 ///
 /// ## Why exhausting the budget cannot wedge anything
 ///
