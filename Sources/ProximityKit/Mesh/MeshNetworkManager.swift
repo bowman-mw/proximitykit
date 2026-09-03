@@ -2481,7 +2481,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Sends this device's signed epoch head(s) to one peer — the **epoch half** of plan §10.3's
-    /// union exchange (P4 item 3).
+    /// union exchange (P4 item 3), on the ask (``beginMergeExchange(entry:)``) and on the answer
+    /// (``receiveInventoryDigest(_:)``'s mismatch branch) alike.
     ///
     /// It is the one thing the reconnect exchange could not compose out of frames that already
     /// existed: `fernlet.mesh.inventory-digest.v1` describes *records*, and its signed bytes are
@@ -3830,14 +3831,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         applyVerifiedSelfRemoval()
     }
 
-    /// Verifies a peer's digest, remembers it, and answers with the records this device holds when
-    /// the two ledgers differ (plan §10.5). A digest that DIFFERS is not an error — that is the
-    /// signal, and the answer is one bounded re-gossip per peer per session.
+    /// Verifies a peer's digest, remembers it, and answers with the records **and the epoch heads**
+    /// this device holds when the two ledgers differ (plan §10.5). A digest that DIFFERS is not an
+    /// error — that is the signal, and the answer is one bounded re-gossip per peer per session.
     ///
     /// Both sides answer, because "I hold fewer records" and "I hold different records" are not the
     /// same thing and a count cannot tell them apart. The loop is closed elsewhere: the batch is
     /// once per peer per session, and a record frame never provokes another digest — so a fresh
     /// joiner converges in one round trip rather than in a ping-pong.
+    ///
+    /// **The answer carries both halves of §10.3's exchange, exactly as the ask does** (P4 item 2c).
+    /// A device inside an open merge window opens no second exchange
+    /// (``openBlipMergeIfReconnected(_:from:peer:)``), and an exchange is the only other thing that
+    /// sends a ``PayloadType/meshEpochHeads`` frame — so an answer of records alone leaves a peer
+    /// that converged on this device's *ledger* still counting up from its own older head, with
+    /// nothing left in flight to correct it. Found by the seeded convergence property
+    /// (`MeshConvergencePropertyTests`), where a chain heal left one member on a lower
+    /// ``rotationBasisHead`` than its peers for good.
     private func receiveInventoryDigest(_ payload: MeshInventoryDigestPayload) {
         guard let verifier = membershipVerifier else { return }
         if let rejection = verifier.verify(payload) {
@@ -3858,7 +3868,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             concludeMerge()
             return
         }
-        Task { @MainActor [weak self] in await self?.reGossipRecords(to: payload.senderFingerprint) }
+        // One task, so the answer's two halves reach the wire in a fixed order: the records the
+        // peer is missing, then the head this device is on. Order is not load-bearing (a fold and a
+        // record commute), determinism is.
+        Task { @MainActor [weak self] in
+            await self?.reGossipRecords(to: payload.senderFingerprint)
+            await self?.sendEpochHeads(to: [payload.senderFingerprint])
+        }
     }
 
     /// Logs a refused record. Frozen English diagnostics, never user copy.

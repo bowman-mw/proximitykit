@@ -711,6 +711,14 @@ pinned by a golden, so widening it would have been a wire decision rather than a
 `Signature.meshEpochHeadsV1`, its own golden, its own framing-transcript case — and no existing
 golden moved.
 
+**Both halves travel in both directions** (P4 item 2c). The ask sends the digest and the heads
+together, and the answer to a *mismatched* digest sends the bounded re-gossip and the heads together,
+for the same reason. A device inside an open merge window opens no second exchange, and an exchange
+is the only other thing that sends a head — so an answer of records alone left a peer converged on
+this device's ledger and still counting up from its own older head, with nothing in flight to correct
+it. The seeded convergence property found it (`MeshConvergencePropertyTests`); the fix moves no wire
+bytes, because the frame it now sends is the one the ask already sent.
+
 Three consequences worth stating outright:
 
 - **A record arriving while a merge is in flight is merge traffic.** While `awaitingResumeMerge` is
