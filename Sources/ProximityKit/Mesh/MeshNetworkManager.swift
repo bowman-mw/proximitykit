@@ -1241,6 +1241,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         awaitingResumeMerge = false
         offersForegroundResume = false
         idleLapseDeadline = nil
+        // Presence is run-scoped: a new session has looked at nothing yet, and carrying a stale
+        // branch view across one would scope the next session's rotation to the last one's branch.
+        branchView = nil
+        lastExternalHeartbeatAt = nil
         restoredSessionContext = nil
         if !keepingTerminalState || !sessionState.hasEnded { sessionState = .idle }
     }
@@ -2543,6 +2547,120 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func evaluateIdleLapse(now: Date) -> Bool {
         guard let deadline = idleLapseDeadline, now >= deadline else { return false }
         return applySessionEvent(.idleLapsed).nextState == .localIdleStop
+    }
+
+    // MARK: - Partition detection (network migration P4 item 1, plan §10.2)
+
+    /// What this device can currently SEE of its own roster: who is present, who is
+    /// ``MeshMemberPresence/temporarilyDisconnected``, and who coordinates this branch.
+    ///
+    /// **Memory-only, and never sealed** (plan §21.3). Presence is a reversible local judgement;
+    /// `MeshSessionContext`'s schema stays at 2 precisely because none of this is written down.
+    /// Nil until ``evaluatePartition(reachable:now:)`` has run at least once with a real roster,
+    /// which is the honest "this device has not looked yet".
+    @ObservationIgnored private(set) var branchView: MeshBranchView?
+
+    /// When this device last counted an authenticated heartbeat from **another** roster member.
+    ///
+    /// Memory-only for the same reason as ``branchView``. `MeshSessionContext.lastExternalHeartbeat`
+    /// exists in the sealed schema and is deliberately still unwritten: sealing on every heartbeat
+    /// would be a write per 30 seconds per link, and the idle window it feeds is a live judgement
+    /// that a relaunch re-derives (a relaunch never auto-reconnects, invariant 5).
+    @ObservationIgnored private(set) var lastExternalHeartbeatAt: Date?
+
+    /// The presence of one roster member, or nil when this device has derived no branch view or the
+    /// roster does not name them.
+    func presence(of fingerprint: String) -> MeshMemberPresence? { branchView?.presence(of: fingerprint) }
+
+    /// The roster fingerprints this device can reach right now: itself plus every committed active
+    /// slot. Uncommitted slots are deliberately excluded — a peer whose identity introduction has
+    /// not finished is not somebody this device can reach in the sense a partition means.
+    func reachableRosterFingerprints() -> Set<String> {
+        Set(activeSlots.compactMap(\.fingerprint) + [identity.localFingerprint])
+    }
+
+    /// Re-derives the branch view from the live transport and raises whatever it implies.
+    ///
+    /// - Parameter now: The instant a fresh idle window would be measured from.
+    /// - Returns: What changed.
+    @discardableResult
+    func evaluatePartition(now: Date) -> MeshPartitionVerdict {
+        evaluatePartition(reachable: reachableRosterFingerprints(), now: now)
+    }
+
+    /// Plan §10.2's partition detection, evaluated **on demand** against a supplied reachable set.
+    ///
+    /// There is deliberately **no new timer**: this is the same shape as
+    /// ``enforceSessionCeiling(now:monotonicElapsed:)`` and ``evaluateIdleLapse(now:)``, and P7
+    /// wires the one poller that drives all three (plan §21.5). Inventing a timer here would
+    /// duplicate that seam and give partition its own clock.
+    ///
+    /// A verdict raises a session event and nothing else: **no record is minted, and the derived
+    /// roster does not move.** That is the whole of "disconnect ≠ removal" at this seam.
+    ///
+    /// - Parameters:
+    ///   - reachable: Fingerprints this device can reach. The overload above supplies the live set;
+    ///     P5's routed store and the tier-1 suites supply their own.
+    ///   - now: The instant a fresh idle window is measured from.
+    /// - Returns: What changed. ``MeshPartitionVerdict/unchanged`` whenever there is no live
+    ///   session or no derived roster to be partitioned from.
+    @discardableResult
+    func evaluatePartition(reachable: Set<String>, now: Date) -> MeshPartitionVerdict {
+        guard sessionState.isLive, let roster = membershipVerifier?.roster,
+              !roster.members.isEmpty else { return .unchanged }
+        let current = MeshBranchView(
+            roster: roster, reachable: reachable, selfFingerprint: identity.localFingerprint
+        )
+        let verdict = MeshPartitionDetector.verdict(previous: branchView, current: current)
+        branchView = current
+        applyPartitionVerdict(verdict, at: now)
+        return verdict
+    }
+
+    /// Raises the verdict's event, if it has one, and anchors the idle window to the instant the
+    /// loss was **judged** rather than to whenever the effect happened to run — so a suite that
+    /// passes `now` can predict the deadline exactly and nothing here reads a wall clock.
+    private func applyPartitionVerdict(_ verdict: MeshPartitionVerdict, at now: Date) {
+        guard let event = verdict.sessionEvent else { return }
+        let transition = applySessionEvent(event)
+        if verdict == .linksLost, transition.nextState == .partitioned, idleLapseDeadline != nil {
+            idleLapseDeadline = now.addingTimeInterval(Self.idleWindowSeconds)
+        }
+        FernletAuditLog.log(
+            "mesh.partition.verdict",
+            context: ["verdict": verdict.rawValue, "state": sessionState.rawValue]
+        )
+    }
+
+    /// Counts an authenticated heartbeat from another roster member, pushing the idle window out.
+    ///
+    /// Plan §10.2: *"the idle timer does not fire while any external member heartbeats — a live
+    /// partition of ≥ 2 stays alive"*. A partition of one has nobody to call this, so its window
+    /// runs to ``MeshSessionState/localIdleStop`` at 30 minutes and resumes-as-merge later.
+    ///
+    /// "External" is mechanical rather than remembered: this device's own fingerprint never counts,
+    /// and once a ledger exists only a **current member** does — a departed or removed peer cannot
+    /// keep a session this device should be idling alive.
+    ///
+    /// - Parameters:
+    ///   - fingerprint: The authenticated sender. Callers must have verified it; this is a policy
+    ///     gate, not a signature check.
+    ///   - instant: When the heartbeat was received.
+    /// - Returns: `true` when it counted.
+    @discardableResult
+    func noteExternalHeartbeat(from fingerprint: String, at instant: Date) -> Bool {
+        guard fingerprint != identity.localFingerprint else { return false }
+        if let roster = membershipVerifier?.roster, !roster.members.isEmpty,
+           !roster.contains(fingerprint: fingerprint) {
+            return false
+        }
+        lastExternalHeartbeatAt = instant
+        // Only an ARMED window moves: a heartbeat while nothing is armed is recorded and changes
+        // no deadline, so this can never arm a timer the state machine did not ask for.
+        if idleLapseDeadline != nil {
+            idleLapseDeadline = instant.addingTimeInterval(Self.idleWindowSeconds)
+        }
+        return true
     }
 
     // MARK: Launch restore (the durable half)
@@ -5667,12 +5785,30 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return perMember
     }
 
-    /// The roster this device presents with a rotation: the derived roster when the ledger knows
-    /// one, else the gossiped descriptor's members plus self.
+    /// The roster this device presents with a rotation, **scoped to its branch** while partitioned
+    /// (plan §10.2: each branch derives its own coordinator and runs its own 15-minute rotation).
     ///
     /// It must be the same set ``epochCoordinatorFingerprint`` takes its minimum from, or this
-    /// device would present a roster it is not the coordinator of and refuse its own rotation.
+    /// device would present a roster it is not the coordinator of and refuse its own rotation —
+    /// which is why the branch scoping happens here, once, and the coordinator falls out of it.
+    ///
+    /// The branch is applied as an **intersection with the current full roster**, not as a
+    /// substitute for it: ``branchView`` is a snapshot that a departure or removal since the last
+    /// evaluation could have outdated, and a rotation must never present a member the records have
+    /// already excluded. Off a partition — including everywhere in shipping code today, since
+    /// nothing calls ``evaluatePartition(reachable:now:)`` until P7 wires the poller — this is
+    /// exactly the value it always was.
     private func presentedRotationRoster() -> [String] {
+        let full = fullRotationRoster()
+        guard let branch = branchView, branch.isPartitioned else { return full }
+        let present = Set(branch.presentFingerprints)
+        let scoped = full.filter { present.contains($0) }
+        return scoped.isEmpty ? full : scoped
+    }
+
+    /// The whole roster this device would present absent any partition: the derived roster when the
+    /// ledger knows one, else the gossiped descriptor's members plus self.
+    private func fullRotationRoster() -> [String] {
         if let roster = membershipVerifier?.roster, !roster.members.isEmpty {
             return roster.memberFingerprints
         }
@@ -6000,6 +6136,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// This manager's identity, so a unit test can mint the signed membership records the verifier
     /// would otherwise refuse. `internal` for `@testable` unit tests only.
     var identityForTesting: IdentityService { identity }
+
+    /// The roster this device would present with a rotation right now — **branch-scoped** while
+    /// partitioned (P4 item 1, plan §10.2).
+    ///
+    /// The derivation is private in shipping code, and a suite has to see that the branch scoping
+    /// reached the *rotation* rather than only the ``branchView`` it was derived from: the two must
+    /// move together, or this device presents a roster it is not the coordinator of.
+    var rotationRosterForTesting: [String] { presentedRotationRoster() }
+
+    /// The coordinator that roster elects — the fingerprint every ``MeshEpochRef`` this device
+    /// mints is named after, and therefore the reason two branches' same-counter epochs are
+    /// distinct refs that `coexist` (plan §21.1).
+    var epochCoordinatorFingerprintForTesting: String? { epochCoordinatorFingerprint }
 
     /// Fires with the membership event that reached ``sendMembershipEvent(_:)``'s broadcast — the
     /// only observation point for a frame whose wire write a unit test cannot see (the slot channel

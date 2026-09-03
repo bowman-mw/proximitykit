@@ -620,6 +620,27 @@ to `partitioned` and mints nothing — the ledger, the derived roster and the pe
 untouched, so the reconnect needs no re-admission and the returning member is still a key recipient.
 A member the roster actually *removed* stays excluded by `MeshRotationPolicy.recipients`.
 
+**A partition is presence, never a record** (P4 item 1, plan §10.2). ``MeshBranchView`` is what a
+device can *see* — derived from the roster plus a set of reachable fingerprints — held deliberately
+apart from ``MeshMembershipLedger``, which is what it can *prove*. Unreachable members are marked
+``MeshMemberPresence/temporarilyDisconnected``, and the derived roster, the quorum threshold and the
+final-pair test are **copied onto the branch view unchanged**, so a 2/2 split of a roster of four
+leaves both branches deriving four members, a quorum of three, and `isFinalPair == false` (§10.4,
+§10.6). None of it is `Codable`: presence is never sealed, and `MeshSessionContextSchema.current`
+stays at 2. ``MeshPartitionDetector`` is the pure edge-detector — only *entering* a partition raises
+`linksLost` and only a *full* heal raises `linksRestored`; a partial heal keeps the branch a branch
+and lets the returning peer take `peerCommitted` into the merge path.
+
+Detection is **on demand**: `MeshNetworkManager.evaluatePartition(reachable:now:)` is the same shape
+as `enforceSessionCeiling(now:monotonicElapsed:)` and `evaluateIdleLapse(now:)`, with no timer of its
+own — P7 wires the one poller that drives all three. While a device is partitioned its rotation
+roster is scoped to the branch (intersected with the current full roster, so a departure since the
+last evaluation still excludes), which makes the **branch coordinator the lowest fingerprint
+present** and is exactly why two branches rotating independently at the same counter mint distinct
+``MeshEpochRef``s that `coexist`. `noteExternalHeartbeat(from:at:)` pushes the 30-minute idle window
+out for a current member's authenticated heartbeat, so a live branch of two or more stays alive
+while a partition of one runs to `localIdleStop` and resumes-as-merge.
+
 **Idle-lapse resume and partition heal are one mechanism**, and it is the merge path (plan §10.3):
 `resumeSessionAfterLapse(mergingLedger:peerEpochHead:)` goes through `mergeMembershipLedger(_:)` and
 `MeshEpochAcceptance`, where two branches that rotated independently at the same counter **coexist**
@@ -656,6 +677,10 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshSessionTransition``
 - ``MeshSessionTransitionRejection``
 - ``MeshSessionStateMachine``
+- ``MeshBranchView``
+- ``MeshMemberPresence``
+- ``MeshPartitionVerdict``
+- ``MeshPartitionDetector``
 - ``MeshSessionCeiling``
 - ``MeshSessionCeilingBound``
 - ``MeshSessionCeilingVerdict``
