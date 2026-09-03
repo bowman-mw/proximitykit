@@ -452,7 +452,7 @@ from (plan §8.1): `MeshMembershipRecordKind`, `MeshMembershipRecord`, `MeshMemb
 `MeshSessionSealKey` and `MeshSessionSealKeyOutcome`. P3 item 3 added the membership events that
 move those records between devices: `MeshMembershipEventFormat`, `MeshRecordIdentity`,
 `MeshInventoryDigest`, `MeshMemberDeparturePayload`, `MeshMemberRemovalPayload`, `MeshTerminationPayload`,
-`MeshInventoryDigestPayload`, `MeshMembershipRecordVerifier`, `MeshMembershipRecordRejection`,
+`MeshInventoryDigestPayload`, `MeshEpochHeadsPayload`, `MeshMembershipRecordVerifier`, `MeshMembershipRecordRejection`,
 `MeshLegacyGoodbyeOutcome` and `MeshMembershipGoodbyeInterop`. P3 item 7 added the admission frame
 and the joiner's ledger bootstrap: `MeshMemberAdmissionPayload`, `MeshLedgerAdoption`,
 `MeshLedgerAdoptionOutcome` and `MeshLedgerAdoptionRefusal`. P3 item 4 added the epoch model:
@@ -475,6 +475,7 @@ frozen English spelling, so one grep finds every layer that touches those bytes:
 | `fernlet.mesh.member-removal.v1` | `SignedRemovalRecord` | the tallier, citing ⌊\|roster\|/2⌋ + 1 votes | `Signature.meshMemberRemovalV1` |
 | `fernlet.mesh.terminated.v1` | `SignedTerminationRecord` | a final-pair member | `Signature.meshTerminatedV1` |
 | `fernlet.mesh.inventory-digest.v1` | — (a message, not a record) | any member | `Signature.meshInventoryDigestV1` over a `Hash.meshInventoryDigestV1` digest |
+| `fernlet.mesh.epoch-heads.v1` | — (a message, not a record) | any member | `Signature.meshEpochHeadsV1` |
 
 **Nothing enters a ledger unverified.** ``MeshMembershipRecordSet`` is pure algebra and will merge
 whatever it is handed; ``MeshMembershipRecordVerifier`` is the only door. That matters because the
@@ -646,9 +647,14 @@ healed partition, an idle-lapse resume and a process restart are four doors onto
 `MeshNetworkManager.mergeReconnected(_:entry:)`, which is a named front door onto
 `mergeMembershipLedger(_:)` and nothing more; ``MeshMergeEntry`` records *which* door without
 anything branching on it. The union each door carries is a ``MeshMergeOffer`` — the peer's records
-plus the epoch head(s) it holds — assembled from frames that already exist: the signed
-`fernlet.mesh.inventory-digest.v1` asks, and the bounded record re-gossip answers with the same
-record frames a live record arrives in. **No wire bytes moved for any of it.**
+plus the epoch head(s) it holds. The **record** half is assembled from frames that already exist:
+the signed `fernlet.mesh.inventory-digest.v1` asks, and the bounded record re-gossip answers with the
+same record frames a live record arrives in — no wire bytes moved for any of it. The **epoch** half
+needed one frame of its own (P4 item 3): the digest describes records, and its signed bytes are
+pinned by a golden, so widening it would have been a wire decision rather than a merge fix.
+`fernlet.mesh.epoch-heads.v1` is additive — its own token, its own registered signature domain
+`Signature.meshEpochHeadsV1`, its own golden, its own framing-transcript case — and no existing
+golden moved.
 
 Three consequences worth stating outright:
 
@@ -688,9 +694,40 @@ Epoch heads **coexist**: two branches that rotated at the same counter hold dist
 `MeshSessionContextSchema.maxEpochHeads` is **named** (`droppedEpochHeadCount`, plan §21.3's "an
 assertion, not a knob") rather than silently truncated. The count is taken **inside the one context
 writer, after the bytes seal** — the set the cap can bite is the set being written, so a count taken
-anywhere else measures something the file never held. Minting the strictly greater successor that
-retires both is P4 item 3, deliberately not the merge's job. Never a fresh session, never a silent
-re-key.
+anywhere else measures something the file never held. Never a fresh session, never a silent re-key.
+
+**Coexistence ends at a mint** (P4 item 3, plan §10.3). `requestMergeRotationForDivergentHeads()`
+asks for **one** `.merge` rotation when the folded head set actually diverges —
+``MeshEpochAcceptance/isDivergent(_:)``, two heads at one counter — and it asks through
+`requestRotation(cause:)`, so a merge that both moved the roster and reconciled a divergence still
+mints one epoch: the second request lands in the first's open 2-second window. The counter is
+`max + 1` over the folded set, not `own + 1`: `rotationBasisHead` is the highest head in
+`knownEpochHeads` ∪ the keyring's, so a branch that rotated twice against one that rotated once is
+counted above rather than adopted. `MeshKeyRotationPayload.newEpoch` carries that same counter,
+because every receiver re-derives the ref from it.
+
+**Neither coexisting head wins, and no clock can pick one.** The minter is the merged view's
+deterministic coordinator — `presentedRotationRoster().min()`, the merged derived roster intersected
+with the branch while partitioned — so it is a pure function of the roster and the counters. When
+that coordinator is not at the merge, item 1's branch rule already answers "lowest fingerprint
+present among the merging parties" (plan §21.3's default), and a later merge that reaches the absent
+coordinator supersedes with a strictly greater counter. A ``MeshEpochRef`` carries **no timestamp**,
+so a forged far-future stamp has nothing to influence; `fernlet.mesh.epoch-heads.v1` binds `sentAt`
+into its signature and nothing downstream reads it. Both old heads then die at grace expiry, and
+every member ends on exactly one post-merge epoch.
+
+**The `divergent` tunnel gate opens for that merge, and only for it.**
+``MeshEpochIntroductionVerdict/reconcile(local:peer:)`` replaces P3's blanket refusal, because the
+merge runs *over* the tunnel the old rule tore down — two branches that had each rotated while split
+could never reconnect at all. The relaxation is scoped three ways: it is reachable only from
+``NetworkMeshSession``'s signed channel introduction, which is members-only before any app frame (MC
+runs no such stage — 0b's lesson, and the reason ``MeshNetworkManager/maySeatVerifiedPeer(signingPublicKey:)``
+exists for the other radio); only the epoch rule moved, with the roster's `stranger` / `barred`
+verdict, the mesh-ID check and the malformed-reference check untouched and still downstream of it;
+and it applies only when ``MeshIntroductionAuthority/mayReconcileDivergentEpochs`` says a merge can
+actually run — a device with no mesh or no ledger keeps
+``MeshIntroductionRejection/divergentEpoch``, and the parameter's default is `false` so a caller that
+forgets it fails closed.
 
 **The ceiling is guarded at both bounds.** ``MeshSessionCeiling`` holds the signed absolute
 `hardDeadline` (± 120 s skew) *and* a local monotonic budget measured with `ContinuousClock`, clamped

@@ -314,6 +314,33 @@ nonisolated struct MeshMembershipRecordVerifier {
         return nil
     }
 
+    /// Verifies a peer's signed epoch-head set (P4 item 3, plan §10.3).
+    ///
+    /// The same five checks the inventory digest gets, under the head set's own signature domain:
+    /// the heads decide the counter a merge's successor is minted at, so an unattributable set is
+    /// refused rather than folded.
+    ///
+    /// - Returns: the named rejection, or nil when the head set verified. A verified set that
+    ///   DIVERGES from this device's own heads is not a rejection — that is the whole point of
+    ///   sending one.
+    func verify(_ payload: MeshEpochHeadsPayload) -> MeshMembershipRecordRejection? {
+        guard payload.meshID == meshID else { return .foreignMesh }
+        guard payload.isWellFormed else { return .malformedRecord }
+        guard let key = admittedSigningKey(for: payload.senderFingerprint) else {
+            return .signerNotAdmitted
+        }
+        guard roster.contains(fingerprint: payload.senderFingerprint) else { return .signerNotAMember }
+        guard IdentityService.verify(
+            payload.signature,
+            of: canonicalBytes(for: payload),
+            by: key,
+            purpose: FernletCryptoPurpose.Signature.meshEpochHeadsV1
+        ) else {
+            return .signatureInvalid
+        }
+        return nil
+    }
+
     /// Whether a peer's digest describes exactly the records this ledger holds. `false` means one
     /// side is missing records and a full record exchange is worth its bytes.
     func matchesLocalInventory(_ digest: MeshInventoryDigest) -> Bool {

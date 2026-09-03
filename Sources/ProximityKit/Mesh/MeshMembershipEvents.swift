@@ -337,6 +337,81 @@ nonisolated struct MeshInventoryDigestPayload: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - MeshEpochHeadsPayload
+
+/// The `fernlet.mesh.epoch-heads.v1` frame: the epoch branch head(s) the sender is on, signed
+/// (network migration P4 item 3, plan §10.3).
+///
+/// **Why this frame exists.** §10.3's reconnect is a union exchange of two halves — "membership
+/// records **and** epoch heads" — and only the record half had frames: `meshInventoryDigest` asks
+/// and the bounded re-gossip answers. The head half was assembled locally, so a
+/// ``MeshMergeOffer`` never actually carried a *peer's* head and two branches that had each
+/// rotated while split could not learn each other's counter. Without that, plan §10.3's
+/// "counter = max + 1" has no `max` to take.
+///
+/// **Why it is signed, and under its own domain.** The heads are the input to the successor a
+/// merge mints. An unsigned head set — or one that cross-validated with the inventory digest's
+/// signature — would let a peer name any counter it liked and walk a mesh toward
+/// ``MeshEpochBounds/counterCap``, where the only legal answer is to end the session. One Ed25519
+/// verification per reconnect buys attribution to a roster member.
+///
+/// **It moves no key and no record.** A ``MeshEpochRef`` is a name — counter, minting id,
+/// coordinator fingerprint — and carries no timestamp at all, which is what makes the merge's
+/// choice of minter provably clock-free: there is no stamp on a head for a forged wall clock to
+/// influence. ``sentAt`` is bound into the signature so a stale frame cannot be replayed as fresh,
+/// and nothing derived from the heads reads it.
+nonisolated struct MeshEpochHeadsPayload: Codable, Equatable, Sendable {
+
+    /// The mesh the heads belong to. A head set for another mesh is a refusal, not a difference.
+    let meshID: UUID
+    /// The branch head(s) the sender holds, clamped to ``MeshSessionContextSchema/maxEpochHeads``.
+    /// Never empty on a frame this device sends: a member on no epoch names none, and says so by
+    /// not sending one.
+    let heads: [MeshEpochRef]
+    /// The member that signed the set.
+    let senderFingerprint: String
+    /// When it was signed — bound into the signature, read by nothing that decides anything.
+    let sentAt: Date
+    /// The sender's signature over ``canonicalBytes(for:)-(MeshEpochHeadsPayload)``.
+    let signature: Data
+
+    /// Builds a payload from already-signed parts, clamping the head set to the persisted cap.
+    ///
+    /// The clamp is here rather than at the decoder so both doors share it: plan §21.3 fixes the
+    /// cap at 8 and calls anything past it a merge bug, so a peer offering more is truncated at the
+    /// boundary rather than allowed to grow a loop (Power of 10 rule 2/3).
+    init(meshID: UUID, heads: [MeshEpochRef], senderFingerprint: String, sentAt: Date, signature: Data) {
+        self.meshID = meshID
+        self.heads = Array(heads.prefix(MeshSessionContextSchema.maxEpochHeads))
+        self.senderFingerprint = senderFingerprint
+        self.sentAt = sentAt
+        self.signature = signature
+    }
+
+    /// Decodes with the same clamp the memberwise initializer applies — the head set arrives from
+    /// a peer, and every ``MeshEpochRef`` in it validates its own bounds as it decodes.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            meshID: try container.decode(UUID.self, forKey: .meshID),
+            heads: try container.decode([MeshEpochRef].self, forKey: .heads),
+            senderFingerprint: try container.decode(String.self, forKey: .senderFingerprint),
+            sentAt: try container.decode(Date.self, forKey: .sentAt),
+            signature: try container.decode(Data.self, forKey: .signature)
+        )
+    }
+
+    /// Whether every field has the width the format fixes. Checked on untrusted bytes before the
+    /// signature is verified.
+    var isWellFormed: Bool {
+        !heads.isEmpty
+            && heads.count <= MeshSessionContextSchema.maxEpochHeads
+            && signature.count == MeshMembershipEventFormat.signatureByteCount
+            && !senderFingerprint.isEmpty
+            && senderFingerprint.utf8.count <= MeshMembershipEventFormat.maxFingerprintLength
+    }
+}
+
 // MARK: - Signing factories
 
 extension SignedDepartureRecord {
@@ -524,5 +599,38 @@ nonisolated enum MeshMembershipGoodbyeInterop {
     /// documentation for why an unsigned frame must not be able to subtract a signed member.
     static func departureRecord(forGoodbyeFrom _: String?) -> SignedDepartureRecord? {
         nil
+    }
+}
+
+extension MeshEpochHeadsPayload {
+
+    /// Mints a signed statement of the epoch heads this device holds.
+    ///
+    /// - Parameters:
+    ///   - meshID: The mesh the heads belong to.
+    ///   - heads: The branch head(s) held. An empty set is not sendable — the caller says "no
+    ///     epoch" by sending nothing.
+    ///   - identity: The signer.
+    ///   - sentAt: The signing instant, bound into the signature.
+    /// - Throws: The identity's signing error; never a trap.
+    @MainActor
+    static func signed(
+        meshID: UUID,
+        heads: [MeshEpochRef],
+        identity: IdentityService,
+        sentAt: Date = Date()
+    ) throws -> MeshEpochHeadsPayload {
+        let unsigned = MeshEpochHeadsPayload(
+            meshID: meshID, heads: heads, senderFingerprint: identity.localFingerprint,
+            sentAt: sentAt, signature: Data()
+        )
+        let signature = try identity.sign(
+            canonicalBytes(for: unsigned),
+            purpose: FernletCryptoPurpose.Signature.meshEpochHeadsV1
+        )
+        return MeshEpochHeadsPayload(
+            meshID: meshID, heads: unsigned.heads, senderFingerprint: identity.localFingerprint,
+            sentAt: sentAt, signature: signature
+        )
     }
 }

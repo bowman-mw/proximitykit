@@ -72,7 +72,9 @@ nonisolated enum MeshEpochRotationRefusal: Equatable, Sendable {
 /// What the two epoch references exchanged in a channel hello mean for the tunnel.
 ///
 /// This is the strict replacement for P2's soft "equal, or one side empty" rule. See
-/// ``MeshEpochAcceptance/introductionVerdict(local:peer:)`` for exactly what got stricter.
+/// ``MeshEpochAcceptance/introductionVerdict(local:peer:)`` for exactly what got stricter — and
+/// ``reconcile(local:peer:)`` for the one thing P4 item 3 deliberately made *less* strict, and why
+/// refusing it was a deadlock rather than a defence.
 nonisolated enum MeshEpochIntroductionVerdict: Equatable, Sendable {
     /// The two sides are on one epoch (or one of them is on none yet). The associated value is the
     /// epoch the pair converged on — nil when neither side holds one.
@@ -80,10 +82,21 @@ nonisolated enum MeshEpochIntroductionVerdict: Equatable, Sendable {
     /// A non-empty epoch reference that is not a canonical ``MeshEpochRef``. Structurally
     /// malformed input, refused before any epoch comparison happens.
     case malformed
-    /// Both sides hold a well-formed epoch and they are not the same epoch — divergent branches.
-    /// They coexist in the model (``MeshEpochRotationVerdict/coexist``) but they do not share a
-    /// group key, so the tunnel is refused until P4's merge exists to reconcile them.
-    case divergent
+    /// Both sides hold a well-formed epoch and they are not the same epoch — divergent branches of
+    /// one mesh.
+    ///
+    /// They coexist in the model (``MeshEpochRotationVerdict/coexist``) and they do **not** share a
+    /// group key. Until P4 item 3 that was a refusal, which was a deadlock: two branches that had
+    /// each rotated while split could never open the tunnel the merge runs over, so the epoch they
+    /// diverged on could never be reconciled. The verdict now says *reconcile* — admit the tunnel
+    /// and let plan §10.3's merge mint the strictly greater successor that retires both heads.
+    ///
+    /// Admitting it is a decision about **epochs only**. Every identity decision downstream is
+    /// unchanged: ``MeshChannelIntroductionExchange/receive(_:roster:nonces:mayReconcileDivergentEpochs:)``
+    /// still asks the roster whether the peer is a member, still refuses a departed or removed one,
+    /// still refuses a foreign mesh, and still refuses a malformed reference before this case can
+    /// even be reached.
+    case reconcile(local: MeshEpochRef, peer: MeshEpochRef)
 }
 
 // MARK: - MeshEpochAcceptance
@@ -179,7 +192,9 @@ nonisolated enum MeshEpochAcceptance {
     /// 2. **Two divergent branches wearing one number.** Under the placeholder decimal form, two
     ///    partitions that each rotated to counter 7 both sent `"7"` and the gate agreed they
     ///    matched. Equality is now equality of the whole ``MeshEpochRef``, so a same-counter
-    ///    divergence is seen and refused instead of silently conflated.
+    ///    divergence is **seen** instead of silently conflated. Since P4 item 3 seeing it means
+    ///    ``MeshEpochIntroductionVerdict/reconcile(local:peer:)`` — named, carried to the caller,
+    ///    and reconciled by the merge — rather than a refusal that no merge could get past.
     /// 3. **Emptiness as a wildcard.** "No epoch" is now one named case of this rule — the joiner
     ///    that holds no group key — decided here rather than by a short-circuit that skipped the
     ///    comparison entirely. A joiner still introduces (admission would otherwise be impossible),
@@ -202,7 +217,42 @@ nonisolated enum MeshEpochAcceptance {
         case (nil, .some(let remote)): return .converge(remote)
         case (.some(let mine), nil): return .converge(mine)
         case (.some(let mine), .some(let remote)):
-            return mine == remote ? .converge(mine) : .divergent
+            return mine == remote ? .converge(mine) : .reconcile(local: mine, peer: remote)
         }
+    }
+
+    /// Whether a set of heads holds two that **coexist**: the same counter, different mintings.
+    ///
+    /// This is the question a merge asks of the folded head set, and it is a pure function of the
+    /// heads — no clock, no roster, no tie-break. Two branches that both rotated while split always
+    /// show up here, because both counted up from the same base: the counter they diverged at holds
+    /// one head per branch, whatever either branch did afterwards.
+    ///
+    /// A head set with no divergence is a lineage — this device's own rotation history — and needs
+    /// no successor minted for it.
+    ///
+    /// - Parameter heads: The heads to inspect. Bounded by ``MeshMergeOffer/maxFoldedHeads``
+    ///   (Power of 10 rule 2): a peer cannot grow the loop by offering more.
+    static func isDivergent(_ heads: [MeshEpochRef]) -> Bool {
+        var mintingByCounter: [UInt32: UUID] = [:]
+        for head in heads.prefix(MeshMergeOffer.maxFoldedHeads) {
+            if let seen = mintingByCounter[head.counter], seen != head.epochID { return true }
+            mintingByCounter[head.counter] = head.epochID
+        }
+        return false
+    }
+
+    /// The head a merge counts **up from**: the highest in ``MeshEpochRefOrder``, whose counter is
+    /// therefore the `max` of plan §10.3's "counter = max + 1".
+    ///
+    /// Deliberately not a *winner*. The returned head is only the number the successor is derived
+    /// from; the successor's own identity comes from the minting coordinator, so neither coexisting
+    /// head survives the merge and no property of a head — not its id, not its coordinator, and
+    /// above all not any timestamp, of which a ``MeshEpochRef`` carries none — decides anything.
+    ///
+    /// - Parameter heads: The folded head set.
+    /// - Returns: The highest head, or nil for an empty set (a device on no epoch at all).
+    static func highestHead(_ heads: [MeshEpochRef]) -> MeshEpochRef? {
+        heads.prefix(MeshMergeOffer.maxFoldedHeads).max(by: MeshEpochRefOrder.precedes)
     }
 }

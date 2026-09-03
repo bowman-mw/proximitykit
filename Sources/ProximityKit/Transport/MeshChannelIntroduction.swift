@@ -208,7 +208,10 @@ nonisolated enum MeshIntroductionRejection: Equatable, Sendable {
     case unsupportedProtocolVersion
     /// The peer named a different mesh, or one this side has ended.
     case foreignMesh
-    /// Both sides have an epoch reference and they are not the same one.
+    /// Both sides have an epoch reference and they are not the same one, and this side may not
+    /// reconcile: it holds no mesh or no membership ledger, so there is no merge for the tunnel to
+    /// run (P4 item 3 — see
+    /// ``MeshIntroductionAuthority/mayReconcileDivergentEpochs``).
     case divergentEpoch
     /// The peer presented this device's own signing key.
     case selfIntroduction
@@ -234,7 +237,7 @@ nonisolated enum MeshIntroductionRejection: Equatable, Sendable {
         case .malformedHello: return "The peer's channel hello was malformed."
         case .unsupportedProtocolVersion: return "The peer speaks another channel-introduction version."
         case .foreignMesh: return "The peer named a different mesh."
-        case .divergentEpoch: return "The peer is on a different membership epoch."
+        case .divergentEpoch: return "The peer is on a different membership epoch and this device cannot merge."
         case .selfIntroduction: return "The peer presented this device's own signing key."
         case .replayedNonce: return "The peer replayed a channel-introduction nonce."
         case .unknownIdentity: return "The peer is not a member of this mesh."
@@ -423,8 +426,9 @@ nonisolated enum MeshChannelIntroductionOutcome: Equatable, Sendable {
 /// The empty string still means "this side holds no epoch", which is what a peer being admitted
 /// has, and that case is now a named branch of ``MeshEpochAcceptance/introductionVerdict(local:peer:)``
 /// rather than a short-circuit that skipped the comparison. Two peers on genuinely divergent
-/// branches still refuse: they coexist in the model, but they hold different group keys and P4's
-/// merge is what reconciles them.
+/// branches **introduce** since P4 item 3, because plan §10.3's merge is what reconciles them and
+/// it runs over this very tunnel; the epoch rule names the divergence and hands it on, and the
+/// roster rule below it is untouched.
 nonisolated struct MeshChannelIntroductionExchange {
 
     /// Which end of the tunnel this side is.
@@ -443,11 +447,22 @@ nonisolated struct MeshChannelIntroductionExchange {
 
     /// Step 1: review the peer's hello, recording it only if every check passes.
     ///
+    /// - Parameters:
+    ///   - hello: The peer's hello, straight off untrusted bytes.
+    ///   - roster: Who may connect right now. Asked **after** the epoch rule and never relaxed by
+    ///     it: a stranger, a departed member and a removed one are refused on a reconciling tunnel
+    ///     exactly as on a converged one.
+    ///   - nonces: The replay cache this session admits nonces into.
+    ///   - mayReconcileDivergentEpochs: Whether this side may admit a peer on a divergent branch so
+    ///     plan §10.3's merge can reconcile the two heads (P4 item 3). Defaults to `false` —
+    ///     fail-closed — and the shipping caller passes
+    ///     ``MeshIntroductionAuthority/mayReconcileDivergentEpochs``.
     /// - Returns: nil when the hello is acceptable, otherwise the named rejection.
     mutating func receive(
         _ hello: MeshChannelHello,
         roster: MeshIntroductionRoster,
-        nonces: inout MeshIntroductionNonceCache
+        nonces: inout MeshIntroductionNonceCache,
+        mayReconcileDivergentEpochs: Bool = false
     ) -> MeshIntroductionRejection? {
         guard hello.isWellFormed else { return .malformedHello }
         guard hello.protocolVersion == localHello.protocolVersion,
@@ -458,7 +473,13 @@ nonisolated struct MeshChannelIntroductionExchange {
         switch MeshEpochAcceptance.introductionVerdict(local: localHello.epochRef, peer: hello.epochRef) {
         case .converge: break
         case .malformed: return .malformedHello
-        case .divergent: return .divergentEpoch
+        case .reconcile:
+            // P4 item 3 (plan §10.3): two branches that both rotated while split hold divergent
+            // heads, and the merge that reconciles them runs OVER this tunnel — so refusing it
+            // here was a deadlock, not a defence. It is admitted only when the authority says a
+            // merge can actually run, and the parameter defaults to `false` so a caller that
+            // forgets it fails closed.
+            guard mayReconcileDivergentEpochs else { return .divergentEpoch }
         }
         guard hello.signingPublicKey != localHello.signingPublicKey else { return .selfIntroduction }
         guard hello.nonce != localHello.nonce, nonces.admit(hello.nonce) else { return .replayedNonce }
@@ -526,13 +547,16 @@ nonisolated struct MeshChannelIntroductionExchange {
     /// Whether two epoch references may share a tunnel, by plan §8.4's strict rule.
     ///
     /// A thin read of ``MeshEpochAcceptance/introductionVerdict(local:peer:)``, kept so a caller
-    /// that only wants the decision does not have to switch. It answers false for BOTH refusals —
-    /// a malformed reference and a divergent one — which is why ``receive(_:roster:nonces:)`` uses
-    /// the verdict itself: the two refusals are named differently on the wire.
+    /// that only wants the decision does not have to switch. It answers the *convergence* question
+    /// only: false for a malformed reference and false for a divergent pair, even though since P4
+    /// item 3 a divergent pair may still introduce so the merge can run
+    /// (``MeshEpochIntroductionVerdict/reconcile(local:peer:)``). "On one epoch" and "may share a
+    /// tunnel" stopped being the same question there, which is why
+    /// ``receive(_:roster:nonces:mayReconcileDivergentEpochs:)`` switches on the verdict itself.
     static func epochsConverge(_ local: String, _ peer: String) -> Bool {
         switch MeshEpochAcceptance.introductionVerdict(local: local, peer: peer) {
         case .converge: return true
-        case .malformed, .divergent: return false
+        case .malformed, .reconcile: return false
         }
     }
 
@@ -571,6 +595,16 @@ protocol MeshIntroductionAuthority: AnyObject {
 
     /// Who may connect right now, derived fresh so a removal takes effect on the next introduction.
     var roster: MeshIntroductionRoster { get }
+
+    /// Whether this device may admit a tunnel to a peer on a **divergent** branch so plan §10.3's
+    /// merge can reconcile the two epoch heads (P4 item 3).
+    ///
+    /// The gate exists for the reason ``MeshNetworkManager/maySeatVerifiedPeer(signingPublicKey:)``
+    /// exists: a relaxation is only as safe as the thing that answers it. Here the answer is "this
+    /// device holds a mesh and a membership ledger", so the tunnel it admits is one a merge can
+    /// actually run over; a device with neither has nothing to reconcile and refuses exactly as it
+    /// did before. Nothing about identity moves: the roster still decides who connects.
+    var mayReconcileDivergentEpochs: Bool { get }
 
     /// Signs the introduction transcript with the device's identity key under
     /// `FernletCryptoPurpose.Signature.meshChannelIntroductionV1`.

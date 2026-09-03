@@ -1649,7 +1649,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshEncryptedMetadata, .meshCoordinatorBeacon, .meshRotationSync, .meshKeyRotation, .meshKeyAck:
             dispatchGroupKeyPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
         case .meshMemberAdmission, .meshMemberDeparture, .meshMemberRemoval, .meshTerminated,
-             .meshInventoryDigest:
+             .meshInventoryDigest, .meshEpochHeads:
             dispatchMembershipEventPayload(payloadType, plaintext: plaintext, decoder: decoder, slot: slot)
         case .sessionGoodbye:
             // Parsed, never emitted (plan §8.3). A goodbye is UNSIGNED, so it can only mean "this
@@ -2061,6 +2061,60 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// honest scope, the cap being a property of the persisted set and not of the merge.
     @ObservationIgnored private(set) var droppedEpochHeadCount = 0
 
+    /// Every epoch branch head this device has sealed — the memory mirror of
+    /// ``MeshSessionContext/epochHeads`` (P4 item 3, plan §10.3).
+    ///
+    /// It exists so a merge can take plan §10.3's `max` **without a disk read on the rotation
+    /// path**: the successor's counter is `max + 1` over the folded head set, and the folded set is
+    /// the file's, not the keyring's — a branch that rotated twice while this one rotated once puts
+    /// a higher counter in the file than this device's own key ever had.
+    ///
+    /// Written at exactly one place, ``writeSessionContext(base:identity:head:terminating:token:store:)``,
+    /// and only **after the bytes seal** (plan §3.6): a mirror updated before the seal would name
+    /// heads a restart could not reproduce, and the merge would mint a successor to an epoch that
+    /// never existed. Refilled from the file at launch. Nothing new is persisted — schema stays 2.
+    @ObservationIgnored private(set) var knownEpochHeads: [MeshEpochRef] = []
+
+    /// The heads a merge still has to resolve: those at or above this device's current epoch.
+    ///
+    /// Once the successor is adopted, both old branch heads sit strictly below the keyring's head
+    /// and drop out of this set — which is what stops a merge that has already been reconciled from
+    /// asking for another `.merge` rotation on every subsequent reconnect.
+    private var unresolvedEpochHeads: [MeshEpochRef] {
+        guard let head = epochKeyring?.head else { return knownEpochHeads }
+        var live = knownEpochHeads.filter { $0.counter >= head.counter }
+        // This device's own epoch belongs in the set whether or not the file has caught up with
+        // it: the divergence a merge has to see is "the branch I am on versus the branch you are
+        // on", and leaving the local head out would make a two-branch merge look converged.
+        if !live.contains(head) { live.append(head) }
+        return live
+    }
+
+    /// The head plan §10.3's "counter = max + 1" counts up from: the highest in
+    /// ``MeshEpochRefOrder`` among the sealed head set and this device's own current epoch.
+    ///
+    /// **Not a winner, and not a tie-break.** It contributes a *number* and nothing else — the
+    /// successor's identity is derived from the minting coordinator, so neither coexisting head
+    /// survives. And it cannot be steered by a clock: a ``MeshEpochRef`` carries no timestamp, so a
+    /// forged far-future stamp anywhere on the wire has nothing here to influence.
+    var rotationBasisHead: MeshEpochRef? {
+        var candidates = knownEpochHeads
+        if let head = epochKeyring?.head, !candidates.contains(head) { candidates.append(head) }
+        return MeshEpochAcceptance.highestHead(candidates)
+    }
+
+    /// The heads this device presents in a `fernlet.mesh.epoch-heads.v1` frame: the epoch it is on
+    /// plus every unresolved branch head it has folded. Empty for a device on no epoch, which says
+    /// "no epoch" by sending nothing rather than by sending an empty set.
+    private func presentedEpochHeads() -> [MeshEpochRef] {
+        var heads: [MeshEpochRef] = []
+        if let head = epochKeyring?.head { heads.append(head) }
+        for candidate in unresolvedEpochHeads where !heads.contains(candidate) {
+            heads.append(candidate)
+        }
+        return Array(heads.prefix(MeshSessionContextSchema.maxEpochHeads))
+    }
+
     /// **The front door to the one merge path** (plan §10.3): applies a reconnecting peer's offer.
     ///
     /// The order is plan §3.6's. The peer's epoch heads are folded and sealed **first** — a head is
@@ -2084,6 +2138,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         mergeApplicationCount += 1
         foldEpochHeads(offer.epochHeads)
         let rejections = mergeMembershipLedger(offer.ledger)
+        requestMergeRotationForDivergentHeads()
         FernletAuditLog.log(
             "mesh.merge.applied",
             context: ["entry": entry.rawValue, "rejected": String(rejections.count)]
@@ -2107,6 +2162,100 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
+    /// **The mint** (P4 item 3, plan §10.3): asks for the one `.merge` rotation that retires two
+    /// coexisting heads, when the folded head set actually holds two.
+    ///
+    /// ## Why it asks rather than mints
+    ///
+    /// It goes through ``requestRotation(cause:)`` — the single rotation entry — so the mint
+    /// **cannot** double-rotate. A merge that both moved the roster and reconciled a divergence
+    /// calls this and ``mergeMembershipLedger(_:)``'s own `.merge` request inside the same
+    /// synchronous turn, and the second lands in the first's open 2-second coalescing window: one
+    /// armed task, one rotation, cause `.merge` (P3 item 5's `merge > membership > timer` rank).
+    /// Which device actually runs it is settled at fire time by ``isLocalCoordinator()``, so a
+    /// non-coordinator consumes the trigger and stops.
+    ///
+    /// ## Who mints, precisely
+    ///
+    /// Nothing here chooses. The minter is ``epochCoordinatorFingerprint`` — the lowest fingerprint
+    /// of ``presentedRotationRoster()``, which is the merged derived roster, intersected with the
+    /// present set while partitioned (item 1's branch rule). That is the whole function: the merged
+    /// roster and the counters, and nothing else. When the merged view's coordinator is not at the
+    /// merge, the branch scoping already answers "lowest fingerprint present among the merging
+    /// parties" (§3's default), and a later merge that reaches the absent coordinator supersedes
+    /// with a strictly greater counter.
+    ///
+    /// ## Why it is gated on still being a member
+    ///
+    /// ``mergeMembershipLedger(_:)`` runs ``applyMergedRosterVerdict(from:)`` before its own
+    /// rotation for the reason stated there: a merge that hands this device its own removal, or a
+    /// termination the merged roster agrees with, must not then ask for a key it is not entitled to
+    /// distribute. This call sits after that verdict, so it repeats the check rather than
+    /// re-opening the hole.
+    private func requestMergeRotationForDivergentHeads() {
+        guard let roster = membershipVerifier?.roster else { return }
+        guard roster.status != .terminated,
+              roster.contains(fingerprint: identity.localFingerprint) else { return }
+        guard MeshEpochAcceptance.isDivergent(unresolvedEpochHeads) else { return }
+        FernletAuditLog.log(
+            "mesh.merge.epochsDivergent",
+            context: ["heads": String(unresolvedEpochHeads.count)]
+        )
+        requestRotation(cause: .merge)
+    }
+
+    /// Sends this device's signed epoch head(s) to one peer — the **epoch half** of plan §10.3's
+    /// union exchange (P4 item 3).
+    ///
+    /// It is the one thing the reconnect exchange could not compose out of frames that already
+    /// existed: `fernlet.mesh.inventory-digest.v1` describes *records*, and its signed bytes are
+    /// pinned by a golden, so widening it to carry heads would have been a wire decision rather
+    /// than a merge fix. `fernlet.mesh.epoch-heads.v1` is additive — its own token, its own
+    /// registered signature domain, its own golden — and no existing golden moves.
+    ///
+    /// - Parameter recipients: The members to tell, or nil for every slot.
+    func sendEpochHeads(to recipients: Set<String>? = nil) async {
+        guard let mesh = currentMesh else { return }
+        if let recipients, recipients.isEmpty { return }
+        let heads = presentedEpochHeads()
+        guard !heads.isEmpty else { return }
+        do {
+            let payload = try MeshEpochHeadsPayload.signed(
+                meshID: mesh.meshID, heads: heads, identity: identity
+            )
+            await broadcastMembershipFrame(.meshEpochHeads, payload, to: recipients)
+        } catch {
+            FernletAuditLog.log(
+                "mesh.membershipEvent.signFailed",
+                context: ["type": PayloadType.meshEpochHeads.rawValue,
+                          "error": String(describing: error)]
+            )
+        }
+    }
+
+    /// Folds a peer's verified epoch heads, then asks for the merge's one rotation if the union
+    /// diverges (P4 item 3).
+    ///
+    /// A head set that differs is not an error — that is the signal, exactly as a differing
+    /// inventory digest is. Nothing is adopted from it: a head is a *name*, the key that belongs to
+    /// it never crossed, and the resolution is always the successor a coordinator mints.
+    private func receiveEpochHeads(_ payload: MeshEpochHeadsPayload) {
+        guard let verifier = membershipVerifier else { return }
+        if let rejection = verifier.verify(payload) {
+            FernletAuditLog.log(
+                "mesh.membershipEvent.rejected",
+                context: ["type": PayloadType.meshEpochHeads.rawValue,
+                          "reason": rejection.diagnosticDescription]
+            )
+            return
+        }
+        foldEpochHeads(payload.heads)
+        FernletAuditLog.log(
+            "mesh.merge.epochHeadsFolded", context: ["count": String(payload.heads.count)]
+        )
+        requestMergeRotationForDivergentHeads()
+    }
+
     /// Asks every committed peer what it holds — the **ask half** of plan §10.3's union exchange.
     ///
     /// No new frame: `fernlet.mesh.inventory-digest.v1` is the ask that already exists, and a
@@ -2127,6 +2276,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let recipients = Set(activeSlots.compactMap(\.fingerprint))
         guard !recipients.isEmpty else { return }
         Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: recipients) }
+        // The epoch half of the same exchange (§10.3, item 3). Separate frame, same ask: a member
+        // on no epoch sends nothing, so a reconnect between two unkeyed devices costs no bytes.
+        Task { @MainActor [weak self] in await self?.sendEpochHeads(to: recipients) }
     }
 
     /// Ends the merge now in flight: this device and the peer hold the same records.
@@ -2463,7 +2615,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         do {
             try sessionStore.save(context, token: token)
-            // After the seal, never before: a refused save wrote nothing, so it dropped nothing.
+            // After the seal, never before: a refused save wrote nothing, so it dropped nothing —
+            // and the mirror a merge takes its `max` from must name only heads a restart could read
+            // back (plan §3.6).
+            knownEpochHeads = context.epochHeads
             recordDroppedEpochHeads(droppedHeads)
             return true
         } catch {
@@ -2983,6 +3138,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         restoredSessionContext = outcome.context
         if let context = outcome.context {
             startSessionCeiling(hardDeadline: context.hardDeadline, startedAt: now)
+            // The heads a restart merges against come off the disk with everything else (item 3):
+            // a relaunched member that forgot them would mint `own + 1` and collide with the branch
+            // it is reconnecting to.
+            knownEpochHeads = context.epochHeads
         }
         if case .resumable(let context) = outcome { restoreMembershipLedger(from: context) }
         // An ending the FILE already records bars the rejoin straight away: the transition below
@@ -3116,6 +3275,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case termination(SignedTerminationRecord)
         /// A peer's signed summary of what it holds.
         case digest(MeshInventoryDigestPayload)
+        /// A peer's signed statement of the epoch branch head(s) it is on (P4 item 3).
+        case epochHeads(MeshEpochHeadsPayload)
     }
 
     /// The membership-event family of the dispatch switch (R4: one function per case family) —
@@ -3145,6 +3306,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         if case .digest(let payload) = decoded {
             receiveInventoryDigest(payload)
+            return
+        }
+        // A head set is not a record and cannot move a roster, so it never reaches the ledger path.
+        if case .epochHeads(let payload) = decoded {
+            receiveEpochHeads(payload)
             return
         }
         if bufferedForAdoption(decoded, from: senderFingerprint) { return }
@@ -3191,6 +3357,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshInventoryDigest:
             return (try? decoder.decode(MeshInventoryDigestPayload.self, from: plaintext))
                 .map { .digest($0) }
+        case .meshEpochHeads:
+            return (try? decoder.decode(MeshEpochHeadsPayload.self, from: plaintext))
+                .map { .epochHeads($0) }
         default:
             return nil
         }
@@ -3211,7 +3380,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .departure(let record): ledger.departures = ledger.departures.inserting(record)
         case .removal(let record): ledger.removals = ledger.removals.inserting(record)
         case .termination(let record): ledger.terminations = ledger.terminations.inserting(record)
-        case .digest: return nil
+        case .digest, .epochHeads: return nil
         }
         return MeshMergeOffer(ledger: ledger)
     }
@@ -3232,7 +3401,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .departure(let record): rejection = membershipVerifier?.insert(record)
         case .removal(let record): rejection = membershipVerifier?.insert(record)
         case .termination(let record): rejection = membershipVerifier?.insert(record)
-        case .digest: return nil
+        case .digest, .epochHeads: return nil
         }
         recordRejection(rejection, type: type)
         // A DEBUG-only console echo, for the same reason P2 item 0 gave the transport's inbound
@@ -3332,7 +3501,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .departure(let record): pendingAdoptionLedger.departures = pendingAdoptionLedger.departures.inserting(record)
         case .removal(let record): pendingAdoptionLedger.removals = pendingAdoptionLedger.removals.inserting(record)
         case .termination(let record): pendingAdoptionLedger.terminations = pendingAdoptionLedger.terminations.inserting(record)
-        case .digest: return false
+        case .digest, .epochHeads: return false
         }
         attemptLedgerAdoption(ownAdmission: ownAdmission, meshID: verifier.meshID)
         return true
@@ -6040,7 +6209,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
         lastRotationCause = cause
         lastRotationBlockReason = nil
-        await distributeRotation(nextEpoch, cause: cause, acked: acked, closingEpoch: closingEpoch)
+        await distributeRotation(nextEpoch, cause: cause, acked: acked)
     }
 
     /// Plans the next epoch, or names why there will not be one.
@@ -6053,8 +6222,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             recordRotationBlock("This device is not the deterministic coordinator of its roster.")
             return nil
         }
+        // P4 item 3, plan §10.3: `max + 1` over the FOLDED head set, not `own + 1`. A branch that
+        // rotated twice while this one rotated once put a higher counter in the sealed heads than
+        // this device's own key ever carried, and minting from the keyring head would collide with
+        // an epoch that already exists.
         let plan = MeshRotationPolicy.plan(
-            head: epochKeyring?.head,
+            head: rotationBasisHead,
             coordinatorFingerprint: coordinator,
             meshID: meshID,
             presentedRoster: presentedRotationRoster()
@@ -6100,11 +6273,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Step 3: mint the key, wrap it for the permitted recipients only, send, and adopt.
+    ///
+    /// It no longer takes the closing epoch: since P4 item 3 the counter on the wire is the minted
+    /// ref's own (`max + 1` over the folded heads), not "one more than the key this device happens
+    /// to hold" — and a parameter that could still be read would be an invitation to re-derive it
+    /// the old way on a merge, where the two answers differ.
     private func distributeRotation(
         _ nextEpoch: MeshEpochRef,
         cause: MeshKeyRotationCause,
-        acked: Set<String>,
-        closingEpoch: Int
+        acked: Set<String>
     ) async {
         // `SystemRandomNumberGenerator` (behind `UInt8.random`) is the platform CSPRNG, so this is
         // the same key material without the pointer seam (R9) or the discarded OSStatus (R7) the
@@ -6117,8 +6294,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             locallyRemoved: removedMemberFingerprints
         )
         let perMember = wrappedGroupKey(newKeyBytes, for: recipients)
+        // The counter the frame carries IS the minted ref's, because every receiver re-derives the
+        // ref from it (`adoptRotatedEpoch` → `epochRef(counter:coordinatorFingerprint:)`). Before
+        // P4 item 3 this was `closingEpoch + 1`, which agreed with the ref only while a rotation
+        // counted up from this device's own head; a merge counts up from the folded `max`, and the
+        // two spellings would then name different epochs on the two ends of the same rotation.
         let rotation = MeshKeyRotationPayload(
-            newEpoch: closingEpoch + 1,
+            newEpoch: Int(nextEpoch.counter),
             perMember: perMember,
             rotationInitiatedAt: Date(),
             coordinatorFingerprint: identity.localFingerprint,
@@ -6526,6 +6708,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// distinct refs that `coexist` (plan §21.1).
     var epochCoordinatorFingerprintForTesting: String? { epochCoordinatorFingerprint }
 
+    /// The head a merge would count up from — plan §10.3's `max` (P4 item 3). Private in shipping
+    /// code, because nothing but the rotation planner may read it.
+    var rotationBasisHeadForTesting: MeshEpochRef? { rotationBasisHead }
+
+    /// The heads this device would put in a `fernlet.mesh.epoch-heads.v1` frame right now, so a
+    /// suite can prove what crossed the wire is what the device is actually on.
+    var presentedEpochHeadsForTesting: [MeshEpochRef] { presentedEpochHeads() }
+
+    /// The ref a member re-derives from the two values a rotation frame carries. It is the
+    /// SHIPPING derivation, exposed rather than re-implemented, so a test proving "both ends land
+    /// on the identical epoch" cannot pass against a test-local copy that has drifted.
+    func epochRefForTesting(counter: Int, coordinatorFingerprint: String?) -> MeshEpochRef? {
+        epochRef(counter: counter, coordinatorFingerprint: coordinatorFingerprint)
+    }
+
     /// Fires with the membership event that reached ``sendMembershipEvent(_:)``'s broadcast — the
     /// only observation point for a frame whose wire write a unit test cannot see (the slot channel
     /// is detached). Mirrors `onSessionHeartSendForTesting`.
@@ -6564,6 +6761,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `MeshRotationTriggerQueueTests` covers on its own, with no wall clock).
     func rotateNowForTesting(cause: MeshKeyRotationCause) async {
         await initiateRotation(cause: cause)
+    }
+
+    /// Disarms whatever the debounce window is holding, and reports what it was.
+    ///
+    /// The determinism half of ``rotateNowForTesting(cause:)``: a scenario that asserts what a
+    /// merge *asked for* and then runs that rotation by hand would otherwise leave a live 2-second
+    /// task behind, and under a loaded suite that window can elapse mid-scenario and rotate a
+    /// second time. Sampling and disarming in one synchronous call is the same discipline
+    /// `MeshMergeExchangeTests` uses when it reads `pendingCause` inside its pump.
+    @discardableResult
+    func consumePendingRotationForTesting() -> MeshKeyRotationCause? {
+        let pending = rotationTriggers.pendingCause
+        rotationDebounceTask?.cancel()
+        rotationDebounceTask = nil
+        rotationTriggers.reset()
+        return pending
     }
 
     /// The callbacks this manager installed on its radio, so a unit test can fire the events a live
@@ -6777,6 +6990,35 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
     private var epochCoordinatorFingerprint: String? {
         guard currentMesh != nil else { return nil }
         return presentedRotationRoster().min()
+    }
+
+    /// Whether this device may admit a tunnel to a peer on a **divergent** branch so plan §10.3's
+    /// merge can reconcile the two heads (P4 item 3).
+    ///
+    /// ## What changed and why it is safe
+    ///
+    /// Before item 3, ``MeshEpochAcceptance/introductionVerdict(local:peer:)`` answered `divergent`
+    /// for two well-formed unequal heads and the QUIC transport tore the tunnel down. That was a
+    /// deadlock: the merge that reconciles two branches runs *over* the tunnel it was refusing, so
+    /// two members that had each rotated while split could never reconnect at all.
+    ///
+    /// The relaxation is scoped three ways, and each one is what makes it safe rather than a
+    /// widened door:
+    ///
+    /// 1. **It is a link-layer relaxation on a members-only transport.** ``MeshChannelIntroductionExchange``
+    ///    is reached from ``NetworkMeshSession`` and nowhere else — MC never runs a signed channel
+    ///    introduction — which is exactly the distinction 0b's review drew and the reason
+    ///    ``maySeatVerifiedPeer(signingPublicKey:)`` exists for the other radio.
+    /// 2. **Only the epoch rule moved.** The hello still has to be well formed, name this mesh,
+    ///    carry a canonical epoch reference, present a fresh nonce, and — immediately after this
+    ///    check — be a `member` by ``roster``'s own verdict. A stranger, a departed member, a
+    ///    removed one and a foreign mesh are refused exactly as strictly as before.
+    /// 3. **Only when a merge can actually run.** A device with no mesh or no membership ledger has
+    ///    nothing to reconcile *with*, so it keeps the old refusal
+    ///    (``MeshIntroductionRejection/divergentEpoch``) rather than admitting a tunnel that could
+    ///    only sit there.
+    var mayReconcileDivergentEpochs: Bool {
+        currentMesh != nil && membershipVerifier != nil
     }
 
     /// This device's current membership epoch as a canonical ``MeshEpochRef`` string, or empty when

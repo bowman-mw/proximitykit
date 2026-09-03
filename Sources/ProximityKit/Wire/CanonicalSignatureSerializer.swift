@@ -178,6 +178,8 @@ private nonisolated let canonicalMeshInventoryDigestDomain =
     FernletCryptoPurpose.Signature.meshInventoryDigestV1.data
 private nonisolated let canonicalMeshInventoryDigestHashDomain =
     FernletCryptoPurpose.Hash.meshInventoryDigestV1.data
+private nonisolated let canonicalMeshEpochHeadsDomain =
+    FernletCryptoPurpose.Signature.meshEpochHeadsV1.data
 
 // MARK: - Identity envelope
 
@@ -464,6 +466,26 @@ nonisolated func canonicalBytes(for payload: MeshInventoryDigestPayload) -> Data
     writer.appendInt64(Int64(payload.digest.removalCount))
     writer.appendInt64(Int64(payload.digest.terminationCount))
     writer.appendLengthPrefixed(payload.digest.recordsHash)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshEpochHeadsPayload`` (plan §10.3, P4 item 3).
+///
+/// Each head contributes its own canonical string — the exact spelling
+/// ``MeshEpochRef/canonicalString`` produces and the one a peer parses back — so two devices
+/// holding the same head set sign over identical bytes, and the count is written first so a
+/// re-partitioning of the same characters cannot produce the same transcript.
+nonisolated func canonicalBytes(for payload: MeshEpochHeadsPayload) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshEpochHeadsDomain)
+    writer.appendUUID(payload.meshID)
+    writer.appendString(payload.senderFingerprint)
+    writer.appendDate(payload.sentAt)
+    writer.appendUInt64(UInt64(payload.heads.count))
+    for head in payload.heads {
+        writer.appendString(head.canonicalString)
+    }
     // signature: deliberately excluded.
     return writer.bytes
 }

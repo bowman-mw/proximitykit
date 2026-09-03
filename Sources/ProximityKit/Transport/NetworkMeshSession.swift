@@ -1775,7 +1775,8 @@ private extension NetworkMeshSession {
         do {
             let peerHello = try await exchangeHellos(role: role, local: exchange.localHello, over: stream)
             if let rejection = exchange.receive(
-                peerHello, roster: authority.roster, nonces: &introductionNonces
+                peerHello, roster: authority.roster, nonces: &introductionNonces,
+                mayReconcileDivergentEpochs: authority.mayReconcileDivergentEpochs
             ) {
                 MeshTransportConsoleLog.echo(Self.refusalDetail(rejection, role: role, authority: authority))
                 report("A QUIC tunnel was refused: \(rejection.diagnosticDescription)")
