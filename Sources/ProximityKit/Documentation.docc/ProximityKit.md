@@ -821,6 +821,34 @@ the other branch of a split, and plan §21.5 retires them **with the path P5 rep
 loosening them here. P5 owns the routed store and the drain; P6 owns feature routing; this layer owns
 only the rules.
 
+**Delivery targets: who content is for, held apart from how far each copy has got** (P4 item 8,
+plan §10.1). ``MeshDeliveryTarget`` is the vocabulary P5's `MeshRoutedManifest` expresses its
+destination set in. The set is the **full derived roster at creation time, minus this device** —
+never the connected set — and it is immutable for the life of the target: the initializer takes a
+``MeshDerivedRoster``, there is no form that takes a reachable set or a ``MeshBranchView``, and no
+method removes a destination. Reachability enters only as a *delivery* state, so content created
+during a 2/2 split of a roster of four is for three people, both of the far side included, and they
+are ``MeshDeliveryState/pending`` rather than absent. That is what stops P5 dropping a recipient who
+happened to be on the other side of a split when the photo was taken.
+
+The stored half is a three-rung monotone ladder — ``MeshDeliveryState`` `pending → custodied(by:) →
+delivered`, with delivered terminal and every regression refused by a named
+``MeshDeliveryRefusal`` — and `custodied` says on its own that **custody is not delivery** (§11:
+hearts are final only after the foreground decrypt and the ledger commit). Closure is *not* a fourth
+stored case: ``MeshDeliveryDisposition/departed`` is derived at read against the current roster, the
+same shape as the termination downgrade, so a departure or removal unioning in closes a destination
+with nothing rewritten — and grow-only records make that closure permanent, which is what lets the
+drain stop rather than back off. `outstanding(in:)` is exactly §11's "destinations lacking a
+`MeshRecipientReceipt`"; `isFullyDelivered(in:)` is its complement. `merging(_:)` takes the
+per-destination max (commutative, associative, idempotent) and **refuses a destination-set mismatch
+by name** rather than unioning or intersecting, either of which would invent or drop a recipient.
+The type carries no key epoch, no branch id and no partition of origin, by construction. Nothing is
+`Codable`: `MeshSessionContext`'s schema stays **2**, and P5 persists targets inside its routed
+store. The two existing seams are derivations rather than duplicates —
+``MeshDevelopmentPlan/handoffTargets`` is `outstandingReachable(from:in:)` and
+``MeshBranchView/temporarilyDisconnectedFingerprints`` is `outstandingUnreachable(from:in:)`, with
+neither type modified to say so.
+
 **The ceiling is guarded at both bounds.** ``MeshSessionCeiling`` holds the signed absolute
 `hardDeadline` (± 120 s skew) *and* a local monotonic budget measured with `ContinuousClock`, clamped
 to six hours at construction. A wall clock set backwards cannot lengthen a session (the monotonic
@@ -855,6 +883,12 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshMemberPresence``
 - ``MeshPartitionVerdict``
 - ``MeshPartitionDetector``
+- ``MeshDeliveryTarget``
+- ``MeshDeliveryState``
+- ``MeshDeliveryDisposition``
+- ``MeshDeliveryStateToken``
+- ``MeshDeliveryRefusal``
+- ``MeshDeliveryOutcome``
 - ``MeshSessionCeiling``
 - ``MeshSessionCeilingBound``
 - ``MeshSessionCeilingVerdict``
