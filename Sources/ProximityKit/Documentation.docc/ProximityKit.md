@@ -660,6 +660,12 @@ Three consequences worth stating outright:
   that is the blip and item 1's partial heal), and closes on the honest completion signal the
   protocol already computes: a peer digest that **matches** local inventory. Splitting again abandons
   it rather than concluding it.
+- **Reconnect ≡ merge; admission ≠ reconnect.** The `peerCommitted` self-edge also carries every
+  genuinely new member's first commit, so `openBlipMergeIfReconnected(_:from:peer:)` opens the window
+  only for a peer that was **already on the derived roster** at that instant. A new admission keeps
+  its own `.membership` rotation — a merge window would relabel a brand-new member's first epoch
+  `.merge` (which outranks `.membership` in the 2 s coalescing window) and leave this device waiting
+  for a re-gossip nobody asked for. A commit that names no peer opens nothing: fail closed.
 - **A merge applies what the merged roster says about this device.** `applyMergedRosterVerdict(from:)`
   is the merge-path counterpart of `applyRosterMove(_:from:)`: a departure or removal that happened
   in the other branch of a split arrives *only* as a merged record, so a merge that left this device
@@ -680,7 +686,9 @@ Epoch heads **coexist**: two branches that rotated at the same counter hold dist
 ``MeshEpochRef``s (their coordinators cannot be the same member), both survive
 ``MeshMergeOffer/foldedHeads(_:adding:limit:)`` into `epochHeads`, and an overflow past
 `MeshSessionContextSchema.maxEpochHeads` is **named** (`droppedEpochHeadCount`, plan §21.3's "an
-assertion, not a knob") rather than silently truncated. Minting the strictly greater successor that
+assertion, not a knob") rather than silently truncated. The count is taken **inside the one context
+writer, after the bytes seal** — the set the cap can bite is the set being written, so a count taken
+anywhere else measures something the file never held. Minting the strictly greater successor that
 retires both is P4 item 3, deliberately not the merge's job. Never a fresh session, never a silent
 re-key.
 

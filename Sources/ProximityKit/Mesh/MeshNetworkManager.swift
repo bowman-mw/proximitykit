@@ -407,10 +407,28 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `nil` means "whatever this build selects", which is what the public initializer passes. Tests
     /// pass an in-memory fake; that seam is the whole of P2 item 8, and what closes the long-standing
     /// gap where manager-level invite behaviour could not be asserted at tier 1 at all.
-    init(store: any ProximityHost, transport: (any MeshTransportSession)?) {
+    ///
+    /// `identity` is the same kind of seam for the device's own keys, and exists for one reason: a
+    /// device has exactly ONE proximity identity, so the default ``IdentityService`` is keyed on one
+    /// process-wide keychain service — and two managers built in a single test process are therefore
+    /// literally the same device, sharing a fingerprint. That makes a two-node tier-1 scenario
+    /// (P4 item 2's wire exchange, `MeshMergeExchangeTests`) impossible to state honestly. Passing a
+    /// distinctly-keyed identity is the only thing that separates them. Nothing in shipping code
+    /// passes it: the public initializer above cannot, so a Release build always takes this device's
+    /// real identity.
+    ///
+    /// - Parameters:
+    ///   - store: The host this manager's roots and vaults hang off.
+    ///   - transport: The radio, or nil for the one this build selects.
+    ///   - identity: The device identity, or nil for this device's own.
+    init(
+        store: any ProximityHost,
+        transport: (any MeshTransportSession)?,
+        identity: IdentityService? = nil
+    ) {
         self.store = store
         self.transport = transport ?? MeshTransportFactory.makeSession(MeshTransportFactory.resolvedKind())
-        let id = IdentityService()
+        let id = identity ?? IdentityService()
         // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
         // otherwise every later sign/seal on this identity fails with no visible cause.
         do {
@@ -2028,11 +2046,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// reconnects and asserts each one moved this counter, which no bypass could do.
     @ObservationIgnored private(set) var mergeApplicationCount = 0
 
-    /// How many epoch heads a merge has dropped past ``MeshSessionContextSchema/maxEpochHeads``.
+    /// How many epoch heads the cap has pushed off the **sealed** head set, past
+    /// ``MeshSessionContextSchema/maxEpochHeads``.
     ///
-    /// Plan §21.3: the cap is an assertion, not a knob. Non-zero means the merge produced more
+    /// Plan §21.3: the cap is an assertion, not a knob. Non-zero means something produced more
     /// branch heads than any partition shape can justify, so it is surfaced here and in the audit
     /// log rather than swallowed by a `prefix`.
+    ///
+    /// Counted **at the one context writer** (``writeSessionContext(base:identity:head:terminating:token:store:)``)
+    /// and only after the bytes seal, because that is where the drop actually happens: a count
+    /// taken at the merge, against the keyring head and the offer, measures a different set from
+    /// the one the file holds and would be a number that is merely plausible. Every head goes
+    /// through that writer, so this covers a rotation's head as well as a merge's — which is the
+    /// honest scope, the cap being a property of the persisted set and not of the merge.
     @ObservationIgnored private(set) var droppedEpochHeadCount = 0
 
     /// **The front door to the one merge path** (plan §10.3): applies a reconnecting peer's offer.
@@ -2068,21 +2094,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Seals a reconnecting peer's epoch heads into ``MeshSessionContext/epochHeads``.
     ///
     /// One ``persistSessionContext(addingEpochHead:)`` per head, because that writer is the single
-    /// seam every head goes through and it already applies
-    /// ``MeshEpochAcceptance/mergedHeads(_:adding:limit:)``. The pre-fold exists only to *count*
-    /// what the cap would drop, which plan §21.3 says must be named rather than truncated silently.
+    /// seam every head goes through and it already folds through
+    /// ``MeshMergeOffer/foldedHeads(_:adding:limit:)``. Nothing is counted here on purpose: the
+    /// only set the cap can bite is the one being written, so ``droppedEpochHeadCount`` is measured
+    /// there, against the heads that actually sealed (plan §21.3 — named, never truncated silently).
     ///
     /// - Parameter heads: The heads the peer offered; empty is the common case and does nothing.
     private func foldEpochHeads(_ heads: [MeshEpochRef]) {
         guard !heads.isEmpty else { return }
-        let known = epochKeyring.map { [$0.head] } ?? []
-        let fold = MeshMergeOffer.foldedHeads(known, adding: heads)
-        if fold.droppedCount > 0 {
-            droppedEpochHeadCount += fold.droppedCount
-            FernletAuditLog.log(
-                "mesh.merge.epochHeadsDropped", context: ["count": String(fold.droppedCount)]
-            )
-        }
         for head in heads.prefix(MeshMergeOffer.maxFoldedHeads) {
             persistSessionContext(addingEpochHead: head)
         }
@@ -2430,8 +2449,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             hardDeadline: meshIdentity.hardDeadline
         )
         if let ledger = membershipVerifier?.ledger { context.ledger = ledger }
+        // The fold and the count are ONE step, here, because here is where the cap can bite: the
+        // set being written is the only set it applies to (plan §21.3).
+        var droppedHeads = 0
         if let head {
-            context.epochHeads = MeshEpochAcceptance.mergedHeads(context.epochHeads, adding: head)
+            let fold = MeshMergeOffer.foldedHeads(context.epochHeads, adding: [head])
+            context.epochHeads = fold.heads
+            droppedHeads = fold.droppedCount
         }
         if let termination {
             context.localTermination = termination
@@ -2439,11 +2463,28 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         do {
             try sessionStore.save(context, token: token)
+            // After the seal, never before: a refused save wrote nothing, so it dropped nothing.
+            recordDroppedEpochHeads(droppedHeads)
             return true
         } catch {
             recordRotationBlock("The session context could not be sealed: \(String(describing: error)).")
             return false
         }
+    }
+
+    /// Names an epoch-head overflow that a seal has just made durable.
+    ///
+    /// Plan §21.3's "an assertion P4 tests, not a knob": a non-zero count is a defect signal — the
+    /// mesh holds more branch heads than everyone-alone can justify — so it is surfaced on the
+    /// manager and in the audit log instead of disappearing into a `prefix`.
+    ///
+    /// - Parameter count: How many distinct heads the cap pushed off the set that was written.
+    private func recordDroppedEpochHeads(_ count: Int) {
+        guard count > 0 else { return }
+        droppedEpochHeadCount += count
+        FernletAuditLog.log(
+            "mesh.sessionContext.epochHeadsDropped", context: ["count": String(count)]
+        )
     }
 
     // MARK: - Session state machine (network migration P3 item 6, plan §8.2)
@@ -2508,10 +2549,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// anything, so a refused seal leaves the rest of the list undone and
     /// ``lastSessionEffectFailure`` set.
     ///
-    /// - Parameter event: What happened.
+    /// - Parameters:
+    ///   - event: What happened.
+    ///   - committedPeer: For ``MeshSessionEvent/peerCommitted`` only, the fingerprint of the peer
+    ///     whose commit raised it. Read for exactly one decision — whether that peer was **already**
+    ///     a roster member, which is what separates a reconnect from a new admission
+    ///     (``openBlipMergeIfReconnected(_:from:peer:)``) — and ignored for every other event. The
+    ///     machine never sees it: an associated value here would make the state machine's alphabet
+    ///     depend on membership, which is the coupling P3 item 6 exists to avoid.
     /// - Returns: The transition taken, or the named refusal.
     @discardableResult
-    func applySessionEvent(_ event: MeshSessionEvent) -> MeshSessionTransition {
+    func applySessionEvent(
+        _ event: MeshSessionEvent, committedPeer: String? = nil
+    ) -> MeshSessionTransition {
         let previous = sessionState
         let transition = MeshSessionStateMachine.transition(from: sessionState, on: event)
         switch transition {
@@ -2530,7 +2580,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // records again and rotate as `.membership`. The next heal opens a fresh exchange.
             if next == .partitioned { abandonMergeExchange() }
             performSessionEffects(effects, for: event)
-            openBlipMergeIfReconnected(event, from: previous)
+            openBlipMergeIfReconnected(event, from: previous, peer: committedPeer)
         }
         return transition
     }
@@ -2545,12 +2595,29 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// commit is deliberately excluded: that is a join, and the admission-grant path already asks
     /// its admitter what it holds.
     ///
+    /// **Reconnect ≡ merge; admission ≠ reconnect.** A peer that was already on the derived roster
+    /// when it committed is coming *back*, and coming back is plan §10.3's merge. A peer that was
+    /// not is being admitted, and an admission is its own roster move with its own `.membership`
+    /// rotation — opening a merge window for it would relabel a brand-new member's first epoch
+    /// `.merge` (which outranks `.membership` in the 2 s coalescing window, so the cause would be
+    /// wrong rather than merely extra) and would set this device waiting for a re-gossip that
+    /// answers a question nobody asked.
+    ///
+    /// Membership is read **before** the commit's own effects can move it, which is what makes
+    /// "already a member" the honest test: at this instant the admission record for a genuine
+    /// joiner has not been filed yet. A commit that names no peer at all opens nothing — fail
+    /// closed, because "not known to be a member" and "is a member" must not be the same answer.
+    ///
     /// - Parameters:
     ///   - event: The event just applied.
     ///   - previous: The state it was applied from.
-    private func openBlipMergeIfReconnected(_ event: MeshSessionEvent, from previous: MeshSessionState) {
+    ///   - peer: The committing peer's fingerprint, when the caller knows it.
+    private func openBlipMergeIfReconnected(
+        _ event: MeshSessionEvent, from previous: MeshSessionState, peer: String?
+    ) {
         guard event == .peerCommitted, previous != .joining, previous.isLive else { return }
         guard !awaitingResumeMerge else { return }
+        guard let peer, membershipVerifier?.roster.contains(fingerprint: peer) == true else { return }
         beginMergeExchange(entry: .blip)
     }
 
@@ -4200,8 +4267,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
         // P3 item 6: the first committed peer makes a joining session active (plan §8.2). P4 item 2
         // hangs the blip and the partial heal off the same event inside ``applySessionEvent(_:)``,
-        // so every reconnect entry is one call rather than a rule this site has to remember.
-        if currentMesh != nil { applySessionEvent(.peerCommitted) }
+        // so every reconnect entry is one call rather than a rule this site has to remember. The
+        // fingerprint is passed because only a peer that was ALREADY a member is reconnecting — a
+        // new admission keeps its own `.membership` rotation.
+        if currentMesh != nil {
+            applySessionEvent(.peerCommitted, committedPeer: peerIdentity.fingerprint)
+        }
 
         // Phase 3: start the beacon loop and, if we are the coordinator, schedule the first rotation.
         if currentMesh != nil && beaconTimer == nil {
