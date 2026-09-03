@@ -3056,9 +3056,40 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         _ event: MeshSessionEvent, from previous: MeshSessionState, peer: String?
     ) {
         guard event == .peerCommitted, previous != .joining, previous.isLive else { return }
-        guard !awaitingResumeMerge else { return }
         guard let peer, membershipVerifier?.roster.contains(fingerprint: peer) == true else { return }
+        guard !awaitingResumeMerge else {
+            askOneReconnectedPeer(peer)
+            return
+        }
         beginMergeExchange(entry: .blip)
+    }
+
+    /// Asks **one** newly reconnected peer what it holds, without opening a second merge window
+    /// (P4 item 9b).
+    ///
+    /// A window already being open means "a merge with somebody is in flight", and re-arming it for
+    /// every later reconnect would relabel one merge as several. But it does **not** mean this peer
+    /// has been asked: ``beginMergeExchange(entry:)`` sends to the slots that existed when it ran,
+    /// and a member of a mesh healing branch by branch acquires most of its slots afterwards. Before
+    /// this, such a peer was never asked and — because it may be awaiting too, and an exchange is
+    /// the only thing that sends either frame — never told. On a `4/2/2` heal that left members
+    /// counting the post-merge epoch up from different heads for good: the same shape P4 item 2c
+    /// fixed for the *answer* half, one party wider. Found by §16.2's roster-8 row
+    /// (`MeshConvergencePropertyTests`).
+    ///
+    /// One ask, to one peer, on the two frames the exchange already uses: no wire change, no second
+    /// window, and ``awaitingResumeMerge`` deliberately untouched so the records that come back
+    /// still land in the one merge path. A repeat ask costs the responder nothing it has not already
+    /// spent — ``reGossipRecords(to:)`` still answers once per peer per session.
+    ///
+    /// - Parameter peer: The committing peer's fingerprint, already checked to be a roster member.
+    private func askOneReconnectedPeer(_ peer: String) {
+        guard membershipVerifier != nil else { return }
+        FernletAuditLog.log("mesh.merge.askedLateReconnect")
+        Task { @MainActor [weak self] in
+            await self?.sendInventoryDigest(to: [peer])
+            await self?.sendEpochHeads(to: [peer])
+        }
     }
 
     /// Drops the merge in flight without concluding it — the session partitioned again, or ended.
@@ -7045,6 +7076,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The heads this device would put in a `fernlet.mesh.epoch-heads.v1` frame right now, so a
     /// suite can prove what crossed the wire is what the device is actually on.
     var presentedEpochHeadsForTesting: [MeshEpochRef] { presentedEpochHeads() }
+
+    /// The peers this device has already spent its once-per-session record re-gossip on (§10.5),
+    /// and how many committed peers it can reach right now.
+    ///
+    /// Exposed for the convergence property, where "this member never learned the departure" and
+    /// "every peer that knew it had already answered this member" are different diagnoses with the
+    /// same symptom — and only the second is §10.5's own bound rather than a lost frame.
+    var reGossipDiagnosticsForTesting: (answered: Set<String>, slots: Int) {
+        (reGossipedToFingerprints, activeSlots.count)
+    }
 
     /// The ref a member re-derives from the two values a rotation frame carries. It is the
     /// SHIPPING derivation, exposed rather than re-implemented, so a test proving "both ends land
