@@ -128,7 +128,7 @@ nonisolated struct MeshRoutedChunkGap: Equatable, Sendable {
 ///    `MeshRecipientReceipt`", partition-agnostic by construction and with `delivered` and `departed`
 ///    already excluded (this is what kills the re-delivery loop).
 /// 2. **The peer is a custodian this device chose at departure** —
-///    `index.itemsAwaitingHandoff(at:in:)` restricted to a peer in
+///    `index.itemsAwaitingHandoff(at:in:originatedBy:)` restricted to a peer in
 ///    `MeshDevelopmentPlan.handoffTargets`. This is increment 1's own load-bearing case: without it
 ///    the delta could move **no bytes at all** to a fresh custodian.
 ///

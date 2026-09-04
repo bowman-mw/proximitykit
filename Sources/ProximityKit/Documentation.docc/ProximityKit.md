@@ -533,6 +533,68 @@ forwarded receipt while advancing **no** rung: `recordingCustodyTransfer`'s `for
 the *caller's* statement about a hand-off, and a drain that was handed no hand-off has no honest
 value for it.
 
+**P5 item 8 shipped CUSTODY-TRANSFER-ON-DEPARTURE — increment 1's only relay hop** (plan §10.6,
+§11). Custody is at the **origin**, or, after exactly one transfer at exactly one moment — a
+development — at the custodians ``MeshDevelopmentPlan/handoffTargets`` names. There is no hand-off
+between two live connected members, and no second hop. Ten new types across two files:
+``MeshCustodyHandoffScope``, ``MeshCustodyHandoffSuppression``, ``MeshCustodyHandoffResult`` and
+``MeshCustodyHandoffPlan`` (`MeshCustodyHandoffPlan.swift`, pure values with no store and no clock,
+where the *choosing* lives), plus ``MeshRoutedCustodyHandoff``, ``MeshRoutedHandoffClaim``,
+``MeshRoutedHandoffRefusalReason``, ``MeshRoutedHandoffRefusal``, ``MeshRoutedHandoffStep`` and
+``MeshRoutedHandoffReport`` beside two new store doors in `MeshRoutedCustodyHandoff.swift`:
+`MeshRoutedStore.recordingCustodyHandoff(_:now:)` (the departing origin, receipt-backed) and
+`MeshRoutedStore.claimingHandedOffLegs(_:now:)` (the custodian, receipt-free). Both are **one load,
+N bounded updates, one save** — looping the single-item `recordingCustodyTransfer` over a full index
+would be two thousand crypto passes on the main actor inside a fifteen-second window — and both
+apply that door's rules through its own now-internal helpers, so the rule has one implementation.
+`recordingCustodyTransfer` itself is untouched and still has **zero** shipping callers.
+
+Five things make the increment-1 line structural rather than a comment:
+
+- **No new wire, no new signature.** The custodian's authority is the leaver's own
+  `SignedDepartureRecord.custodyHandoff.custodianFingerprints`, already inside the departure's
+  canonical bytes, verified, grow-only and available offline. `MeshDeliveryTarget`'s existing
+  `pending → custodied(by:) → delivered` ladder is the whole state change; no frame, no
+  `PayloadType`, no crypto purpose and no golden moved, and `MeshRoutedIndexSchema` stays 2.
+- **The enumerator refuses the second hop.** ``MeshRoutedIndex/itemsAwaitingHandoff(at:in:originatedBy:)``
+  takes a **required** origin filter, so a departing *custodian* enumerates nothing at all; a future
+  call site cannot forget what it is not allowed to omit.
+- **The hop bound is the origin-served set, not the record.** `custodyHandoff.custodianFingerprints`
+  is the whole roster minus the leaver in every production departure, so the record alone would make
+  every member an entitled courier for every other and content would walk A→B→C→D. A device may
+  therefore claim handed-off legs only for an item whose **manifest it admitted from the origin
+  itself**, recorded at the one door that knows the sender. Every courier of a departed origin's
+  content is consequently a device that origin both named and served directly. The set is
+  memory-only and dies with the session: a restart before claiming forfeits the claim, which is
+  fail-closed and named (`mesh.development.handoffClaimNotOriginServed`).
+- **Every "nothing transferred" is a named answer.** ``MeshCustodyHandoffSuppression`` distinguishes
+  a store that could not say what it holds, a partition of one with nobody to hand to, a record that
+  was never emitted and a window that had already closed — so `nil` really is the single value that
+  means "this device handed over exactly what it says it did", and a delivery-ladder refusal inside a
+  batch door keeps its own name rather than reading as "nothing to do".
+- **A removed member's record grants nothing.** `MeshMembershipRecordVerifier` accepts a departure
+  from any *admitted* fingerprint, not only a current member, and a derived roster cannot separate
+  *departed* from *removed*; so the gate lives in the manager, over `ledger.removals` and
+  `removedMemberFingerprints`, before the pure planner ever sees a leaver.
+
+`MeshDevelopmentPlan.handoffSummary(handedOffItemCount:)` is what a departure record now signs, and
+the count is defined narrowly: **distinct items whose rung this device's own durable index moved
+`pending → custodied(by:)`, inside the window, and whose single save succeeded.** Not sends, not
+attempts, not candidates — nothing can retract it once the record is signed, so every uncertain path
+under-reports. The claim at the custodian is **one idempotent derivation applied at four doors** (a
+live roster move, a merge, an item completing, and the drain-exchange entry) rather than four event
+hooks; the fourth exists because a store that answered `deferred` when the record folded is reachable
+by no other event. At each door the claim runs **only after** the roster verdict has declined to end
+the session — a merge that hands this device its own removal ejects it before any rung is written,
+which is the order ``MeshNetworkManager`` already used on the live-record path. The durable custody
+commit those doors trigger is capped per evaluation, and its overflow is *carried* rather than
+dropped: the planner cannot recover it, because after a claim no named leg is `pending`, so the queue
+is what makes "retried at the next evaluation" true. Items no stored receipt could place are named
+(`MeshCustodyHandoffResult.unplacedItemKeys`) and their bytes ride a best-effort push through the
+drain's own narrowing planner and frame budget, bounded by the plan's deadline re-read per custodian
+— a frame cap is not a time bound. Everything the push sends is the origin's exact stored objects:
+**a custodian is a courier, never a co-signer.**
+
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
 frozen English spelling, so one grep finds every layer that touches those bytes:
@@ -781,7 +843,11 @@ the **merged derived roster** chooses the ending (``MeshDevelopmentEnding/termin
 custodians (`presentFingerprints − self`), with the 15-second window expressed as a deadline and
 ``MeshDevelopmentHandoffOutcome`` as its named answer — completed, nobody reachable, or the window
 closed first. The type never sees how many peers are connected, so "a 2/2 split of a four-roster is
-two final pairs" is not a mistake the call site can make. `permitsTermination(_:)` is the same rule
+two final pairs" is not a mistake the call site can make. P5 item 8 added
+``MeshDevelopmentPlan/handoffSummary(handedOffItemCount:)`` beside the zero-argument
+``MeshDevelopmentPlan/handoffSummary``, which stays as the nothing-transferred answer: the plan is
+handed the count rather than computing it, because the number is a fact about a durable routed index
+this pure value deliberately cannot reach. `permitsTermination(_:)` is the same rule
 applied as an **issuance gate** inside `sendMembershipEvent(_:custodyHandoff:)`: a device whose own
 merged roster is larger than two will not sign a `terminated.v1` at all (a device with no ledger —
 the ceiling, the epoch-counter cap — still may, or an ending would be silenced rather than a wrong
@@ -849,7 +915,11 @@ Three consequences worth stating outright:
   (`MeshRoutedDrainWallTests.theDrainFiresOnlyFromTheMergeDoor`). The routed answer gets its **own**
   receive door rather than a ride inside `receiveInventoryDigest(_:)`, because that function returns
   at its match branch before its own `Task` whenever the two ledgers already agree — the commonest
-  blip, and precisely the case the drain exists for.
+  blip, and precisely the case the drain exists for. **P5 item 8 added a third door class to that
+  wall** — the one-moment hand-off push, which opens no exchange and sends neither digest, but does
+  carry routed bulk. It moves bytes through `sendRoutedBulk(_:to:now:)`, extracted from the drain's
+  own answer so both charge the per-peer session budget before their first `await`, and it is named
+  in the wall rather than left to a count that would have stayed green by accident.
 
 - **The window is a value, and it closes only when every asked peer has matched** (P5 item 7, which
   retired P4's deferred defect 2d). ``MeshMergeWindow`` is a pure `nonisolated struct` holding three

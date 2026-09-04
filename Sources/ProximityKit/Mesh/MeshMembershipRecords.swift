@@ -173,10 +173,23 @@ nonisolated struct SignedAdmissionRecord: MeshMembershipRecord {
 /// both paths, and a `Codable` synthesis would have clamped the first and not the second.
 nonisolated struct MeshCustodyHandoffSummary: Codable, Equatable, Sendable {
 
-    /// Members that accepted custody, capped at ``MeshMembershipBounds/maxCustodians``.
+    /// The reachable members custody was **offered** to, capped at
+    /// ``MeshMembershipBounds/maxCustodians``.
+    ///
+    /// Offered, not accepted: increment 1 has no acceptance frame, and P5 item 8 deliberately did
+    /// **not** narrow this list to the custodians that advanced a rung. Narrowing would strand the
+    /// pure courier — a custodian that is not a destination and has never seen the item is named by
+    /// nothing else, so it would never claim. The narrowing that matters is applied at the
+    /// custodian instead, on durable evidence it can check for itself.
     let custodianFingerprints: [String]
 
-    /// How many routed items were handed over. Clamped to zero, never negative.
+    /// How many routed items the leaver's own durable index recorded a
+    /// `pending → custodied(by:)` transition for, inside the window. Clamped to zero, never
+    /// negative.
+    ///
+    /// Filled by P5 item 8 from what actually transferred — never a candidate count, never a send
+    /// count. Nothing can retract it once the record is signed, so every uncertain path
+    /// under-reports.
     let handedOffItemCount: Int
 
     /// A hand-off that transferred nothing — a member leaving with no pending custody, and the

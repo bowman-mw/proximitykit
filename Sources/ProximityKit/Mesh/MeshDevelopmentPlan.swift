@@ -27,8 +27,10 @@
 // ``MeshDevelopmentPlan/handoffTargets`` at all.
 //
 // P5 owns the custody *content*. ``MeshDevelopmentPlan/handoffSummary`` names the custodians and
-// counts zero items, which is exactly the half P4 can honestly sign for; the item count is P5's
-// to fill when the routed store has something to hand over.
+// counts zero items — the half P4 could honestly sign for — and P5 item 8 added
+// ``MeshDevelopmentPlan/handoffSummary(handedOffItemCount:)``, which carries the count the routed
+// store's own transfer produced. The plan still computes nothing about content: it is handed the
+// number, because the number is a fact about a durable index this type deliberately cannot reach.
 
 import Foundation
 import FernletDomainModel
@@ -117,7 +119,7 @@ nonisolated struct MeshDevelopmentPlan: Equatable, Sendable {
     /// Which ending this development is.
     let ending: MeshDevelopmentEnding
 
-    /// The members custody is offered to: the **reachable** roster members other than this device
+    /// The members custody is **offered** to: the **reachable** roster members other than this device
     /// (``MeshBranchView/externalPresentFingerprints``). The unreachable branch is deliberately
     /// absent — nothing waits on it, and their delivery is preserved instead by the custodians'
     /// records merging when the partition heals (§10.6).
@@ -166,13 +168,31 @@ nonisolated struct MeshDevelopmentPlan: Equatable, Sendable {
         return handoffTargets.isEmpty ? .noReachableCustodian : .completed
     }
 
-    /// The custody summary the departure record carries (plan §8.3's `custody-handoff summary`).
+    /// The custody summary of a development that handed **nothing** over: a termination, a store
+    /// that could not be read, an emit that was blocked, or a device holding no routed content.
     ///
-    /// The item count is zero until P5's routed store exists to be handed over — the custodians are
-    /// what P4 can honestly sign for, and inventing a count would be a claim about content this
-    /// phase has none of.
+    /// Kept beside ``handoffSummary(handedOffItemCount:)`` rather than deleted, because "zero items"
+    /// is a real and common answer and spelling it at the call site would be one more place for a
+    /// count to be invented.
     var handoffSummary: MeshCustodyHandoffSummary {
-        MeshCustodyHandoffSummary(custodianFingerprints: handoffTargets, handedOffItemCount: 0)
+        handoffSummary(handedOffItemCount: 0)
+    }
+
+    /// The custody summary the departure record carries (plan §8.3's `custody-handoff summary`),
+    /// with the count P5 item 8 fills.
+    ///
+    /// The plan stays a pure value and never computes the count itself: `handedOffItemCount` is a
+    /// statement about the departing device's own durable routed index — how many items' rungs
+    /// actually moved `pending → custodied(by:)` and survived the save — and this type has no store
+    /// to ask. `MeshNetworkManager` transfers first and passes the answer in, so the number a
+    /// departure record signs is never a prediction.
+    ///
+    /// - Parameter handedOffItemCount: What actually transferred. Clamped to zero by
+    ///   ``MeshCustodyHandoffSummary``, never negative.
+    func handoffSummary(handedOffItemCount: Int) -> MeshCustodyHandoffSummary {
+        MeshCustodyHandoffSummary(
+            custodianFingerprints: handoffTargets, handedOffItemCount: handedOffItemCount
+        )
     }
 
     /// Whether a roster permits a termination to be **issued** at all (plan §10.6's second rule,

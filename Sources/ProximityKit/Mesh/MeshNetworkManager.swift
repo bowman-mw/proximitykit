@@ -1101,9 +1101,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The clock-injected form, so the 15-second handoff bound is asserted on a test clock rather
     /// than by timing a real send (tier 1, plan §16.2: no wall-clock sleeps).
     ///
-    /// - Parameter clock: Read twice — once when the handoff window opens, once when the sends
-    ///   have returned. The difference is what ``MeshDevelopmentPlan/handoffOutcome(finishedAt:)``
-    ///   judges against the window.
+    /// - Parameter clock: Read **three** times on the transfer path (P5 item 8) — once when the
+    ///   handoff window opens, once when custody is transferred to the reachable custodians, and
+    ///   once when the sends have returned — plus once per custodian inside the best-effort push,
+    ///   which stops at ``MeshDevelopmentPlan/handoffDeadline`` because a frame cap is not a time
+    ///   bound. Reads two and three collapse on the `blockedByStore` path, where neither the
+    ///   transfer nor the push runs. The first and last are what
+    ///   ``MeshDevelopmentPlan/handoffOutcome(finishedAt:)`` judges against the window.
     func leaveSessionAfterNotifyingPeers(clock: () -> Date) async {
         let plan = developmentPlan(startedAt: clock())
         lastDevelopmentPlan = plan
@@ -1111,11 +1115,32 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // A REFUSED transition (no session was ever started through the machine) leaves the emit
         // alone; only a taken transition whose save failed blocks it.
         let blockedByStore = transition.nextState != nil && lastSessionEffectFailure != nil
+        var handoff = MeshCustodyHandoffResult.none
         if !blockedByStore {
-            await sendMembershipEvent(plan.ending.membershipEvent, custodyHandoff: plan.handoffSummary)
+            // The count is final BEFORE the record is signed: `canonicalBytes(for:)` binds it and
+            // nothing can retract it. Every transfer is a synchronous write over evidence already
+            // on this device's disk — no ack, no round trip, no timer — which is exactly why an
+            // honest count fits inside fifteen seconds.
+            handoff = transferCustodyOnDevelopment(plan, at: clock())
+            let emitted = await sendMembershipEvent(
+                plan.ending.membershipEvent,
+                custodyHandoff: plan.handoffSummary(handedOffItemCount: handoff.transferredItemCount)
+            )
+            // The push runs BEFORE the sent event, and that order is load-bearing rather than
+            // stylistic: `.departureSent` carries `.stopParticipation`, which tears every slot down,
+            // so a push after it would have nowhere to send. The record still goes first, so a
+            // custodian sees the entitling record before or with the bytes.
+            if emitted {
+                await pushCustodyToCustodians(handoff, plan: plan, clock: clock)
+            } else {
+                handoff = handoff.notAnnounced()
+                FernletAuditLog.log(
+                    "mesh.development.handoffSuppressed", context: ["reason": "recordNotEmitted"]
+                )
+            }
             applySessionEvent(plan.ending.sentEvent)
         }
-        recordDevelopmentHandoffOutcome(plan, finishedAt: clock())
+        recordDevelopmentHandoffOutcome(plan, finishedAt: clock(), handoff: handoff)
         leaveSession()
     }
 
@@ -1131,18 +1156,213 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
     }
 
-    /// Records how the bounded handoff ended. Never silent: a window that closed before the sends
-    /// returned is a named outcome, not a shrug (R7).
-    private func recordDevelopmentHandoffOutcome(_ plan: MeshDevelopmentPlan, finishedAt: Date) {
+    /// Records how the bounded handoff ended, and what it moved. Never silent: a window that closed
+    /// before the sends returned is a named outcome, not a shrug (R7).
+    ///
+    /// The outcome and the count answer two different questions and may legitimately disagree: the
+    /// count is a statement about **this device's own index**, the outcome a statement about the
+    /// **clock**. A push that ran out of window after the rungs were written and the record signed
+    /// is `.windowExpired` with a non-zero count, and both are true.
+    ///
+    /// Counts only in the context — never a fingerprint, never content.
+    private func recordDevelopmentHandoffOutcome(
+        _ plan: MeshDevelopmentPlan, finishedAt: Date, handoff: MeshCustodyHandoffResult
+    ) {
         let outcome = plan.handoffOutcome(finishedAt: finishedAt)
         lastDevelopmentHandoffOutcome = outcome
+        lastDevelopmentHandoff = handoff
         FernletAuditLog.log(
             "mesh.development.handoff",
             context: [
                 "ending": plan.ending.rawValue,
                 "outcome": outcome.rawValue,
-                "custodians": String(plan.handoffTargets.count)
+                "custodians": String(plan.handoffTargets.count),
+                "items": String(handoff.transferredItemCount),
+                "unplaced": String(handoff.unplacedItemKeys.count),
+                "pushed": String(handoff.pushedItemKeys.count)
             ]
+        )
+    }
+
+    /// Plan §10.6's custody transfer: the departing origin's outstanding content moves to the
+    /// reachable custodians ``MeshDevelopmentPlan/handoffTargets`` names, in one index write.
+    ///
+    /// This is increment 1's **only** relay hop, and it is bounded three ways: the enumerator takes
+    /// this device's own fingerprint as its origin filter, so a departing custodian transfers
+    /// nothing; a custodian is eligible only if its verified custody receipt is already stored here,
+    /// so no rung names a device without the bytes; and only `pending` legs move, so a leg already
+    /// handed is never re-handed. A termination transfers nothing at all — the mesh is over and
+    /// there is nobody left to be a courier for.
+    ///
+    /// A store that cannot say what it holds is `.storeUnavailable`, never an empty one: "held
+    /// nothing" and "could not read" are two answers and plan §19.5 keeps them apart.
+    ///
+    /// - Parameters:
+    ///   - plan: The development decision, already derived.
+    ///   - at: The injected instant, read from the same clock the window opened on.
+    /// - Returns: what actually transferred, for the departure record and for the audit line.
+    private func transferCustodyOnDevelopment(
+        _ plan: MeshDevelopmentPlan, at now: Date
+    ) -> MeshCustodyHandoffResult {
+        guard plan.ending == .departure else { return .none }
+        guard !plan.handoffTargets.isEmpty else { return .suppressed(.noReachableCustodian) }
+        guard !plan.handoffHasExpired(at: now) else {
+            FernletAuditLog.log(
+                "mesh.development.handoffSuppressed", context: ["reason": "windowExpired"]
+            )
+            // Its own suppression, never `.none`: a device that held placeable items and ran out of
+            // clock is not a device that held nothing, and a consumer reading the result alone must
+            // not be able to conclude otherwise.
+            return .suppressed(.windowExpired)
+        }
+        guard let roster = membershipVerifier?.roster else { return .none }
+        let index: MeshRoutedIndex
+        switch routedStore().indexForWriting() {
+        case .writable(let loaded, _): index = loaded
+        case .unavailable(let cause):
+            FernletAuditLog.log(
+                "mesh.development.handoffSuppressed", context: ["state": cause.logToken]
+            )
+            return .suppressed(.storeUnavailable)
+        }
+        let planned = MeshCustodyHandoffPlan(
+            index: index, roster: roster, selfFingerprint: identity.localFingerprint,
+            custodians: plan.handoffTargets, at: now
+        )
+        developmentHandoff = MeshCustodyHandoffScope(
+            custodians: Set(plan.handoffTargets), deadline: plan.handoffDeadline
+        )
+        return applyCustodyHandoff(
+            planned, unrestorable: index.itemsWithUnrestorableDelivery(at: now).count, now: now
+        )
+    }
+
+    /// Applies one planned transfer batch and names everything it could not do.
+    private func applyCustodyHandoff(
+        _ planned: MeshCustodyHandoffPlan, unrestorable: Int, now: Date
+    ) -> MeshCustodyHandoffResult {
+        if !planned.unplacedItemKeys.isEmpty {
+            FernletAuditLog.log(
+                "mesh.development.handoffUnplaced",
+                context: ["items": String(planned.unplacedItemKeys.count)]
+            )
+        }
+        if unrestorable > 0 {
+            FernletAuditLog.log(
+                "mesh.routedDrain.deliveryUnrestorable", context: ["items": String(unrestorable)]
+            )
+        }
+        guard !planned.transfers.isEmpty else {
+            return Self.handoffResult(planned, transferred: [], unrestorable: unrestorable)
+        }
+        switch routedStore().recordingCustodyHandoff(planned.transfers, now: now) {
+        case .completed(let report):
+            // R2: bounded by the batch's own size.
+            for refusal in report.refused {
+                FernletAuditLog.log(
+                    "mesh.development.handoffRefused",
+                    context: ["reason": refusal.refusal.token]
+                )
+            }
+            return Self.handoffResult(planned, transferred: report.advanced, unrestorable: unrestorable)
+        case .refused(let refusal):
+            FernletAuditLog.log(
+                "mesh.development.handoffRefused", context: ["reason": refusal.rawValue]
+            )
+            return Self.handoffResult(planned, transferred: [], unrestorable: unrestorable)
+        case .unavailable(let cause):
+            FernletAuditLog.log(
+                "mesh.development.handoffSuppressed", context: ["state": cause.logToken]
+            )
+            return .suppressed(.storeUnavailable)
+        }
+    }
+
+    /// The result value one transfer produced: what moved, what could not be placed, and what the
+    /// push will therefore offer. **Nothing pushed is counted** — under-reporting is the safe
+    /// direction for a claim nobody can retract, and a pushed item becomes servable when the
+    /// custodian completes it and its own claim re-evaluates.
+    private static func handoffResult(
+        _ planned: MeshCustodyHandoffPlan, transferred: [MeshRoutedItemKey], unrestorable: Int
+    ) -> MeshCustodyHandoffResult {
+        MeshCustodyHandoffResult(
+            transferredItemKeys: transferred,
+            unplacedItemKeys: planned.unplacedItemKeys,
+            pushedItemKeys: planned.unplacedItemKeys,
+            unrestorableCount: unrestorable,
+            suppression: nil
+        )
+    }
+
+    /// The best-effort half of the hand-off: the BYTES of items no stored receipt could place, sent
+    /// to every reachable custodian so a **pure courier** — a custodian that is not a destination
+    /// and has never seen the item — can serve after the heal.
+    ///
+    /// Everything sent is the origin's exact stored objects, forwarded verbatim; nothing is
+    /// re-signed. The batch rides the drain's own narrowing planner, so every per-answer bound and
+    /// the per-peer session frame budget apply unchanged, and the loop re-reads the **live** clock
+    /// per custodian and stops at the plan's own deadline: `scope.admits(peer, at: plan.startedAt)`
+    /// would be vacuous by construction, and a frame cap is not a time bound.
+    ///
+    /// Uncounted, and it runs only after the departure record was actually emitted — pushing bytes
+    /// to custodians that will never be told they are custodians is retention with no delivery.
+    private func pushCustodyToCustodians(
+        _ handoff: MeshCustodyHandoffResult, plan: MeshDevelopmentPlan, clock: () -> Date
+    ) async {
+        guard !handoff.pushedItemKeys.isEmpty else { return }
+        let pushable = Set(handoff.pushedItemKeys)
+        var frames = 0
+        var reached = 0
+        // R2: bounded by the roster cap.
+        for custodian in plan.handoffTargets.prefix(MeshMembershipBounds.maxRosterMembers) {
+            let now = clock()
+            guard !plan.handoffHasExpired(at: now) else {
+                FernletAuditLog.log(
+                    "mesh.development.handoffPushDeadline",
+                    context: ["left": String(plan.handoffTargets.count - reached)]
+                )
+                break
+            }
+            reached += 1
+            guard let batch = handoffPushBatch(to: custodian, limitedTo: pushable, at: now) else {
+                continue
+            }
+            if await sendRoutedBulk(batch, to: custodian, now: now) {
+                frames += batch.frameCount
+            } else if batch.frameCount > 0 {
+                FernletAuditLog.log(
+                    "mesh.development.handoffPushBudgetSpent",
+                    context: ["left": String(routedFramesRemaining(for: custodian))]
+                )
+            }
+        }
+        FernletAuditLog.log(
+            "mesh.development.handoffPushed",
+            context: ["items": String(pushable.count),
+                      "custodians": String(reached), "frames": String(frames)]
+        )
+    }
+
+    /// One custodian's push batch, built through the drain's narrowing initializer so every bound
+    /// and the gap computation come from the one place they live.
+    private func handoffPushBatch(
+        to custodian: String, limitedTo pushable: Set<MeshRoutedItemKey>, at now: Date
+    ) -> MeshRoutedDrainPlan? {
+        guard let mesh = currentMesh, let index = routedIndexForAdvertising() else { return nil }
+        guard let local = MeshRoutedInventory(
+            meshID: mesh.meshID, index: index, selfFingerprint: identity.localFingerprint, at: now
+        ) else {
+            FernletAuditLog.log("mesh.routedDrain.inventoryOverCap")
+            return nil
+        }
+        let bounds = MeshRoutedDrainBounds.increment1
+        return MeshCustodyHandoffPlan.pushBatch(
+            local: local,
+            remote: peerRoutedInventories[custodian]?.inventory
+                ?? MeshRoutedInventory(meshID: mesh.meshID, members: [], entries: []),
+            offerable: offerableKeys(to: custodian, in: index, at: now).intersection(pushable),
+            refused: routedRefusedKeys[custodian] ?? [],
+            frameAllowance: min(bounds.maxFrames, routedFramesRemaining(for: custodian))
         )
     }
 
@@ -1317,6 +1537,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         branchView = nil
         lastExternalHeartbeatAt = nil
         restoredSessionContext = nil
+        // P5 item 8: every half of the hand-off is run-scoped. The entitlement a development opened
+        // dies with the session it belonged to, and so does the origin-served set that bounds a
+        // claim to one hop — carrying either across a session would be increment 2 arriving by
+        // accident. The deferred-commit queue goes with them: it names items of THIS session's mesh.
+        developmentHandoff = nil
+        originServedItems.removeAll()
+        deferredCustodyCommits.removeAll()
         if !keepingTerminalState || !sessionState.hasEnded { sessionState = .idle }
     }
 
@@ -1832,6 +2059,37 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// text — plan §18.2's copy is the owner's and item 6 ships none.
     @ObservationIgnored private(set) var lastRoutedDrainRefusal: MeshRoutedDrainRefusalNote?
 
+    /// Items whose MANIFEST this device admitted **from their own origin** — P5 item 8's hop bound.
+    ///
+    /// A departure record alone bounds nothing: `custodyHandoff.custodianFingerprints` is the whole
+    /// roster minus the leaver in every production departure, so on the record alone every member
+    /// would be an entitled courier for every other and content would walk A→B→C→D — increment 2's
+    /// shape, reached without the device measurement plan §11 gates it on. A device may therefore
+    /// claim handed-off legs only for an item the origin served it directly, which makes every
+    /// courier of a departed origin's content a device that origin **both** named and served.
+    ///
+    /// One write site (``noteOriginServed(_:)``, called only from ``ingestRoutedManifest(_:in:)``),
+    /// one read site (``claimHandedOffCustody(now:excluding:)``), bounded by the store's item cap,
+    /// cleared with the session. Memory-only, so a restart between taking the bytes and claiming
+    /// forfeits the claim: fail-closed, named, and item 10's to make durable if it ever should be.
+    @ObservationIgnored private var originServedItems: Set<MeshRoutedItemKey> = []
+
+    /// Items this device claimed but could not durably commit custody for inside one evaluation's
+    /// cap — P5 item 8's named deferral, made real.
+    ///
+    /// ``mintClaimedCustody(_:at:)`` is the expensive half (``commitLocalCustody(for:manifest:now:)``
+    /// re-streams and re-hashes the whole item), so it is capped per evaluation. The overflow cannot
+    /// be re-planned: after the claim every named leg carries a `custodied(by:)` rung, so the
+    /// planner's `pending`-only leg list is empty and a re-run plans nothing. Without this queue the
+    /// deferral would therefore be permanent rather than latent — no `custodiedAt`, no advertised
+    /// custody signer, no forwardable self receipt — so the overflow is carried here and drained at
+    /// the **next** claim evaluation, ahead of that evaluation's own work.
+    ///
+    /// Bounded by the store's item cap, memory-only and session-scoped, exactly like
+    /// ``originServedItems``: a commit that is merely late costs a receipt's latency, never a served
+    /// byte, because the courier predicate reads the **rung**.
+    @ObservationIgnored private var deferredCustodyCommits: [MeshRoutedItemKey] = []
+
     /// Prepares the verified ledger for a mesh, keyed to the founder's signing key.
     ///
     /// Idempotent for the same mesh so a re-broadcast descriptor cannot discard verified records;
@@ -1880,12 +2138,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///     rather than silently dropped.
     ///   - custodyHandoff: What the leaver hands to the members it can still reach (plan §8.3).
     ///     Only a departure carries one.
+    /// - Returns: `true` only when a signed record really was broadcast. Every exit that does not
+    ///   broadcast — no mesh, a refused termination, a signature that failed — answers `false`, and
+    ///   P5 item 8's development path reads it: rungs written for custodians no record will ever
+    ///   name are content stranded, so the count is reported **unplaced** rather than transferred
+    ///   and the byte push is skipped. `@discardableResult` because the other four call sites are
+    ///   fire-and-forget and were before.
+    @discardableResult
     func sendMembershipEvent(
         _ event: PayloadType, custodyHandoff: MeshCustodyHandoffSummary = .none
-    ) async {
+    ) async -> Bool {
         guard let mesh = currentMesh else {
             FernletAuditLog.log("mesh.membershipEvent.emitNoMesh", context: ["type": event.rawValue])
-            return
+            return false
         }
         do {
             switch event {
@@ -1894,10 +2159,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                     meshID: mesh.meshID, identity: identity, custodyHandoff: custodyHandoff
                 )
                 await broadcastMembershipFrame(event, MeshMemberDeparturePayload(record: record))
+                return true
             case .meshTerminated:
                 guard MeshDevelopmentPlan.permitsTermination(membershipVerifier?.roster) else {
                     FernletAuditLog.log("mesh.membershipEvent.terminationRefusedRosterAboveTwo")
-                    return
+                    return false
                 }
                 let record = try SignedTerminationRecord.signed(
                     meshID: mesh.meshID,
@@ -1905,10 +2171,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                     rosterAtSigning: presentedRotationRoster()
                 )
                 await broadcastMembershipFrame(event, MeshTerminationPayload(record: record))
+                return true
             default:
                 FernletAuditLog.log(
                     "mesh.membershipEvent.emitUnsupported", context: ["type": event.rawValue]
                 )
+                return false
             }
         } catch {
             // A membership event this device could not SIGN is never sent, and never silent (R7).
@@ -1916,6 +2184,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 "mesh.membershipEvent.signFailed",
                 context: ["type": event.rawValue, "error": String(describing: error)]
             )
+            return false
         }
     }
 
@@ -2254,13 +2523,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Every reconnect reaches it — a blip, a healed partition, an idle-lapse resume and a process
     /// restart all arrive through ``mergeReconnected(_:entry:)``, which is a named front door onto
     /// this call and nothing more. There is deliberately no second merge: a record arriving while a
-    /// merge is in flight is offered here too (``dispatchMembershipEventPayload(_:plaintext:decoder:slot:)``)
-    /// rather than through the live-record insert, so a returning peer's whole re-gossip mints
-    /// **one** `.merge` epoch instead of one `.membership` epoch per record.
+    /// merge is in flight is offered here too
+    /// (``dispatchMembershipEventPayload(_:plaintext:decoder:slot:now:)``) rather than through the
+    /// live-record insert, so a returning peer's whole re-gossip mints **one** `.merge` epoch
+    /// instead of one `.membership` epoch per record.
     ///
+    /// - Parameters:
+    ///   - other: The reconnecting side's ledger.
+    ///   - now: The injected instant, so P5 item 8's custody claim and item 14's property battery
+    ///     run on a deterministic clock. Defaulted, so no existing call site moves.
     /// - Returns: One rejection per record the verifier refused — never a silent drop.
     @discardableResult
-    func mergeMembershipLedger(_ other: MeshMembershipLedger) -> [MeshMembershipRecordRejection] {
+    func mergeMembershipLedger(
+        _ other: MeshMembershipLedger, now: Date = Date()
+    ) -> [MeshMembershipRecordRejection] {
         let snapshot = membershipVerifier
         let before = membershipVerifier?.roster
         let rejections = membershipVerifier?.merge(other) ?? []
@@ -2282,7 +2558,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // is no longer entitled to hand out (``applyVerifiedSelfRemoval()``'s rule, at the merge
         // seam). Everything else rotates exactly as P3 item 5 had it.
         if moved { refreshBranchViewAfterMerge() }
+        // P5 item 8's second claim door: a departure record that arrives during a merge lands here
+        // rather than through the live insert, so the claim has to be evaluated on this path too —
+        // but only AFTER the verdict, and only when the verdict declined to end the session. That is
+        // the same order the live-record twin ``applyRosterMove(_:from:now:)`` uses, and it is
+        // load-bearing for the same reason the rotation is: a merge that hands this device its own
+        // removal, or a termination the merged roster agrees with, must not first write custody
+        // rungs and re-stream content for a mesh it is no longer in.
         if moved, !applyMergedRosterVerdict(from: before) {
+            claimHandedOffCustody(now: now)
             requestRotation(cause: .merge)
         }
         return rejections
@@ -2454,10 +2738,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameters:
     ///   - offer: What the reconnecting side holds.
     ///   - entry: Which reconnect this is. Recorded, never branched on.
+    ///   - now: The injected instant, threaded to ``mergeMembershipLedger(_:now:)``. Defaulted.
     /// - Returns: One rejection per record the verifier refused.
     @discardableResult
     func mergeReconnected(
-        _ offer: MeshMergeOffer, entry: MeshMergeEntry
+        _ offer: MeshMergeOffer, entry: MeshMergeEntry, now: Date = Date()
     ) -> [MeshMembershipRecordRejection] {
         // Captured BEFORE the fold: the post-merge proof (P5 item 7) is owed exactly when this
         // fold moved the local digest, and after the fold there is nothing left to compare against.
@@ -2465,7 +2750,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         lastMergeEntry = entry
         mergeApplicationCount += 1
         foldEpochHeads(offer.epochHeads)
-        let rejections = mergeMembershipLedger(offer.ledger)
+        let rejections = mergeMembershipLedger(offer.ledger, now: now)
         requestMergeRotationForDivergentHeads()
         advanceMergeWindowAfterFold(previousDigest: previousDigest)
         FernletAuditLog.log(
@@ -3229,6 +3514,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// A store that cannot say what it holds vends no plan, so this sends **nothing at all** — not an
     /// empty answer, and certainly not a `quiescent: true` a deferred store cannot honestly claim.
     private func answerRoutedInventory(from peer: String, advertisedAt: Date, now: Date) {
+        // P5 item 8's fourth claim door, and the only one that fires for an item that is ALREADY
+        // complete under a record that is ALREADY folded. A custodian whose store answered
+        // `deferred`, `corrupt` or seal-`refused` when the departure record landed is reachable by
+        // no other event: the two ledger doors need a new roster move and `finishLocalRungs` needs
+        // an item to become complete. It costs nothing in the common case — the claim returns
+        // before any I/O when no leaver named this device.
+        claimHandedOffCustody(now: now)
         guard let planned = routedDrainPlan(for: peer, at: now) else { return }
         recordLocalQuiescence(planned.quiescent, for: peer, asOf: advertisedAt)
         Task { @MainActor [weak self] in
@@ -3314,6 +3606,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return
         }
         let key = MeshRoutedItemKey(manifest)
+        // P5 item 8's hop bound, recorded at the ONE door that knows who sent the frame. This is
+        // beside the admission clause above, never part of it: the clause is unchanged and stays
+        // walled, and a device may claim handed-off legs only for an item it took from the origin
+        // itself. Increment 2's `sender ∈ handoffTargets` widening is declined here by name.
+        if context.sender == manifest.originFingerprint { noteOriginServed(key) }
         let outcome = routedStore().admittingManifest(manifest, now: context.now)
         recordRoutedOutcome(outcome, type: .meshRoutedManifest, key: key, in: context)
         guard let admission = outcome.value, admission.receivedCount == admission.expectedCount else {
@@ -3535,6 +3832,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func finishLocalRungs(for key: MeshRoutedItemKey, from peer: String, now: Date) {
         guard case .completed(let held) = routedStore().forwardableManifest(item: key),
               let manifest = held else { return }
+        // P5 item 8's third claim door: an item that has just BECOME complete may be one a departed
+        // origin handed this device. It runs before the guard below, which answers `false` for a
+        // courier that is not a destination and would return before any receipt was sent; and it
+        // excludes `key`, which the next line commits itself — one item, one commit, per evaluation,
+        // because `committingCustody` re-streams the whole item before it finds a stored stamp.
+        claimHandedOffCustody(now: now, excluding: key)
         guard routedRungsOutstanding(for: key, manifest: manifest) else { return }
         let custody = commitLocalCustody(for: key, manifest: manifest, now: now)
         let recipient = commitLocalDelivery(for: key, manifest: manifest, now: now)
@@ -3595,14 +3898,167 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Whether some destination's leg of `key` was explicitly handed to this device at a departure.
-    /// Item 8 is what writes that rung; in item 6 nothing shipping does, which is exactly the
-    /// increment-1 line.
+    /// ``claimHandedOffCustody(now:excluding:)`` is what writes that rung (P5 item 8); the predicate
+    /// itself has not moved since item 6, which is exactly the increment-1 line.
     private func holdsHandedOffLeg(of key: MeshRoutedItemKey, as me: String) -> Bool {
         guard let target = routedIndexForAdvertising()?.record(for: key)?.deliveryTarget else {
             return false
         }
         // R2: bounded by the destination cap.
         return target.destinations.contains { target.state(of: $0) == .custodied(by: me) }
+    }
+
+    /// Records that a manifest arrived **from its own origin** — P5 item 8's hop bound.
+    ///
+    /// Bounded by the store's item cap, and full is a named line rather than unbounded growth.
+    private func noteOriginServed(_ key: MeshRoutedItemKey) {
+        guard originServedItems.contains(key)
+                || originServedItems.count < MeshRoutedStoreFormat.maxItems else {
+            FernletAuditLog.log("mesh.development.originServedSetFull")
+            return
+        }
+        originServedItems.insert(key)                                 // R3: bounded set
+    }
+
+    /// Takes the custody legs a departed origin handed THIS device — plan §10.6's custodian half.
+    ///
+    /// **One idempotent derivation, four doors, never four event hooks.** The authority is a single
+    /// signed development; the write is a derivation applied whenever its evidence becomes
+    /// complete — a live roster move, a merge, an item finishing, or the next drain exchange. After
+    /// the first application no named leg is `pending`, so a re-run plans nothing and writes
+    /// nothing, which is what makes a duplicate record, a merge and a restart converge.
+    ///
+    /// Three filters, and each one is load-bearing:
+    ///
+    /// - the leaver's own signed departure record must name this device a custodian — the origin's
+    ///   authorisation, verified, grow-only and available offline;
+    /// - the leaver must not have been **removed**. `MeshMembershipRecordVerifier` accepts a
+    ///   departure from any admitted fingerprint, not only a current member, and a derived roster
+    ///   cannot separate *departed* from *removed* because both subtract from it — so the gate lives
+    ///   here, over `ledger.removals` and ``removedMemberFingerprints``, before the pure planner
+    ///   sees a leaver. A removal is the mesh's statement that this member's word no longer counts;
+    ///   granting retention on it would let an ejected device park content across the mesh;
+    /// - the item's manifest must have come from the origin itself (``originServedItems``), which is
+    ///   what keeps the courier set one hop from the origin.
+    ///
+    /// The common case — nobody named this device — returns before any I/O at all.
+    ///
+    /// - Parameters:
+    ///   - now: The injected instant.
+    ///   - excluding: A key the caller is about to commit custody for itself, one line later. One
+    ///     item, one commit, per evaluation: ``MeshRoutedStore/committingCustody(item:custodian:now:)``
+    ///     re-streams the whole item before it finds a stored stamp, so committing twice is up to
+    ///     256 MiB re-read on the main actor and two signed receipts.
+    private func claimHandedOffCustody(now: Date, excluding pending: MeshRoutedItemKey? = nil) {
+        guard let verifier = membershipVerifier else { return }
+        let me = identity.localFingerprint
+        // R2: bounded by `MeshMembershipBounds.maxRecordsPerKind`.
+        let removed = Set(verifier.ledger.removals.all.map(\.memberFingerprint))
+            .union(removedMemberFingerprints)
+        let leavers = Set(
+            verifier.ledger.departures.all
+                .filter { $0.custodyHandoff.custodianFingerprints.contains(me) }
+                .map(\.memberFingerprint)
+                .filter { !removed.contains($0) }
+        )
+        guard !leavers.isEmpty, let index = routedIndexForAdvertising() else { return }
+        let stranded = MeshCustodyHandoffPlan.notOriginServedCount(
+            in: index, from: leavers, originServed: originServedItems, at: now
+        )
+        if stranded > 0 {
+            FernletAuditLog.log(
+                "mesh.development.handoffClaimNotOriginServed", context: ["items": String(stranded)]
+            )
+        }
+        let claims = MeshCustodyHandoffPlan.claims(
+            in: index, from: leavers, originServed: originServedItems,
+            roster: verifier.roster, selfFingerprint: me, at: now
+        )
+        // An evaluation that plans nothing new still drains the previous one's deferred commits:
+        // after a claim the planner sees no `pending` leg, so a re-plan is exactly what CANNOT
+        // recover the overflow, and routing the retry through the plan would make the deferral
+        // permanent (``deferredCustodyCommits``).
+        guard !claims.isEmpty else { return mintClaimedCustody([], at: now) }
+        applyHandedOffClaims(claims, now: now, excluding: pending)
+    }
+
+    /// Writes one planned claim batch and commits custody for what it took.
+    private func applyHandedOffClaims(
+        _ claims: [MeshRoutedHandoffClaim], now: Date, excluding pending: MeshRoutedItemKey?
+    ) {
+        switch routedStore().claimingHandedOffLegs(claims, now: now) {
+        case .completed(let report):
+            if !report.incomplete.isEmpty {
+                FernletAuditLog.log(
+                    "mesh.development.handoffClaimIncomplete",
+                    context: ["items": String(report.incomplete.count)]
+                )
+            }
+            // R2: bounded by the batch's own size.
+            for refusal in report.refused {
+                FernletAuditLog.log(
+                    "mesh.development.handoffClaimRefused",
+                    context: ["reason": refusal.refusal.token]
+                )
+            }
+            mintClaimedCustody(report.advanced.filter { $0 != pending }, at: now)
+        case .refused(let refusal):
+            FernletAuditLog.log(
+                "mesh.development.handoffClaimSuppressed", context: ["reason": refusal.rawValue]
+            )
+        case .unavailable(let cause):
+            FernletAuditLog.log(
+                "mesh.development.handoffClaimSuppressed", context: ["state": cause.logToken]
+            )
+        }
+    }
+
+    /// Commits durable custody for items this device just claimed — plus whatever a previous
+    /// evaluation deferred — and mints nothing else.
+    ///
+    /// Capped per evaluation because this is the expensive half: ``commitLocalCustody(for:manifest:now:)``
+    /// re-streams and re-hashes the whole item. The overflow is named **and carried** in
+    /// ``deferredCustodyCommits``, ahead of the next evaluation's own work: the claim planner cannot
+    /// recover it (after a claim no named leg is `pending`, so a re-plan is empty by design), so a
+    /// queue is what makes "retried at the next evaluation" true rather than a comment. Deferring
+    /// costs a receipt's latency rather than a served byte — the courier predicate reads the
+    /// **rung**, not `custodiedAt`.
+    ///
+    /// **The minted receipts are deliberately not transmitted here.** Three of the four claim doors
+    /// have no peer to send to, and a receipt broadcast to nobody is a frame with no recipient. The
+    /// durable half is what matters: `custodiedAt` is what puts this device into the item's
+    /// advertised custody signers, so every peer learns of the custody through the next inventory
+    /// it already exchanges. Do not "fix" this by inventing a broadcast.
+    ///
+    /// - Parameters:
+    ///   - keys: The items whose rung just moved. May be empty — an evaluation that planned nothing
+    ///     new still drains the queue.
+    ///   - now: The injected instant.
+    private func mintClaimedCustody(_ keys: [MeshRoutedItemKey], at now: Date) {
+        var seen: Set<MeshRoutedItemKey> = []
+        // R3: bounded below by the store's own item cap, deduped so a re-deferred key cannot double.
+        let queued = (deferredCustodyCommits + keys).filter { seen.insert($0).inserted }
+        guard !queued.isEmpty else { return }
+        guard let index = routedIndexForAdvertising() else {
+            // Nothing was committed, so nothing may be dropped: a store that cannot say what it
+            // holds defers the WHOLE queue rather than the overflow alone.
+            deferredCustodyCommits = Array(queued.prefix(MeshRoutedStoreFormat.maxItems))
+            return
+        }
+        let cap = MeshRoutedDrainBounds.increment1.maxItems
+        let overflow = Array(queued.dropFirst(cap).prefix(MeshRoutedStoreFormat.maxItems))
+        if !overflow.isEmpty {
+            FernletAuditLog.log(
+                "mesh.development.handoffCommitDeferred", context: ["items": String(overflow.count)]
+            )
+        }
+        deferredCustodyCommits = overflow
+        // R2: bounded by the per-answer item allowance.
+        for key in queued.prefix(cap) {
+            guard let record = index.record(for: key), record.custodiedAt == nil,
+                  let manifest = record.manifest else { continue }
+            _ = commitLocalCustody(for: key, manifest: manifest, now: now)
+        }
     }
 
     /// This device's own recipient receipt, when it is a destination and the type's final-ack
@@ -3692,11 +4148,29 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             .filter { $0.receivedCount == Int($0.chunkCount) }
             .filter { self.mayCourier($0.key, to: peer, in: index) }
             .map(\.key))
-        // Item 8 unions entitlement source 2 here — `itemsAwaitingHandoff(at:in:)` when `peer` is one
-        // of `MeshDevelopmentPlan.handoffTargets`. One place to widen; item 6 adds no speculative
-        // plumbing for it.
+        // P5 item 8's entitlement source 2, unioned in one place: while a development is live, the
+        // custodians it named may take this device's own outstanding items even though they are not
+        // destinations. It is scoped to that development and dies with the session.
+        keys.formUnion(handoffEntitlement(to: peer, in: index, at: now))
         keys.subtract(routedRefusedKeys[peer] ?? [])
         return keys
+    }
+
+    /// Item 5's entitlement source 2: this device's own outstanding items, offerable to a custodian
+    /// a **live** development named, until that development's window closes.
+    ///
+    /// Empty outside a development, empty for any peer the development did not name, and empty once
+    /// the window has closed — three conditions, all read off one run-scoped value that
+    /// ``resetSessionStateMachine(keepingTerminalState:)`` clears. `originatedBy:` is the enumerator's
+    /// own no-second-hop wall: only content this device minted is ever offered this way.
+    private func handoffEntitlement(
+        to peer: String, in index: MeshRoutedIndex, at now: Date
+    ) -> Set<MeshRoutedItemKey> {
+        guard let scope = developmentHandoff, scope.admits(peer, at: now),
+              let roster = membershipVerifier?.roster else { return [] }
+        return Set(index.itemsAwaitingHandoff(
+            at: now, in: roster, originatedBy: identity.localFingerprint
+        ).map(\.key))
     }
 
     /// Increment 1's entitlement line, stated once: the origin's own item, or a destination's leg
@@ -3783,11 +4257,33 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// pump can deliver two of a peer's inventories synchronously: both are planned before either
     /// `Task` body runs, so a charge that landed after the sends would double-spend. A batch that no
     /// longer fits is refused whole and re-planned at the next exchange.
+    ///
+    /// Extracted from ``sendRoutedDrainBatch(_:to:now:)`` by P5 item 8 so the departure push moves
+    /// bytes through the identical charge-then-send sequence. It has exactly **two** call sites and
+    /// deliberately logs nothing: each caller keeps its own audit vocabulary, so a drain answer and
+    /// a hand-off push are never confused in a transcript.
+    ///
+    /// - Returns: `true` when the batch was charged and sent; `false` when the session budget
+    ///   refused it whole, or when there was nothing to send.
+    private func sendRoutedBulk(
+        _ plan: MeshRoutedDrainPlan, to peer: String, now: Date
+    ) async -> Bool {
+        guard plan.frameCount > 0 else { return false }
+        guard chargeRoutedFrames(plan.frameCount, to: peer) else { return false }
+        // Manifests before chunks: a chunk before its manifest is admissible and parked, but the
+        // reverse costs nothing and un-parks the peer's set at once.
+        await sendRoutedManifests(plan.manifests, to: peer)
+        await sendRoutedChunks(plan.chunks, to: peer)
+        await sendRoutedReceipts(plan.receipts, to: peer, now: now)
+        return true
+    }
+
+    /// The drain's own use of ``sendRoutedBulk(_:to:now:)``, with the drain's audit tokens.
     private func sendRoutedDrainBatch(
         _ plan: MeshRoutedDrainPlan, to peer: String, now: Date
     ) async {
         guard plan.frameCount > 0 else { return }
-        guard chargeRoutedFrames(plan.frameCount, to: peer) else {
+        guard await sendRoutedBulk(plan, to: peer, now: now) else {
             FernletAuditLog.log(
                 "mesh.merge.routedAnswerBudgetSpent",
                 context: ["left": String(routedFramesRemaining(for: peer))]
@@ -3799,11 +4295,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 "mesh.merge.routedAnswerTruncated", context: ["frames": String(plan.frameCount)]
             )
         }
-        // Manifests before chunks: a chunk before its manifest is admissible and parked, but the
-        // reverse costs nothing and un-parks the peer's set at once.
-        await sendRoutedManifests(plan.manifests, to: peer)
-        await sendRoutedChunks(plan.chunks, to: peer)
-        await sendRoutedReceipts(plan.receipts, to: peer, now: now)
         FernletAuditLog.log(
             "mesh.merge.routedAnswered",
             context: ["manifests": String(plan.manifests.count),
@@ -4167,6 +4658,25 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// How that development's bounded handoff ended.
     @ObservationIgnored private(set) var lastDevelopmentHandoffOutcome: MeshDevelopmentHandoffOutcome?
+
+    /// What the last development's custody transfer actually did (P5 item 8, plan §10.6): which
+    /// items moved a rung, which could not be placed, which bytes the push offered, and why — if
+    /// anything — it handed over less than it held.
+    ///
+    /// Memory-only and `@ObservationIgnored`, like the two properties above: it is a record of one
+    /// departure's work, nothing observes it, and registering a departure-path mutation for
+    /// observation would invalidate views for state no view reads. The durable half is the rungs in
+    /// the routed index; the announced half is the signed departure record every survivor holds.
+    @ObservationIgnored private(set) var lastDevelopmentHandoff: MeshCustodyHandoffResult?
+
+    /// The entitlement a LIVE development opens, or nil outside one (P5 item 8).
+    ///
+    /// Item 5's entitlement source 2, scoped so it cannot become a permanent relay entitlement:
+    /// armed once inside ``transferCustodyOnDevelopment(_:at:)``, cleared by
+    /// ``resetSessionStateMachine(keepingTerminalState:)`` — which ``leaveMesh()`` runs at the end
+    /// of the very same development. Deliberately not derived from ``lastDevelopmentPlan``, which
+    /// outlives the session on purpose.
+    @ObservationIgnored private var developmentHandoff: MeshCustodyHandoffScope?
 
     /// When the idle window lapses, or nil when it is not armed. A value, not a timer: it is
     /// evaluated on demand (``evaluateIdleLapse(now:)``) so nothing spins.
@@ -4824,7 +5334,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         _ type: PayloadType,
         plaintext: Data,
         decoder: JSONDecoder,
-        slot: PeerSlot?
+        slot: PeerSlot?,
+        now: Date = Date()
     ) {
         guard let senderFingerprint = slot?.fingerprint else {
             FernletAuditLog.log("mesh.membershipEvent.droppedUncommittedSlot", context: ["type": type.rawValue])
@@ -4851,7 +5362,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // the bounded re-gossip answering this device's digest. It goes through the one merge path
         // so the whole batch mints one `.merge` epoch, not one `.membership` epoch per record.
         if awaitingResumeMerge, let offer = Self.mergeOffer(for: decoded) {
-            mergeReconnected(offer, entry: pendingMergeEntry ?? .blip)
+            mergeReconnected(offer, entry: pendingMergeEntry ?? .blip, now: now)
             return
         }
         let snapshot = membershipVerifier
@@ -4862,7 +5373,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // same set after a refused seal.
         guard membershipVerifier?.roster != rosterBefore else { return }
         guard commitVerifiedRecord(rollingBackTo: snapshot, type: type) else { return }
-        applyRosterMove(accepted, from: rosterBefore)
+        applyRosterMove(accepted, from: rosterBefore, now: now)
     }
 
     /// Decodes one membership frame into the record it carries, applying the type's own bounds.
@@ -4955,7 +5466,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// termination that the **merged** roster agrees with ends it too; anything else — including a
     /// termination the merged roster downgrades to its signer's departure — is a roster change like
     /// any other and rotates the key.
-    private func applyRosterMove(_ accepted: DecodedMembershipRecord?, from before: MeshDerivedRoster?) {
+    private func applyRosterMove(
+        _ accepted: DecodedMembershipRecord?, from before: MeshDerivedRoster?, now: Date = Date()
+    ) {
         if case .removal(let record) = accepted, record.memberFingerprint == identity.localFingerprint {
             applyVerifiedSelfRemoval()
             return
@@ -4964,6 +5477,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             applyVerifiedTermination()
             return
         }
+        // P5 item 8's first claim door: the record that just moved the roster is durable, so a
+        // departure naming this device a custodian can be acted on now.
+        claimHandedOffCustody(now: now)
         rotateIfRosterChanged(from: before)
     }
 
@@ -8355,6 +8871,32 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     var routedDrainFramesSpentForTesting: [String: Int] {
         get { routedDrainFramesSpent }
         set { routedDrainFramesSpent = newValue }
+    }
+
+    /// The items whose manifest this device admitted **from their own origin** — P5 item 8's hop
+    /// bound (`originServedItems`).
+    ///
+    /// Readable because the bound is otherwise unobservable: a set nothing can see is a set a future
+    /// widening can drop without a single test going red, and §4.2a's whole claim is that a device
+    /// which took an item from a *custodian* is not entitled to courier it onward.
+    var originServedItemsForTesting: Set<MeshRoutedItemKey> { originServedItems }
+
+    /// How many durable custody commits are queued past this evaluation's cap
+    /// (`deferredCustodyCommits`) — the named deferral, made observable so "retried at the next
+    /// evaluation" is a measured claim rather than a comment.
+    var deferredCustodyCommitCountForTesting: Int { deferredCustodyCommits.count }
+
+    /// Runs the custody claim exactly as the four shipping doors run it.
+    ///
+    /// **Not a fifth door.** The doors are named in ``claimHandedOffCustody(now:excluding:)``'s own
+    /// documentation and walled there; this seam exists so a suite can measure the claim's *gates*
+    /// — the removed-leaver filter and the origin-served bound — directly, rather than inferring
+    /// them from whichever door a scenario happened to reach. A gate whose only coverage is a
+    /// scenario that short-circuits before it is a gate with no coverage at all.
+    ///
+    /// - Parameter now: The injected instant, so a cell asserts against a clock rather than a date.
+    func claimHandedOffCustodyForTesting(now: Date) {
+        claimHandedOffCustody(now: now)
     }
 
     /// The ref a member re-derives from the two values a rotation frame carries. It is the

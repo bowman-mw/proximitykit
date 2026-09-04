@@ -540,7 +540,7 @@ nonisolated struct MeshRoutedItemRef: Equatable, Sendable {
     ///
     /// `true` means the item is HELD with destinations this device cannot account for — it is
     /// therefore absent from ``MeshRoutedIndex/outstandingItems(at:in:)`` and
-    /// ``MeshRoutedIndex/itemsAwaitingHandoff(at:in:)``, and named by
+    /// ``MeshRoutedIndex/itemsAwaitingHandoff(at:in:originatedBy:)``, and named by
     /// ``MeshRoutedIndex/itemsWithUnrestorableDelivery(at:)``. Never `true` for a parked item, which
     /// has no signed destination set to fail to restore.
     let deliveryRestoreRefused: Bool
@@ -732,14 +732,28 @@ nonisolated struct MeshRoutedIndex: Codable, Equatable, Sendable {
         return buckets
     }
 
-    /// Whole held items still live at `now` with at least one outstanding destination — what a
-    /// departure hands over.
+    /// Whole held items still live at `now` with at least one outstanding destination, **originated
+    /// by one named device** — what a departure hands over.
     ///
     /// An item whose stored delivery map will not restore is not here either (its destinations are
     /// unknown to this device, so a handoff could not name them); item 8 reads
     /// ``itemsWithUnrestorableDelivery(at:)`` for those.
-    func itemsAwaitingHandoff(at now: Date, in roster: MeshDerivedRoster) -> [MeshRoutedItemRef] {
+    ///
+    /// - Important: `originatedBy` is **required, and has no default**, because it is P5 item 8's
+    ///   no-second-hop wall rather than a convenience. Increment 1's custody moves at exactly one
+    ///   moment — a development — and only for content the departing device itself minted; a
+    ///   departing *custodian* enumerates nothing. Defaulting the parameter would turn that
+    ///   structural bound into something a future call site has to remember.
+    ///
+    /// - Parameters:
+    ///   - now: The injected instant; expired items are excluded.
+    ///   - roster: The current merged roster — departed destinations are derived out here.
+    ///   - originatedBy: The origin whose items are being handed over — this device, always.
+    func itemsAwaitingHandoff(
+        at now: Date, in roster: MeshDerivedRoster, originatedBy origin: String
+    ) -> [MeshRoutedItemRef] {
         items.filter { item in
+            guard item.key.originFingerprint == origin else { return false }
             guard item.isLive(at: now), item.isComplete, let target = item.deliveryTarget else {
                 return false
             }
@@ -843,12 +857,14 @@ nonisolated struct MeshRoutedIndex: Codable, Equatable, Sendable {
         }.map(\.reference)
     }
 
-    /// How many items ``itemsAwaitingHandoff(at:in:)`` would name.
+    /// How many items ``itemsAwaitingHandoff(at:in:originatedBy:)`` would name.
     ///
     /// - Important: this is a **candidate** count, never `MeshCustodyHandoffSummary.handedOffItemCount`.
-    ///   That field is signed into a departure record nobody can retract, so item 8 fills it from
-    ///   what actually transferred, after the transfers.
-    func handoffCandidateCount(at now: Date, in roster: MeshDerivedRoster) -> Int {
-        itemsAwaitingHandoff(at: now, in: roster).count
+    ///   That field is signed into a departure record nobody can retract, so P5 item 8 fills it from
+    ///   what actually transferred, after the transfers — `MeshCustodyHandoffResult.transferredItemCount`.
+    func handoffCandidateCount(
+        at now: Date, in roster: MeshDerivedRoster, originatedBy origin: String
+    ) -> Int {
+        itemsAwaitingHandoff(at: now, in: roster, originatedBy: origin).count
     }
 }

@@ -700,7 +700,10 @@ nonisolated extension MeshRoutedStore {
     /// (``recordingCustodyEvidence(item:receipt:now:)``) applies **the same two** checks in **the
     /// same order**, minus the destination clause it has no honest value for. Behaviour here is
     /// unchanged, which `recordingCustodyTransferIsUnchanged` pins.
-    private func receiptRefusal(
+    ///
+    /// Internal since P5 item 8 so the batch hand-off door applies the identical rule; the rule has
+    /// exactly one implementation.
+    func receiptRefusal(
         _ receipt: MeshCustodyReceipt,
         against record: MeshRoutedItemRecord,
         manifest: MeshRoutedManifest,
@@ -748,7 +751,12 @@ nonisolated extension MeshRoutedStore {
 
     /// Advances every named destination to `custodied(by:)`, stopping at the first delivery-level
     /// refusal so nothing is half-applied.
-    private func advancingAll(
+    ///
+    /// Internal since P5 item 8 so the batch hand-off door applies the identical rule; the rule has
+    /// exactly one implementation. Refuse-batch is the contract, not an accident: the caller owes a
+    /// refusal-free list, because "nothing is half-applied" is what keeps an unretractable signed
+    /// count honest.
+    func advancingAll(
         _ destinations: [String],
         to custodian: String,
         in target: MeshDeliveryTarget
@@ -764,7 +772,10 @@ nonisolated extension MeshRoutedStore {
     }
 
     /// The evidence set with `receipt` inserted or replaced for its custodian, in custodian order.
-    private static func storing(
+    ///
+    /// Internal since P5 item 8 so the batch hand-off door applies the identical rule; the rule has
+    /// exactly one implementation.
+    static func storing(
         _ receipt: MeshCustodyReceipt,
         in receipts: [MeshCustodyReceipt]
     ) -> [MeshCustodyReceipt] {
