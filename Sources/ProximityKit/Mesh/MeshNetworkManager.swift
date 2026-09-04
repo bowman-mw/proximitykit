@@ -1309,7 +1309,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         stagedTermination = nil
         lastSessionEffectFailure = nil
         lastSessionTransitionRejection = nil
-        awaitingResumeMerge = false
+        clearMergeWindow()
         offersForegroundResume = false
         idleLapseDeadline = nil
         // Presence is run-scoped: a new session has looked at nothing yet, and carrying a stale
@@ -2348,6 +2348,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// used is not a fact about membership.
     @ObservationIgnored private(set) var pendingMergeEntry: MeshMergeEntry?
 
+    /// The merge exchange now in flight, or nil when none is (P5 item 7, plan §22.3).
+    ///
+    /// The **one** stored source of truth for "a merge is open": ``awaitingResumeMerge`` is
+    /// `mergeWindow != nil`, so the observable six test files read cannot disagree with the state
+    /// the closing rule runs on. Memory-only and session-scoped — nothing here is persisted, so it
+    /// owes no wipe row and no schema (D-7.21).
+    @ObservationIgnored private(set) var mergeWindow: MeshMergeWindow?
+
+    /// Why the last merge window closed. A frozen diagnostic token in the idiom of
+    /// ``lastMergeEntry``: it lets a suite assert *why* a window closed rather than merely that it
+    /// did. Never display copy.
+    @ObservationIgnored private(set) var lastMergeClosure: MeshMergeWindowClosure?
+
     /// The entry of the last merge this device applied. A frozen diagnostic token, in the idiom of
     /// ``lastRotationCause`` — read by suites and audit lines, never shown to a person.
     @ObservationIgnored private(set) var lastMergeEntry: MeshMergeEntry?
@@ -2446,11 +2459,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func mergeReconnected(
         _ offer: MeshMergeOffer, entry: MeshMergeEntry
     ) -> [MeshMembershipRecordRejection] {
+        // Captured BEFORE the fold: the post-merge proof (P5 item 7) is owed exactly when this
+        // fold moved the local digest, and after the fold there is nothing left to compare against.
+        let previousDigest = membershipVerifier?.localInventoryDigest
         lastMergeEntry = entry
         mergeApplicationCount += 1
         foldEpochHeads(offer.epochHeads)
         let rejections = mergeMembershipLedger(offer.ledger)
         requestMergeRotationForDivergentHeads()
+        advanceMergeWindowAfterFold(previousDigest: previousDigest)
         FernletAuditLog.log(
             "mesh.merge.applied",
             context: ["entry": entry.rawValue, "rejected": String(rejections.count)]
@@ -2517,7 +2534,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Sends this device's signed epoch head(s) to one peer — the **epoch half** of plan §10.3's
-    /// union exchange (P4 item 3), on the ask (``beginMergeExchange(entry:)``) and on the answer
+    /// union exchange (P4 item 3), on the ask (``beginMergeExchange(entry:now:)``) and on the answer
     /// (``receiveInventoryDigest(_:)``'s mismatch branch) alike.
     ///
     /// It is the one thing the reconnect exchange could not compose out of frames that already
@@ -2574,20 +2591,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// No new frame: `fernlet.mesh.inventory-digest.v1` is the ask that already exists, and a
     /// differing digest is answered with the bounded record re-gossip (§10.5), whose frames land
     /// back in the one merge path because ``awaitingResumeMerge`` is set while this is outstanding.
-    /// A peer whose digest MATCHES is already converged, which is what ends the merge.
+    /// A peer whose digest MATCHES has proved its half; the window ends only once EVERY peer it is
+    /// waiting on has done so (P5 item 7, ``concludeMergeIfConverged()``).
     ///
-    /// - Parameter entry: Which reconnect opened this exchange.
-    private func beginMergeExchange(entry: MeshMergeEntry) {
+    /// - Parameters:
+    ///   - entry: Which reconnect opened this exchange.
+    ///   - now: The instant the window records as its opening. Recorded, never compared (D-7.24) —
+    ///     injected so the value type needs no clock of its own.
+    private func beginMergeExchange(entry: MeshMergeEntry, now: Date = Date()) {
         // A launch restore arms `.processRestart` before any session event can run, and it outranks
         // whichever door the user's resume happened to use: the ledger being merged FROM came off
         // the disk, which is the fact worth recording.
         let resolved = pendingMergeEntry == .processRestart ? MeshMergeEntry.processRestart : entry
         pendingMergeEntry = resolved
-        awaitingResumeMerge = true
-        guard membershipVerifier != nil else { return }
+        // Armed exactly where `awaitingResumeMerge = true` stood, BEFORE both guards, so the
+        // observable is bit-identical to P4's on the verifier-less and empty-recipient paths.
+        mergeWindow = .opened(at: now)
+        guard let verifier = membershipVerifier else { return }
         FernletAuditLog.log("mesh.merge.exchangeOpened", context: ["entry": resolved.rawValue])
         let recipients = Set(activeSlots.compactMap(\.fingerprint))
         guard !recipients.isEmpty else { return }
+        mergeWindow = mergeWindow?.asking(recipients).advertised(verifier.localInventoryDigest)
         Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: recipients) }
         // The epoch half of the same exchange (§10.3, item 3). Separate frame, same ask: a member
         // on no epoch sends nothing, so a reconnect between two unkeyed devices costs no bytes.
@@ -2597,17 +2621,144 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         Task { @MainActor [weak self] in await self?.sendRoutedInventory(to: recipients) }
     }
 
-    /// Ends the merge now in flight: this device and the peer hold the same records.
+    /// Ends the merge now in flight **iff** every peer it is still waiting on has matched.
     ///
-    /// Convergence is the honest completion signal, and it is one this protocol already computes —
-    /// ``MeshMembershipRecordVerifier/matchesLocalInventory(_:)`` over a signed digest. Closing on
-    /// a timer, or on the first record of a re-gossip, would each end the window while records were
-    /// still arriving and hand the rest of the batch to the live-record path instead.
-    private func concludeMerge() {
-        guard awaitingResumeMerge else { return }
-        awaitingResumeMerge = false
+    /// The name is the rule: P4's `concludeMerge()` closed on the FIRST peer digest that matched
+    /// local inventory, which across eight members shut the window while other peers' re-gossips
+    /// were still in flight — defect 2d, one record labelled `.membership` instead of `.merge`. The
+    /// safe rule is `pending = (asked ∪ answered) ∩ reachable ∖ matched`, and "answered" sits inside
+    /// `pending` precisely so a responder that merely answered can never close anything: that is the
+    /// P4 item 2c deadlock, reopened from the other side.
+    ///
+    /// A function called `conclude` that may not conclude is how a counter creeps back in, so the
+    /// verdict is computed by the value type and this only spends it. The audit token is unchanged.
+    private func concludeMergeIfConverged() {
+        guard let window = mergeWindow else { return }
+        guard case .closed(let closure) = window.verdict(reachable: reachableMergePeers()) else {
+            return
+        }
+        lastMergeClosure = closure
+        clearMergeWindow()
         pendingMergeEntry = nil
-        FernletAuditLog.log("mesh.merge.converged")
+        FernletAuditLog.log(
+            "mesh.merge.converged",
+            context: ["closure": closure.rawValue,
+                      "asked": String(window.asked.count),
+                      "matched": String(window.matched.count),
+                      "routedConverged": routedConvergenceSummary(for: window)]
+        )
+    }
+
+    /// Drops the window, and **only** the window.
+    ///
+    /// Deliberately not a place to clear anything else. `pendingMergeEntry` keeps its own **four**
+    /// write sites — two armings (``beginMergeExchange(entry:now:)``, and the launch restore's
+    /// `.processRestart`, which arms it with no window at all) and two clearings
+    /// (``concludeMergeIfConverged()``, ``abandonMergeExchange()``) — because folding the entry in
+    /// here would silently destroy that restore arming, which `resetSessionStateMachine` would then
+    /// reach through this helper. The drain's per-peer session budget is never refunded by a flap
+    /// either. `MeshRoutedDrainWallTests.theMergeWindowIsClearedAtExactlyItsOwnSites` pins all three
+    /// asymmetries by name: this body and `resetSessionStateMachine`'s never mention
+    /// `pendingMergeEntry`, and `abandonMergeExchange`'s mentions neither `clearRoutedDrainState()`
+    /// nor `reGossipedToFingerprints`.
+    private func clearMergeWindow() {
+        mergeWindow = nil
+    }
+
+    /// The peers the closing rule may still be waiting on: **every committed slot** ∩ the derived
+    /// roster.
+    ///
+    /// Deliberately not ``activeSlots`` and deliberately not ``reachableRosterFingerprints()``,
+    /// which is the obvious wrong reuse. `.active` is a UWB *distance rank* capped at three of five
+    /// slots, a fourth slot is born `.lightweight`, and `rerankSlots()` re-assigns every slot's kind
+    /// from a ranging sample — while `broadcastMembershipFrame` iterates **all** slots, so a
+    /// `.lightweight` peer sends and receives digests and re-gossip exactly like an active one.
+    /// A rank change would otherwise subtract a peer that is still re-gossiping and restore 2d,
+    /// triggered by a distance sample with no membership meaning.
+    ///
+    /// - Returns: The reachable roster members, self excluded by the slot derivation.
+    private func reachableMergePeers() -> Set<String> {
+        guard let roster = membershipVerifier?.roster else { return [] }
+        return Set(slots.compactMap(\.fingerprint).filter { roster.contains(fingerprint: $0) })
+    }
+
+    /// Records that `peer` proved convergence, then spends the verdict.
+    ///
+    /// - Parameter peer: The sender whose digest equalled local inventory.
+    private func recordMergeMatch(_ peer: String) {
+        mergeWindow = mergeWindow?.matching(peer)
+        concludeMergeIfConverged()
+    }
+
+    /// Records that this device answered `peer`'s mismatched digest — and **attempts no close**.
+    ///
+    /// Answering adds an obligation and un-matches its sender; it can never discharge one. The
+    /// close attempt is deliberately absent so that no future edit can turn "answered" into "done".
+    ///
+    /// - Parameter peer: The sender whose digest did not match.
+    private func recordMergeAnswer(_ peer: String) {
+        mergeWindow = mergeWindow?.answering(peer)
+    }
+
+    /// Advances the window after a fold moved this device's ledger: re-evaluate, prove, then judge.
+    ///
+    /// The order is the mechanism. `owed` is captured **before** the re-evaluation and before the
+    /// verdict, because a device whose fold both caught it up *and* emptied its pending set has
+    /// converged and is the only device that can tell its peers so — gating the proof on "the window
+    /// is still open" silences exactly the device that just converged, and leaves its peer holding
+    /// an open window for the rest of the session.
+    ///
+    /// - Parameter previousDigest: This device's inventory digest before the fold, or nil when it
+    ///   had no verifier.
+    private func advanceMergeWindowAfterFold(previousDigest: MeshInventoryDigest?) {
+        guard let window = mergeWindow, let verifier = membershipVerifier else { return }
+        let reachable = reachableMergePeers()
+        let owed = window.pending(reachable: reachable)
+        let local = verifier.localInventoryDigest
+        mergeWindow = window.reEvaluated(against: local, reachable: reachable)
+        if local != previousDigest, mergeWindow?.needsProof(of: local) == true {
+            readvertiseMergeProof(to: owed)
+        }
+        concludeMergeIfConverged()
+    }
+
+    /// Tells the peers this window still owes what this device now holds — the **occasion** the
+    /// strict closing rule needs, and the only thing item 7 puts on the wire.
+    ///
+    /// It is not an ask: it opens no window, re-arms no ``pendingMergeEntry``, sends no epoch heads
+    /// (the peer's answer to a mismatched proof already carries them) and carries **no routed
+    /// twin** — a routed re-advertisement would put bulk on a door sized for three asks and re-spend
+    /// the drain's per-peer session budget. Value-gated and bounded: one frame per distinct local
+    /// digest, at most ``MeshMergeWindow/maxProofs`` per window, emitted only when a grow-only capped
+    /// ledger actually grows. A proof that matches at the peer provokes no reply at all.
+    ///
+    /// - Parameter peers: The pending set captured before the fold's re-evaluation.
+    private func readvertiseMergeProof(to peers: Set<String>) {
+        guard !peers.isEmpty, let verifier = membershipVerifier else { return }
+        mergeWindow = mergeWindow?.advertised(verifier.localInventoryDigest)
+        Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: peers) }
+        FernletAuditLog.log(
+            "mesh.merge.proofReadvertised", context: ["peers": String(peers.count)]
+        )
+    }
+
+    /// How many of the peers a window waited on are ROUTED-converged, as `"3/5"`.
+    ///
+    /// Recorded on the audit line and **gating nothing** (D-7.11): the membership digest closes the
+    /// window, quiescence does not. Both halves of
+    /// ``MeshRoutedInventoryDelta/converged(local:peerReportsQuiescent:)`` were recorded in the same
+    /// pass that minted the answer (D-6.18), so this is a pure read — no `load()`, no store touch,
+    /// counts only and never a fingerprint.
+    ///
+    /// - Parameter window: The window about to close.
+    /// - Returns: The frozen `"converged/waited"` count.
+    private func routedConvergenceSummary(for window: MeshMergeWindow) -> String {
+        let waited = window.asked.union(window.answered)
+        let converged = waited.filter { peer in
+            guard let state = peerRoutedInventories[peer] else { return false }
+            return state.localQuiescent && state.reportsQuiescent
+        }
+        return "\(converged.count)/\(waited.count)"
     }
 
     // MARK: - Ledger bootstrap and convergence (network migration P3 item 7, plan §8.3, §10.5)
@@ -2766,8 +2917,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     // MARK: - Routed drain (network migration P5 item 6, plan §11, §10.3, §22.1)
     //
     // **Reconnect ≡ merge ≡ relay drain.** There is no second reconnect path: the routed inventory
-    // rides the three doors `sendInventoryDigest(to:)` already fires from, and the bulk it implies
-    // is piggybacked on the exchange that door opened. The drain adds **no policy** — what may be
+    // rides the three ASK doors `sendInventoryDigest(to:)` fires from, and the bulk it implies
+    // is piggybacked on the exchange that door opened. It rides neither of the membership digest's
+    // two non-ask doors (the post-merge proof and the joiner's post-adoption digest, P5 item 7):
+    // those open no exchange, and a routed twin there would re-spend the per-peer session budget. The drain adds **no policy** — what may be
     // offered is item 5's `MeshRoutedInventoryDelta`, what may be admitted is items 1–4's verifiers
     // and store doors, and what may be spent is `MeshRoutedDrainPlan`'s bounds.
     //
@@ -2841,7 +2994,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Sends this device's signed ROUTED inventory to one peer or to the named set — the routed twin
-    /// of ``sendInventoryDigest(to:)``, on the same three doors and the same cadence.
+    /// of ``sendInventoryDigest(to:)``, on that function's three **ask** doors and no others.
     ///
     /// An empty **named** set is "nobody to ask", not "ask everybody", exactly as the membership
     /// digest reads it. The advertisement instant recorded per peer is the **minted payload's own
@@ -3027,7 +3180,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// A peer's advertisement: verify, record, and answer it — the drain's own door.
     ///
     /// Deliberately **not** piggybacked inside ``receiveInventoryDigest(_:)``: that function returns
-    /// at `concludeMerge()` before its own `Task` whenever the two membership ledgers already agree,
+    /// at its match branch before its own `Task` whenever the two membership ledgers already agree,
     /// which is the commonest blip — so a routed answer placed there would never run in exactly the
     /// case the drain exists for.
     ///
@@ -3999,7 +4152,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// True between a resume/partition-heal and the merge that completes it — the flag that says
     /// this session is being MERGED back, not started fresh (plan §10.3).
-    @ObservationIgnored private(set) var awaitingResumeMerge = false
+    ///
+    /// **Computed from ``mergeWindow``, never stored** (P5 item 7): one source of truth cannot
+    /// disagree with the observable six test files and three shipping call sites read.
+    var awaitingResumeMerge: Bool { mergeWindow != nil }
 
     /// Whether the foreground may offer a resume for a restored or idle-stopped session.
     @ObservationIgnored private(set) var offersForegroundResume = false
@@ -4123,7 +4279,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// A window already being open means "a merge with somebody is in flight", and re-arming it for
     /// every later reconnect would relabel one merge as several. But it does **not** mean this peer
-    /// has been asked: ``beginMergeExchange(entry:)`` sends to the slots that existed when it ran,
+    /// has been asked: ``beginMergeExchange(entry:now:)`` sends to the slots that existed when it ran,
     /// and a member of a mesh healing branch by branch acquires most of its slots afterwards. Before
     /// this, such a peer was never asked and — because it may be awaiting too, and an exchange is
     /// the only thing that sends either frame — never told. On a `4/2/2` heal that left members
@@ -4139,6 +4295,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameter peer: The committing peer's fingerprint, already checked to be a roster member.
     private func askOneReconnectedPeer(_ peer: String) {
         guard membershipVerifier != nil else { return }
+        // The same window, one peer wider — and one peer LESS proved. `reAsking` un-matches its
+        // peer, because a re-commit is present-tense evidence that this peer's link dropped and
+        // re-formed, and while it was gone it may have linked to the other branch and folded records
+        // this device has never seen. An earlier match is evidence from before it left, so the
+        // window may not close on it (P5 item 7, D-7.32).
+        mergeWindow = mergeWindow?.reAsking(peer)
         FernletAuditLog.log("mesh.merge.askedLateReconnect")
         Task { @MainActor [weak self] in
             await self?.sendInventoryDigest(to: [peer])
@@ -4149,8 +4311,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Drops the merge in flight without concluding it — the session partitioned again, or ended.
     private func abandonMergeExchange() {
-        guard awaitingResumeMerge || pendingMergeEntry != nil else { return }
-        awaitingResumeMerge = false
+        guard mergeWindow != nil || pendingMergeEntry != nil else { return }
+        clearMergeWindow()
         pendingMergeEntry = nil
         FernletAuditLog.log("mesh.merge.abandoned")
     }
@@ -4884,6 +5046,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// proven yet, so the buffer keeps growing until the peer's re-gossip has delivered the records
     /// that prove it. Success is durable before it counts (plan §3.6) — a rebase this device could
     /// not seal is rolled back to the bootstrap ledger.
+    ///
+    /// **A successful rebase owes the admitter one digest** (P5 item 7, D-7.33). The admitter's
+    /// merge window may have been open when it granted the admission, in which case this device's
+    /// grant-reply digest — a bootstrap ledger, one record long — mismatched, and the admitter put
+    /// it in `answered`, i.e. in `pending`. Adoption is the only moment this device's ledger reaches
+    /// the admitter's, and it happens through a rebase rather than
+    /// ``mergeMembershipLedger(_:)``, so the post-merge proof door never fires and a joiner would
+    /// otherwise have no second occasion to speak — stranding the admitter's window for the rest of
+    /// the session. It is not an ask: no window opens here, and there is no routed twin (the
+    /// grant reply already advertised this device's `.absent` routed store, and a second
+    /// advertisement would re-spend the drain's per-peer session budget).
     private func attemptLedgerAdoption(ownAdmission: SignedAdmissionRecord, meshID: UUID) {
         let outcome = MeshLedgerAdoption.adopt(
             offered: pendingAdoptionLedger, ownAdmission: ownAdmission, meshID: meshID
@@ -4898,6 +5071,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             context: ["members": String(adopted.roster.memberCount)]
         )
         applyAdoptedRosterVerdict(adopted.roster)
+        let admitter = ownAdmission.token.admitterFingerprint
+        Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: [admitter]) }
     }
 
     /// What a freshly adopted roster says about THIS device.
@@ -4948,12 +5123,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             || peerInventoryDigests.count < MeshMembershipBounds.maxRosterMembers {
             peerInventoryDigests[payload.senderFingerprint] = payload.digest   // R3: bounded map
         }
-        // A matching digest is plan §10.3's merge, finished: the two sides hold the same records,
-        // so there is nothing to re-gossip and nothing left for the merge window to catch.
+        // The WINDOW's own evidence, separate from the hint map above: it is seeded only while a
+        // window is open and dies with it, so no comparison can ever use a digest from before this
+        // exchange began (P5 item 7).
+        mergeWindow = mergeWindow?.recording(payload.digest, from: payload.senderFingerprint)
+        // A matching digest is this peer's half of plan §10.3's merge, proven. The window closes
+        // only once EVERY peer it is waiting on has done the same.
         guard !verifier.matchesLocalInventory(payload.digest) else {
-            concludeMerge()
+            recordMergeMatch(payload.senderFingerprint)
             return
         }
+        // A mismatch this device answers is an obligation, never a discharge: it also un-matches
+        // the sender, because a verified present-tense digest that differs is evidence any earlier
+        // match is stale.
+        recordMergeAnswer(payload.senderFingerprint)
         // One task, so the answer's two halves reach the wire in a fixed order: the records the
         // peer is missing, then the head this device is on. Order is not load-bearing (a fold and a
         // record commute), determinism is.
@@ -5749,6 +5932,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slotTrustPolicies.removeValue(forKey: slot.id)
         pruneShopSendTracking(for: slot.id)
         rerankSlots()
+        // A peer whose slot is gone leaves the merge window's reach set, so the verdict is spent at
+        // the moment it changes rather than at the next inbound frame. `rerankSlots()` is NOT an
+        // evaluation site and must not become one: it moves `kind`, which the rule never reads.
+        concludeMergeIfConverged()
         promoteRosterToPendingReviewIfSessionEnded()
         openShopWindowIfSessionEnded()
         clearSessionMessagesIfSessionEnded()
@@ -5775,6 +5962,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slotTrustPolicies.removeValue(forKey: slot.id)
         pruneShopSendTracking(for: slot.id)
         rerankSlots()
+        // A peer whose slot is gone leaves the merge window's reach set, so the verdict is spent at
+        // the moment it changes rather than at the next inbound frame. `rerankSlots()` is NOT an
+        // evaluation site and must not become one: it moves `kind`, which the rule never reads.
+        concludeMergeIfConverged()
         promoteRosterToPendingReviewIfSessionEnded()
         openShopWindowIfSessionEnded()
         clearSessionMessagesIfSessionEnded()
@@ -8146,6 +8337,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     var reGossipDiagnosticsForTesting: (answered: Set<String>, slots: Int) {
         (reGossipedToFingerprints, activeSlots.count)
     }
+
+    /// The merge exchange now in flight, so a cell can assert WHICH peers a window is still
+    /// waiting on rather than only that `awaitingResumeMerge` is true.
+    var mergeWindowForTesting: MeshMergeWindow? { mergeWindow }
+
+    /// Why the last merge window closed — `.converged` (every waited-on peer proved it) or
+    /// `.nothingOutstanding` (they stopped being reachable members).
+    var lastMergeClosureForTesting: MeshMergeWindowClosure? { lastMergeClosure }
 
     /// The bulk frames charged to each peer this session — D-6.5's per-peer budget.
     ///

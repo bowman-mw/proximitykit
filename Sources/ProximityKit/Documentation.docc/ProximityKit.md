@@ -842,25 +842,55 @@ Three consequences worth stating outright:
   rather than to the live-record insert, so a returning peer's whole re-gossip mints **one** `.merge`
   epoch instead of one `.membership` epoch per record. The window opens on
   ``MeshSessionEffect/beginMerge`` (and on the `peerCommitted` self-edge, which carries no effects —
-  that is the blip and item 1's partial heal), and closes on the honest completion signal the
-  protocol already computes: a peer digest that **matches** local inventory. Splitting again abandons
-  it rather than concluding it.
-  **P5 item 7 will redesign that rule, and item 5 has already defined what replaces it:** a routed
-  digest gives "the exchange is finished" a second, content-shaped meaning — close only when *every
-  asked peer* has matched, and on the routed half only when **both** sides report no local work
-  (`MeshRoutedInventoryDelta.converged(local:peerReportsQuiescent:)`, never `isQuiescent` alone,
-  which a device holding nothing satisfies against every peer). Nothing in item 5 changes today's
-  behaviour: the frame is built and unwired.
-  **P5 item 6 wired the routed half onto exactly those doors and changed the window rule not at
-  all.** `sendRoutedInventory(to:)` fires from the same three call sites `sendInventoryDigest(to:)`
-  does — `beginMergeExchange(entry:)`, `askOneReconnectedPeer(_:)` and `handleAdmissionGrant`'s
-  reply — and nowhere else, which is the mechanically checkable form of "do not add a second
-  reconnect path" (`MeshRoutedDrainWallTests.theDrainFiresOnlyFromTheMergeDoor`). The routed answer
-  gets its **own** receive door rather than a ride inside `receiveInventoryDigest(_:)`, because that
-  function returns at `concludeMerge()` before its own `Task` whenever the two ledgers already agree
-  — the commonest blip, and precisely the case the drain exists for. What item 6 supplies is the
-  quiescence bit, recorded for **both** sides in `peerRoutedInventories`; what item 7 will do with
-  it is close the window.
+  that is the blip and item 1's partial heal). Splitting again abandons it rather than concluding it.
+  **P5 item 6 wired the routed half onto exactly those doors** — `sendRoutedInventory(to:)` fires
+  from the same three call sites `sendInventoryDigest(to:)` does, and nowhere else, which is the
+  mechanically checkable form of "do not add a second reconnect path"
+  (`MeshRoutedDrainWallTests.theDrainFiresOnlyFromTheMergeDoor`). The routed answer gets its **own**
+  receive door rather than a ride inside `receiveInventoryDigest(_:)`, because that function returns
+  at its match branch before its own `Task` whenever the two ledgers already agree — the commonest
+  blip, and precisely the case the drain exists for.
+
+- **The window is a value, and it closes only when every asked peer has matched** (P5 item 7, which
+  retired P4's deferred defect 2d). ``MeshMergeWindow`` is a pure `nonisolated struct` holding three
+  bounded per-peer sets — **asked**, **answered**, **matched** — plus the digests peers sent *while
+  this window was open*. The rule is one line: `pending = (asked ∪ answered) ∩ reachable ∖ matched`,
+  and the window closes exactly when `pending` is empty. Four things about it are load-bearing:
+  - **"Answered" is inside `pending`.** A responder that merely answered a mismatch has *added* an
+    obligation, never discharged one — that is P4 item 2c's deadlock staying shut by construction
+    rather than by a comment. A peer's later *mismatching* digest also removes it from `matched`,
+    so an obligation can never be created and discharged by the same frame. So does the **late
+    ask**: a peer that re-commits while the window is open is re-asked through `reAsking(_:)`,
+    which drops it from `matched`, because a link that dropped and re-formed may have carried that
+    peer through the other branch of a split — the one peer whose pre-disconnect match proves
+    least. The *opening* ask un-matches nobody.
+  - **`reachable` is every committed slot ∩ the derived roster**, never `activeSlots`. `.active` is
+    a UWB distance rank capped at three of five slots, re-assigned from ranging samples, while
+    `broadcastMembershipFrame` reaches all slots — so a `.lightweight` peer re-gossips exactly like
+    an active one, and subtracting it would restore 2d from a distance measurement with no
+    membership meaning. A peer that departs or whose slot goes simply leaves `pending`: derived at
+    read time, never a stored fourth state.
+  - **The proof is the occasion, not a new frame.** Nothing else ever sent a second digest inside
+    one session, so the strict rule alone would wedge every bidirectional mismatch. A fold that
+    moves this device's `localInventoryDigest` re-advertises it, once per distinct digest, to the
+    pending set captured **before** that fold's re-evaluation — a device that has just converged is
+    precisely the device whose peers are still waiting to hear it. It rides
+    `fernlet.mesh.inventory-digest.v1` unchanged: no new frame, field, purpose or golden. It opens
+    no window, asks nothing, and carries no routed twin. A **joiner** gets the same treatment for
+    the same reason: its grant-reply digest is a one-record bootstrap ledger, so the admitter
+    answers it and holds the obligation, and adoption rebases the joiner's ledger without going
+    through `mergeMembershipLedger(_:)` — so `attemptLedgerAdoption(ownAdmission:meshID:)` sends one
+    digest to the admitter itself, the joiner's only other occasion to speak. Those two non-ask
+    doors are why the membership ask now has **six** call sites while the routed one still has four
+    — an asymmetry the wall asserts per function rather than by counting.
+  - **The routed half is recorded and gates nothing.** `MeshRoutedInventoryDelta.converged(local:
+    peerReportsQuiescent:)` is read at close time and logged as a count on `mesh.merge.converged`;
+    it is not part of the closing rule. Gating on it would hold a window for the length of a
+    256 MiB transfer, and — decisively — the capacity-refusal contract subtracts a refused key from
+    the entitlement but not from the delta's ask, so a refused pair is non-quiescent for the rest of
+    the session and such a window would never close again. That asymmetry is item 9's surface. The
+    window's job is to route this reconnect's *records* through the merge path; it is finished when
+    the ledgers agree, whatever the bytes are doing.
 - **Reconnect ≡ merge; admission ≠ reconnect.** The `peerCommitted` self-edge also carries every
   genuinely new member's first commit, so `openBlipMergeIfReconnected(_:from:peer:)` opens the window
   only for a peer that was **already on the derived roster** at that instant. A new admission keeps

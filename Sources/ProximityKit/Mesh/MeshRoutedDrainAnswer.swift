@@ -13,9 +13,15 @@
 // `fernlet.mesh.routed-drain-answer.v1` diverges from `fernlet.mesh.routed-inventory-digest.v1` at
 // `d` vs `i` immediately after `routed-`, so neither prefixes the other.
 //
-// **Why it is signed** (D-6.10, and the reason an unsigned bit is not an option): item 7's merge
-// window closes on quiescence, so a forged `quiescent: true` closes a window that should still be
-// open — the fail-open direction. On top of the signature the receiver requires the two bindings
+// **Why it is signed** (D-6.10, and the reason an unsigned bit is not an option). Item 7 decided the
+// merge window does **not** close on quiescence (D-7.11): the membership digest gates it, and this
+// bit gates nothing. What the bit does is become a *recorded fact* — it is stored per peer in
+// `MeshRoutedPeerInventory`, counted onto the `mesh.merge.converged` audit line, and it is item 9's
+// input for a visible capacity refusal. A forged `quiescent: true` therefore poisons a stored fact,
+// an audit record and a future gate, which is a wire claim about another device's disk and has to
+// carry that device's signature like every other.
+//
+// On top of the signature the receiver requires the two bindings
 // this frame exists to carry: ``MeshRoutedDrainAnswer/advertiserFingerprint`` must be the receiver
 // itself, and ``MeshRoutedDrainAnswer/advertisedAt`` must be an instant it really advertised. Both
 // halves of that equality are the **minted payload's own floored `sentAt`**, never a `now` — see
