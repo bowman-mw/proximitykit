@@ -468,7 +468,21 @@ and `MeshRotationPolicy`. P5 item 1 added the routed-content wire family: `MeshR
 `MeshRoutedKeyWrapError` and `MeshRoutedContentKeyWrapper`. P5 item 2 added the routed CHUNK family
 — thirteen types: `MeshChunkFormat`, `MeshRoutedContentDigest`, `MeshChunk`, `MeshChunkPayload`,
 `MeshChunkRejection`, `MeshChunkVerifier`, `MeshChunkMintError`, `MeshChunker`, `MeshChunkRefusal`,
-`MeshChunkAdmission`, `MeshChunkBinding`, `MeshChunkCompletion` and `MeshChunkAssembly`.
+`MeshChunkAdmission`, `MeshChunkBinding`, `MeshChunkCompletion` and `MeshChunkAssembly`. P5 item 3
+added the CUSTODY RECEIPT and the sealed routed store — the module's **second** durable surface:
+`MeshCustodyReceiptFormat`, `MeshCustodyReceipt`, `MeshCustodyReceiptPayload`,
+`MeshCustodyReceiptMintError`, `MeshCustodyReceiptRejection`, `MeshCustodyReceiptVerifier`,
+`MeshCustodyDurabilityWitness`, `MeshRoutedStorageScope`, `MeshRoutedSealKeyOutcome`,
+`MeshRoutedSealKey`, `MeshRoutedIndexSchema`, `MeshRoutedStoreFormat`, `MeshRoutedIndexDecodingError`,
+`MeshRoutedItemKey`, `MeshRoutedChunkDescriptor`, `MeshRoutedDeliveryProgress`,
+`MeshRoutedDeliveryRecord`, `MeshRoutedItemRecord`, `MeshRoutedItemRef`, `MeshRoutedIndex`,
+`MeshRoutedSealRefusal`, `MeshRoutedDeferral`, `MeshRoutedCorruption`, `MeshRoutedLoad`,
+`MeshRoutedSaveError`, `MeshRoutedChunkFileRead`, `MeshRoutedStore`, `MeshRoutedRetryBounds`,
+`MeshRoutedUnavailability`, `MeshRoutedStoreRefusal`, `MeshRoutedOutcome`,
+`MeshRoutedManifestAdmission`, `MeshRoutedCustodyOutcome`, `MeshRoutedSweepReport`,
+`MeshRoutedIndexLoad`, `MeshRoutedStagedFile`, `MeshRoutedContentHasher`, `MeshChunkDescriptor`,
+`MeshChunkSetShape`, `MeshChunkAdmissionRule`, plus `MeshDeliveryRestoreRefusal` and
+`MeshDeliveryRestoreOutcome` on the P4 delivery target.
 
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
@@ -486,6 +500,7 @@ frozen English spelling, so one grep finds every layer that touches those bytes:
 | `fernlet.mesh.removal-vote.v1` | — (live state, not a record) | any member except the target | `Signature.meshRemovalVoteV1` |
 | `fernlet.mesh.routed-manifest.v1` | `MeshRoutedManifest` (a content record, not a membership record) | the origin only — relays forward it verbatim, never re-sign | `Signature.meshRoutedManifestV1`; wraps under `KeyDerivation.meshRoutedContentKeyWrapV1` + `AEAD.meshRoutedContentKeyWrapV1` |
 | `fernlet.mesh.routed-chunk.v1` | `MeshChunk` (one slice of that item's ciphertext) | the origin only — a custodian forwards it verbatim, never re-signs | `Signature.meshRoutedChunkV1`; digests under `Hash.meshRoutedContentV1` (the whole item), `Hash.meshRoutedChunkV1` (one slice) and `Hash.meshRoutedChunkIDV1` (the derived replay-window id) |
+| `fernlet.mesh.custody-receipt.v1` | `MeshCustodyReceipt` (a custodian durably holds one item's complete ciphertext) | the **custodian**, about the origin's item — the one routed record its subject did not sign; relays forward it verbatim | `Signature.meshCustodyReceiptV1`; the derived dedup id under `Hash.meshCustodyReceiptIDV1`; the at-rest store sealed under `KeyDerivation.meshRoutedStoreV1` |
 
 **Nothing enters a ledger unverified.** ``MeshMembershipRecordSet`` is pure algebra and will merge
 whatever it is handed; ``MeshMembershipRecordVerifier`` is the only door. That matters because the
@@ -589,7 +604,7 @@ dispatch path's: ``MeshDerivedRoster`` applies §8.3's downgrade rule first, so 
 by a member of a roster larger than two costs its signer their own membership and nobody else's, and
 reaches the manager as an ordinary roster change that rotates the key.
 
-**The one durable surface, and the four that stay memory-only.** P3 item 2 reversed this module's
+**Two durable surfaces, and the four that stay memory-only.** P3 item 2 reversed this module's
 old blanket "ProximityKit persists nothing" rule (plan §17.3), and the reversal is narrow on
 purpose. `MeshSessionContext` — mesh id, protocol version, `createdAt`/`hardDeadline`, the
 membership ledger, epoch heads, the develop bar — is sealed at rest by ``MeshSessionStore`` under
@@ -600,9 +615,25 @@ membership ledger, epoch heads, the develop bar — is sealed at rest by ``MeshS
 now load-bearing by contrast: content never depends on the control key, so resume reconnects and
 rotates rather than reloading a secret.
 
-**Loading it has five states, and three of them are not "empty".** `ColumnCrypto` is V3-only and
-*refuses* to seal without a `DeviceBindingID` (owner decision D4), so before first unlock this file
-cannot be written at all:
+P5 item 3 added the **second** durable surface, on the same floor and with its own everything:
+``MeshRoutedStore`` seals `MeshRoutedIndex.sealed` (the catalogue of routed items this device is
+holding for other people, their delivery maps and the receipts other members signed) plus one
+`MeshRoutedChunks/<uuid>.chunk` file per held slice, under
+`FernletCryptoPurpose.KeyDerivation.meshRoutedStoreV1`, on a per-instance ``MeshRoutedStorageScope``
+whose keychain service is its **own** (`com.fernlet.mesh-routed`) rather than a lodger under the
+session's — one fate per service is the only arrangement a service-wide delete can express honestly.
+Its schema is its own from day one (``MeshRoutedIndexSchema``, version 1); `MeshSessionContext` stays
+at schema 2 and gains nothing. Chunk file names are opaque random UUIDs recorded in the index, so no
+fingerprint, item id, index or hash appears in a path component; and because `ColumnCrypto`'s AAD is
+purpose ‖ install binding with **no file name in it**, every read compares the opened chunk's
+descriptor and payload length against the ones holding its slot — a comparison that is not redundant
+and must not be removed.
+
+**Loading either of them has five states, and three of them are not "empty".** `ColumnCrypto` is
+V3-only and *refuses* to seal without a `DeviceBindingID` (owner decision D4), so before first unlock
+neither file can be written at all. ``MeshRoutedLoad`` mirrors ``MeshSessionLoad`` case for case and
+its refusal, deferral and corruption vocabularies carry the **same frozen rawValues** (a test asserts
+the sets are equal), because invariant 7 is stated once and enforced everywhere:
 
 | state | meaning |
 | --- | --- |
@@ -721,7 +752,10 @@ golden moved. P5 item 1's `fernlet.mesh.routed-manifest.v1` followed the same ru
 pre-registered in P0, its own golden and framing case, no existing golden moved. So did P5 item 2's
 `fernlet.mesh.routed-chunk.v1`: one new signature purpose, three new `Hash` purposes, four new
 vectors (the chunk transcript, the per-chunk hash, the item hash and the derived chunk id), its own
-framing-transcript case — and the manifest golden re-asserted, untouched, in the new suite.
+framing-transcript case — and the manifest golden re-asserted, untouched, in the new suite. And so
+did P5 item 3's `fernlet.mesh.custody-receipt.v1`: one new signature purpose, one new `Hash` purpose
+for the derived receipt id, one new `KeyDerivation` purpose for the at-rest seal, two new vectors and
+its own framing case — with the inventory, manifest and chunk goldens all re-asserted untouched.
 
 **Both halves travel in both directions** (P4 item 2c). The ask sends the digest and the heads
 together, and the answer to a *mismatched* digest sends the bounded re-gossip and the heads together,
@@ -919,6 +953,47 @@ the 16 MiB ceiling, so `NetworkMeshSession` gives it a stream of its own by size
 seals the item (that is item 6 / P6 — item 2 chunks an opaque blob), forwards anything, persists
 anything, or tunes the transport.
 
+**Custody: a custodian may say "I hold this" only after the ciphertext survived a write that
+returned** (P5 item 3, plan §11 and §3.6). ``MeshCustodyReceipt`` is signed by the **custodian**
+about the **origin's** item — the one routed record whose subject did not author it — and it carries
+mesh, item, origin, the item's `contentHash`, the custodian, the durable custody instant and the
+item's expiry, and nothing else: no destination set, no chunk index, no hop count, no key epoch, no
+schema integer (the `.v1` in the domain *is* the version). Its dedup id
+(``MeshCustodyReceipt/receiptID``) is derived from `(itemID, origin, custodian)`, excluding both the
+hedged signature and `custodiedAt`, so a re-mint of the same claim is the same id.
+
+The order is a **type rule, not a comment**: the mint takes a ``MeshCustodyDurabilityWitness``, whose
+initializer is `fileprivate` to `Mesh/MeshRoutedCustodyCommit.swift` — the file holding
+``MeshRoutedStore/committingCustody(item:custodian:now:)`` and nothing else. No witness ⇒ no receipt.
+The mirror-image gate is `MeshRoutedStore.LoadToken`'s own `fileprivate` initializer in
+`Mesh/MeshRoutedStore.swift`, so the commit verb cannot mint its own write token either: two
+`fileprivate` gates in two files, neither able to open the other's door. A grep-wall
+(`MeshRoutedStoreIsolationTests`) is what notices if the type is ever moved, because moving it would
+widen the gate with no compile error.
+
+``MeshRoutedStore``'s verbs — `admittingManifest`, `stagingChunk`, `committingCustody`,
+`recordingCustodyTransfer`, `forwardableManifest`/`forwardableChunk`, `sweepingExpired`,
+`sweepingOrphanChunkFiles` and `dropping` — each return one ``MeshRoutedOutcome``: `completed`,
+`refused` (by name, ``MeshRoutedStoreRefusal``) or `unavailable` (``MeshRoutedUnavailability``, which
+is retryable for `deferred`, `notWritten` **and** `refused`, exactly as
+`MeshSessionRestoreOutcome.isRetryable` answers its own refusal, and not for `corrupt`). Write
+ordering is one-way: the sealed chunk file, then the index — and the writer that makes an orphan
+removes it. Both chunk-set decisions are shared with ``MeshChunkAssembly`` through
+``MeshChunkAdmissionRule``, so the durable form cannot answer differently from the in-memory one
+(C13); ``MeshDeliveryTarget`` is persisted through the explicit ``MeshRoutedDeliveryRecord`` encoder
+and restored against the destination set from the **origin's signed manifest**, never from a stored
+copy and never re-derived from the current roster. A stored map that will **not** restore is a fault
+in this device's own bytes, not evidence that nothing is owed: it is audited, and named at the value
+level by ``MeshRoutedItemRef/deliveryRestoreRefused`` and
+``MeshRoutedIndex/itemsWithUnrestorableDelivery(at:)``, because every outstanding/handoff enumerator
+must skip it and a held item with outstanding destinations may not simply vanish from all of them.
+For the same reason a failed `custodiedAt` stamp answers the store's own classification — a refused
+seal is not an absent file (§19.5) — rather than flattening to a bare `notWritten`. The store has
+**no decrypt door**: it never
+unwraps a per-recipient content key and never touches the key-agreement key, so custody is
+ciphertext-only by construction (item 10). Nothing here gossips, asks, drains, relays or writes the
+`delivered` rung — that is items 4, 6, 8 and 11.
+
 **The ceiling is guarded at both bounds.** ``MeshSessionCeiling`` holds the signed absolute
 `hardDeadline` (± 120 s skew) *and* a local monotonic budget measured with `ContinuousClock`, clamped
 to six hours at construction. A wall clock set backwards cannot lengthen a session (the monotonic
@@ -959,6 +1034,8 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshDeliveryStateToken``
 - ``MeshDeliveryRefusal``
 - ``MeshDeliveryOutcome``
+- ``MeshDeliveryRestoreRefusal``
+- ``MeshDeliveryRestoreOutcome``
 - ``MeshRoutedManifestFormat``
 - ``MeshRecipientKeyWrap``
 - ``MeshRoutedManifest``
@@ -982,6 +1059,46 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshChunkBinding``
 - ``MeshChunkCompletion``
 - ``MeshChunkAssembly``
+- ``MeshChunkDescriptor``
+- ``MeshChunkSetShape``
+- ``MeshChunkAdmissionRule``
+- ``MeshCustodyReceiptFormat``
+- ``MeshCustodyReceipt``
+- ``MeshCustodyReceiptPayload``
+- ``MeshCustodyReceiptMintError``
+- ``MeshCustodyReceiptRejection``
+- ``MeshCustodyReceiptVerifier``
+- ``MeshCustodyDurabilityWitness``
+- ``MeshRoutedContentHasher``
+- ``MeshRoutedStorageScope``
+- ``MeshRoutedSealKeyOutcome``
+- ``MeshRoutedSealKey``
+- ``MeshRoutedIndexSchema``
+- ``MeshRoutedStoreFormat``
+- ``MeshRoutedIndexDecodingError``
+- ``MeshRoutedItemKey``
+- ``MeshRoutedChunkDescriptor``
+- ``MeshRoutedDeliveryProgress``
+- ``MeshRoutedDeliveryRecord``
+- ``MeshRoutedItemRecord``
+- ``MeshRoutedItemRef``
+- ``MeshRoutedIndex``
+- ``MeshRoutedSealRefusal``
+- ``MeshRoutedDeferral``
+- ``MeshRoutedCorruption``
+- ``MeshRoutedLoad``
+- ``MeshRoutedSaveError``
+- ``MeshRoutedChunkFileRead``
+- ``MeshRoutedStore``
+- ``MeshRoutedRetryBounds``
+- ``MeshRoutedUnavailability``
+- ``MeshRoutedStoreRefusal``
+- ``MeshRoutedOutcome``
+- ``MeshRoutedManifestAdmission``
+- ``MeshRoutedCustodyOutcome``
+- ``MeshRoutedSweepReport``
+- ``MeshRoutedIndexLoad``
+- ``MeshRoutedStagedFile``
 - ``MeshSessionCeiling``
 - ``MeshSessionCeilingBound``
 - ``MeshSessionCeilingVerdict``

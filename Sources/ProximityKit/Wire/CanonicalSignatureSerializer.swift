@@ -198,6 +198,13 @@ private nonisolated let canonicalMeshRoutedManifestDomain = FernletCryptoPurpose
 // A signature that satisfied both could let one stand in for the other, which is how a destination
 // set or a key wrap would be swapped under an authentic-looking transfer.
 private nonisolated let canonicalMeshRoutedChunkDomain = FernletCryptoPurpose.Signature.meshRoutedChunkV1.data
+// P5 item 3 (plan §11, §3.6): a custodian's statement that it durably holds one item's complete
+// ciphertext. Its own domain, distinct from the manifest's and the chunk's, because it is the one
+// routed record signed by somebody other than the item's origin — a signature that satisfied both
+// this and the chunk domain would let "I am holding it" be replayed as "these bytes are part of it",
+// under the wrong key.
+private nonisolated let canonicalMeshCustodyReceiptDomain =
+    FernletCryptoPurpose.Signature.meshCustodyReceiptV1.data
 
 // MARK: - Identity envelope
 
@@ -598,6 +605,31 @@ nonisolated func canonicalBytes(for chunk: MeshChunk) -> Data {
     writer.appendLengthPrefixed(chunk.chunkHash)
     writer.appendDate(chunk.expiresAt)
     // payload: bound by chunkHash, deliberately excluded.
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshCustodyReceipt`` — a custodian's statement that it durably
+/// holds one routed item's complete ciphertext (plan §11, P5 item 3). **Field order IS the schema**:
+/// identity first (mesh, item, the item's ORIGIN), then the content hash, then the CUSTODIAN, then
+/// the two instants.
+///
+/// The origin and the custodian are two different fingerprints in two fixed positions, so a receipt
+/// cannot be re-read as being about the signer's own item, and one lifted onto another origin's item
+/// fails the signature. There is no destination set, no chunk index and no partial count: a receipt
+/// exists only for a COMPLETE item, so a count would be a second source of truth under one signature.
+/// The `signature` is excluded as ever. Signed by the custodian only; relays forward these exact
+/// fields and never re-derive them.
+nonisolated func canonicalBytes(for receipt: MeshCustodyReceipt) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshCustodyReceiptDomain)
+    writer.appendUUID(receipt.meshID)
+    writer.appendUUID(receipt.itemID)
+    writer.appendString(receipt.originFingerprint)
+    writer.appendLengthPrefixed(receipt.contentHash)
+    writer.appendString(receipt.custodianFingerprint)
+    writer.appendDate(receipt.custodiedAt)
+    writer.appendDate(receipt.expiresAt)
     // signature: deliberately excluded.
     return writer.bytes
 }

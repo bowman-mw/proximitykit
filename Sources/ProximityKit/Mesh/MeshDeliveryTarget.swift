@@ -26,10 +26,13 @@
 //     partition the **outstanding** destinations into reachable and unreachable. Neither can move a
 //     destination out of the set.
 //
-// **Nothing here is persisted and nothing here is wire.** `MeshSessionContext`'s schema stays 2, no
-// `UserDefaults` key is added, and no payload gains a field. P5 persists targets inside its routed
-// store, next to the manifests they belong to (plan §11); this phase owns only the vocabulary the
-// manifest's destination set is expressed in.
+// **Nothing here is `Codable` and nothing here is wire.** `MeshSessionContext`'s schema stays 2, no
+// `UserDefaults` key is added, and no payload gains a field. P5 item 3 persists targets inside the
+// routed store's own sealed sidecar, next to the manifests they belong to (plan §11), through an
+// EXPLICIT encoder — `MeshRoutedDeliveryRecord`, which reads this type's public surface only and
+// hands the destination set back from the ORIGIN'S SIGNED MANIFEST rather than from a stored copy
+// (`restoring(contentID:destinations:progress:)` below). That encoding owes its own
+// `Docs/PrivacyWipeCoverage.md` row and its delete-all wiring, which shipped with it.
 //
 // **There is no clock in this file and none behind it.** States advance by explicit calls carrying
 // the receipt as evidence, never by elapsed time — so a forged stamp has nothing to influence and
@@ -276,9 +279,13 @@ nonisolated enum MeshDeliveryOutcome: Equatable, Sendable {
 ///   `MeshRecipientReceipt` is ``MeshDeliveryState/delivered`` — and for hearts only after the
 ///   foreground decrypt and the ledger commit, never on durable custody (§11: custody ≠ delivery in
 ///   every UI surface).
-/// - **Persist it inside the routed store**, beside the manifest. Nothing here is `Codable` and
-///   nothing here is on the wire, so `MeshSessionContext`'s schema stays **2**; giving the routed
-///   store its own encoding is P5's decision, made once, with its own wipe-coverage row.
+/// - **It is persisted inside the routed store**, beside the manifest (P5 item 3). Nothing here is
+///   `Codable` and nothing here is on the wire, so `MeshSessionContext`'s schema stays **2**: the
+///   encoding is `MeshRoutedDeliveryRecord`'s, explicit, reading this type's public surface only,
+///   and it stores the PROGRESS MAP alone — the destination set comes back from the origin's signed
+///   manifest through ``restoring(contentID:destinations:progress:)``, so it can never be silently
+///   re-derived from the current roster. That surface shipped with its own
+///   `Docs/PrivacyWipeCoverage.md` row and its delete-all wiring.
 /// - **Merge two members' views with ``merging(_:)``**, which takes the per-destination max. Two
 ///   members that learned different receipts converge without either losing one.
 ///
@@ -478,5 +485,135 @@ nonisolated struct MeshDeliveryTarget: Equatable, Sendable {
         return MeshDeliveryTarget(
             contentID: contentID, destinationOrder: destinationOrder, progress: updated
         )
+    }
+}
+
+// MARK: - MeshDeliveryRestoreRefusal
+
+/// Why a stored delivery map did not restore into a ``MeshDeliveryTarget`` (network migration P5
+/// item 3, plan §11).
+///
+/// Frozen English tokens, logged verbatim, never localized. Every one of them is a fault in bytes
+/// this device wrote and then read back — a durable record that does not restore is not a state to
+/// reconcile, so the restore refuses by name rather than repairing, dropping or inventing a rung.
+nonisolated enum MeshDeliveryRestoreRefusal: String, Equatable, Sendable, CaseIterable {
+
+    /// The signed manifest named no destinations, so there is no target to restore.
+    case emptyDestinations
+
+    /// The destination set names the same fingerprint twice.
+    case duplicateDestination
+
+    /// The destination set is above the roster cap.
+    case tooManyDestinations
+
+    /// The stored map carries a fingerprint the signed destination set does not name — a state for
+    /// somebody the item was never for.
+    case progressKeyIsNotADestination
+
+    /// The stored map carries ``MeshDeliveryStateToken/departed``, which is **derived at read**
+    /// against the current roster and is never a stored state. A fourth stored rung would let a
+    /// max-merge overwrite a `delivered`.
+    case departedIsDerived
+
+    /// The stored map carries a spelling that is not a ``MeshDeliveryStateToken``.
+    case unknownStateToken
+
+    /// A `custodied` entry carries an empty custodian fingerprint.
+    case emptyCustodian
+
+    /// A `custodied` entry carries no custodian at all — the rung's whole evidence is missing.
+    case custodianMissing
+
+    /// A `pending` or `delivered` entry carries a custodian, which only `custodied` may.
+    case custodianOnANonCustodiedState
+}
+
+// MARK: - MeshDeliveryRestoreOutcome
+
+/// The result of restoring a persisted delivery map: the target, or the named refusal.
+nonisolated enum MeshDeliveryRestoreOutcome: Equatable, Sendable {
+    /// The map restored; the associated value is the target.
+    case restored(MeshDeliveryTarget)
+    /// The map was refused, and this is why.
+    case refused(MeshDeliveryRestoreRefusal)
+
+    /// The restored target, or nil when the restore was refused.
+    var target: MeshDeliveryTarget? {
+        if case .restored(let target) = self { return target }
+        return nil
+    }
+
+    /// The refusal, or nil when the restore succeeded.
+    var refusal: MeshDeliveryRestoreRefusal? {
+        if case .refused(let refusal) = self { return refusal }
+        return nil
+    }
+}
+
+// MARK: - Restoring from the routed store
+
+nonisolated extension MeshDeliveryTarget {
+
+    /// Rebuilds a target from a destination set that came out of the **origin's signed manifest**
+    /// and a stored progress map (P5 item 3).
+    ///
+    /// Not a door for a reachable set, a `MeshBranchView` or a current roster: the destination set
+    /// is the roster AT CREATION, and re-deriving it now would silently shrink it — which is the one
+    /// bug this whole type exists to prevent. The parameter is a plain `[String]` because it is a
+    /// verbatim copy of `MeshRoutedManifest.destinations`, bytes the origin signed; it is never
+    /// assembled by the caller.
+    ///
+    /// At a **custodian**, that set may contain the custodian's own fingerprint. It is deliberately
+    /// NOT filtered out — filtering would be a silent shrink of a signed set, and "this item was
+    /// addressed to me too" is a true statement item 6 owns the handling of.
+    ///
+    /// - Parameters:
+    ///   - contentID: The item id, which must be the manifest's.
+    ///   - destinations: `MeshRoutedManifest.destinations`, verbatim.
+    ///   - progress: The stored per-destination states. `pending` entries normalize to absences, so
+    ///     a restored target is `==` the one that was encoded.
+    /// - Returns: the restored target, or the named refusal.
+    static func restoring(
+        contentID: UUID,
+        destinations: [String],
+        progress: [String: MeshDeliveryState]
+    ) -> MeshDeliveryRestoreOutcome {
+        if let refusal = destinationRefusal(destinations) { return .refused(refusal) }
+        if let refusal = progressRefusal(progress, in: destinations) { return .refused(refusal) }
+        var normalized: [String: MeshDeliveryState] = [:]
+        // R2: bounded by the destination cap.
+        for (destination, state) in progress where state != .pending {
+            normalized[destination] = state
+        }
+        return .restored(
+            MeshDeliveryTarget(
+                contentID: contentID, destinationOrder: destinations, progress: normalized
+            )
+        )
+    }
+
+    /// The destination set's own faults: empty, duplicated, or above the roster cap.
+    private static func destinationRefusal(_ destinations: [String]) -> MeshDeliveryRestoreRefusal? {
+        guard !destinations.isEmpty else { return .emptyDestinations }
+        guard destinations.count <= MeshRoutedManifestFormat.maxDestinations else {
+            return .tooManyDestinations
+        }
+        guard Set(destinations).count == destinations.count else { return .duplicateDestination }
+        return nil
+    }
+
+    /// The stored map's faults against that set. The per-entry spelling and custodian checks happen
+    /// before this, in `MeshRoutedDeliveryRecord`; what is left is membership of the signed set.
+    private static func progressRefusal(
+        _ progress: [String: MeshDeliveryState],
+        in destinations: [String]
+    ) -> MeshDeliveryRestoreRefusal? {
+        let named = Set(destinations)
+        // R2: bounded by the stored map, itself bounded by the destination cap on write.
+        guard progress.keys.allSatisfy({ named.contains($0) }) else {
+            return .progressKeyIsNotADestination
+        }
+        return nil
     }
 }

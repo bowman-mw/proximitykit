@@ -60,6 +60,18 @@ public protocol ProximityHost: AnyObject {
     /// (`MeshSessionStoreIsolationTests`); the default below keeps a test double's scope private to
     /// its own sidecar root rather than lodging it on the production keychain row.
     var meshSessionStorage: MeshSessionStorageScope { get }
+
+    /// This host's sealed ROUTED-CONTENT scope (network migration P5 item 3): the directory holding
+    /// `MeshRoutedIndex.sealed`, its `.corrupt` quarantine sibling and the `MeshRoutedChunks`
+    /// payload files, plus the keychain service holding the key that seals them.
+    ///
+    /// A second scope rather than a lodger on ``meshSessionStorage``: the routed store has its own
+    /// keychain service, because one fate per service is the only arrangement a service-wide delete
+    /// can express honestly, and a session wipe must not silently orphan routed ciphertext this
+    /// device is holding for other people. Routed through the host for the same isolation reason
+    /// ``meshSessionStorage`` is; the default below keeps a test double's scope private to its own
+    /// sidecar root.
+    var meshRoutedStorage: MeshRoutedStorageScope { get }
 }
 
 public extension ProximityHost {
@@ -79,6 +91,25 @@ public extension ProximityHost {
         return MeshSessionStorageScope(
             directory: directory,
             keychainService: MeshSessionStorageScope.productionKeychainService
+                + ".host." + directory.lastPathComponent
+        )
+    }
+
+    /// Default for hosts that do not carry their own routed scope (test doubles). Production
+    /// resolves to `Application Support/Fernlet` + `com.fernlet.mesh-routed`, unchanged; a host on
+    /// any other sidecar root gets a service named after that root, so it can never wipe — or be
+    /// wiped by — the production row or another double's.
+    var meshRoutedStorage: MeshRoutedStorageScope {
+        let directory = proximitySupportDirectory
+        guard directory != ProximitySupportLayout.defaultDirectory else {
+            return MeshRoutedStorageScope(
+                directory: directory,
+                keychainService: MeshRoutedStorageScope.productionKeychainService
+            )
+        }
+        return MeshRoutedStorageScope(
+            directory: directory,
+            keychainService: MeshRoutedStorageScope.productionKeychainService
                 + ".host." + directory.lastPathComponent
         )
     }

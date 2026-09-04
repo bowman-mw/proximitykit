@@ -12,11 +12,11 @@
 // malformed inbound transfer (log and drop, never disconnect) reaches the application as a named
 // refusal rather than a throw.
 //
-// Chunk bytes live in MEMORY here (item 3 re-backs the byte custody with its sealed sidecar — the
-// four-state load plus the fifth "seal refused" distinction — and REUSES this verdict logic
-// unchanged: the durable form must produce the same `MeshChunkAdmission` and `MeshChunkCompletion`
-// values for the same inputs). Inventing a byte-storage protocol here would be item 3's design
-// made without item 3's constraints.
+// Chunk bytes live in MEMORY here. Item 3 re-backs the byte custody with its sealed sidecar — the
+// four-state load plus the fifth "seal refused" distinction — and reuses this file's verdicts
+// LITERALLY: both per-chunk admission and manifest binding moved into `MeshChunkAdmissionRule`
+// (C13), which `admit(_:)` and `bind(to:)` now call, so the durable form cannot answer differently.
+// This file keeps the bytes, the completion over them, and nothing else that could drift.
 //
 // What is deliberately NOT here: any capacity verdict. The assembly's own bound IS
 // 1024 × 256 KiB = `MeshRoutedManifestFormat.maxContentByteCount`, structurally, so there is no
@@ -151,8 +151,10 @@ nonisolated enum MeshChunkCompletion: Equatable, Sendable {
 ///    "self-consistent with whatever manifest the caller handed in".
 ///
 /// **Item 3's seam:** chunk bytes live in memory here. Item 3 re-backs the byte custody with its
-/// sealed sidecar and **reuses this verdict logic unchanged** — the durable form must produce the
-/// same ``MeshChunkAdmission`` and ``MeshChunkCompletion`` values for the same inputs.
+/// sealed sidecar and reaches the SAME decisions through ``MeshChunkAdmissionRule`` — ``admit(_:)``
+/// and ``bind(to:)`` are thin wrappers over ``MeshChunkAdmissionRule/verdict(for:payloadHash:in:receivedCount:)``
+/// and ``MeshChunkAdmissionRule/bindingVerdict(for:in:)``, so the durable form is the same function
+/// over a shape built from index records rather than from held chunks (C13).
 nonisolated struct MeshChunkAssembly: Equatable, Sendable {
     /// The item every admitted chunk must name.
     let itemID: UUID
@@ -225,16 +227,8 @@ nonisolated struct MeshChunkAssembly: Equatable, Sendable {
     /// - Important: `manifest` must be one ``MeshRoutedManifestVerifier/verify(_:)`` has already
     ///   accepted — see the type's precondition 2.
     mutating func bind(to manifest: MeshRoutedManifest) -> MeshChunkBinding {
-        guard manifest.itemID == itemID,
-              manifest.originFingerprint == originFingerprint,
-              manifest.contentHash == contentHash else {
-            return .refused(.foreignItem)
-        }
-        guard let derived = MeshChunkFormat.chunkCount(forSize: manifest.size),
-              derived == Int(chunkCount) else {
-            return .refused(.countMismatch)
-        }
-        if let refusal = heldChunkRefusal(forSize: manifest.size) { return .refused(refusal) }
+        let binding = MeshChunkAdmissionRule.bindingVerdict(for: manifest, in: shape(forIndex: nil))
+        guard case .bound = binding else { return binding }
         boundSize = manifest.size
         return .bound
     }
@@ -250,23 +244,34 @@ nonisolated struct MeshChunkAssembly: Equatable, Sendable {
     /// - Important: `chunk` must be one ``MeshChunkVerifier/verify(_:)`` has already accepted —
     ///   see the type's precondition 1.
     mutating func admit(_ chunk: MeshChunk) -> MeshChunkAdmission {
-        guard chunk.itemID == itemID,
-              chunk.originFingerprint == originFingerprint,
-              chunk.contentHash == contentHash else {
-            return .refused(.foreignItem)
-        }
-        guard chunk.chunkCount == chunkCount else { return .refused(.countMismatch) }
-        guard chunk.chunkIndex < chunkCount else { return .refused(.indexOutOfRange) }
-        if let verdict = existingVerdict(for: chunk) { return verdict }
-        guard MeshRoutedContentDigest.chunkHash(of: chunk.payload) == chunk.chunkHash else {
-            return .refused(.chunkHashMismatch)
-        }
-        if let size = boundSize, UInt64(bytesHeld) + UInt64(chunk.payload.count) > size {
-            return .refused(.sizeOverflow)
-        }
-        if let refusal = lengthRefusal(for: chunk) { return .refused(refusal) }
+        let payloadHash = MeshRoutedContentDigest.chunkHash(of: chunk.payload)
+        let verdict = MeshChunkAdmissionRule.verdict(
+            for: chunk,
+            payloadHash: payloadHash,
+            in: shape(forIndex: chunk.chunkIndex),
+            receivedCount: chunks.count
+        )
+        guard case .admitted = verdict else { return verdict }
         chunks[chunk.chunkIndex] = chunk
-        return .admitted(received: chunks.count, expected: Int(chunkCount))
+        return verdict
+    }
+
+    /// This assembly's state as ``MeshChunkAdmissionRule`` reads it — everything but the payloads.
+    ///
+    /// `index` names the slot a per-chunk verdict is about; pass nil for the binding decision,
+    /// which is about the set rather than one slot. One bounded pass over the held map, which is
+    /// the cost `bytesHeld` already paid at this door.
+    private func shape(forIndex index: UInt32?) -> MeshChunkSetShape {
+        MeshChunkSetShape(
+            itemID: itemID,
+            originFingerprint: originFingerprint,
+            contentHash: contentHash,
+            chunkCount: chunkCount,
+            boundSize: boundSize,
+            bytesHeld: bytesHeld,
+            held: index.flatMap { chunks[$0] }.map(MeshChunkDescriptor.init),
+            heldPayloadLengths: chunks.mapValues(\.payload.count)
+        )
     }
 
     /// Whether the item is whole, and if so its ciphertext.
@@ -295,68 +300,6 @@ nonisolated struct MeshChunkAssembly: Equatable, Sendable {
             return .refused(.contentHashMismatch)
         }
         return .complete(blob: blob)
-    }
-
-    /// The verdict for an index that is already occupied: a retransmission of the same chunk is a
-    /// duplicate no-op, anything else is a conflict. Nil when the index is free.
-    ///
-    /// Decided on the **content-bearing identity** — the signed transcript plus the payload —
-    /// never on `==`, which would fold in the 64-byte `signature`. CryptoKit's Ed25519 signing is
-    /// *hedged*, so two mints of one logical chunk differ in exactly that field, and honest
-    /// re-mints are the normal case: ``MeshChunker/chunk(of:at:for:identity:)`` exists so item 6
-    /// can stream without retaining what it minted, one item sent to two destinations is two
-    /// mints, and item 8's custody transfer at departure can hand a holder a copy of what it
-    /// already has. Comparing whole values would answer ``MeshChunkRefusal/conflictingChunk`` — an
-    /// integrity claim — for honest bytes on exactly the path plan §11 calls load-bearing. Both
-    /// copies passed ``MeshChunkVerifier`` (the type's precondition 1), so both signatures are
-    /// authentic and the held one is kept.
-    private func existingVerdict(for chunk: MeshChunk) -> MeshChunkAdmission? {
-        guard let held = chunks[chunk.chunkIndex] else { return nil }
-        guard canonicalBytes(for: held) == canonicalBytes(for: chunk),
-              held.payload == chunk.payload else {
-            return .refused(.conflictingChunk)
-        }
-        return .duplicate(received: chunks.count)
-    }
-
-    /// The length rule, bound and unbound. Bound: exactly what
-    /// ``MeshChunk/expectedPayloadByteCount(index:count:size:)`` fixes. Unbound: interior chunks
-    /// are exactly 256 KiB — derivable from `chunkCount` alone — and the last is 1 … 256 KiB,
-    /// checked **here** rather than left to ``MeshChunk/isWellFormed``: that is the verifier's
-    /// precondition, and the assembly's own bounded-growth statement has to be true at this door
-    /// whoever called it.
-    private func lengthRefusal(for chunk: MeshChunk) -> MeshChunkRefusal? {
-        if let size = boundSize {
-            guard let expected = MeshChunk.expectedPayloadByteCount(
-                index: chunk.chunkIndex, count: chunkCount, size: size
-            ), chunk.payload.count == expected else {
-                return .payloadLengthMismatch
-            }
-            return nil
-        }
-        guard chunk.payload.count >= 1,
-              chunk.payload.count <= MeshChunkFormat.maxChunkPayloadBytes else {
-            return .payloadLengthMismatch
-        }
-        guard chunk.chunkIndex == chunkCount - 1
-                || chunk.payload.count == MeshChunkFormat.maxChunkPayloadBytes else {
-            return .payloadLengthMismatch
-        }
-        return nil
-    }
-
-    /// Whether any already-held chunk has the wrong length for `size`. One bounded loop over the
-    /// chunk count; nothing is mutated.
-    private func heldChunkRefusal(forSize size: UInt64) -> MeshChunkRefusal? {
-        for index in 0..<Int(chunkCount) {
-            guard let held = chunks[UInt32(index)] else { continue }
-            guard let expected = MeshChunk.expectedPayloadByteCount(
-                index: held.chunkIndex, count: chunkCount, size: size
-            ), held.payload.count == expected else {
-                return .payloadLengthMismatch
-            }
-        }
-        return nil
     }
 
     /// The concatenated payloads in index order, or nil at the first gap. One bounded loop; never

@@ -31,7 +31,7 @@ import FernletFoundation
 nonisolated struct MeshSessionSealRefusal: Error, Equatable, Sendable {
 
     /// Which half of the store refused.
-    nonisolated enum Operation: String, Equatable, Sendable {
+    nonisolated enum Operation: String, CaseIterable, Equatable, Sendable {
         /// A write refused; nothing reached the disk.
         case seal
         /// A read refused; the bytes exist and cannot be opened under this custody.
@@ -39,7 +39,7 @@ nonisolated struct MeshSessionSealRefusal: Error, Equatable, Sendable {
     }
 
     /// Why it refused. Every case is terminal *for this attempt* and none of them means "empty".
-    nonisolated enum Cause: String, Equatable, Sendable {
+    nonisolated enum Cause: String, CaseIterable, Equatable, Sendable {
         /// `DeviceBindingID` produced no durable install binding, so v3 cannot be minted or its
         /// AAD reconstructed. The canonical D4 refusal — the pre-first-unlock window.
         case installBindingUnavailable
@@ -81,7 +81,7 @@ nonisolated struct MeshSessionSealRefusal: Error, Equatable, Sendable {
 nonisolated struct MeshSessionDeferral: Equatable, Sendable {
 
     /// Why the attempt was deferred.
-    nonisolated enum Reason: String, Equatable, Sendable {
+    nonisolated enum Reason: String, CaseIterable, Equatable, Sendable {
         /// The keychain could not answer for the seal key (locked, interaction required, transient
         /// failure). The row's existence is UNKNOWN, which is exactly why this is not a refusal.
         case sealKeyTransientlyUnreadable
