@@ -155,6 +155,39 @@ canonical signing bytes, sealed-payload framing (``SealedPayloadFraming``), the 
 handling of unknown payload types, and the additive-optional-key rule for intro payloads are all
 compatibility contracts with in-field peers.
 
+### The host pin: the managers read a host they do not own (HP0/HP1/HP2)
+
+All four proximity managers — ``MeshNetworkManager``, ``PresenceManager``,
+``ProximityRecipeShareManager``, ``ProximityActivityManager`` — hold their host as
+`unowned let store: any ProximityHost`. That is right: the host owns the manager (each is a `lazy
+var` on `FernletStore`), so the back-reference is the cycle-breaker. It also means a manager can be
+alive while its host is gone, and reading `store` then is not a nil — it is
+`swift_abortRetainUnowned`, which kills the whole process. Three invariants keep that unrepresentable,
+and a new manager in this subsystem inherits all three:
+
+- **HP0 (ownership).** Whatever holds a manager holds that manager's host at least as long.
+  Production satisfies this structurally. Tests satisfy it by rig discipline — never
+  `MeshNetworkManager(store: makeTestStore(), …)`, whose host dies at the end of the expression.
+- **HP1 (the pin).** Every detached task a manager spawns captures the host for the duration of the
+  operation that will read it. That is what `spawnHostPinned(_:)` does: it reads `store`
+  synchronously, on the main actor, where the host is provably alive, and releases it when the
+  operation returns. Where the read happens after a suspension inside an `async` callee that a
+  *stored* task re-enters, the callee takes the same pin scoped to its own call
+  (`let host = store` + `defer { withExtendedLifetime(host) {} }`, marked `// host-pin: scoped`).
+  That pin goes **below** any early-return guard that does not itself read the host: `let host =
+  store` *is* an `unowned` read, so a resume that would have returned without touching the host must
+  not be made to touch it.
+- **HP2 (the bound).** No pin may outlive the operation that reads the host — and in particular no
+  pin may be taken for the lifetime of a `Task` whose handle the manager STORES. Such a task is
+  reachable from the host (host → manager → handle), so a pin in its closure context closes the loop:
+  neither object ever deallocates, and the `isolated deinit` that ends the perpetual timers becomes
+  unreachable. Those spawns stay plain `Task { … }` and carry a `// host-pin: timer — <reason>`
+  marker instead.
+
+`MemoryLifecycleBoundaryTests` rule ML4 fails any unmarked `Task` construction in a file holding an
+`unowned` host; rule ML5 fails a test that builds a manager over an inline host expression.
+``ProximityManagerDeallocationTests`` measures HP2 directly, with the beacon loop armed.
+
 ### Localization: nothing on the wire is display copy
 
 The module owns a `Localizable.xcstrings` (added by the 2026-08-22 accessibility review's §4.0) and one copy vault, `ProximityUICopy`, for the three SwiftUI surfaces it ships — the friend-photo review sheet, the keep-friends prompt, and the photo-save failure alert. Those were bare literals, and a `LocalizedStringKey` literal inside an SPM module resolves against `Bundle.main`, which never consults this module's catalog: untranslatable English with a clean build. Six of them were hiding inside ternaries (`Button(isKept ? "Keeping" : "Keep")`) or in `LocalizedStringKey`-typed properties, where no call-site scan could see them; `LocalizationBoundaryTests.packageDisplayLiteralsPassModuleBundle()` now catches both shapes. **The vault is display copy only.** Nothing below may go in it.

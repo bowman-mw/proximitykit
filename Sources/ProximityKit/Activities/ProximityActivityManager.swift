@@ -286,7 +286,7 @@ public final class ProximityActivityManager {
         save()
         let grant = ActivityJoinGrantPayload(token: token, snapshot: snapshot)
         let recipient = pending.verifiedFingerprint
-        Task { [weak self] in await self?.send?(.activityJoinGrant, grant, recipient, true) }
+        spawnHostPinned { [weak self] in await self?.send?(.activityJoinGrant, grant, recipient, true) }
         gossipSnapshot(snapshot)
     }
 
@@ -318,7 +318,7 @@ public final class ProximityActivityManager {
         }
         let grant = ActivityJoinGrantPayload(token: token, snapshot: hosted.currentSnapshot)
         let recipient = member.fingerprint
-        Task { [weak self] in await self?.send?(.activityJoinGrant, grant, recipient, true) }
+        spawnHostPinned { [weak self] in await self?.send?(.activityJoinGrant, grant, recipient, true) }
     }
 
     public func declineJoin(_ pending: PendingActivityJoin) {
@@ -349,7 +349,7 @@ public final class ProximityActivityManager {
             joinerKeyAgreementPublicKey: identity.localKeyAgreementPublicKey
         )
         let hostFingerprint = offered.offeringFingerprint
-        Task { [weak self] in await self?.send?(.activityJoinRequest, request, hostFingerprint, false) }
+        spawnHostPinned { [weak self] in await self?.send?(.activityJoinRequest, request, hostFingerprint, false) }
     }
 
     public func dismissOffer(activityID: UUID) {
@@ -519,7 +519,7 @@ public final class ProximityActivityManager {
                snapshot.version > entry.versionHeld,
                snapshot.participants.contains(where: { $0.fingerprint == fromFingerprint }) {
                 let target = fromFingerprint
-                Task { [weak self] in await self?.send?(.activityRosterSnapshot, ActivityRosterSnapshotPayload(snapshot: snapshot), target, true) }
+                spawnHostPinned { [weak self] in await self?.send?(.activityRosterSnapshot, ActivityRosterSnapshotPayload(snapshot: snapshot), target, true) }
                 replied = true
             }
         }
@@ -538,6 +538,33 @@ public final class ProximityActivityManager {
 
     // MARK: - Outbound helpers
 
+    /// Spawns a detached task that PINS this manager's host for the task's own lifetime.
+    ///
+    /// ``store`` is `unowned` because the host owns this manager (`FernletStore.swift`'s `lazy var`
+    /// managers), and the unowned back-reference is that ownership's cycle-breaker. A detached task,
+    /// however, holds `self` STRONGLY for the duration of every `self?.method()` it awaits, so it can
+    /// outlive the host and then read a destroyed object — `swift_abortRetainUnowned` aborts the whole
+    /// process, which is what P5 item 1a's crash reports are. Capturing the host here, read
+    /// synchronously on the main actor at a point where it is provably alive, makes the read the task
+    /// will later perform valid by construction (invariant HP1).
+    ///
+    /// The pin is safe ONLY because this task's handle is not stored on the manager: nothing the host
+    /// owns can reach this closure context, so no `store → manager → task → store` cycle forms. NEVER
+    /// build the same pin into a task whose handle the manager keeps (invariant HP2); this file stores no `Task`
+    /// handle at all, so every spawn in it goes through this helper.
+    ///
+    /// The closure is deliberately neither `@Sendable` nor `sending`, so it inherits this manager's
+    /// isolation exactly as the `Task { … }` literal it replaces did — same executor, same enqueue,
+    /// same ordering. It carries no `@_implicitSelfCapture` either, so a strong `self` capture has to
+    /// be spelled `self.` at the call site.
+    private func spawnHostPinned(_ operation: @escaping () async -> Void) {
+        let host = store
+        Task {   // host-pin: helper
+            await operation()
+            withExtendedLifetime(host) {}
+        }
+    }
+
     /// Offer up to `maxOffersPerCommit` non-expired hosted activities to one committed peer.
     private func sendOffers(to fingerprint: String) {
         let offers = hostedActivities
@@ -545,7 +572,7 @@ public final class ProximityActivityManager {
             .prefix(ActivityLimits.maxOffersPerCommit)
             .map { ActivityOfferPayload(descriptor: $0.descriptor, rosterVersion: $0.version) }
         for offer in offers {
-            Task { [weak self] in await self?.send?(.activityOffer, offer, fingerprint, true) }
+            spawnHostPinned { [weak self] in await self?.send?(.activityOffer, offer, fingerprint, true) }
         }
     }
 
@@ -565,14 +592,14 @@ public final class ProximityActivityManager {
         }
         guard !entries.isEmpty else { return }
         let payload = ActivitySyncPayload(held: entries)
-        Task { [weak self] in await self?.send?(.activitySync, payload, fingerprint, true) }
+        spawnHostPinned { [weak self] in await self?.send?(.activitySync, payload, fingerprint, true) }
     }
 
     /// Gossip a fresh host-signed snapshot to every currently-committed member of that activity.
     private func gossipSnapshot(_ snapshot: ActivityRosterSnapshot) {
         let members = Set(snapshot.participants.map(\.fingerprint))
         for fingerprint in committedActivityPeerFingerprints?() ?? [] where members.contains(fingerprint) {
-            Task { [weak self] in await self?.send?(.activityRosterSnapshot, ActivityRosterSnapshotPayload(snapshot: snapshot), fingerprint, true) }
+            spawnHostPinned { [weak self] in await self?.send?(.activityRosterSnapshot, ActivityRosterSnapshotPayload(snapshot: snapshot), fingerprint, true) }
         }
     }
 

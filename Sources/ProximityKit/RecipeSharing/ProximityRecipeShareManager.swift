@@ -256,7 +256,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
         if let connection = connection(with: recipient),
            connection.verifiedKeyAgreementPublicKey != nil {
-            Task { [weak self] in await self?.sendPendingPayload(via: connection) }
+            spawnHostPinned { [weak self] in await self?.sendPendingPayload(via: connection) }
             return
         }
 
@@ -409,6 +409,33 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// The advertised local display name (shared coercion; see `PeerDisplayNames.swift`).
     private var displayName: String { store.resolvedProximityDisplayName }
 
+    /// Spawns a detached task that PINS this manager's host for the task's own lifetime.
+    ///
+    /// ``store`` is `unowned` because the host owns this manager (`FernletStore.swift`'s `lazy var`
+    /// managers), and the unowned back-reference is that ownership's cycle-breaker. A detached task,
+    /// however, holds `self` STRONGLY for the duration of every `self?.method()` it awaits, so it can
+    /// outlive the host and then read a destroyed object — `swift_abortRetainUnowned` aborts the whole
+    /// process, which is what P5 item 1a's crash reports are. Capturing the host here, read
+    /// synchronously on the main actor at a point where it is provably alive, makes the read the task
+    /// will later perform valid by construction (invariant HP1).
+    ///
+    /// The pin is safe ONLY because this task's handle is not stored on the manager: nothing the host
+    /// owns can reach this closure context, so no `store → manager → task → store` cycle forms. NEVER
+    /// build the same pin into a task whose handle the manager keeps (invariant HP2) — see the `// host-pin: timer`
+    /// markers on the sites in this file that must not use this helper.
+    ///
+    /// The closure is deliberately neither `@Sendable` nor `sending`, so it inherits this manager's
+    /// isolation exactly as the `Task { … }` literal it replaces did — same executor, same enqueue,
+    /// same ordering. It carries no `@_implicitSelfCapture` either, so a strong `self` capture has to
+    /// be spelled `self.` at the call site.
+    private func spawnHostPinned(_ operation: @escaping () async -> Void) {
+        let host = store
+        Task {   // host-pin: helper
+            await operation()
+            withExtendedLifetime(host) {}
+        }
+    }
+
     private func handlePeerDiscovered(_ peer: PeerHandle) {
         // Exclude self using session ID comparison; blocklist is enforced post-introduction.
         if let remoteSID = peer.discoveryInfo?["sid"], remoteSID == sessionID { return }
@@ -548,7 +575,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         )
         registerConnection(connection)
 
-        Task { [weak self] in
+        spawnHostPinned { [weak self] in
             await coordinator.begin(role: .browser, mode: .friend)
             channel.notifyConnected()
             self?.checkCoordinatorStates()
@@ -599,6 +626,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             case .awaitingManualCommit, .awaitingProximityCommit:
                 let coordinator = connections[index].coordinator
                 recordDiagnostic("Recipe share recipient verified; confirming selected recipient.")
+                // host-pin: exempt — coordinator/channel only, no `self`, no host read
                 Task { await coordinator.commitManualProximity() }
             default:
                 break
@@ -614,7 +642,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
                 }
                 if let outgoing = pendingOutgoing, isSameDevice(connections[index], as: outgoing.recipient) {
                     let connection = connections[index]
-                    Task { [weak self] in await self?.sendPendingPayload(via: connection) }
+                    spawnHostPinned { [weak self] in await self?.sendPendingPayload(via: connection) }
                 }
             }
         }
@@ -662,6 +690,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// audit; the Task releases it afterwards.
     private func cancelCoordinators(of evicted: [RecipeShareConnection]) {
         for connection in evicted {
+            // host-pin: exempt — coordinator/channel only, no `self`, no host read
             Task { [connection] in await connection.coordinator.cancel() }
         }
     }
@@ -716,6 +745,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     private func armConnectTimeout(for recipient: ProximityRecipeShareRecipient) {
         connectTimeoutTask?.cancel()
         let timeout = connectTimeoutSeconds
+        // host-pin: timer — stored handle, synchronous main-actor body (connect-timeout failure) (HP2)
         connectTimeoutTask = Task { @MainActor [weak self] in
             // Cancelled by `registerConnection`/`stop` ⇒ the connect stage succeeded or the
             // session went away; not firing IS the recovery.
@@ -743,6 +773,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     private func startParkedSweepIfNeeded() {
         guard parkedSweepTask == nil else { return }
+        // host-pin: timer — stored handle, synchronous main-actor body (`sweepParkedConnections`) (HP2)
         parkedSweepTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 // Cancellation ends the sweep loop here rather than spinning one more iteration.
@@ -850,6 +881,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     private func scheduleStatusClear() {
         clearStatusTask?.cancel()
+        // host-pin: timer — stored handle, synchronous main-actor body (`sendState = .idle`) (HP2)
         clearStatusTask = Task { @MainActor [weak self] in
             // A superseding `scheduleStatusClear` cancels this one — NOT clearing the status is
             // the correct recovery, because the newer timer owns it.

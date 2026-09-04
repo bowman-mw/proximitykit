@@ -427,6 +427,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// its event rate.
     private func scheduleLostSweep() {
         guard lostSweepTask == nil else { return }
+        // host-pin: timer — stored handle, synchronous main-actor body (`sweepExpiredPeers()`) (HP2)
         lostSweepTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .seconds(Self.lostGraceInterval + 1))
@@ -497,6 +498,7 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     private func startEpochRotation() {
         epochRotationTask?.cancel()
+        // host-pin: timer — stored handle, synchronous main-actor body (`rotateEpochIfNeeded()`) (HP2)
         epochRotationTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 // SCOPED strong bindings only — never hold `self` across the sleep (manager-Task
@@ -606,6 +608,33 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// The advertised local display name (shared coercion; see `PeerDisplayNames.swift`).
     private var displayName: String { store.resolvedProximityDisplayName }
 
+    /// Spawns a detached task that PINS this manager's host for the task's own lifetime.
+    ///
+    /// ``store`` is `unowned` because the host owns this manager (`FernletStore.swift`'s `lazy var`
+    /// managers), and the unowned back-reference is that ownership's cycle-breaker. A detached task,
+    /// however, holds `self` STRONGLY for the duration of every `self?.method()` it awaits, so it can
+    /// outlive the host and then read a destroyed object — `swift_abortRetainUnowned` aborts the whole
+    /// process, which is what P5 item 1a's crash reports are. Capturing the host here, read
+    /// synchronously on the main actor at a point where it is provably alive, makes the read the task
+    /// will later perform valid by construction (invariant HP1).
+    ///
+    /// The pin is safe ONLY because this task's handle is not stored on the manager: nothing the host
+    /// owns can reach this closure context, so no `store → manager → task → store` cycle forms. NEVER
+    /// build the same pin into a task whose handle the manager keeps (invariant HP2) — see the `// host-pin: timer`
+    /// markers on the sites in this file that must not use this helper.
+    ///
+    /// The closure is deliberately neither `@Sendable` nor `sending`, so it inherits this manager's
+    /// isolation exactly as the `Task { … }` literal it replaces did — same executor, same enqueue,
+    /// same ordering. It carries no `@_implicitSelfCapture` either, so a strong `self` capture has to
+    /// be spelled `self.` at the call site.
+    private func spawnHostPinned(_ operation: @escaping () async -> Void) {
+        let host = store
+        Task {   // host-pin: helper
+            await operation()
+            withExtendedLifetime(host) {}
+        }
+    }
+
     /// Deliver a heart to a nearby friend over an on-demand pairwise connection. Multi-second
     /// pipeline; drives `heartSendState`. The FriendListView button is enabled only while the
     /// friend is reachable and the 5-minute cooldown is clear — the guards here are the belt.
@@ -638,7 +667,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         // Reuse an already-verified live connection to this friend if one exists.
         if let connection = verifiedHeartConnection(fingerprint: friend.fingerprint) {
             heartSendState = .verifying(recipientName: friend.displayName)
-            Task { [weak self] in await self?.deliverHeart(via: connection, to: friend) }
+            spawnHostPinned { [weak self] in await self?.deliverHeart(via: connection, to: friend) }
             return
         }
         guard let peer = discoveredPeer(matchingFriendFingerprint: friend.fingerprint) else {
@@ -845,7 +874,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         ))
         heartConnectionObservationRevision += 1
 
-        Task { [weak self] in
+        spawnHostPinned { [weak self] in
             await coordinator.begin(role: .browser, mode: .friend)
             channel.notifyConnected()
             self?.checkHeartCoordinatorStates()
@@ -877,6 +906,7 @@ public final class PresenceManager: ProximityPayloadHandling {
             case .awaitingManualCommit, .awaitingProximityCommit:
                 // Programmatic auto-commit — a heart handshake has no user-facing dwell ritual.
                 let coordinator = heartConnections[index].coordinator
+                // host-pin: exempt — coordinator/channel only, no `self`, no host read
                 Task { await coordinator.commitManualProximity() }
             default:
                 break
@@ -894,7 +924,7 @@ public final class PresenceManager: ProximityPayloadHandling {
                 if eligible, IdentityService.fingerprintsMatch(peerIdentity.fingerprint, intended.fingerprint) {
                     let connection = heartConnections[index]
                     heartSendState = .verifying(recipientName: intended.displayName)
-                    Task { [weak self] in await self?.deliverHeart(via: connection, to: intended) }
+                    spawnHostPinned { [weak self] in await self?.deliverHeart(via: connection, to: intended) }
                 } else {
                     failHeart("Couldn't verify \(Self.firstName(of: intended.displayName)) — no heart was sent.")
                     teardownIDs.append(heartConnections[index].id)
@@ -923,6 +953,7 @@ public final class PresenceManager: ProximityPayloadHandling {
             // (its `end()` already stopped everything); for `.failed` it is what guarantees the
             // ranging + Live Activity anchor stop even if `fail()`'s own teardown task has not run.
             let coordinator = connection.coordinator
+            // host-pin: exempt — coordinator/channel only, no `self`, no host read
             Task { await coordinator.cancel() }
             // A failed handshake never fires an MC disconnect — best-effort kick the zombie.
             session?.disconnectPeer(connection.peer)
@@ -980,6 +1011,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         cancelHeartConnectTimeout(for: connection.peer)
         removePendingHeartSend(for: connection.peer)
         let coordinator = connection.coordinator
+        // host-pin: exempt — coordinator/channel only, no `self`, no host read
         Task { await coordinator.cancel() }
         session?.disconnectPeer(connection.peer)
         heartConnections.removeAll { $0.id == id }
@@ -993,6 +1025,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     private func teardownAllHeartConnections() {
         for connection in heartConnections {
             let coordinator = connection.coordinator
+            // host-pin: exempt — coordinator/channel only, no `self`, no host read
             Task { await coordinator.cancel() }
         }
         heartConnections.removeAll()
@@ -1015,6 +1048,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         // orphaned Live Activity until the system's time cap. Mirrors `teardownHeartConnection`.
         for connection in dropped {
             let coordinator = connection.coordinator
+            // host-pin: exempt — coordinator/channel only, no `self`, no host read
             Task { await coordinator.cancel() }
         }
         let droppedOutbound = dropped.contains { $0.intendedFriend != nil }
@@ -1034,6 +1068,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     private func armHeartConnectTimeout(peerID: UUID, peer: PeerHandle, friend: ProximityTrustedPeerRecord) {
         cancelHeartConnectTimeout(peerID: peerID)
         let timeout = heartConnectTimeoutSeconds
+        // host-pin: timer — stored handle; its host read is synchronous main-actor code, so HP0 covers it (HP2)
         heartConnectTimeoutTasks[peerID] = Task { @MainActor [weak self] in
             // A cancelled timeout means the channel came up — it must not fire the retry (R7).
             do {
@@ -1083,7 +1118,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         pendingHeartSends[peerID] = (peer, friend, nextAttempt)
         session?.disconnectPeer(peer)
         recordDiagnostic("Retrying heart invite.")
-        Task { @MainActor [weak self] in
+        spawnHostPinned { [weak self] in
             // Cancelled re-invite delay: the send was abandoned, so do not invite (R7).
             do {
                 try await Task.sleep(for: .seconds(Self.heartReinviteDelaySeconds))
@@ -1189,6 +1224,7 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     private func scheduleHeartStatusClear() {
         clearHeartStatusTask?.cancel()
+        // host-pin: timer — stored handle, synchronous main-actor body (`heartSendState = .idle`) (HP2)
         clearHeartStatusTask = Task { @MainActor [weak self] in
             // Cancelled: a newer status replaced this one, so leave `heartSendState` alone (R7).
             do {

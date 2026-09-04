@@ -802,7 +802,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let payload = HeartPayload(sentAtDayKey: FernletDate.dayKey(for: Date()))
         let fingerprint = friend.fingerprint
         let recipientName = friend.displayName
-        Task { [weak self] in
+        spawnHostPinned { [weak self] in
             await self?.deliverSessionHeart(payload: payload, via: slot, fingerprint: fingerprint, recipientName: recipientName)
         }
     }
@@ -841,6 +841,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func scheduleSessionHeartStateClear() {
         sessionHeartStateClearTask?.cancel()
+        // host-pin: timer — stored handle, synchronous main-actor body; a task-lifetime pin would cycle (HP2)
         sessionHeartStateClearTask = Task { [weak self] in
             // Cancelled: a newer heart state replaced this one, so leave it alone (R7).
             do {
@@ -1775,7 +1776,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         photosAddedThisSession += 1
         for slot in activeSlots {
-            Task { [weak self] in
+            spawnHostPinned { [weak self] in
                 await self?.sendEnvelope(.friendPhoto, encodable: wirePhoto, via: slot, sealed: true)
             }
         }
@@ -1797,7 +1798,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             mesh.members.append(newMember)
         }
         currentMesh = mesh
-        Task { [weak self] in
+        spawnHostPinned { [weak self] in
             await self?.grantAdmission(to: request, meshID: mesh.meshID)
         }
     }
@@ -2115,7 +2116,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// - Parameter event: the signed frame to broadcast to every committed slot.
     func emitMembershipEvent(_ event: PayloadType) {
-        Task { @MainActor [weak self] in
+        spawnHostPinned { [weak self] in
             await self?.sendMembershipEvent(event)
         }
     }
@@ -2230,7 +2231,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// - Parameter record: The completed, already-signed removal.
     func emitRemovalRecord(_ record: SignedRemovalRecord) {
-        Task { @MainActor [weak self] in
+        spawnHostPinned { [weak self] in
             await self?.sendRemovalRecord(record)
         }
     }
@@ -2503,7 +2504,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// itself gains nothing it may act on and a voter list to retaliate against.
     private func broadcastQuorumFrame(_ type: PayloadType, _ payload: some Encodable, about target: String) {
         let recipients = membershipEventRecipients(excluding: target)
-        Task { @MainActor [weak self] in
+        spawnHostPinned { [weak self] in
             await self?.broadcastMembershipFrame(type, payload, to: recipients)
         }
     }
@@ -2897,13 +2898,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let recipients = Set(activeSlots.compactMap(\.fingerprint))
         guard !recipients.isEmpty else { return }
         mergeWindow = mergeWindow?.asking(recipients).advertised(verifier.localInventoryDigest)
-        Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: recipients) }
+        spawnHostPinned { [weak self] in await self?.sendInventoryDigest(to: recipients) }
         // The epoch half of the same exchange (§10.3, item 3). Separate frame, same ask: a member
         // on no epoch sends nothing, so a reconnect between two unkeyed devices costs no bytes.
-        Task { @MainActor [weak self] in await self?.sendEpochHeads(to: recipients) }
+        spawnHostPinned { [weak self] in await self?.sendEpochHeads(to: recipients) }
         // The ROUTED half of the same exchange (§10.3, §22.1, item 6). Separate `Task`, like the
         // epoch half: a store that cannot say what it holds must not stop the membership ask.
-        Task { @MainActor [weak self] in await self?.sendRoutedInventory(to: recipients) }
+        spawnHostPinned { [weak self] in await self?.sendRoutedInventory(to: recipients) }
     }
 
     /// Ends the merge now in flight **iff** every peer it is still waiting on has matched.
@@ -3021,7 +3022,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func readvertiseMergeProof(to peers: Set<String>) {
         guard !peers.isEmpty, let verifier = membershipVerifier else { return }
         mergeWindow = mergeWindow?.advertised(verifier.localInventoryDigest)
-        Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: peers) }
+        spawnHostPinned { [weak self] in await self?.sendInventoryDigest(to: peers) }
         FernletAuditLog.log(
             "mesh.merge.proofReadvertised", context: ["peers": String(peers.count)]
         )
@@ -3523,7 +3524,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         claimHandedOffCustody(now: now)
         guard let planned = routedDrainPlan(for: peer, at: now) else { return }
         recordLocalQuiescence(planned.quiescent, for: peer, asOf: advertisedAt)
-        Task { @MainActor [weak self] in
+        spawnHostPinned { [weak self] in
             await self?.sendRoutedDrainAnswer(
                 to: peer, advertisedAt: advertisedAt, quiescent: planned.quiescent, now: now
             )
@@ -3842,7 +3843,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let custody = commitLocalCustody(for: key, manifest: manifest, now: now)
         let recipient = commitLocalDelivery(for: key, manifest: manifest, now: now)
         guard custody != nil || recipient != nil else { return }
-        Task { @MainActor [weak self] in
+        spawnHostPinned { [weak self] in
             await self?.sendMintedReceipts(custody: custody, recipient: recipient, to: peer)
         }
     }
@@ -4431,7 +4432,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// - Parameter record: The admission this device signed.
     func emitAdmissionRecord(_ record: SignedAdmissionRecord) {
-        Task { @MainActor [weak self] in
+        spawnHostPinned { [weak self] in
             await self?.broadcastMembershipFrame(
                 .meshMemberAdmission,
                 MeshMemberAdmissionPayload(record: record),
@@ -4812,7 +4813,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // window may not close on it (P5 item 7, D-7.32).
         mergeWindow = mergeWindow?.reAsking(peer)
         FernletAuditLog.log("mesh.merge.askedLateReconnect")
-        Task { @MainActor [weak self] in
+        spawnHostPinned { [weak self] in
             await self?.sendInventoryDigest(to: [peer])
             await self?.sendEpochHeads(to: [peer])
             await self?.sendRoutedInventory(to: [peer])
@@ -5588,7 +5589,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         applyAdoptedRosterVerdict(adopted.roster)
         let admitter = ownAdmission.token.admitterFingerprint
-        Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: [admitter]) }
+        spawnHostPinned { [weak self] in await self?.sendInventoryDigest(to: [admitter]) }
     }
 
     /// What a freshly adopted roster says about THIS device.
@@ -5656,7 +5657,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // One task, so the answer's two halves reach the wire in a fixed order: the records the
         // peer is missing, then the head this device is on. Order is not load-bearing (a fold and a
         // record commute), determinism is.
-        Task { @MainActor [weak self] in
+        spawnHostPinned { [weak self] in
             await self?.reGossipRecords(to: payload.senderFingerprint)
             await self?.sendEpochHeads(to: [payload.senderFingerprint])
         }
@@ -5882,7 +5883,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshEncryptedMetadata:
             if let wrapper = try? decoder.decode(MeshEncryptedMetadataPayload.self, from: plaintext),
                let slot {
-                Task { [weak self] in await self?.handleEncryptedMetadata(wrapper, from: peer, slot: slot) }
+                spawnHostPinned { [weak self] in await self?.handleEncryptedMetadata(wrapper, from: peer, slot: slot) }
             }
         case .meshCoordinatorBeacon:
             if let beacon = try? decoder.decode(MeshCoordinatorBeaconPayload.self, from: plaintext) {
@@ -5894,7 +5895,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             }
         case .meshKeyRotation:
             if let rotation = try? decoder.decode(MeshKeyRotationPayload.self, from: plaintext) {
-                Task { [weak self] in await self?.handleKeyRotation(rotation, senderFingerprint: senderFingerprint) }
+                spawnHostPinned { [weak self] in await self?.handleKeyRotation(rotation, senderFingerprint: senderFingerprint) }
             }
         case .meshKeyAck:
             if let ack = try? decoder.decode(MeshKeyAckPayload.self, from: plaintext) {
@@ -6009,6 +6010,33 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// The advertised local display name (shared coercion; see `PeerDisplayNames.swift`).
     private var displayName: String { store.resolvedProximityDisplayName }
+
+    /// Spawns a detached task that PINS this manager's host for the task's own lifetime.
+    ///
+    /// ``store`` is `unowned` because the host owns this manager (`FernletStore.swift`'s `lazy var`
+    /// managers), and the unowned back-reference is that ownership's cycle-breaker. A detached task,
+    /// however, holds `self` STRONGLY for the duration of every `self?.method()` it awaits, so it can
+    /// outlive the host and then read a destroyed object — `swift_abortRetainUnowned` aborts the whole
+    /// process, which is what P5 item 1a's crash reports are. Capturing the host here, read
+    /// synchronously on the main actor at a point where it is provably alive, makes the read the task
+    /// will later perform valid by construction (invariant HP1).
+    ///
+    /// The pin is safe ONLY because this task's handle is not stored on the manager: nothing the host
+    /// owns can reach this closure context, so no `store → manager → task → store` cycle forms. NEVER
+    /// build the same pin into a task whose handle the manager keeps (invariant HP2) — see the `// host-pin: timer`
+    /// markers on the sites in this file that must not use this helper.
+    ///
+    /// The closure is deliberately neither `@Sendable` nor `sending`, so it inherits this manager's
+    /// isolation exactly as the `Task { … }` literal it replaces did — same executor, same enqueue,
+    /// same ordering. It carries no `@_implicitSelfCapture` either, so a strong `self` capture has to
+    /// be spelled `self.` at the call site.
+    private func spawnHostPinned(_ operation: @escaping () async -> Void) {
+        let host = store
+        Task {   // host-pin: helper
+            await operation()
+            withExtendedLifetime(host) {}
+        }
+    }
 
     private var activeSlots: [PeerSlot] {
         slots.filter { $0.kind == .active }
@@ -6173,7 +6201,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let retryCount = peerRetryCount[peer.endpoint, default: 0]
         guard retryCount < Self.maxPeerRetries else { return }
         peerRetryCount[peer.endpoint] = retryCount + 1
-        Task { [weak self] in
+        spawnHostPinned { [weak self] in
             // A cancelled retry must not invite (R7).
             do {
                 try await Task.sleep(for: .seconds(Self.reinviteDelaySeconds))
@@ -6210,6 +6238,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         sentShopCatalogSlotIDs.removeAll()
         shopCatalogRequestResponseAt.removeAll()
         transport.stop()
+        // host-pin: exempt — coordinator/channel only, no `self`, no host read
         for slot in slots { Task { await slot.coordinator.cancel() } }
         slots.removeAll()
         slotTrustPolicies.removeAll()
@@ -6427,6 +6456,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slotTrustPolicies[slot.id] = trustPolicy
         slots.append(slot)
 
+        // host-pin: exempt — coordinator/channel only, no `self`, no host read
         Task {
             await coordinator.begin(role: .browser, mode: .friend)
             channel.notifyConnected()
@@ -6434,6 +6464,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     private func removeSlot(_ slot: PeerSlot) {
+        // host-pin: exempt — coordinator/channel only, no `self`, no host read
         Task { await slot.coordinator.cancel() }
         kickEvictedPeer(slot.peer)
         clearActiveVerifyQRIfBound(to: slot.id)
@@ -6458,7 +6489,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     private func disconnectSlot(_ slot: PeerSlot) {
-        Task { [weak self] in
+        spawnHostPinned { [weak self] in
             // No `.sessionGoodbye` (P3 item 3, plan §8.3): parsed, never emitted. Cancelling the
             // coordinator IS the disconnect the goodbye used to announce, and a disconnect is all
             // an unsigned frame could ever have meant — membership ends only via a signed
@@ -6539,7 +6570,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 return  // promoteToMesh handles descriptor + manifest sync for all slots
             }
             // First committed peer — pairwise, sync photos and return early.
-            Task { [weak self] in
+            spawnHostPinned { [weak self] in
                 guard let self else { return }
                 await self.syncPhotoManifest(to: slot)
                 await self.sendVouchList(to: slot)
@@ -6548,14 +6579,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
 
         if currentMesh != nil {
-            Task { [weak self] in
+            spawnHostPinned { [weak self] in
                 guard let self else { return }
                 await self.sendMeshDescriptor(to: slot)
                 await self.syncPhotoManifest(to: slot)
             }
         }
         // Exchange vouch lists after every successful identity verification
-        Task { [weak self] in await self?.sendVouchList(to: slot) }
+        spawnHostPinned { [weak self] in await self?.sendVouchList(to: slot) }
 
         // P3 item 6: the first committed peer makes a joining session active (plan §8.2). P4 item 2
         // hangs the blip and the partial heal off the same event inside ``applySessionEvent(_:)``,
@@ -6628,7 +6659,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 keyAgreementPublicKey: kaKey
             )
         }
-        Task { [weak self] in
+        spawnHostPinned { [weak self] in
             guard let self else { return }
             for slot in committed {
                 await self.sendMeshDescriptor(to: slot)
@@ -6658,6 +6689,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     public func commitManualProximity(slotID: UUID) {
         guard let slot = slots.first(where: { $0.id == slotID }) else { return }
+        // host-pin: exempt — coordinator/channel only, no `self`, no host read
         Task { await slot.coordinator.commitManualProximity() }
     }
 
@@ -6750,7 +6782,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let challengeNonce = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })
         pendingQRVerifications[slot.id] = (payload.nonce, challengeNonce, payload.signingPublicKey)
         let challenge = VerifyChallengePayload(qrNonce: payload.nonce, challengeNonce: challengeNonce)
-        Task { await sendVerifyEnvelope(.verifyChallenge, encodable: challenge, to: peer, via: slot) }
+        spawnHostPinned { await self.sendVerifyEnvelope(.verifyChallenge, encodable: challenge, to: peer, via: slot) }
         FernletAuditLog.log("mesh.verifyQR.challengeSent")
         return true
     }
@@ -6807,8 +6839,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         activeVerifyQR = nil // single use
         let response = VerifyResponsePayload(challengeNonce: payload.challengeNonce, signature: signature)
         let supportsWire2 = ceremonyPeerIdentity(of: slot)?.supports(.wire2) ?? slot.supports(.wire2)
-        Task {
-            await sendVerifyEnvelope(
+        spawnHostPinned {
+            await self.sendVerifyEnvelope(
                 .verifyResponse,
                 encodable: response,
                 toKeyAgreementKey: envelope.senderKeyAgreementPublicKey,
@@ -7076,7 +7108,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let mesh = currentMesh else { return }
         let payload = MeshStateChangePayload(descriptor: mesh)
         for slot in slots where slot.fingerprint != nil {
-            Task { [weak self] in await self?.sendEnvelope(.meshDescriptor, encodable: payload, via: slot) }
+            spawnHostPinned { [weak self] in await self?.sendEnvelope(.meshDescriptor, encodable: payload, via: slot) }
         }
         updateDiscoveryInfo()
     }
@@ -7105,7 +7137,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 || outstandingAdmissionRequestBySlot[slot.id] != nil {
                 outstandingAdmissionRequestBySlot[slot.id] = mesh.meshID
             }
-            Task { [weak self] in await self?.sendEnvelope(.meshAdmissionRequest, encodable: request, via: slot) }
+            spawnHostPinned { [weak self] in await self?.sendEnvelope(.meshAdmissionRequest, encodable: request, via: slot) }
         }
     }
 
@@ -7182,7 +7214,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func broadcastEnvelope(_ type: PayloadType, encodable: some Encodable) {
         for slot in slots {
-            Task { [weak self] in
+            spawnHostPinned { [weak self] in
                 await self?.sendEnvelope(type, encodable: encodable, via: slot)
             }
         }
@@ -7345,7 +7377,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Its reply is the bounded record re-gossip, and `MeshLedgerAdoption` rebases this device's
         // provisional root onto the mesh's real founder when it arrives.
         if let fingerprint = slot?.fingerprint {
-            Task { @MainActor [weak self] in
+            spawnHostPinned { [weak self] in
                 await self?.sendInventoryDigest(to: [fingerprint])
                 // A joiner's routed store is `.absent`, and saying so is what lets the admitter
                 // offer it anything at all — the drain is push-only (item 6).
@@ -7632,7 +7664,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             .map(\.id)
             .prefix(Self.maxSessionPhotos)
         guard !missing.isEmpty else { return }
-        Task { [weak self] in
+        spawnHostPinned { [weak self] in
             guard let self else { return }
             let req = FriendPhotoRequestPayload(missingPhotoIDs: Array(missing))
             if self.currentMesh?.mode == .closed, self.currentGroupKey != nil {
@@ -7661,7 +7693,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let wanted = Set(ids)
         let requested = sessionPhotos.filter { wanted.contains($0.id) }.compactMap { photoCacheStore.hydrated($0) }
-        Task { [weak self] in
+        spawnHostPinned { [weak self] in
             defer { self?.photoSendsInFlight.remove(slot.id) }
             for photo in requested {
                 await self?.sendEnvelope(.friendPhoto, encodable: photo, via: slot, sealed: true)
@@ -7704,7 +7736,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             shopCatalogRequestResponseAt.removeAll()
         }
         if shouldOfferShopCatalog(to: peerIdentity), sentShopCatalogSlotIDs.insert(slot.id).inserted {
-            Task { [weak self] in
+            spawnHostPinned { [weak self] in
                 await self?.sendShopCatalog(to: slot)
                 await self?.sendShopCatalogRequest(to: slot)
             }
@@ -7713,12 +7745,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // The send method additionally requires the recipient be a vault-trusted (kept) friend.
         if peerIdentity.supports(.moderation) {
             let recipientKey = peerIdentity.signingPublicKey
-            Task { [weak self] in await self?.sendModerationReports(to: slot, recipientSigningKey: recipientKey) }
+            spawnHostPinned { [weak self] in await self?.sendModerationReports(to: slot, recipientSigningKey: recipientKey) }
         }
         // Phase 4: share our fuzzy vibe + appearance with this committed friend (kept friends only).
         if peerIdentity.supports(.friendState) {
             let recipientKey = peerIdentity.signingPublicKey
-            Task { [weak self] in await self?.sendFriendState(to: slot, recipientSigningKey: recipientKey) }
+            spawnHostPinned { [weak self] in await self?.sendFriendState(to: slot, recipientSigningKey: recipientKey) }
         }
         // Phase 6: offer any activities we host to this committed peer + exchange a roster version digest
         // so the highest verified snapshot converges. The manager sends via its wired `send` closure.
@@ -7744,7 +7776,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return
         }
         shopCatalogRequestResponseAt[slot.id] = now
-        Task { [weak self] in await self?.sendShopCatalog(to: slot) }
+        spawnHostPinned { [weak self] in await self?.sendShopCatalog(to: slot) }
     }
 
     /// Sends this device's current catalog to a committed slot, pairwise sealed. A nil provider
@@ -7803,7 +7835,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let payload = TempMessagePayload(id: id, text: text, sentAt: now)
         for slot in activeSlots where slot.fingerprint != nil && slot.supports(.messages) {
             onTempMessageSendForTesting?(slot.id)
-            Task { [weak self] in
+            spawnHostPinned { [weak self] in
                 await self?.sendEnvelope(.tempMessage, encodable: payload, via: slot, sealed: true)
             }
         }
@@ -8170,6 +8202,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func startBeaconLoop() {
         guard beaconTimer == nil else { return }
+        // host-pin: timer — stored handle; its only host reads are the pinned per-slot fan-out (HP2)
         beaconTimer = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 // Cancellation exits the beacon loop — that IS the recovery (R7).
@@ -8197,7 +8230,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             sentAt: Date()
         )
         for slot in slots {
-            Task { [weak self] in await self?.sendEnvelope(.meshCoordinatorBeacon, encodable: beacon, via: slot) }
+            spawnHostPinned { [weak self] in await self?.sendEnvelope(.meshCoordinatorBeacon, encodable: beacon, via: slot) }
         }
     }
 
@@ -8250,6 +8283,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func scheduleRotationTimer(fireAt target: Date) {
         rotationTimer?.cancel()
         let delay = max(0, target.timeIntervalSinceNow)
+        // host-pin: timer — stored handle, synchronous main-actor body (`requestRotation`) (HP2)
         rotationTimer = Task { @MainActor [weak self] in
             // A cancelled timer must NEVER initiate a rotation (R7).
             do {
@@ -8284,6 +8318,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func armRotationDebounce(firingAt target: Date) {
         rotationDebounceTask?.cancel()
         let delay = max(0, target.timeIntervalSinceNow)
+        // host-pin: timer — stored handle; `runDebouncedRotation()` takes the scoped pin instead (HP2)
         rotationDebounceTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .seconds(delay))
@@ -8299,6 +8334,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// it was in flight. Non-coordinators claim nothing — they consume the trigger and stop.
     private func runDebouncedRotation() async {
         guard let cause = rotationTriggers.claim(at: Date()) else { return }
+        let host = store   // host-pin: scoped — spans initiateRotation's ack window and its sends
+        defer { withExtendedLifetime(host) {} }
         if isLocalCoordinator() {
             await initiateRotation(cause: cause)
         }
@@ -8607,6 +8644,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// frame, each acking every active slot. Cancel-and-replace keeps at most one in flight.
     private func scheduleRotationSyncAck(_ sync: MeshRotationSyncPayload, senderFingerprint: String?) {
         rotationSyncTask?.cancel()
+        // host-pin: timer — stored handle; `handleRotationSync` takes the scoped pin instead (HP2)
         rotationSyncTask = Task { @MainActor [weak self] in
             await self?.handleRotationSync(sync, senderFingerprint: senderFingerprint)
             self?.rotationSyncTask = nil
@@ -8617,6 +8655,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func handleRotationSync(_ sync: MeshRotationSyncPayload, senderFingerprint: String?) async {
         // Accept only from the elected coordinator (sender-authenticated).
         guard let senderFP = senderFingerprint, isElectedCoordinator(senderFP) else { return }
+        let host = store   // host-pin: scoped — spans the drain sleep before the meshKeyAck sends
+        defer { withExtendedLifetime(host) {} }
         // Drain any pending outbound photo work before signalling ready. A cancelled drain sends
         // no ack (R7) — a newer sync has replaced this one, or the session ended.
         do {
@@ -8944,6 +8984,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `MeshRotationTriggerQueueTests` covers on its own, with no wall clock).
     func rotateNowForTesting(cause: MeshKeyRotationCause) async {
         await initiateRotation(cause: cause)
+    }
+
+    /// Test seam: fires the coordinator-beacon fan-out — the detached per-slot send `Task` family
+    /// named by P5 item 1a's crash reports (`displayName.getter ← sendEnvelopeCore ← closure #1 in
+    /// broadcastCoordinatorBeacon`). The beacon refuses without a known next rotation, so the seam
+    /// supplies one. Mirrors ``rotateNowForTesting(cause:)``.
+    func broadcastCoordinatorBeaconForTesting(nextRotationAt: Date = Date().addingTimeInterval(900)) {
+        lastKnownNextRotationAt = nextRotationAt
+        broadcastCoordinatorBeacon()
+    }
+
+    /// Test seam: arms the 20-second beacon loop — the manager's longest-lived stored `Task` handle,
+    /// and the one whose closure context must NEVER pin the host (invariant HP2).
+    /// `MemoryLifecycleTests` uses it to prove a store-owned manager still deallocates with the loop
+    /// running, which is what stops ``spawnHostPinned(_:)`` from being copied onto `beaconTimer`.
+    func startBeaconLoopForTesting() {
+        startBeaconLoop()
     }
 
     /// Disarms whatever the debounce window is holding, and reports what it was.
