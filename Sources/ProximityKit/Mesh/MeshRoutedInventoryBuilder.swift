@@ -7,9 +7,12 @@
 // Item 5 adds **no store verb and no index enumerator**. `MeshRoutedStore.load()` already vends the
 // index; a second door would be a second place for the five-state load discipline to be got wrong.
 // The drain (item 6) composes `load()` + this initializer, and — this is the fail-closed half —
-// **sends no digest at all** when the load is not `.loaded`. An empty digest is a positive claim
-// ("I hold nothing"), and before first unlock that claim would turn a deferred sidecar into a
-// re-delivery storm.
+// **sends no digest at all** unless the load is one of the two states that KNOW what this device
+// holds: `.loaded`, and `.absent`, which mints over an empty index (D-6.1). `.deferred`, `.corrupt`
+// and seal-`refused` advertise nothing: an empty digest is a positive claim ("I hold nothing"), and
+// before first unlock that claim would turn a deferred sidecar into a re-delivery storm. `.absent`
+// is not that case — `load()` answers it from the file read, before the seal key is ever consulted,
+// so it cannot be a locked-device artefact and its empty digest is simply true.
 
 import Foundation
 

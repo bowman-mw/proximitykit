@@ -565,9 +565,12 @@ extension MeshRoutedInventoryPayload {
     ///
     /// - Parameters:
     ///   - meshID: The session these holdings belong to.
-    ///   - index: The routed store's loaded index. A non-`.loaded` load must send **no digest at
-    ///     all**, never an empty one — an empty digest is a positive claim ("I hold nothing") that
-    ///     makes every peer re-offer everything.
+    ///   - index: The routed store's index, from one of the two load states that KNOW what this
+    ///     device holds — `.loaded`, or `.absent` minting over an empty index (D-6.1). A
+    ///     `.deferred`, `.corrupt` or seal-`refused` load must send **no digest at all**, never an
+    ///     empty one: an empty digest is a positive claim ("I hold nothing") that makes every peer
+    ///     re-offer everything, and before first unlock it would turn a deferred sidecar into a
+    ///     re-delivery storm.
     ///   - sentAt: The injected instant, floored into the signed bytes.
     ///   - identity: The advertiser, and the sole source of "this device".
     /// - Returns: The signed frame.

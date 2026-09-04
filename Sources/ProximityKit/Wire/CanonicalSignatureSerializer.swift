@@ -218,6 +218,14 @@ private nonisolated let canonicalMeshRecipientReceiptDomain =
 // records I hold" be replayed as "what content I am carrying, and for whom".
 private nonisolated let canonicalMeshRoutedInventoryDomain =
     FernletCryptoPurpose.Signature.meshRoutedInventoryDigestV1.data
+// P5 item 6 (plan §11, §10.3, §22.1): one device's answer to another's routed-inventory
+// advertisement — which advertisement, and whether the answerer's own delta against it is empty.
+// Its own domain, and the one it must be distinct from is the ROUTED INVENTORY DIGEST's: that
+// signs what a disk holds, this the result of comparing two such statements. A signature satisfying
+// both would let "we are in sync" be replayed as "here is everything I hold", and would let a stale
+// quiescence bit close a merge window that should still be open.
+private nonisolated let canonicalMeshRoutedDrainAnswerDomain =
+    FernletCryptoPurpose.Signature.meshRoutedDrainAnswerV1.data
 
 // MARK: - Identity envelope
 
@@ -695,6 +703,29 @@ nonisolated func canonicalBytes(for payload: MeshRoutedInventoryPayload) -> Data
     for entry in payload.inventory.entries {
         appendCanonical(&writer, entry)
     }
+    writer.appendString(payload.senderFingerprint)
+    writer.appendDate(payload.sentAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshRoutedDrainAnswerPayload`` — one device's answer to another's
+/// routed-inventory advertisement (plan §11, P5 item 6). **Field order IS the schema**: the mesh,
+/// the ADVERTISER being answered, that advertisement's instant, the bit, then the ANSWERER and its
+/// own instant.
+///
+/// Both instants are floored to whole seconds at the value's own initializers, so the stored bytes
+/// and these bytes agree; `advertisedAt` is the advertisement's own signed instant copied verbatim,
+/// which is what makes the receiver's exact-equality binding check possible at all. The bit is one
+/// byte, `1` or `0`, never a string — a frozen token would be a second spelling of a Bool. The
+/// `signature` is excluded as ever.
+nonisolated func canonicalBytes(for payload: MeshRoutedDrainAnswerPayload) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshRoutedDrainAnswerDomain)
+    writer.appendUUID(payload.answer.meshID)
+    writer.appendString(payload.answer.advertiserFingerprint)
+    writer.appendDate(payload.answer.advertisedAt)
+    writer.appendByte(payload.answer.quiescent ? 1 : 0)
     writer.appendString(payload.senderFingerprint)
     writer.appendDate(payload.sentAt)
     // signature: deliberately excluded.

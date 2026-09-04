@@ -228,6 +228,30 @@ nonisolated enum MeshRoutedCustodyOutcome: Equatable, Sendable {
     case refused(MeshChunkRefusal)
 }
 
+// MARK: - MeshRoutedCustodyEvidence
+
+/// What ``MeshRoutedStore/recordingCustodyEvidence(item:receipt:now:)`` stored.
+///
+/// Deliberately **not** a `MeshDeliveryOutcome`: an evidence write moves no delivery rung, so
+/// returning the delivery vocabulary would invite a caller to read a rung out of it. What it does
+/// carry is enough for a log line and for a drain to know whether anything changed.
+nonisolated struct MeshRoutedCustodyEvidence: Equatable, Sendable {
+    /// The item the receipt is about.
+    let key: MeshRoutedItemKey
+    /// The receipt's signer.
+    let custodian: String
+    /// Whether this custodian had no stored receipt before. `false` means replace-by-signer, which
+    /// is what makes a re-forwarded receipt grow nothing.
+    let isNew: Bool
+
+    /// Records one evidence write.
+    init(key: MeshRoutedItemKey, custodian: String, isNew: Bool) {
+        self.key = key
+        self.custodian = custodian
+        self.isNew = isNew
+    }
+}
+
 // MARK: - MeshRoutedSweepReport
 
 /// What one bounded sweep removed.
@@ -668,12 +692,37 @@ nonisolated extension MeshRoutedStore {
         return .completed(advanced)
     }
 
-    /// The four identity equalities plus the destination-set and evidence-capacity guards.
+    /// The four identity equalities plus the destination-set and evidence-capacity guards, in the
+    /// transfer door's order: identity → destinations → capacity.
+    ///
+    /// Split into ``identityRefusal(_:against:manifest:)`` and
+    /// ``capacityRefusal(forCustodyReceipt:against:)`` in P5 item 6 so the evidence-only door
+    /// (``recordingCustodyEvidence(item:receipt:now:)``) applies **the same two** checks in **the
+    /// same order**, minus the destination clause it has no honest value for. Behaviour here is
+    /// unchanged, which `recordingCustodyTransferIsUnchanged` pins.
     private func receiptRefusal(
         _ receipt: MeshCustodyReceipt,
         against record: MeshRoutedItemRecord,
         manifest: MeshRoutedManifest,
         destinations: [String]
+    ) -> MeshRoutedStoreRefusal? {
+        if let refusal = identityRefusal(receipt, against: record, manifest: manifest) {
+            return refusal
+        }
+        let named = Set(manifest.destinations)
+        guard !destinations.isEmpty, destinations.allSatisfy({ named.contains($0) }) else {
+            return .notADestination
+        }
+        return capacityRefusal(forCustodyReceipt: receipt, against: record)
+    }
+
+    /// The four identity equalities: the receipt is about **this** record's item, origin, bytes and
+    /// mesh. A store that trusts its caller's word about which item a receipt is for has no
+    /// invariant left.
+    private func identityRefusal(
+        _ receipt: MeshCustodyReceipt,
+        against record: MeshRoutedItemRecord,
+        manifest: MeshRoutedManifest
     ) -> MeshRoutedStoreRefusal? {
         guard receipt.itemID == record.key.itemID,
               receipt.originFingerprint == record.key.originFingerprint,
@@ -681,10 +730,15 @@ nonisolated extension MeshRoutedStore {
               receipt.meshID == manifest.meshID else {
             return .manifestMismatch
         }
-        let named = Set(manifest.destinations)
-        guard !destinations.isEmpty, destinations.allSatisfy({ named.contains($0) }) else {
-            return .notADestination
-        }
+        return nil
+    }
+
+    /// The evidence cap, applied by SIGNER: replacing an existing custodian's receipt is always
+    /// allowed, and only a genuinely new signer can push the set over its bound.
+    private func capacityRefusal(
+        forCustodyReceipt receipt: MeshCustodyReceipt,
+        against record: MeshRoutedItemRecord
+    ) -> MeshRoutedStoreRefusal? {
         let alreadyStored = record.receipts.contains { $0.custodianFingerprint == receipt.custodianFingerprint }
         guard alreadyStored || record.receipts.count < MeshRoutedStoreFormat.maxReceiptsPerItem else {
             return .capacityReceipts
@@ -719,7 +773,83 @@ nonisolated extension MeshRoutedStore {
         return stored.sorted { $0.custodianFingerprint < $1.custodianFingerprint }
     }
 
+    /// Stores one verified custody receipt as **evidence only** — the drain's ingest door.
+    ///
+    /// The difference from ``recordingCustodyTransfer(item:for:receipt:now:)`` is the whole reason
+    /// this door exists: that one takes a `for destinations:` list, which is the **caller's**
+    /// statement about which legs the custodian is now the courier for, and advances those rungs.
+    /// A drain receiving a forwarded receipt has no honest value for that list — nobody handed it a
+    /// hand-off decision — so it records the signature and **moves no rung at all**. Inferring a
+    /// destination list from the manifest would be this device inventing somebody else's hand-off.
+    ///
+    /// Applies exactly the transfer door's identity and capacity checks, in the same order, minus
+    /// the destination clause it has no input for.
+    ///
+    /// - Important: `receipt` must be one `MeshCustodyReceiptVerifier.verify(_:)` has already
+    ///   accepted (returned nil). The door re-checks identity anyway.
+    ///
+    /// - Parameters:
+    ///   - item: The signed pair.
+    ///   - receipt: The custodian's signed statement, forwarded verbatim.
+    ///   - now: The injected instant. Nothing here reads a clock; the parameter keeps the door's
+    ///     shape identical to every other verb the property battery drives.
+    /// - Returns: what was stored, or a named refusal, or the store's unavailability. **Nothing is
+    ///   written on any refusal.**
+    func recordingCustodyEvidence(
+        item: MeshRoutedItemKey,
+        receipt: MeshCustodyReceipt,
+        now: Date
+    ) -> MeshRoutedOutcome<MeshRoutedCustodyEvidence> {
+        var index: MeshRoutedIndex
+        let token: LoadToken
+        switch indexForWriting() {
+        case .unavailable(let cause): return .unavailable(cause)
+        case .writable(let loaded, let vended): index = loaded; token = vended
+        }
+        guard var record = index.record(for: item) else { return .refused(.unknownItem) }
+        guard let manifest = record.manifest else { return .refused(.manifestMismatch) }
+        if let refusal = identityRefusal(receipt, against: record, manifest: manifest) {
+            return .refused(refusal)
+        }
+        if let refusal = capacityRefusal(forCustodyReceipt: receipt, against: record) {
+            return .refused(refusal)
+        }
+        let isNew = !record.receipts.contains { $0.custodianFingerprint == receipt.custodianFingerprint }
+        record.receipts = Self.storing(receipt, in: record.receipts)
+        index.upsert(record)
+        do {
+            try save(index, token: token)
+        } catch {
+            return .unavailable(unavailability(from: error))
+        }
+        return .completed(
+            MeshRoutedCustodyEvidence(key: item, custodian: receipt.custodianFingerprint, isNew: isNew)
+        )
+    }
+
     // MARK: Forwarding (the origin's exact bytes)
+
+    /// The stored custody receipts for `item`, byte-identical, ordered by custodian fingerprint.
+    ///
+    /// The mirror of ``forwardableRecipientReceipts(item:)``, with one deliberate asymmetry stated
+    /// on both: a record stores **other members'** custody receipts only. This device's own custody
+    /// is the `custodiedAt` stamp, and its receipt is re-minted from the durable bytes when it is
+    /// needed — a custody claim is re-measurable forever, which is exactly what a recipient receipt's
+    /// one-shot ledger judgement is not.
+    ///
+    /// - Parameter item: The signed pair.
+    /// - Returns: the receipts (empty when the item is unknown or holds none), or the store's
+    ///   unavailability.
+    func forwardableCustodyReceipts(
+        item: MeshRoutedItemKey
+    ) -> MeshRoutedOutcome<[MeshCustodyReceipt]> {
+        switch indexForWriting() {
+        case .unavailable(let cause):
+            return .unavailable(cause)
+        case .writable(let index, _):
+            return .completed(index.record(for: item)?.receipts ?? [])
+        }
+    }
 
     /// The origin's stored manifest for `item`, byte-identical — a custodian is a courier, not a
     /// co-signer.

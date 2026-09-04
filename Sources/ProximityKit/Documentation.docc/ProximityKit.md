@@ -507,6 +507,32 @@ evidence, so a second, disagreeing spelling would mint a digest that verifies cl
 custody for a member that never held the item; the peer would then ask that member for a receipt it
 can never mint and the merge window item 7 closes would never close.
 
+P5 item 6 wired the DRAIN onto that one merge path — six new types and two new store doors:
+`MeshRoutedDrainAnswerFormat`, `MeshRoutedDrainAnswer`, `MeshRoutedDrainAnswerPayload`,
+`MeshRoutedDrainAnswerMintError`, `MeshRoutedDrainAnswerRejection`,
+`MeshRoutedDrainAnswerVerifier`, plus the pure planning values `MeshRoutedPeerInventory`,
+`MeshRoutedDrainRefusalNote`, `MeshRoutedDrainBounds`, `MeshRoutedDrainChunkSend` and
+`MeshRoutedDrainPlan`, and `MeshRoutedCustodyEvidence` beside
+`MeshRoutedStore.recordingCustodyEvidence(item:receipt:now:)` /
+`forwardableCustodyReceipts(item:)`. The drain itself is a private section of
+`MeshNetworkManager` — it needs the manager's `store`, `identity`, `broadcastMembershipFrame` and
+slot table, all file-scoped, so the value-type extraction above is what keeps the new *logic* out of
+that file rather than a manager extension, which could not compile elsewhere. Three seams are
+`internal` rather than private, and only three: `sendRoutedInventory(to:now:)`,
+`dispatchRoutedPayload(_:plaintext:decoder:slot:now:)` and `receiveRoutedInventory(_:from:now:)` —
+the drain's send door, its ingest door and its advertisement door, each taking an injected `now`
+(D-6.12) because every admission, `isLive(at:)` check and `deliveredAt` stamp downstream reads that
+one instant. A battery that cannot reach them, or cannot supply the instant, is testing the wall
+clock instead of the drain.
+
+The two store doors are deliberately asymmetric with the delivery family's. A record holds **other
+members'** custody receipts only, so `forwardableCustodyReceipts` never returns this device's own —
+that is the `custodiedAt` stamp, and the drain re-mints the receipt from the durable bytes, which is
+byte-identical because the commit re-uses the stored instant. And `recordingCustodyEvidence` stores a
+forwarded receipt while advancing **no** rung: `recordingCustodyTransfer`'s `for destinations:` is
+the *caller's* statement about a hand-off, and a drain that was handed no hand-off has no honest
+value for it.
+
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
 frozen English spelling, so one grep finds every layer that touches those bytes:
@@ -526,6 +552,7 @@ frozen English spelling, so one grep finds every layer that touches those bytes:
 | `fernlet.mesh.custody-receipt.v1` | `MeshCustodyReceipt` (a custodian durably holds one item's complete ciphertext) | the **custodian**, about the origin's item — the one routed record its subject did not sign; relays forward it verbatim | `Signature.meshCustodyReceiptV1`; the derived dedup id under `Hash.meshCustodyReceiptIDV1`; the at-rest store sealed under `KeyDerivation.meshRoutedStoreV1` |
 | `fernlet.mesh.recipient-receipt.v1` | `MeshRecipientReceipt` (a destination received one item, FINALLY) | the **recipient**, about the origin's item; relays forward it verbatim, and it carries no ack stage — what "finally" meant is resolved from the origin-signed type token | `Signature.meshRecipientReceiptV1`; the derived dedup id under `Hash.meshRecipientReceiptIDV1`, one per `(recipient, item)` |
 | `fernlet.mesh.routed-inventory-digest.v1` | — (a message, not a record) — the ROUTED CONTENT a device holds: a minimal fingerprint table plus one entry per live item, each with the signed `(origin, itemID)` pair, the parked flag, the chunk count, the **exact** held-chunk bitmap and the two receipt-signer lists | the **advertiser**, about its own disk — nobody forwards it on another device's behalf | `Signature.meshRoutedInventoryDigestV1`; **no** `Hash` sibling, because the entry list IS the digest |
+| `fernlet.mesh.routed-drain-answer.v1` | — (a message, not a record) — the RESULT of comparing two routed inventories: whose advertisement is being answered, which one (its own signed instant), and the single bit "my delta against it is empty" | the **answerer**, about its own comparison | `Signature.meshRoutedDrainAnswerV1`; **no** `Hash` and **no** `AEAD` sibling — one Bool and two binding scalars have nothing to digest and nothing to seal |
 
 **Nothing enters a ledger unverified.** ``MeshMembershipRecordSet`` is pure algebra and will merge
 whatever it is handed; ``MeshMembershipRecordVerifier`` is the only door. That matters because the
@@ -794,6 +821,11 @@ vector and its own framing case, with all four routed goldens and the membership
 re-asserted untouched. Its own token was the item's first decision, because
 `fernlet.mesh.inventory-digest.v1` was already taken by the membership digest and the two summarise
 structurally different things.
+And so did P5 item 6's `fernlet.mesh.routed-drain-answer.v1`: one new signature purpose, **no** new
+`Hash` and **no** new `AEAD`, one new vector and its own framing case — with all five routed goldens
+and the membership inventory golden re-asserted untouched. Its stem is `routed-drain-`, not
+`routed-inventory-`, because the frame states the result of a **comparison** rather than what a disk
+holds; the two diverge at `d` vs `i` immediately after `routed-`, so neither prefixes the other.
 
 **Both halves travel in both directions** (P4 item 2c). The ask sends the digest and the heads
 together, and the answer to a *mismatched* digest sends the bounded re-gossip and the heads together,
@@ -819,6 +851,16 @@ Three consequences worth stating outright:
   (`MeshRoutedInventoryDelta.converged(local:peerReportsQuiescent:)`, never `isQuiescent` alone,
   which a device holding nothing satisfies against every peer). Nothing in item 5 changes today's
   behaviour: the frame is built and unwired.
+  **P5 item 6 wired the routed half onto exactly those doors and changed the window rule not at
+  all.** `sendRoutedInventory(to:)` fires from the same three call sites `sendInventoryDigest(to:)`
+  does — `beginMergeExchange(entry:)`, `askOneReconnectedPeer(_:)` and `handleAdmissionGrant`'s
+  reply — and nowhere else, which is the mechanically checkable form of "do not add a second
+  reconnect path" (`MeshRoutedDrainWallTests.theDrainFiresOnlyFromTheMergeDoor`). The routed answer
+  gets its **own** receive door rather than a ride inside `receiveInventoryDigest(_:)`, because that
+  function returns at `concludeMerge()` before its own `Task` whenever the two ledgers already agree
+  — the commonest blip, and precisely the case the drain exists for. What item 6 supplies is the
+  quiescence bit, recorded for **both** sides in `peerRoutedInventories`; what item 7 will do with
+  it is close the window.
 - **Reconnect ≡ merge; admission ≠ reconnect.** The `peerCommitted` self-edge also carries every
   genuinely new member's first commit, so `openBlipMergeIfReconnected(_:from:peer:)` opens the window
   only for a peer that was **already on the derived roster** at that instant. A new admission keeps

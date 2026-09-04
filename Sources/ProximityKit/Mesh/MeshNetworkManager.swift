@@ -1358,6 +1358,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         membershipVerifier = nil
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
+        clearRoutedDrainState()
         pendingAdoptionLedger = .empty
         isSessionOpen = true
         pendingAdmissionRequests.removeAll()
@@ -1708,6 +1709,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshMemberAdmission, .meshMemberDeparture, .meshMemberRemoval, .meshTerminated,
              .meshInventoryDigest, .meshEpochHeads:
             dispatchMembershipEventPayload(payloadType, plaintext: plaintext, decoder: decoder, slot: slot)
+        case .meshRoutedManifest, .meshRoutedChunk, .meshCustodyReceipt, .meshRecipientReceipt,
+             .meshRoutedInventoryDigest, .meshRoutedDrainAnswer:
+            dispatchRoutedPayload(payloadType, plaintext: plaintext, decoder: decoder, slot: slot)
         case .sessionGoodbye:
             // Parsed, never emitted (plan §8.3). A goodbye is UNSIGNED, so it can only mean "this
             // link is going away" — `MeshMembershipGoodbyeInterop` is where that rule is stated and
@@ -1797,6 +1801,37 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// roster cap (plan §10.5).
     @ObservationIgnored private var reGossipedToFingerprints: Set<String> = []
 
+    // MARK: Routed drain state (network migration P5 item 6, plan §11, §10.3)
+
+    /// What each peer last told us its ROUTED store holds, plus both halves of the quiescence
+    /// predicate item 7's merge window closes on.
+    ///
+    /// Never ``peerInventoryDigests`` — that is the MEMBERSHIP digest and a structurally different
+    /// value under one English word. Bounded by the roster cap; cleared with the session; never
+    /// persisted (D-6.14), so it owes no wipe row.
+    @ObservationIgnored private(set) var peerRoutedInventories: [String: MeshRoutedPeerInventory] = [:]
+
+    /// Bulk frames this device has already served each peer THIS SESSION, so a peer cannot spend
+    /// this device's bytes by re-sending inventories.
+    ///
+    /// A **budget**, not the once-per-peer boolean ``reGossipedToFingerprints`` is: re-gossip is a
+    /// one-shot because a ledger is COMPLETE after one gossip, which a content store never is. Under
+    /// a boolean, an item needing more chunks than one answer carries could never finish inside a
+    /// six-hour session, and an item minted after the first batch could never be offered at all.
+    /// Charged the plan's `frameCount`, so an empty plan costs nothing; refused past
+    /// ``MeshRoutedDrainBounds/sessionFramesPerPeer``.
+    @ObservationIgnored private var routedDrainFramesSpent: [String: Int] = [:]
+
+    /// Keys this device REFUSED from a peer for a capacity reason, per peer, per session.
+    ///
+    /// Subtracted from the entitlement set and from the plan's request list, so a refusal does not
+    /// re-fire. Bounded by the roster cap and, per peer, by the inventory's entry cap.
+    @ObservationIgnored private var routedRefusedKeys: [String: Set<MeshRoutedItemKey>] = [:]
+
+    /// The last capacity refusal the drain took, for item 9 to surface. Frozen reason, no display
+    /// text — plan §18.2's copy is the owner's and item 6 ships none.
+    @ObservationIgnored private(set) var lastRoutedDrainRefusal: MeshRoutedDrainRefusalNote?
+
     /// Prepares the verified ledger for a mesh, keyed to the founder's signing key.
     ///
     /// Idempotent for the same mesh so a re-broadcast descriptor cannot discard verified records;
@@ -1809,6 +1844,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
+        clearRoutedDrainState()
         pendingAdoptionLedger = .empty
     }
 
@@ -2556,6 +2592,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // The epoch half of the same exchange (§10.3, item 3). Separate frame, same ask: a member
         // on no epoch sends nothing, so a reconnect between two unkeyed devices costs no bytes.
         Task { @MainActor [weak self] in await self?.sendEpochHeads(to: recipients) }
+        // The ROUTED half of the same exchange (§10.3, §22.1, item 6). Separate `Task`, like the
+        // epoch half: a store that cannot say what it holds must not stop the membership ask.
+        Task { @MainActor [weak self] in await self?.sendRoutedInventory(to: recipients) }
     }
 
     /// Ends the merge now in flight: this device and the peer hold the same records.
@@ -2636,6 +2675,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             membershipVerifier = verifier
             peerInventoryDigests.removeAll()
             reGossipedToFingerprints.removeAll()
+            clearRoutedDrainState()
             pendingAdoptionLedger = .empty
             FernletAuditLog.log("mesh.membershipLedger.bootstrapped")
             return true
@@ -2722,6 +2762,1020 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// peer short of records this device holds — and it is still a hard constant ceiling (R2/R3).
     static let maxReGossipFrames = MeshMembershipBounds.maxRecordsPerKind * 3
         + MeshMembershipBounds.maxTerminationRecords
+
+    // MARK: - Routed drain (network migration P5 item 6, plan §11, §10.3, §22.1)
+    //
+    // **Reconnect ≡ merge ≡ relay drain.** There is no second reconnect path: the routed inventory
+    // rides the three doors `sendInventoryDigest(to:)` already fires from, and the bulk it implies
+    // is piggybacked on the exchange that door opened. The drain adds **no policy** — what may be
+    // offered is item 5's `MeshRoutedInventoryDelta`, what may be admitted is items 1–4's verifiers
+    // and store doors, and what may be spent is `MeshRoutedDrainPlan`'s bounds.
+    //
+    // Nothing here reads a `keyEpoch`, a group key, a branch id or a partition id: the routed path's
+    // authorisation is the origin's signature plus the per-recipient key wrap, which is exactly what
+    // lets item 13 *delete* the three epoch gates rather than loosen them.
+
+    /// The deadline every routed record's expiry is derived from — `createdAt` plus the session
+    /// ceiling, the same derivation `sessionContextIdentity` makes.
+    ///
+    /// Deliberately **not** `sessionCeiling?.hardDeadline`. That timer is armed only when this device
+    /// founds a mesh or restores one at launch, so a device that JOINED has none for its whole first
+    /// session — and a fail-closed guard on it would drop every inbound manifest, chunk and receipt
+    /// on exactly the load-bearing case (a heart to a new member). `currentMesh == nil` is the only
+    /// state that fails closed here.
+    private var routedHardDeadline: Date? {
+        guard let mesh = currentMesh else { return nil }
+        return mesh.createdAt.addingTimeInterval(MeshSessionCeiling.ceilingSeconds)
+    }
+
+    /// This device's routed store, on the host's own scope. Built **per call**, exactly as
+    /// `MeshSessionStore(scope: store.meshSessionStorage)` is: the store is a stateless value over a
+    /// directory plus a keychain service, and holding one would invent a lifetime question.
+    private func routedStore() -> MeshRoutedStore {
+        MeshRoutedStore(scope: store.meshRoutedStorage)
+    }
+
+    /// Forgets every peer's routed drain state. Called from the three session resets
+    /// `peerInventoryDigests` is cleared at, and nowhere else.
+    ///
+    /// **Not** from `abandonMergeExchange()`: a partition is not a new session, and refunding the
+    /// per-peer frame budget on every flap is precisely what that budget exists to prevent.
+    private func clearRoutedDrainState() {
+        peerRoutedInventories.removeAll()
+        routedDrainFramesSpent.removeAll()
+        routedRefusedKeys.removeAll()
+        lastRoutedDrainRefusal = nil
+    }
+
+    /// The index this device may advertise from, or nil when the store is not in a state that KNOWS
+    /// what it holds.
+    ///
+    /// Two states know: `.loaded`, and `.absent`, which is answered from the file read **before the
+    /// seal key is ever consulted** and therefore cannot be a locked-device artefact — its empty
+    /// digest is byte-identical to a loaded empty store's, i.e. true. The other three advertise
+    /// nothing: an empty digest is a positive claim ("I hold nothing"), and a `.deferred` store
+    /// cannot honestly make it. Nil means **no digest, no answer, no offers** — structurally, because
+    /// `routedDrainPlan(for:at:)` returns nil too, not as a second condition at a send site.
+    ///
+    /// Never `indexForWriting()`: that collapses `.absent` into a writable empty index and would
+    /// answer out of a *deferred* classification path.
+    private func routedIndexForAdvertising() -> MeshRoutedIndex? {
+        switch routedStore().load() {
+        case .loaded(let index, _):
+            return index
+        case .absent:
+            return MeshRoutedIndex()
+        case .deferred(let deferral):
+            FernletAuditLog.log(
+                "mesh.routedStore.advertisementSuppressed",
+                context: ["state": "deferred", "reason": deferral.reason.rawValue]
+            )
+            return nil
+        case .corrupt:
+            FernletAuditLog.log("mesh.routedStore.advertisementSuppressed", context: ["state": "corrupt"])
+            return nil
+        case .refused:
+            FernletAuditLog.log("mesh.routedStore.advertisementSuppressed", context: ["state": "sealRefused"])
+            return nil
+        }
+    }
+
+    /// Sends this device's signed ROUTED inventory to one peer or to the named set — the routed twin
+    /// of ``sendInventoryDigest(to:)``, on the same three doors and the same cadence.
+    ///
+    /// An empty **named** set is "nobody to ask", not "ask everybody", exactly as the membership
+    /// digest reads it. The advertisement instant recorded per peer is the **minted payload's own
+    /// floored `sentAt`**, never `now` — see ``recordRoutedAdvertisement(to:at:)``.
+    ///
+    /// - Parameters:
+    ///   - recipients: The members to advertise to, or nil for every slot.
+    ///   - now: The injected instant, floored into the signed bytes.
+    func sendRoutedInventory(to recipients: Set<String>? = nil, now: Date = Date()) async {
+        guard let mesh = currentMesh, membershipVerifier != nil else { return }
+        if let recipients, recipients.isEmpty { return }
+        guard let index = routedIndexForAdvertising() else { return }
+        do {
+            let payload = try MeshRoutedInventoryPayload.signed(
+                meshID: mesh.meshID, index: index, sentAt: now, identity: identity
+            )
+            await broadcastMembershipFrame(.meshRoutedInventoryDigest, payload, to: recipients)
+            let told = recipients ?? Set(activeSlots.compactMap(\.fingerprint))
+            // R2: bounded by the roster cap.
+            for peer in told { recordRoutedAdvertisement(to: peer, at: payload.sentAt) }
+        } catch {
+            FernletAuditLog.log(
+                "mesh.routedDrain.signFailed",
+                context: ["type": PayloadType.meshRoutedInventoryDigest.rawValue,
+                          "error": String(describing: error)]
+            )
+        }
+    }
+
+    /// Records which advertisement this device made to `peer`, so an inbound quiescence bit can be
+    /// bound to something it really said.
+    ///
+    /// - Parameter advertisedAt: The **minted payload's** `sentAt`, floored and wire-identical.
+    ///   Recording a raw `now` here makes the receiver's exact `Date` equality never hold, so every
+    ///   answer is dropped as unbound and the quiescence bit is silently disabled.
+    private func recordRoutedAdvertisement(to peer: String, at advertisedAt: Date) {
+        guard peerRoutedInventories[peer] != nil
+                || peerRoutedInventories.count < MeshMembershipBounds.maxRosterMembers else { return }
+        var state = peerRoutedInventories[peer] ?? MeshRoutedPeerInventory()
+        state.advertisedAt = advertisedAt
+        peerRoutedInventories[peer] = state          // R3: bounded map
+    }
+
+    /// The bulk frames `peer` may still make this device serve this session, floored at zero.
+    private func routedFramesRemaining(for peer: String) -> Int {
+        max(0, MeshRoutedDrainBounds.sessionFramesPerPeer - (routedDrainFramesSpent[peer] ?? 0))
+    }
+
+    /// Charges `count` bulk frames to `peer`'s session budget, or refuses the whole batch.
+    ///
+    /// Refused **whole** rather than part-served: a partially charged batch would be a second
+    /// accounting rule, and the remainder is re-planned against the true remainder at the next
+    /// exchange.
+    private func chargeRoutedFrames(_ count: Int, to peer: String) -> Bool {
+        guard routedDrainFramesSpent[peer] != nil
+                || routedDrainFramesSpent.count < MeshMembershipBounds.maxRosterMembers else {
+            return false
+        }
+        guard routedFramesRemaining(for: peer) >= count else { return false }
+        routedDrainFramesSpent[peer] = (routedDrainFramesSpent[peer] ?? 0) + count   // R3: bounded map
+        return true
+    }
+
+    /// The routed family of the dispatch switch (R4: one function per case family).
+    ///
+    /// Member business, so a COMMITTED slot is required — the same boundary the membership, removal,
+    /// photo and registry families enforce. The four CONTENT families additionally need the session's
+    /// hard deadline, because every routed record's expiry is checked against it; the two digest
+    /// families do not, so a device that has left still answers what it holds.
+    ///
+    /// `internal`, and clock-injectable, for the same reason the other tier-1 seams are: every
+    /// admission, every `isLive(at:)` check and every `deliveredAt` stamp downstream of here reads
+    /// this one instant, so a battery that cannot supply it is testing the wall clock.
+    ///
+    /// - Parameter now: The injected instant for this frame's whole ingest (D-6.12).
+    func dispatchRoutedPayload(
+        _ type: PayloadType,
+        plaintext: Data,
+        decoder: JSONDecoder,
+        slot: PeerSlot?,
+        now: Date = Date()
+    ) {
+        guard let senderFingerprint = slot?.fingerprint else {
+            FernletAuditLog.log("mesh.routedDrain.droppedUncommittedSlot", context: ["type": type.rawValue])
+            return
+        }
+        guard let mesh = currentMesh, let verifier = membershipVerifier else {
+            FernletAuditLog.log("mesh.routedDrain.droppedNoLedger", context: ["type": type.rawValue])
+            return
+        }
+        if type == .meshRoutedInventoryDigest || type == .meshRoutedDrainAnswer {
+            dispatchRoutedDigest(
+                type, plaintext: plaintext, decoder: decoder, from: senderFingerprint, now: now
+            )
+            return
+        }
+        guard let hardDeadline = routedHardDeadline else {
+            FernletAuditLog.log("mesh.routedDrain.droppedNoCeiling", context: ["type": type.rawValue])
+            return
+        }
+        let context = RoutedIngestContext(
+            meshID: mesh.meshID, ledger: verifier.ledger, hardDeadline: hardDeadline,
+            sender: senderFingerprint, now: now
+        )
+        dispatchRoutedContent(type, plaintext: plaintext, decoder: decoder, in: context)
+    }
+
+    /// The two digest-family frames, which need no deadline: an advertisement and an answer both
+    /// describe state rather than carry content.
+    private func dispatchRoutedDigest(
+        _ type: PayloadType,
+        plaintext: Data,
+        decoder: JSONDecoder,
+        from senderFingerprint: String,
+        now: Date
+    ) {
+        switch type {
+        case .meshRoutedInventoryDigest:
+            guard let payload = try? decoder.decode(MeshRoutedInventoryPayload.self, from: plaintext) else {
+                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                return
+            }
+            receiveRoutedInventory(payload, from: senderFingerprint, now: now)
+        default:
+            guard let payload = try? decoder.decode(MeshRoutedDrainAnswerPayload.self, from: plaintext) else {
+                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                return
+            }
+            receiveRoutedDrainAnswer(payload, from: senderFingerprint)
+        }
+    }
+
+    /// The four content families: manifest, chunk, custody receipt, recipient receipt. One ingest
+    /// function each, one admission call site each — the shape item 12 wires its replay window into.
+    private func dispatchRoutedContent(
+        _ type: PayloadType,
+        plaintext: Data,
+        decoder: JSONDecoder,
+        in context: RoutedIngestContext
+    ) {
+        switch type {
+        case .meshRoutedManifest:
+            guard let payload = try? decoder.decode(MeshRoutedManifestPayload.self, from: plaintext) else {
+                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                return
+            }
+            ingestRoutedManifest(payload, in: context)
+        case .meshRoutedChunk:
+            guard let payload = try? decoder.decode(MeshChunkPayload.self, from: plaintext) else {
+                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                return
+            }
+            ingestRoutedChunk(payload, in: context)
+        case .meshCustodyReceipt:
+            guard let payload = try? decoder.decode(MeshCustodyReceiptPayload.self, from: plaintext) else {
+                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                return
+            }
+            ingestCustodyReceipt(payload, in: context)
+        default:
+            guard let payload = try? decoder.decode(MeshRecipientReceiptPayload.self, from: plaintext) else {
+                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                return
+            }
+            ingestRecipientReceipt(payload, in: context)
+        }
+    }
+
+    /// The four values every routed content ingest needs, gathered once at the dispatch door.
+    private struct RoutedIngestContext {
+        /// The session both sides are in.
+        let meshID: UUID
+        /// The merged membership ledger every routed verifier resolves keys from.
+        let ledger: MeshMembershipLedger
+        /// `createdAt + ceiling` — what every routed expiry is checked against.
+        let hardDeadline: Date
+        /// The committed slot's fingerprint.
+        let sender: String
+        /// The injected instant for this frame's whole ingest.
+        let now: Date
+    }
+
+    /// A peer's advertisement: verify, record, and answer it — the drain's own door.
+    ///
+    /// Deliberately **not** piggybacked inside ``receiveInventoryDigest(_:)``: that function returns
+    /// at `concludeMerge()` before its own `Task` whenever the two membership ledgers already agree,
+    /// which is the commonest blip — so a routed answer placed there would never run in exactly the
+    /// case the drain exists for.
+    ///
+    /// `internal` for the same reason ``dispatchRoutedPayload(_:plaintext:decoder:slot:now:)`` is:
+    /// the drain's battery drives one advertisement at a time, on an injected clock.
+    func receiveRoutedInventory(
+        _ payload: MeshRoutedInventoryPayload,
+        from senderFingerprint: String,
+        now: Date = Date()
+    ) {
+        guard let mesh = currentMesh, let verifier = membershipVerifier else { return }
+        let door = MeshRoutedInventoryVerifier(meshID: mesh.meshID, ledger: verifier.ledger)
+        if let rejection = door.verify(payload) {
+            FernletAuditLog.log(
+                "mesh.routedDrain.rejected",
+                context: ["type": PayloadType.meshRoutedInventoryDigest.rawValue,
+                          "reason": rejection.rawValue]
+            )
+            return
+        }
+        // A digest describes the sender's own disk and nobody forwards one on its behalf.
+        guard payload.senderFingerprint == senderFingerprint else {
+            FernletAuditLog.log("mesh.routedDrain.rejected", context: ["reason": "senderMismatch"])
+            return
+        }
+        recordPeerRoutedInventory(payload, from: senderFingerprint)
+        answerRoutedInventory(from: senderFingerprint, advertisedAt: payload.sentAt, now: now)
+    }
+
+    /// Stores the peer's verified holdings, bounded by the roster cap.
+    private func recordPeerRoutedInventory(
+        _ payload: MeshRoutedInventoryPayload,
+        from senderFingerprint: String
+    ) {
+        guard peerRoutedInventories[senderFingerprint] != nil
+                || peerRoutedInventories.count < MeshMembershipBounds.maxRosterMembers else { return }
+        var state = peerRoutedInventories[senderFingerprint] ?? MeshRoutedPeerInventory()
+        state.inventory = payload.inventory
+        state.inventorySentAt = payload.sentAt
+        peerRoutedInventories[senderFingerprint] = state          // R3: bounded map
+    }
+
+    /// Plans the answer, records **both** quiescence halves, and puts the frames on the wire in one
+    /// `Task` in a fixed order: the answer bit, then manifests, then chunks, then receipts.
+    ///
+    /// A store that cannot say what it holds vends no plan, so this sends **nothing at all** — not an
+    /// empty answer, and certainly not a `quiescent: true` a deferred store cannot honestly claim.
+    private func answerRoutedInventory(from peer: String, advertisedAt: Date, now: Date) {
+        guard let planned = routedDrainPlan(for: peer, at: now) else { return }
+        recordLocalQuiescence(planned.quiescent, for: peer, asOf: advertisedAt)
+        Task { @MainActor [weak self] in
+            await self?.sendRoutedDrainAnswer(
+                to: peer, advertisedAt: advertisedAt, quiescent: planned.quiescent, now: now
+            )
+            await self?.sendRoutedDrainBatch(planned.plan, to: peer, now: now)
+        }
+    }
+
+    /// Records THIS device's own half of `converged(local:peerReportsQuiescent:)`, in the same pass
+    /// that minted the answer — so item 7's window rule is a pure read rather than a second
+    /// main-actor `load()` and comparison.
+    private func recordLocalQuiescence(_ quiescent: Bool, for peer: String, asOf: Date) {
+        guard var state = peerRoutedInventories[peer] else { return }
+        state.localQuiescent = quiescent
+        state.quiescentLocalAsOf = asOf
+        peerRoutedInventories[peer] = state
+    }
+
+    /// The peer's answer to an advertisement of ours: verified, **bound**, then recorded.
+    ///
+    /// Two bindings beyond the signature, both refusing in the fail-closed direction: the answer must
+    /// name **this device** as the advertiser, and must name an instant this device really
+    /// advertised. Without them a replayed `quiescent: true` closes a merge window that should still
+    /// be open. A bit that does not bind is logged and dropped, never recorded.
+    private func receiveRoutedDrainAnswer(
+        _ payload: MeshRoutedDrainAnswerPayload,
+        from senderFingerprint: String
+    ) {
+        guard let mesh = currentMesh, let verifier = membershipVerifier else { return }
+        let door = MeshRoutedDrainAnswerVerifier(meshID: mesh.meshID, ledger: verifier.ledger)
+        if let rejection = door.verify(payload) {
+            FernletAuditLog.log(
+                "mesh.routedDrain.rejected",
+                context: ["type": PayloadType.meshRoutedDrainAnswer.rawValue,
+                          "reason": rejection.rawValue]
+            )
+            return
+        }
+        guard payload.senderFingerprint == senderFingerprint,
+              payload.answer.advertiserFingerprint == identity.localFingerprint,
+              var state = peerRoutedInventories[senderFingerprint],
+              state.advertisedAt == payload.answer.advertisedAt else {
+            FernletAuditLog.log("mesh.merge.routedQuiescentUnbound", context: ["peer": "redacted"])
+            return
+        }
+        state.reportsQuiescent = payload.answer.quiescent
+        state.quiescentAsOf = payload.answer.advertisedAt
+        peerRoutedInventories[senderFingerprint] = state
+        FernletAuditLog.log(
+            "mesh.merge.routedQuiescent",
+            context: ["peerQuiescent": String(payload.answer.quiescent),
+                      "localQuiescent": String(state.localQuiescent)]
+        )
+    }
+
+    /// A peer's manifest: verified, gated to increment 1, admitted.
+    ///
+    /// The gate is `self ∈ destinations || sender == origin` — an item addressed to this device, or a
+    /// departing origin's hand-off. A third party's manifest is refused: without the clause any
+    /// admitted member could fill this device's caps with content nobody asked it to hold, and §6.1
+    /// would then mint a custody receipt for each. The second disjunct is not slack — a departure
+    /// custodian is not a destination, and the custody evidence cannot land until the record exists.
+    private func ingestRoutedManifest(_ payload: MeshRoutedManifestPayload, in context: RoutedIngestContext) {
+        let manifest = payload.manifest
+        let door = MeshRoutedManifestVerifier(
+            meshID: context.meshID, hardDeadline: context.hardDeadline, ledger: context.ledger,
+            acceptedTypeTokens: MeshRoutedAckStageTable.increment1.tokens
+        )
+        if let rejection = door.verify(manifest) {
+            FernletAuditLog.log(
+                "mesh.routedDrain.rejected",
+                context: ["type": PayloadType.meshRoutedManifest.rawValue, "reason": rejection.rawValue]
+            )
+            return
+        }
+        guard manifest.destinations.contains(identity.localFingerprint)
+                || context.sender == manifest.originFingerprint else {
+            FernletAuditLog.log(
+                "mesh.routedDrain.rejected", context: ["reason": "notADestinationOrHandoff"]
+            )
+            return
+        }
+        let key = MeshRoutedItemKey(manifest)
+        let outcome = routedStore().admittingManifest(manifest, now: context.now)
+        recordRoutedOutcome(outcome, type: .meshRoutedManifest, key: key, in: context)
+        guard let admission = outcome.value, admission.receivedCount == admission.expectedCount else {
+            return
+        }
+        finishLocalRungs(for: key, from: context.sender, now: context.now)
+    }
+
+    /// A peer's chunk: the manifest it belongs to (nil means "not seen yet", which is admissible and
+    /// parks the set), then verify, then stage.
+    ///
+    /// **D-6.16's second door.** For a KNOWN item the manifest gate has already run, so the chunk
+    /// inherits it. For an UNKNOWN one there is nothing to inherit and `MeshChunkVerifier` has no
+    /// manifest to bind against, so the retention clause is restated here: only the ORIGIN may park
+    /// a set on this device. Without it the harm the manifest door refuses — any admitted member
+    /// filling this device's caps with content nobody asked it to hold — is reachable through the
+    /// other door, one parked chunk set at a time.
+    private func ingestRoutedChunk(_ payload: MeshChunkPayload, in context: RoutedIngestContext) {
+        let chunk = payload.chunk
+        let key = MeshRoutedItemKey(chunk)
+        let store = routedStore()
+        let known = store.forwardableManifest(item: key)
+        guard case .completed(let manifest) = known else {
+            recordRoutedOutcome(known, type: .meshRoutedChunk, key: key, in: context)
+            return
+        }
+        guard manifest != nil || context.sender == chunk.originFingerprint else {
+            FernletAuditLog.log(
+                "mesh.routedDrain.rejected", context: ["reason": "unknownItemNotFromOrigin"]
+            )
+            return
+        }
+        let door = MeshChunkVerifier(
+            meshID: context.meshID, hardDeadline: context.hardDeadline,
+            ledger: context.ledger, manifest: manifest
+        )
+        if let rejection = door.verify(chunk) {
+            FernletAuditLog.log(
+                "mesh.routedDrain.rejected",
+                context: ["type": PayloadType.meshRoutedChunk.rawValue, "reason": rejection.rawValue]
+            )
+            return
+        }
+        let outcome = store.stagingChunk(chunk, now: context.now)
+        recordRoutedOutcome(
+            outcome, type: .meshRoutedChunk, key: key, in: context, verdict: RoutedDrainVerdict.of
+        )
+        guard let admission = outcome.value,
+              case .admitted(let received, let expected) = admission, received == expected else {
+            return
+        }
+        finishLocalRungs(for: key, from: context.sender, now: context.now)
+    }
+
+    /// A forwarded custody receipt: verified, then stored as **evidence only**. It advances no rung —
+    /// the drain was handed no hand-off decision and has no honest destination list to state.
+    private func ingestCustodyReceipt(
+        _ payload: MeshCustodyReceiptPayload, in context: RoutedIngestContext
+    ) {
+        let receipt = payload.receipt
+        let key = MeshRoutedItemKey(
+            originFingerprint: receipt.originFingerprint, itemID: receipt.itemID
+        )
+        let store = routedStore()
+        let known = store.forwardableManifest(item: key)
+        guard case .completed(let manifest) = known else {
+            recordRoutedOutcome(known, type: .meshCustodyReceipt, key: key, in: context)
+            return
+        }
+        let door = MeshCustodyReceiptVerifier(
+            meshID: context.meshID, hardDeadline: context.hardDeadline,
+            ledger: context.ledger, manifest: manifest
+        )
+        if let rejection = door.verify(receipt) {
+            FernletAuditLog.log(
+                "mesh.routedDrain.rejected",
+                context: ["type": PayloadType.meshCustodyReceipt.rawValue, "reason": rejection.rawValue]
+            )
+            return
+        }
+        let outcome = store.recordingCustodyEvidence(item: key, receipt: receipt, now: context.now)
+        recordRoutedOutcome(outcome, type: .meshCustodyReceipt, key: key, in: context)
+    }
+
+    /// A forwarded recipient receipt: verified, then filed through the store's **one** writer of a
+    /// `delivered` rung.
+    private func ingestRecipientReceipt(
+        _ payload: MeshRecipientReceiptPayload, in context: RoutedIngestContext
+    ) {
+        let receipt = payload.receipt
+        let key = MeshRoutedItemKey(
+            originFingerprint: receipt.originFingerprint, itemID: receipt.itemID
+        )
+        let store = routedStore()
+        let known = store.forwardableManifest(item: key)
+        guard case .completed(let manifest) = known else {
+            recordRoutedOutcome(known, type: .meshRecipientReceipt, key: key, in: context)
+            return
+        }
+        let door = MeshRecipientReceiptVerifier(
+            meshID: context.meshID, hardDeadline: context.hardDeadline,
+            ledger: context.ledger, manifest: manifest
+        )
+        if let rejection = door.verify(receipt) {
+            FernletAuditLog.log(
+                "mesh.routedDrain.rejected",
+                context: ["type": PayloadType.meshRecipientReceipt.rawValue, "reason": rejection.rawValue]
+            )
+            return
+        }
+        let outcome = store.recordingRecipientReceipt(item: key, receipt: receipt, now: context.now)
+        recordRoutedOutcome(
+            outcome, type: .meshRecipientReceipt, key: key, in: context,
+            verdict: RoutedDrainVerdict.of
+        )
+    }
+
+    /// The frozen-English name of what a store verb actually did, so an admission line distinguishes
+    /// a real admission from a duplicate or from an INNER refusal.
+    ///
+    /// `MeshRoutedOutcome.completed` means only "the door ran"; a `stagingChunk` that answers
+    /// `.completed(.refused(.conflictingChunk))` — a peer offering different bytes for a slot this
+    /// device already holds, which is an attack signal — is not an admission, and logging it as one
+    /// satisfies "no drop is unnamed" in letter only.
+    private nonisolated enum RoutedDrainVerdict {
+
+        /// A verb whose value carries no verdict of its own.
+        static let admitted = "admitted"
+
+        /// One chunk's verdict, including the inner refusal.
+        static func of(_ admission: MeshChunkAdmission) -> String {
+            switch admission {
+            case .admitted: return admitted
+            case .duplicate: return "duplicate"
+            case .refused(let refusal): return refusal.rawValue
+            }
+        }
+
+        /// One delivery-map write's verdict, including the inner refusal.
+        static func of(_ outcome: MeshDeliveryOutcome) -> String {
+            switch outcome {
+            case .updated: return admitted
+            case .refused(let refusal): return refusal.rawValue
+            }
+        }
+    }
+
+    /// Every store outcome is named: a drop with no line is the violation, and an admission line
+    /// carries the verdict BY NAME so an inner refusal cannot hide inside `.completed`.
+    ///
+    /// A CAPACITY refusal is additionally remembered — the key joins this peer's refused set so the
+    /// exchange stops re-asking for it, and ``lastRoutedDrainRefusal`` is the seam item 9 surfaces it
+    /// from. `deferred`, seal-`refused` and `corrupt` stay three distinct answers and change nothing:
+    /// deferred is never treated as empty, and quarantine is the store's own explicit call.
+    private func recordRoutedOutcome<Value>(
+        _ outcome: MeshRoutedOutcome<Value>,
+        type: PayloadType,
+        key: MeshRoutedItemKey,
+        in context: RoutedIngestContext,
+        verdict: (Value) -> String = { _ in RoutedDrainVerdict.admitted }
+    ) {
+        switch outcome {
+        case .completed(let value):
+            FernletAuditLog.log(
+                "mesh.routedDrain.admitted",
+                context: ["type": type.rawValue, "verdict": verdict(value)]
+            )
+        case .refused(let refusal):
+            FernletAuditLog.log(
+                "mesh.routedDrain.refused",
+                context: ["type": type.rawValue, "reason": refusal.rawValue]
+            )
+            guard Self.routedCapacityRefusals.contains(refusal) else { return }
+            noteRoutedCapacityRefusal(refusal, key: key, from: context.sender, at: context.now)
+        case .unavailable(let cause):
+            FernletAuditLog.log(
+                "mesh.routedDrain.unavailable",
+                context: ["type": type.rawValue, "state": cause.logToken]
+            )
+        }
+    }
+
+    /// The store refusals that mean "this device is full", as opposed to "this frame was wrong".
+    /// Only these narrow the entitlement set — a wrong frame corrects itself from the next inventory.
+    static let routedCapacityRefusals: Set<MeshRoutedStoreRefusal> = [
+        .capacityItems, .capacityBytes, .capacityChunkFiles, .capacityChunksPerItem,
+        .capacityReceipts, .capacityRecipientReceipts
+    ]
+
+    /// Remembers one capacity refusal so it neither re-fires nor stays invisible.
+    private func noteRoutedCapacityRefusal(
+        _ refusal: MeshRoutedStoreRefusal, key: MeshRoutedItemKey, from peer: String, at now: Date
+    ) {
+        lastRoutedDrainRefusal = MeshRoutedDrainRefusalNote(
+            peerFingerprint: peer, reason: refusal.rawValue, at: now
+        )
+        guard routedRefusedKeys[peer] != nil
+                || routedRefusedKeys.count < MeshMembershipBounds.maxRosterMembers else { return }
+        var keys = routedRefusedKeys[peer] ?? []
+        guard keys.contains(key) || keys.count < MeshRoutedInventoryFormat.maxEntries else {
+            FernletAuditLog.log("mesh.routedDrain.refusedSetFull", context: ["reason": refusal.rawValue])
+            return
+        }
+        keys.insert(key)
+        routedRefusedKeys[peer] = keys                                // R3: bounded map
+    }
+
+    /// An item just became complete on this device: take whichever rungs this device is entitled to,
+    /// then send the receipts back to the peer the bytes came from.
+    ///
+    /// **The drain has no verb of its own that writes a rung**: every rung comes from a
+    /// witness-gated commit door, and a witness's initializer is `fileprivate` to its own file.
+    ///
+    /// Guarded on the rungs still being outstanding, because "complete" is reached again by every
+    /// re-sent frame: `admittingManifest` re-admits a byte-identical manifest and answers
+    /// `received == expected`, so one cheap duplicate would otherwise re-open the seal key and
+    /// re-stream, re-decrypt and re-hash the whole item — up to 256 MiB, on the main actor — and
+    /// send two signed receipts back, none of it charged to the peer's frame budget.
+    private func finishLocalRungs(for key: MeshRoutedItemKey, from peer: String, now: Date) {
+        guard case .completed(let held) = routedStore().forwardableManifest(item: key),
+              let manifest = held else { return }
+        guard routedRungsOutstanding(for: key, manifest: manifest) else { return }
+        let custody = commitLocalCustody(for: key, manifest: manifest, now: now)
+        let recipient = commitLocalDelivery(for: key, manifest: manifest, now: now)
+        guard custody != nil || recipient != nil else { return }
+        Task { @MainActor [weak self] in
+            await self?.sendMintedReceipts(custody: custody, recipient: recipient, to: peer)
+        }
+    }
+
+    /// Whether either rung this device could take for `key` is still outstanding.
+    ///
+    /// A store that cannot say what it holds answers **true**: the fail-closed direction here is to
+    /// re-do bounded work, never to skip a rung. A held item whose custody rung is taken and whose
+    /// own recipient receipt is filed has nothing left to take, so a duplicate frame is a no-op.
+    private func routedRungsOutstanding(
+        for key: MeshRoutedItemKey, manifest: MeshRoutedManifest
+    ) -> Bool {
+        guard let record = routedIndexForAdvertising()?.record(for: key) else { return true }
+        guard record.custodiedAt != nil else { return true }
+        let me = identity.localFingerprint
+        guard manifest.destinations.contains(me) else { return false }
+        return record.recipientReceipts.contains { $0.recipientFingerprint == me } == false
+    }
+
+    /// This device's own custody receipt, minted only when it has an honest claim to be holding the
+    /// item: it is one of the origin's signed destinations, or a hand-off already named it custodian.
+    ///
+    /// Otherwise the ciphertext is **held, not claimed** — one line, no receipt, no `custodiedAt`.
+    /// Minting a custody receipt for content nobody handed this device is the receipt saying
+    /// something untrue. Own items are skipped: an origin is never its own custodian.
+    private func commitLocalCustody(
+        for key: MeshRoutedItemKey, manifest: MeshRoutedManifest, now: Date
+    ) -> MeshCustodyReceipt? {
+        let me = identity.localFingerprint
+        guard key.originFingerprint != me else { return nil }
+        guard manifest.destinations.contains(me) || holdsHandedOffLeg(of: key, as: me) else {
+            FernletAuditLog.log(
+                "mesh.routedDrain.heldWithoutCustodyClaim",
+                context: ["type": manifest.typeToken]
+            )
+            return nil
+        }
+        let outcome = routedStore().committingCustody(item: key, custodian: me, now: now)
+        guard case .completed(.committed(let witness)) = outcome else {
+            FernletAuditLog.log("mesh.routedDrain.custodyNotCommitted", context: ["type": manifest.typeToken])
+            return nil
+        }
+        do {
+            return try MeshCustodyReceipt.signed(witness: witness, manifest: manifest, identity: identity)
+        } catch {
+            FernletAuditLog.log(
+                "mesh.routedDrain.signFailed",
+                context: ["type": PayloadType.meshCustodyReceipt.rawValue,
+                          "error": String(describing: error)]
+            )
+            return nil
+        }
+    }
+
+    /// Whether some destination's leg of `key` was explicitly handed to this device at a departure.
+    /// Item 8 is what writes that rung; in item 6 nothing shipping does, which is exactly the
+    /// increment-1 line.
+    private func holdsHandedOffLeg(of key: MeshRoutedItemKey, as me: String) -> Bool {
+        guard let target = routedIndexForAdvertising()?.record(for: key)?.deliveryTarget else {
+            return false
+        }
+        // R2: bounded by the destination cap.
+        return target.destinations.contains { target.state(of: $0) == .custodied(by: me) }
+    }
+
+    /// This device's own recipient receipt, when it is a destination and the type's final-ack
+    /// condition is met. A heart without foreground evidence stops at `custodied(by: self)` — the
+    /// correct terminal-for-now state — and the drain never fakes foregroundness.
+    private func commitLocalDelivery(
+        for key: MeshRoutedItemKey, manifest: MeshRoutedManifest, now: Date
+    ) -> MeshRecipientReceipt? {
+        let me = identity.localFingerprint
+        guard manifest.destinations.contains(me) else { return nil }
+        let store = routedStore()
+        let outcome = store.committingDelivery(
+            item: key, recipient: me, stages: .increment1, evidence: .none, now: now
+        )
+        guard case .completed(let commit) = outcome else { return nil }
+        guard case .acknowledged(let witness) = commit else {
+            if case .unsatisfied(let shortfall) = commit {
+                FernletAuditLog.log(
+                    "mesh.routedDrain.deliveryPending",
+                    context: ["shortfall": shortfall.diagnosticDescription]
+                )
+            }
+            return nil
+        }
+        return storedRecipientReceipt(witness: witness, manifest: manifest, key: key, now: now)
+    }
+
+    /// Mints this device's recipient receipt and files it through the one rung writer. A receipt that
+    /// could not be stored is not returned: nothing is acknowledged for state a restart would lose.
+    private func storedRecipientReceipt(
+        witness: MeshRecipientDeliveryWitness,
+        manifest: MeshRoutedManifest,
+        key: MeshRoutedItemKey,
+        now: Date
+    ) -> MeshRecipientReceipt? {
+        do {
+            let receipt = try MeshRecipientReceipt.signed(
+                witness: witness, manifest: manifest, identity: identity
+            )
+            let stored = routedStore().recordingRecipientReceipt(item: key, receipt: receipt, now: now)
+            guard stored.value != nil else {
+                FernletAuditLog.log("mesh.routedDrain.receiptNotStored", context: ["type": manifest.typeToken])
+                return nil
+            }
+            return receipt
+        } catch {
+            FernletAuditLog.log(
+                "mesh.routedDrain.signFailed",
+                context: ["type": PayloadType.meshRecipientReceipt.rawValue,
+                          "error": String(describing: error)]
+            )
+            return nil
+        }
+    }
+
+    /// Sends whichever receipts this device just minted, to the peer the content came from — at most
+    /// two frames. The origin learns the rest through the receipt forwarding of the next exchange;
+    /// pushing to anyone else here would be a send on a link that did not just open.
+    private func sendMintedReceipts(
+        custody: MeshCustodyReceipt?, recipient: MeshRecipientReceipt?, to peer: String
+    ) async {
+        if let custody {
+            await broadcastMembershipFrame(
+                .meshCustodyReceipt, MeshCustodyReceiptPayload(receipt: custody), to: [peer]
+            )
+        }
+        if let recipient {
+            await broadcastMembershipFrame(
+                .meshRecipientReceipt, MeshRecipientReceiptPayload(receipt: recipient), to: [peer]
+            )
+        }
+    }
+
+    /// The keys this device may move to `peer`: item 5's entitlement source 1, narrowed to what
+    /// increment 1 permits and to what this peer has not already refused.
+    ///
+    /// Deliberately **not** routed through `outstandingReachable`/`outstandingUnreachable`: those take
+    /// a `MeshBranchView`, so entitlement would silently empty whenever no branch view is raised.
+    /// `outstandingItems(at:in:)` is plan §11's "destinations lacking a `MeshRecipientReceipt`",
+    /// partition-agnostic by construction.
+    private func offerableKeys(
+        to peer: String, in index: MeshRoutedIndex, at now: Date
+    ) -> Set<MeshRoutedItemKey> {
+        guard let roster = membershipVerifier?.roster else { return [] }
+        let refs = index.outstandingItems(at: now, in: roster)[peer] ?? []
+        var keys = Set(refs.lazy
+            .filter { $0.receivedCount == Int($0.chunkCount) }
+            .filter { self.mayCourier($0.key, to: peer, in: index) }
+            .map(\.key))
+        // Item 8 unions entitlement source 2 here — `itemsAwaitingHandoff(at:in:)` when `peer` is one
+        // of `MeshDevelopmentPlan.handoffTargets`. One place to widen; item 6 adds no speculative
+        // plumbing for it.
+        keys.subtract(routedRefusedKeys[peer] ?? [])
+        return keys
+    }
+
+    /// Increment 1's entitlement line, stated once: the origin's own item, or a destination's leg
+    /// this device was **handed at a departure**. Never "this device happens to hold the ciphertext".
+    ///
+    /// `isCustodied` is not that line: it goes true at **every** non-origin receiver, destinations
+    /// included, so `origin == self || isCustodied` would make every destination a live third-party
+    /// relay for its co-destinations — increment 2 wearing increment 1's name. The rung
+    /// `custodied(by: self)` is written by exactly one door, `recordingCustodyTransfer`, which no
+    /// shipping code in item 6 calls: so item 6's only entitled offerer is an origin, and item 8
+    /// widens the SOURCE of the rung rather than this predicate.
+    private func mayCourier(_ key: MeshRoutedItemKey, to peer: String, in index: MeshRoutedIndex) -> Bool {
+        if key.originFingerprint == identity.localFingerprint { return true }
+        guard let target = index.record(for: key)?.deliveryTarget else { return false }
+        return target.state(of: peer) == .custodied(by: identity.localFingerprint)
+    }
+
+    /// The batch this exchange with `peer` may send, and this device's own quiescence bit.
+    ///
+    /// Returns **nil** whenever the store does not vend an index, which is what makes a non-advertising
+    /// store send no answer frame at all rather than skipping the bulk inside one.
+    private func routedDrainPlan(
+        for peer: String, at now: Date
+    ) -> (plan: MeshRoutedDrainPlan, quiescent: Bool)? {
+        guard let mesh = currentMesh,
+              let remote = peerRoutedInventories[peer]?.inventory,
+              let index = routedIndexForAdvertising() else { return nil }
+        guard let local = MeshRoutedInventory(
+            meshID: mesh.meshID, index: index, selfFingerprint: identity.localFingerprint, at: now
+        ) else {
+            FernletAuditLog.log("mesh.routedDrain.inventoryOverCap")
+            return nil
+        }
+        guard let delta = MeshRoutedInventoryDelta.between(
+            local: local, remote: remote, offerableToPeer: offerableKeys(to: peer, in: index, at: now)
+        ) else {
+            FernletAuditLog.log("mesh.routedDrain.foreignMeshDelta")
+            return nil
+        }
+        noteUnrestorableDeliveries(index, at: now)
+        let bounds = MeshRoutedDrainBounds.increment1
+        let plan = MeshRoutedDrainPlan(
+            delta: delta, refused: routedRefusedKeys[peer] ?? [], bounds: bounds,
+            frameAllowance: min(bounds.maxFrames, routedFramesRemaining(for: peer))
+        )
+        return (plan, delta.isQuiescent)
+    }
+
+    /// Held ciphertext whose own delivery map will not restore is invisible to every outstanding
+    /// enumerator, so it is **named** once per answer rather than silently dropped. Repair, cap
+    /// accounting and any user-visible surface are item 9's.
+    private func noteUnrestorableDeliveries(_ index: MeshRoutedIndex, at now: Date) {
+        let stranded = index.itemsWithUnrestorableDelivery(at: now).count
+        guard stranded > 0 else { return }
+        FernletAuditLog.log(
+            "mesh.routedDrain.deliveryUnrestorable", context: ["items": String(stranded)]
+        )
+    }
+
+    /// Sends the quiescence bit for one advertisement. Signed, because an unsigned bit would let any
+    /// peer close item 7's merge window early.
+    private func sendRoutedDrainAnswer(
+        to peer: String, advertisedAt: Date, quiescent: Bool, now: Date
+    ) async {
+        guard let mesh = currentMesh else { return }
+        do {
+            let payload = try MeshRoutedDrainAnswerPayload.signed(
+                meshID: mesh.meshID, advertiser: peer, advertisedAt: advertisedAt,
+                quiescent: quiescent, sentAt: now, identity: identity
+            )
+            await broadcastMembershipFrame(.meshRoutedDrainAnswer, payload, to: [peer])
+        } catch {
+            FernletAuditLog.log(
+                "mesh.routedDrain.signFailed",
+                context: ["type": PayloadType.meshRoutedDrainAnswer.rawValue,
+                          "error": String(describing: error)]
+            )
+        }
+    }
+
+    /// Puts one planned batch on the wire, charging the peer's session frame budget **first**.
+    ///
+    /// The check-and-charge is this function's first statement, before its first `await`, because a
+    /// pump can deliver two of a peer's inventories synchronously: both are planned before either
+    /// `Task` body runs, so a charge that landed after the sends would double-spend. A batch that no
+    /// longer fits is refused whole and re-planned at the next exchange.
+    private func sendRoutedDrainBatch(
+        _ plan: MeshRoutedDrainPlan, to peer: String, now: Date
+    ) async {
+        guard plan.frameCount > 0 else { return }
+        guard chargeRoutedFrames(plan.frameCount, to: peer) else {
+            FernletAuditLog.log(
+                "mesh.merge.routedAnswerBudgetSpent",
+                context: ["left": String(routedFramesRemaining(for: peer))]
+            )
+            return
+        }
+        if plan.truncated {
+            FernletAuditLog.log(
+                "mesh.merge.routedAnswerTruncated", context: ["frames": String(plan.frameCount)]
+            )
+        }
+        // Manifests before chunks: a chunk before its manifest is admissible and parked, but the
+        // reverse costs nothing and un-parks the peer's set at once.
+        await sendRoutedManifests(plan.manifests, to: peer)
+        await sendRoutedChunks(plan.chunks, to: peer)
+        await sendRoutedReceipts(plan.receipts, to: peer, now: now)
+        FernletAuditLog.log(
+            "mesh.merge.routedAnswered",
+            context: ["manifests": String(plan.manifests.count),
+                      "chunks": String(plan.chunks.count),
+                      "receipts": String(plan.receipts.count),
+                      "framesLeft": String(routedFramesRemaining(for: peer))]
+        )
+    }
+
+    /// Forwards the origin's stored manifests, byte-identical. A parked or unknown item is skipped
+    /// with a named line — never a synthesised value.
+    private func sendRoutedManifests(_ keys: [MeshRoutedItemKey], to peer: String) async {
+        let store = routedStore()
+        // R2: bounded by `MeshRoutedDrainBounds.increment1.maxItems`.
+        for key in keys.prefix(MeshRoutedDrainBounds.increment1.maxItems) {
+            switch store.forwardableManifest(item: key) {
+            case .completed(let manifest):
+                guard let manifest else {
+                    FernletAuditLog.log("mesh.routedDrain.offerSkipped", context: ["reason": "parked"])
+                    continue
+                }
+                await broadcastMembershipFrame(
+                    .meshRoutedManifest, MeshRoutedManifestPayload(manifest: manifest), to: [peer]
+                )
+            case .refused(let refusal):
+                FernletAuditLog.log("mesh.routedDrain.offerSkipped", context: ["reason": refusal.rawValue])
+            case .unavailable(let cause):
+                FernletAuditLog.log("mesh.routedDrain.unavailable", context: ["state": cause.logToken])
+                return
+            }
+        }
+    }
+
+    /// Forwards the origin's stored chunks, one resident at a time. A slot the store can no longer
+    /// stand behind is skipped: the repair it triggers corrects the next advertisement.
+    private func sendRoutedChunks(_ sends: [MeshRoutedDrainChunkSend], to peer: String) async {
+        let store = routedStore()
+        let bound = MeshRoutedDrainBounds.increment1.maxChunksPerAnswer
+        // R2: bounded by the per-answer chunk allowance.
+        for send in sends.prefix(bound) {
+            // R2: bounded by the per-item chunk allowance.
+            for index in send.indices.prefix(bound) {
+                switch store.forwardableChunk(item: send.key, index: index) {
+                case .completed(let chunk):
+                    guard let chunk else {
+                        FernletAuditLog.log("mesh.routedDrain.offerSkipped", context: ["reason": "slotNotHeld"])
+                        continue
+                    }
+                    await broadcastMembershipFrame(
+                        .meshRoutedChunk, MeshChunkPayload(chunk: chunk), to: [peer]
+                    )
+                case .refused(let refusal):
+                    FernletAuditLog.log("mesh.routedDrain.offerSkipped", context: ["reason": refusal.rawValue])
+                case .unavailable(let cause):
+                    FernletAuditLog.log("mesh.routedDrain.unavailable", context: ["state": cause.logToken])
+                    return
+                }
+            }
+        }
+    }
+
+    /// Forwards receipts verbatim, one frame each.
+    ///
+    /// Three cases, and only the third is not a forward: this device's OWN custody receipt is never
+    /// stored (a record holds other members' only), so it is **re-minted** from the durable bytes —
+    /// byte-identically, because the commit re-uses the stored `custodiedAt`. A re-mint that no
+    /// longer succeeds means this device no longer holds what it advertised: log, send nothing.
+    private func sendRoutedReceipts(
+        _ refs: [MeshRoutedInventoryReceiptRef], to peer: String, now: Date
+    ) async {
+        let store = routedStore()
+        // R2: bounded by `MeshRoutedDrainBounds.increment1.maxReceipts`.
+        for ref in refs.prefix(MeshRoutedDrainBounds.increment1.maxReceipts) {
+            if ref.kind == .recipient {
+                let held = store.forwardableRecipientReceipts(item: ref.key).value ?? []
+                guard let receipt = held.first(where: { $0.recipientFingerprint == ref.signer }) else {
+                    FernletAuditLog.log("mesh.routedDrain.receiptSkipped", context: ["kind": ref.kind.rawValue])
+                    continue
+                }
+                await broadcastMembershipFrame(
+                    .meshRecipientReceipt, MeshRecipientReceiptPayload(receipt: receipt), to: [peer]
+                )
+                continue
+            }
+            guard let receipt = custodyReceiptToForward(ref, in: store, now: now) else { continue }
+            await broadcastMembershipFrame(
+                .meshCustodyReceipt, MeshCustodyReceiptPayload(receipt: receipt), to: [peer]
+            )
+        }
+    }
+
+    /// The custody receipt a reference names: another member's stored bytes, or — when the signer is
+    /// this device — a re-mint from the durable ciphertext.
+    private func custodyReceiptToForward(
+        _ ref: MeshRoutedInventoryReceiptRef, in store: MeshRoutedStore, now: Date
+    ) -> MeshCustodyReceipt? {
+        guard ref.signer == identity.localFingerprint else {
+            let held = store.forwardableCustodyReceipts(item: ref.key).value ?? []
+            guard let receipt = held.first(where: { $0.custodianFingerprint == ref.signer }) else {
+                FernletAuditLog.log("mesh.routedDrain.receiptSkipped", context: ["kind": ref.kind.rawValue])
+                return nil
+            }
+            return receipt
+        }
+        switch store.forwardableManifest(item: ref.key) {
+        case .completed(let held):
+            guard let manifest = held else {
+                FernletAuditLog.log(
+                    "mesh.routedDrain.receiptSkipped",
+                    context: ["kind": ref.kind.rawValue, "reason": "parked"]
+                )
+                return nil
+            }
+            return commitLocalCustody(for: ref.key, manifest: manifest, now: now)
+        case .refused(let refusal):
+            FernletAuditLog.log(
+                "mesh.routedDrain.receiptSkipped",
+                context: ["kind": ref.kind.rawValue, "reason": refusal.rawValue]
+            )
+            return nil
+        case .unavailable(let cause):
+            FernletAuditLog.log("mesh.routedDrain.unavailable", context: ["state": cause.logToken])
+            return nil
+        }
+    }
 
     /// Broadcasts a freshly minted admission record to the members that were NOT part of minting
     /// it, so a joiner appears on every member's derived roster.
@@ -3089,6 +4143,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         Task { @MainActor [weak self] in
             await self?.sendInventoryDigest(to: [peer])
             await self?.sendEpochHeads(to: [peer])
+            await self?.sendRoutedInventory(to: [peer])
         }
     }
 
@@ -5583,7 +6638,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Its reply is the bounded record re-gossip, and `MeshLedgerAdoption` rebases this device's
         // provisional root onto the mesh's real founder when it arrives.
         if let fingerprint = slot?.fingerprint {
-            Task { @MainActor [weak self] in await self?.sendInventoryDigest(to: [fingerprint]) }
+            Task { @MainActor [weak self] in
+                await self?.sendInventoryDigest(to: [fingerprint])
+                // A joiner's routed store is `.absent`, and saying so is what lets the admitter
+                // offer it anything at all — the drain is push-only (item 6).
+                await self?.sendRoutedInventory(to: [fingerprint])
+            }
         }
     }
 
@@ -7085,6 +8145,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// same symptom — and only the second is §10.5's own bound rather than a lost frame.
     var reGossipDiagnosticsForTesting: (answered: Set<String>, slots: Int) {
         (reGossipedToFingerprints, activeSlots.count)
+    }
+
+    /// The bulk frames charged to each peer this session — D-6.5's per-peer budget.
+    ///
+    /// Readable so a suite can pin that the charge equals the frames actually sent (a budget nothing
+    /// reads is a budget that can be deleted silently), and writable so "a peer whose budget is
+    /// spent still gets the inventory and the answer bit" can be driven in one exchange rather than
+    /// by sending a thousand real frames.
+    var routedDrainFramesSpentForTesting: [String: Int] {
+        get { routedDrainFramesSpent }
+        set { routedDrainFramesSpent = newValue }
     }
 
     /// The ref a member re-derives from the two values a rotation frame carries. It is the
