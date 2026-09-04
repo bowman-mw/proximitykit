@@ -130,6 +130,14 @@ nonisolated enum MeshRoutedStoreRefusal: String, CaseIterable, Equatable, Sendab
     case chunkFileMismatch
     /// The item's evidence set already holds ``MeshRoutedStoreFormat/maxReceiptsPerItem`` receipts.
     case capacityReceipts
+    /// The item's RECIPIENT-receipt evidence set already holds
+    /// ``MeshRoutedStoreFormat/maxReceiptsPerItem`` receipts (P5 item 4). Its own token beside
+    /// ``capacityReceipts``: two evidence arrays with two signer roles want two log tokens.
+    case capacityRecipientReceipts
+    /// The item's origin-signed type token is one the caller's stage table does not know (P5 item
+    /// 4). Plan §11's "unknown type tokens are rejected, not forwarded", answered at the ack seam:
+    /// nothing is acknowledged and nothing is written.
+    case unknownTypeToken
 
     /// Frozen English for the diagnostic surface. Never shown as user copy.
     var diagnosticDescription: String {
@@ -147,6 +155,8 @@ nonisolated enum MeshRoutedStoreRefusal: String, CaseIterable, Equatable, Sendab
         case .notADestination: return "The named destination is not in the item's signed manifest."
         case .chunkFileMismatch: return "A stored chunk file does not match the descriptor holding its slot."
         case .capacityReceipts: return "The item's custody-receipt evidence set is full."
+        case .capacityRecipientReceipts: return "The item's recipient-receipt evidence set is full."
+        case .unknownTypeToken: return "The item's type token is not one this build's stage table knows."
         }
     }
 }
@@ -421,7 +431,8 @@ nonisolated extension MeshRoutedStore {
         var record = existing ?? MeshRoutedItemRecord(
             key: MeshRoutedItemKey(manifest), contentHash: manifest.contentHash,
             chunkCount: UInt32(derivedCount), expiresAt: manifest.expiresAt, manifest: nil,
-            firstSeenAt: now, custodiedAt: nil, chunks: [], delivery: nil, receipts: []
+            firstSeenAt: now, custodiedAt: nil, deliveredAt: nil, chunks: [], delivery: nil,
+            receipts: [], recipientReceipts: []
         )
         record.manifest = manifest
         if record.delivery == nil {
@@ -595,7 +606,7 @@ nonisolated extension MeshRoutedStore {
         var record = existing ?? MeshRoutedItemRecord(
             key: key, contentHash: chunk.contentHash, chunkCount: chunk.chunkCount,
             expiresAt: chunk.expiresAt, manifest: nil, firstSeenAt: now, custodiedAt: nil,
-            chunks: [], delivery: nil, receipts: []
+            deliveredAt: nil, chunks: [], delivery: nil, receipts: [], recipientReceipts: []
         )
         record.chunks.append(descriptor)
         record.chunks.sort { $0.descriptor.chunkIndex < $1.descriptor.chunkIndex }

@@ -205,6 +205,13 @@ private nonisolated let canonicalMeshRoutedChunkDomain = FernletCryptoPurpose.Si
 // under the wrong key.
 private nonisolated let canonicalMeshCustodyReceiptDomain =
     FernletCryptoPurpose.Signature.meshCustodyReceiptV1.data
+// P5 item 4 (plan §11, §3.6): a destination's statement that one item reached it, finally. Its own
+// domain, distinct from the custody receipt's, because the two receipts are the same shape with two
+// signer roles — a signature satisfying both would let "it reached me" be replayed as "I am holding
+// it", under the wrong key, and that is precisely the custody-is-not-delivery distinction plan §11
+// requires in every surface.
+private nonisolated let canonicalMeshRecipientReceiptDomain =
+    FernletCryptoPurpose.Signature.meshRecipientReceiptV1.data
 
 // MARK: - Identity envelope
 
@@ -629,6 +636,31 @@ nonisolated func canonicalBytes(for receipt: MeshCustodyReceipt) -> Data {
     writer.appendLengthPrefixed(receipt.contentHash)
     writer.appendString(receipt.custodianFingerprint)
     writer.appendDate(receipt.custodiedAt)
+    writer.appendDate(receipt.expiresAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshRecipientReceipt`` — a destination's statement that one
+/// routed item reached it, finally (plan §11, P5 item 4). **Field order IS the schema**: identity
+/// first (mesh, item, the item's ORIGIN), then the content hash, then the RECIPIENT, then the two
+/// instants — the custody receipt's layout with the signer's role changed, under its own domain.
+///
+/// The origin and the recipient are two different fingerprints in two fixed positions, so a receipt
+/// cannot be re-read as being about the signer's own item, and one lifted onto another origin's item
+/// fails the signature. There is no ack STAGE — what made the item final is resolved from the
+/// origin-signed type token, never signed by the recipient — and no chunk index or partial count: a
+/// recipient receipt is whole-item, one per `(recipient, item)`. The `signature` is excluded as ever.
+/// Signed by the recipient only; relays forward these exact fields and never re-derive them.
+nonisolated func canonicalBytes(for receipt: MeshRecipientReceipt) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshRecipientReceiptDomain)
+    writer.appendUUID(receipt.meshID)
+    writer.appendUUID(receipt.itemID)
+    writer.appendString(receipt.originFingerprint)
+    writer.appendLengthPrefixed(receipt.contentHash)
+    writer.appendString(receipt.recipientFingerprint)
+    writer.appendDate(receipt.receivedAt)
     writer.appendDate(receipt.expiresAt)
     // signature: deliberately excluded.
     return writer.bytes

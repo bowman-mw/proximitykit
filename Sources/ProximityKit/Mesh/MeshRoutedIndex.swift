@@ -38,9 +38,15 @@ import FernletFoundation
 /// A file this build does not own is refused **as a whole**, never partially reinterpreted, and
 /// lands in `corrupt`, never `absent`. Older is corrupt, not migrated, and the justification is
 /// temporal and true today: no build that wrote an older version ever ran on a device.
+///
+/// P5 item 4 moved it 1 → **2** for the two durable fields a final acknowledgement needs
+/// (``MeshRoutedItemRecord/deliveredAt`` and ``MeshRoutedItemRecord/recipientReceipts``). Adding
+/// them under schema 1 would have created an undeclared schema-1 variant: an item-3 build loading an
+/// item-4 index would silently drop both on its next save, quietly losing acknowledged state, which
+/// is plan §3.6 inverted and exactly what "refused as a whole" exists to prevent.
 nonisolated enum MeshRoutedIndexSchema {
     /// The version this build writes and the only version it reads.
-    static let current = 1
+    static let current = 2
     /// Frozen English at-rest token — the same spelling as the sealing purpose
     /// (`KeyDerivation.meshRoutedStoreV1`), so the file's format and its key derivation are one
     /// vocabulary. Never localized, never displayed.
@@ -99,7 +105,8 @@ nonisolated enum MeshRoutedIndexDecodingError: Error, Equatable, Sendable {
     /// The blob decoded, but its `schemaVersion` is not ``MeshRoutedIndexSchema/current``.
     case unsupportedSchemaVersion(Int)
     /// A cap this build owns was exceeded by bytes already on disk. Carries the cap's frozen
-    /// English name: `items`, `chunksPerItem`, `receiptsPerItem`, `contentBytes` or `chunkFiles`.
+    /// English name: `items`, `chunksPerItem`, `receiptsPerItem`, `recipientReceiptsPerItem`,
+    /// `contentBytes` or `chunkFiles`.
     ///
     /// A refusal rather than a clamp, on purpose: these are OUR durable records, and clamping one
     /// away silently drops an item whose chunk files stay on disk as orphans.
@@ -314,6 +321,15 @@ nonisolated struct MeshRoutedItemRecord: Codable, Equatable, Sendable {
     /// byte-identical; nil ⇒ no witness may exist. **Cleared** by any repair that drops a
     /// descriptor: the item is no longer complete, so the durable claim behind a witness is gone.
     var custodiedAt: Date?
+    /// The instant the index write that FIRST recorded THIS DEVICE's final ack returned, floored
+    /// (P5 item 4).
+    ///
+    /// Written **once** and re-used by every later ``MeshRecipientDeliveryWitness``, so a re-mint's
+    /// canonical bytes are byte-identical; nil ⇒ no delivery witness may exist. Unlike
+    /// ``custodiedAt`` it is **not cleared by a repair**: custody asserts bytes we still hold, while
+    /// this records an acknowledgement already given — plan §11's final ack is a fact, and
+    /// `MeshDeliveryState.delivered` is terminal.
+    var deliveredAt: Date?
     /// The held chunks, ordered by `chunkIndex`, at most ``MeshRoutedStoreFormat/maxChunksPerItem``.
     var chunks: [MeshRoutedChunkDescriptor]
     /// The persisted delivery map. Present **iff** ``manifest`` is.
@@ -326,6 +342,16 @@ nonisolated struct MeshRoutedItemRecord: Codable, Equatable, Sendable {
     /// (plan §3.2: receipts are union records). This device's OWN receipt is never stored: it is
     /// re-minted from the witness.
     var receipts: [MeshCustodyReceipt]
+    /// Recipient receipts for this item — peers' AND this device's own — ordered by
+    /// `recipientFingerprint`, at most ``MeshRoutedStoreFormat/maxReceiptsPerItem`` (P5 item 4).
+    ///
+    /// The EVIDENCE behind ``delivery``'s `delivered` entries, stored verbatim so a peer is handed
+    /// the signer's own bytes (plan §3.2's union records). This device's own receipt **is** stored,
+    /// which is the deliberate difference from ``receipts``: a custody claim is re-measurable from
+    /// the bytes on disk forever, while a heart's final-ack condition is a one-shot ledger judgement
+    /// the ledger will refuse to repeat, so a design that re-derived would either strand hearts or
+    /// need a second, weaker mint.
+    var recipientReceipts: [MeshRecipientReceipt]
 
     /// Builds a record field by field. The store's verbs are the only production callers.
     init(
@@ -336,9 +362,11 @@ nonisolated struct MeshRoutedItemRecord: Codable, Equatable, Sendable {
         manifest: MeshRoutedManifest?,
         firstSeenAt: Date,
         custodiedAt: Date?,
+        deliveredAt: Date?,
         chunks: [MeshRoutedChunkDescriptor],
         delivery: MeshRoutedDeliveryRecord?,
-        receipts: [MeshCustodyReceipt]
+        receipts: [MeshCustodyReceipt],
+        recipientReceipts: [MeshRecipientReceipt]
     ) {
         self.key = key
         self.contentHash = contentHash
@@ -347,21 +375,34 @@ nonisolated struct MeshRoutedItemRecord: Codable, Equatable, Sendable {
         self.manifest = manifest
         self.firstSeenAt = MeshRoutedManifest.floored(firstSeenAt)
         self.custodiedAt = custodiedAt.map(MeshRoutedManifest.floored)
+        self.deliveredAt = deliveredAt.map(MeshRoutedManifest.floored)
         self.chunks = chunks
         self.delivery = delivery
         self.receipts = receipts
+        self.recipientReceipts = recipientReceipts
     }
 
     /// Decodes a record, **refusing** — never clamping — an at-rest collection over its cap.
+    ///
+    /// The two P5 item 4 fields decode differently, on purpose. ``recipientReceipts`` is
+    /// **hard-decoded**, beside its two sibling arrays: a `decodeIfPresent` array would admit a
+    /// schema-2 record with the key missing as "no receipts held", which re-opens *inside* schema 2
+    /// the partial reinterpretation the 1 → 2 bump was spent to close. ``deliveredAt`` keeps
+    /// `decodeIfPresent`, mirroring ``custodiedAt`` — it is a genuine `Date?`, and "absent" and "nil"
+    /// are the same fact for it.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let storedChunks = try container.decode([MeshRoutedChunkDescriptor].self, forKey: .chunks)
         let storedReceipts = try container.decode([MeshCustodyReceipt].self, forKey: .receipts)
+        let storedAcks = try container.decode([MeshRecipientReceipt].self, forKey: .recipientReceipts)
         guard storedChunks.count <= MeshRoutedStoreFormat.maxChunksPerItem else {
             throw MeshRoutedIndexDecodingError.capacityExceeded("chunksPerItem")
         }
         guard storedReceipts.count <= MeshRoutedStoreFormat.maxReceiptsPerItem else {
             throw MeshRoutedIndexDecodingError.capacityExceeded("receiptsPerItem")
+        }
+        guard storedAcks.count <= MeshRoutedStoreFormat.maxReceiptsPerItem else {
+            throw MeshRoutedIndexDecodingError.capacityExceeded("recipientReceiptsPerItem")
         }
         self.init(
             key: try container.decode(MeshRoutedItemKey.self, forKey: .key),
@@ -371,9 +412,11 @@ nonisolated struct MeshRoutedItemRecord: Codable, Equatable, Sendable {
             manifest: try container.decodeIfPresent(MeshRoutedManifest.self, forKey: .manifest),
             firstSeenAt: try container.decode(Date.self, forKey: .firstSeenAt),
             custodiedAt: try container.decodeIfPresent(Date.self, forKey: .custodiedAt),
+            deliveredAt: try container.decodeIfPresent(Date.self, forKey: .deliveredAt),
             chunks: storedChunks,
             delivery: try container.decodeIfPresent(MeshRoutedDeliveryRecord.self, forKey: .delivery),
-            receipts: storedReceipts
+            receipts: storedReceipts,
+            recipientReceipts: storedAcks
         )
     }
 
@@ -393,6 +436,21 @@ nonisolated struct MeshRoutedItemRecord: Codable, Equatable, Sendable {
     /// Whether a durable custody commit has succeeded and not been undone by a repair.
     var isCustodied: Bool { custodiedAt != nil }
 
+    /// Whether this device has written its own durable final-ack record for the item.
+    ///
+    /// It means exactly that, and the natural misreadings are the dangerous ones. It is **not**
+    /// "this device's receipt is stored" — the window between the ack write and the receipt landing
+    /// is `true` here with no receipt, and ``MeshRoutedIndex/itemsAwaitingLocalAck(at:for:)`` is what
+    /// names it. And it is emphatically **not** "the content has been consumed and the item is safe
+    /// to drop": anything reclaiming content reads
+    /// ``MeshRoutedIndex/itemsReclaimableAsCustodian(at:in:for:)``.
+    var isDeliveredLocally: Bool { deliveredAt != nil }
+
+    /// The stored recipient receipt signed by `fingerprint`, or nil.
+    func recipientReceipt(from fingerprint: String) -> MeshRecipientReceipt? {
+        recipientReceipts.first { $0.recipientFingerprint == fingerprint }
+    }
+
     /// Whether this item is chunks without a manifest.
     var isParked: Bool { manifest == nil }
 
@@ -410,7 +468,8 @@ nonisolated struct MeshRoutedItemRecord: Codable, Equatable, Sendable {
             key: key, contentHash: contentHash, chunkCount: chunkCount, receivedCount: receivedCount,
             contentBytesHeld: contentBytesHeld, expiresAt: expiresAt, firstSeenAt: firstSeenAt,
             isCustodied: isCustodied, isParked: isParked,
-            deliveryRestoreRefused: deliveryRestoreRefused
+            deliveryRestoreRefused: deliveryRestoreRefused,
+            isAcknowledgedLocally: isDeliveredLocally
         )
     }
 
@@ -485,6 +544,13 @@ nonisolated struct MeshRoutedItemRef: Equatable, Sendable {
     /// ``MeshRoutedIndex/itemsWithUnrestorableDelivery(at:)``. Never `true` for a parked item, which
     /// has no signed destination set to fail to restore.
     let deliveryRestoreRefused: Bool
+    /// Whether this device wrote its own durable final-ack record for the item (P5 item 4).
+    ///
+    /// ``MeshRoutedItemRecord/isDeliveredLocally``, carried onto the ref — the ref is not persisted,
+    /// so this is not a schema change. Its two misreadings are named there and are worth repeating:
+    /// it is not "this device's receipt is stored", and it is **never** "safe to drop". Reading it
+    /// as the latter deletes the only copy of a received photo.
+    let isAcknowledgedLocally: Bool
 }
 
 // MARK: - MeshRoutedIndex
@@ -686,15 +752,95 @@ nonisolated struct MeshRoutedIndex: Codable, Equatable, Sendable {
     ///
     /// Exactly the items the four outstanding/handoff enumerators cannot answer for, named rather
     /// than dropped: a delivery record that will not restore is a fault in our own durable bytes,
-    /// not evidence that nothing is owed. Items 6 and 8 surface these (and item 4 may re-derive one
-    /// from a fresh manifest); nothing here repairs anything, because a repair at a read door would
-    /// be a write with no token.
+    /// not evidence that nothing is owed. Items 6 and 8 surface these; nothing here repairs
+    /// anything, because a repair at a read door would be a write with no token.
+    ///
+    /// - Important: item 4 deliberately does **not** re-derive a fresh map for these from the
+    ///   manifest. Re-deriving would overwrite a stored map this device cannot read, which is a
+    ///   silent loss of somebody's `delivered` — so the items stay named and untouched, and both
+    ///   delivery doors take the corruption route for them rather than a refusal.
     ///
     /// - Parameter now: The injected instant; expired items are excluded, as everywhere else.
     /// - Returns: the refs, in index order, each with ``MeshRoutedItemRef/deliveryRestoreRefused``
     ///   set.
     func itemsWithUnrestorableDelivery(at now: Date) -> [MeshRoutedItemRef] {
         items.filter { $0.isLive(at: now) && $0.deliveryRestoreRefused }.map(\.reference)
+    }
+
+    // MARK: Delivery enumeration (P5 item 4)
+
+    /// Live items every destination has delivered or departed from.
+    ///
+    /// A PARKED item is never here: it has no manifest, so no signed destination set, exactly as it
+    /// is never named by ``itemsWithUnrestorableDelivery(at:)``.
+    ///
+    /// - Important: **this is not a reclaim list.** A destination's own entry reaches `delivered` on
+    ///   durable ciphertext alone for photos and text, so at a RECIPIENT this answers `true` while
+    ///   the store's copy is still the only copy of content nothing has moved into the canonical
+    ///   store yet. Item 9 reads ``itemsReclaimableAsCustodian(at:in:for:)``, and
+    ///   ``MeshRoutedItemRef/isAcknowledgedLocally`` says nothing about consumption.
+    ///
+    /// - Parameters:
+    ///   - now: The injected instant; expired items are excluded.
+    ///   - roster: The current merged roster — departed destinations are derived out here.
+    /// - Returns: the refs, in index order.
+    func itemsFullyDelivered(at now: Date, in roster: MeshDerivedRoster) -> [MeshRoutedItemRef] {
+        items.filter { item in
+            guard item.isLive(at: now), let target = item.deliveryTarget else { return false }
+            return target.isFullyDelivered(in: roster)
+        }.map(\.reference)
+    }
+
+    /// Live items that are fully delivered **and do not name this device as a destination** — the
+    /// courier's own copies, whose content this device holds for other people and nothing local
+    /// still needs. Item 9's reclaim input.
+    ///
+    /// The exclusion is deliberate and one-directional: an item this device is a destination for
+    /// stays until its content has actually been consumed, and P5 item 4 ships **no**
+    /// consumed-locally signal to relax that with. `dropping(item:reason:)` has no destination guard
+    /// of its own — it removes the record and its chunk files on the caller's word — so this list is
+    /// the guard.
+    ///
+    /// - Parameters:
+    ///   - now: The injected instant; expired items are excluded.
+    ///   - roster: The current merged roster.
+    ///   - selfFingerprint: This device.
+    /// - Returns: the refs, in index order.
+    func itemsReclaimableAsCustodian(
+        at now: Date,
+        in roster: MeshDerivedRoster,
+        for selfFingerprint: String
+    ) -> [MeshRoutedItemRef] {
+        items.filter { item in
+            guard item.isLive(at: now), let manifest = item.manifest else { return false }
+            guard !manifest.destinations.contains(selfFingerprint) else { return false }
+            guard let target = item.deliveryTarget else { return false }
+            return target.isFullyDelivered(in: roster)
+        }.map(\.reference)
+    }
+
+    /// Live items where THIS DEVICE is a destination and **this device's own recipient receipt is
+    /// not stored** — the retry list. Item 10's enumerator, and item 6's self-drain input.
+    ///
+    /// Deliberately NOT conditioned on the ack instant, on completeness or on custody: the predicate
+    /// has to reach every state a retry must fix, and each of those three would hide one — the window
+    /// between a stamped ack and a stored receipt, a heart whose ledger commit landed and whose
+    /// custody a later repair then cleared, and an incomplete item this device is a destination for.
+    /// A retry list that misses an item strands it forever; one carrying an extra item costs exactly
+    /// one named shortfall. Callers that want to prioritise read ``MeshRoutedItemRef/isCustodied``,
+    /// ``MeshRoutedItemRef/receivedCount`` and ``MeshRoutedItemRef/chunkCount``, which are already
+    /// there.
+    ///
+    /// - Parameters:
+    ///   - now: The injected instant; expired items are excluded.
+    ///   - selfFingerprint: This device.
+    /// - Returns: the refs, in index order.
+    func itemsAwaitingLocalAck(at now: Date, for selfFingerprint: String) -> [MeshRoutedItemRef] {
+        items.filter { item in
+            guard item.isLive(at: now), let manifest = item.manifest else { return false }
+            guard manifest.destinations.contains(selfFingerprint) else { return false }
+            return item.recipientReceipt(from: selfFingerprint) == nil
+        }.map(\.reference)
     }
 
     /// How many items ``itemsAwaitingHandoff(at:in:)`` would name.

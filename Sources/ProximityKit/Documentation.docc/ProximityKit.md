@@ -482,7 +482,13 @@ added the CUSTODY RECEIPT and the sealed routed store — the module's **second*
 `MeshRoutedManifestAdmission`, `MeshRoutedCustodyOutcome`, `MeshRoutedSweepReport`,
 `MeshRoutedIndexLoad`, `MeshRoutedStagedFile`, `MeshRoutedContentHasher`, `MeshChunkDescriptor`,
 `MeshChunkSetShape`, `MeshChunkAdmissionRule`, plus `MeshDeliveryRestoreRefusal` and
-`MeshDeliveryRestoreOutcome` on the P4 delivery target.
+`MeshDeliveryRestoreOutcome` on the P4 delivery target. P5 item 4 added the RECIPIENT RECEIPT and
+plan §11's acknowledgement stages — fifteen types: `MeshRoutedAckStage`, `MeshRoutedTypeToken`,
+`MeshRoutedAckStageRow`, `MeshRoutedAckStageTable`, `MeshRoutedHeartAck`, `MeshRoutedAckEvidence`,
+`MeshRoutedAckShortfall`, `MeshRoutedDeliveryCommitOutcome`, `MeshRecipientReceiptFormat`,
+`MeshRecipientReceipt`, `MeshRecipientReceiptPayload`, `MeshRecipientReceiptMintError`,
+`MeshRecipientReceiptRejection`, `MeshRecipientReceiptVerifier`, `MeshRecipientDeliveryWitness`, and
+one read-only door on the heart ledger (`MeshHeartLedgerProof` + `commitProof(for:)`).
 
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
@@ -501,6 +507,7 @@ frozen English spelling, so one grep finds every layer that touches those bytes:
 | `fernlet.mesh.routed-manifest.v1` | `MeshRoutedManifest` (a content record, not a membership record) | the origin only — relays forward it verbatim, never re-sign | `Signature.meshRoutedManifestV1`; wraps under `KeyDerivation.meshRoutedContentKeyWrapV1` + `AEAD.meshRoutedContentKeyWrapV1` |
 | `fernlet.mesh.routed-chunk.v1` | `MeshChunk` (one slice of that item's ciphertext) | the origin only — a custodian forwards it verbatim, never re-signs | `Signature.meshRoutedChunkV1`; digests under `Hash.meshRoutedContentV1` (the whole item), `Hash.meshRoutedChunkV1` (one slice) and `Hash.meshRoutedChunkIDV1` (the derived replay-window id) |
 | `fernlet.mesh.custody-receipt.v1` | `MeshCustodyReceipt` (a custodian durably holds one item's complete ciphertext) | the **custodian**, about the origin's item — the one routed record its subject did not sign; relays forward it verbatim | `Signature.meshCustodyReceiptV1`; the derived dedup id under `Hash.meshCustodyReceiptIDV1`; the at-rest store sealed under `KeyDerivation.meshRoutedStoreV1` |
+| `fernlet.mesh.recipient-receipt.v1` | `MeshRecipientReceipt` (a destination received one item, FINALLY) | the **recipient**, about the origin's item; relays forward it verbatim, and it carries no ack stage — what "finally" meant is resolved from the origin-signed type token | `Signature.meshRecipientReceiptV1`; the derived dedup id under `Hash.meshRecipientReceiptIDV1`, one per `(recipient, item)` |
 
 **Nothing enters a ledger unverified.** ``MeshMembershipRecordSet`` is pure algebra and will merge
 whatever it is handed; ``MeshMembershipRecordVerifier`` is the only door. That matters because the
@@ -622,8 +629,11 @@ holding for other people, their delivery maps and the receipts other members sig
 `FernletCryptoPurpose.KeyDerivation.meshRoutedStoreV1`, on a per-instance ``MeshRoutedStorageScope``
 whose keychain service is its **own** (`com.fernlet.mesh-routed`) rather than a lodger under the
 session's — one fate per service is the only arrangement a service-wide delete can express honestly.
-Its schema is its own from day one (``MeshRoutedIndexSchema``, version 1); `MeshSessionContext` stays
-at schema 2 and gains nothing. Chunk file names are opaque random UUIDs recorded in the index, so no
+Its schema is its own from day one (``MeshRoutedIndexSchema``, version **2** since P5 item 4 added the
+durable ack instant and the recipient-receipt evidence set — an older file is `corrupt`, never
+migrated, because reinterpreting one would produce a record whose two new fields the next save
+silently drops; the at-rest *token* does not move, since it names the key-derivation domain);
+`MeshSessionContext` stays at schema 2 and gains nothing. Chunk file names are opaque random UUIDs recorded in the index, so no
 fingerprint, item id, index or hash appears in a path component; and because `ColumnCrypto`'s AAD is
 purpose ‖ install binding with **no file name in it**, every read compares the opened chunk's
 descriptor and payload length against the ones holding its slot — a comparison that is not redundant
@@ -755,7 +765,11 @@ vectors (the chunk transcript, the per-chunk hash, the item hash and the derived
 framing-transcript case — and the manifest golden re-asserted, untouched, in the new suite. And so
 did P5 item 3's `fernlet.mesh.custody-receipt.v1`: one new signature purpose, one new `Hash` purpose
 for the derived receipt id, one new `KeyDerivation` purpose for the at-rest seal, two new vectors and
-its own framing case — with the inventory, manifest and chunk goldens all re-asserted untouched.
+its own framing case — with the inventory, manifest and chunk goldens all re-asserted untouched. And
+so did P5 item 4's `fernlet.mesh.recipient-receipt.v1`: one new signature purpose, one new `Hash`
+purpose for its derived id, **no** new `KeyDerivation` (the at-rest seal is unchanged and item 4 adds
+no file), two new vectors and its own framing case — with the inventory, manifest, chunk and
+custody-receipt goldens all re-asserted untouched.
 
 **Both halves travel in both directions** (P4 item 2c). The ask sends the digest and the heads
 together, and the answer to a *mismatched* digest sends the bounded re-gossip and the heads together,
@@ -893,12 +907,19 @@ stored case: ``MeshDeliveryDisposition/departed`` is derived at read against the
 same shape as the termination downgrade, so a departure or removal unioning in closes a destination
 with nothing rewritten — and grow-only records make that closure permanent, which is what lets the
 drain stop rather than back off. `outstanding(in:)` is exactly §11's "destinations lacking a
-`MeshRecipientReceipt`"; `isFullyDelivered(in:)` is its complement. `merging(_:)` takes the
+`MeshRecipientReceipt`"; `isFullyDelivered(in:)` is its complement. Since P5 item 4 that phrase is
+literal: ``MeshRoutedStore/recordingRecipientReceipt(item:receipt:now:)`` is the **only** writer of a
+`delivered` rung, it advances only the receipt's own signer, and `committingDelivery` — which records
+this device's durable final ack — advances no rung at all. Every `delivered` in a persisted map is
+therefore receipt-backed by construction rather than by call-site discipline. `merging(_:)` takes the
 per-destination max (commutative, associative, idempotent) and **refuses a destination-set mismatch
 by name** rather than unioning or intersecting, either of which would invent or drop a recipient.
 The type carries no key epoch, no branch id and no partition of origin, by construction. Nothing is
 `Codable`: `MeshSessionContext`'s schema stays **2**, and P5 persists targets inside its routed
-store. The two existing seams are derivations rather than duplicates —
+store. What makes an item final at a destination is plan §11's per-type table
+(``MeshRoutedAckStageTable``), resolved from the ORIGIN-signed type token — photos and text on
+durable recipient storage, hearts only after a foreground decrypt and a ``ProximityHeartLedger``
+commit, control immediately — and the stage is never on the wire and never the recipient's to state. The two existing seams are derivations rather than duplicates —
 ``MeshDevelopmentPlan/handoffTargets`` is `outstandingReachable(from:in:)` and
 ``MeshBranchView/temporarilyDisconnectedFingerprints`` is `outstandingUnreachable(from:in:)`, with
 neither type modified to say so.

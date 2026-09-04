@@ -54,6 +54,28 @@ public nonisolated struct ReceivedHeartRecord: Codable, Equatable, Identifiable,
     }
 }
 
+/// Proof that the heart ledger holds a durable record for one gift id (plan §3.6, network migration
+/// P5 item 4).
+///
+/// Its initializer is `fileprivate` and it is declared in `ProximityHeartLedger.swift`, so the only
+/// way anywhere in the app to hold one is to have asked the ledger itself. That is what keeps
+/// "receipt before durable ledger write" **unwritable** rather than merely discouraged: a `Bool`
+/// would be a caller-supplied value, and a `Bool`-shaped gate could be satisfied for a heart that
+/// was never decrypted and never committed — the exact order the routed store's custody gate is
+/// built to make impossible.
+///
+/// A value, not a handle: it names the gift and nothing that could go stale.
+public nonisolated struct MeshHeartLedgerProof: Equatable, Sendable {
+    /// The gift the ledger durably holds.
+    public let giftID: UUID
+
+    /// The one construction site's initializer. `fileprivate` on purpose — see the type's
+    /// documentation.
+    fileprivate init(giftID: UUID) {
+        self.giftID = giftID
+    }
+}
+
 /// Device-local persistence for hearts: received-heart records (the Home bubble + 24h health-bar
 /// glow) and the per-friend 5-minute rate limit, enforced in BOTH directions and shared by every
 /// heart transport (presence, in-session mesh, dead-drop).
@@ -234,6 +256,35 @@ public final class ProximityHeartLedger {
         }
         refreshMirror()
         return true
+    }
+
+    // MARK: - Routed delivery (network migration P5 item 4)
+
+    /// A ``MeshHeartLedgerProof`` for `giftID`, or nil — the ledger's own answer, in one read, to
+    /// "did the write land, and is this gift in what was stored?"
+    ///
+    /// Non-nil **only** when both hold, and neither is a caller's word:
+    ///
+    ///  - the sidecar's write landed (`state == .ready`, which means memory and disk agree). A
+    ///    `.dirty` store is `.unavailable` here, because ``recordReceivedHeart(id:senderDisplayName:senderFingerprint:)``
+    ///    returns `true` for an applied-but-unpersisted mutation too, and treating that as durable is
+    ///    plan §3.6 inverted; and
+    ///  - the gift is in the ledger's STORED `receivedHearts`. That is
+    ///    `MeshContentLedger.heartReceipt(_:committed:)`'s rule evaluated over the ledger's own set
+    ///    rather than re-implemented elsewhere: a caller checking only "was it accepted on this
+    ///    pass" would strand an already-recorded gift forever, and one accepting "committed or
+    ///    refused" would receipt a cooldown-dropped gift the recipient never stored.
+    ///
+    /// Reads only. It never mutates, never re-derives a rule, never forks the one receive path, and
+    /// never widens a protection class — the routed store's caller asks it right after a commit and
+    /// never after an `await`.
+    ///
+    /// - Parameter giftID: The gift, which for a routed heart is the item's id.
+    /// - Returns: the proof, or nil when the ledger cannot stand behind that gift.
+    public func commitProof(for giftID: UUID) -> MeshHeartLedgerProof? {
+        guard sidecar.state == .ready, let state = sidecar.read() else { return nil }
+        guard state.receivedHearts.contains(where: { $0.id == giftID }) else { return nil }
+        return MeshHeartLedgerProof(giftID: giftID)
     }
 
     // MARK: - Surfacing
