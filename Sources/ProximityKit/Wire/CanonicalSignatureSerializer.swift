@@ -212,6 +212,12 @@ private nonisolated let canonicalMeshCustodyReceiptDomain =
 // requires in every surface.
 private nonisolated let canonicalMeshRecipientReceiptDomain =
     FernletCryptoPurpose.Signature.meshRecipientReceiptV1.data
+// P5 item 5 (plan §11, §10.3): an advertiser's summary of the ROUTED CONTENT it holds. Its own
+// domain, and the one it must be distinct from is the MEMBERSHIP inventory digest's — the two
+// summarise different things under one English word, so a signature satisfying both would let "what
+// records I hold" be replayed as "what content I am carrying, and for whom".
+private nonisolated let canonicalMeshRoutedInventoryDomain =
+    FernletCryptoPurpose.Signature.meshRoutedInventoryDigestV1.data
 
 // MARK: - Identity envelope
 
@@ -664,6 +670,56 @@ nonisolated func canonicalBytes(for receipt: MeshRecipientReceipt) -> Data {
     writer.appendDate(receipt.expiresAt)
     // signature: deliberately excluded.
     return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshRoutedInventoryPayload`` — an advertiser's summary of the
+/// routed content it holds (plan §11, P5 item 5). **Field order IS the schema**: the mesh, then the
+/// minimal fingerprint table, then one block per entry, then the ADVERTISER and the instant.
+///
+/// The digest carries no rollup hash, so these bytes are the only representation of the holdings
+/// set: the entry list travels because the consumer needs the elements to compute a difference. The
+/// held-chunk bitmap is length-prefixed rather than fixed-width because its width is
+/// `ceil(chunkCount / 8)`, pinned to the entry's own `chunkCount` by the shape check — which is also
+/// what makes two encodings of one held set impossible. `sentAt` is bound in, so a stale digest
+/// cannot be replayed as fresh; the `signature` is excluded as ever. Signed by the advertiser only:
+/// it is a statement about that device's own disk and nobody forwards it on its behalf.
+nonisolated func canonicalBytes(for payload: MeshRoutedInventoryPayload) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshRoutedInventoryDomain)
+    writer.appendUUID(payload.inventory.meshID)
+    writer.appendUInt64(UInt64(payload.inventory.members.count))
+    for member in payload.inventory.members {
+        writer.appendString(member)
+    }
+    writer.appendUInt64(UInt64(payload.inventory.entries.count))
+    for entry in payload.inventory.entries {
+        appendCanonical(&writer, entry)
+    }
+    writer.appendString(payload.senderFingerprint)
+    writer.appendDate(payload.sentAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// One ``MeshRoutedInventoryEntry`` inside a routed-inventory transcript: the signed pair's origin
+/// INDEX and item id, the parked flag, the chunk count, the length-prefixed held-chunk bitmap, and
+/// the two signer index lists, each counted then written byte by byte.
+private nonisolated func appendCanonical(
+    _ writer: inout CanonicalByteWriter, _ entry: MeshRoutedInventoryEntry
+) {
+    writer.appendByte(entry.originIndex)
+    writer.appendUUID(entry.itemID)
+    writer.appendByte(entry.holdsManifest ? 1 : 0)
+    writer.appendUInt64(UInt64(entry.chunkCount))
+    writer.appendLengthPrefixed(entry.heldChunks)
+    writer.appendUInt64(UInt64(entry.custodySigners.count))
+    for index in entry.custodySigners {
+        writer.appendByte(index)
+    }
+    writer.appendUInt64(UInt64(entry.recipientSigners.count))
+    for index in entry.recipientSigners {
+        writer.appendByte(index)
+    }
 }
 
 /// One ``MeshRecipientKeyWrap`` inside a manifest's transcript: recipient, then the three

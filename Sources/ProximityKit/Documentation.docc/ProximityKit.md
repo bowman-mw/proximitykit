@@ -490,6 +490,23 @@ plan §11's acknowledgement stages — fifteen types: `MeshRoutedAckStage`, `Mes
 `MeshRecipientReceiptRejection`, `MeshRecipientReceiptVerifier`, `MeshRecipientDeliveryWitness`, and
 one read-only door on the heart ledger (`MeshHeartLedgerProof` + `commitProof(for:)`).
 
+P5 item 5 added the ROUTED CONTENT digest and its pure comparison — eleven types:
+`MeshRoutedInventoryFormat`, `MeshRoutedInventoryEntry`, `MeshRoutedInventory`,
+`MeshRoutedInventoryPayload`, `MeshRoutedInventoryMintError`, `MeshRoutedInventoryRejection`,
+`MeshRoutedInventoryVerifier`, `MeshRoutedInventoryReceiptKind`, `MeshRoutedInventoryReceiptRef`,
+`MeshRoutedChunkGap` and `MeshRoutedInventoryDelta`. **None of them carries the stem
+`InventoryDigest`, on purpose:** that stem belongs to P4's MEMBERSHIP digest, and the two wire tokens
+deliberately share the `inventory-digest` spelling, so the Swift value-type names are what keep a
+manager dispatch from reaching for the wrong family.
+
+The mint has **one** spelling of "this device": `MeshRoutedInventoryPayload.signed(meshID:index:sentAt:identity:)`
+takes no `selfFingerprint`, deriving it from the signing identity exactly as `MeshRoutedManifest.signed`
+derives its origin. The reason is not tidiness — the builder's custody self-rule turns "who am I" into
+an advertised `custodySigners` entry, and `custodySigners` is advertiser-asserted rather than signed
+evidence, so a second, disagreeing spelling would mint a digest that verifies cleanly while claiming
+custody for a member that never held the item; the peer would then ask that member for a receipt it
+can never mint and the merge window item 7 closes would never close.
+
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
 frozen English spelling, so one grep finds every layer that touches those bytes:
@@ -500,7 +517,7 @@ frozen English spelling, so one grep finds every layer that touches those bytes:
 | `fernlet.mesh.member-departure.v1` | `SignedDepartureRecord` | the departing member | `Signature.meshMemberDepartureV1` |
 | `fernlet.mesh.member-removal.v1` | `SignedRemovalRecord` | the tallier, citing ⌊\|roster\|/2⌋ + 1 votes | `Signature.meshMemberRemovalV1` |
 | `fernlet.mesh.terminated.v1` | `SignedTerminationRecord` | a final-pair member | `Signature.meshTerminatedV1` |
-| `fernlet.mesh.inventory-digest.v1` | — (a message, not a record) | any member | `Signature.meshInventoryDigestV1` over a `Hash.meshInventoryDigestV1` digest |
+| `fernlet.mesh.inventory-digest.v1` | — (a message, not a record) — **membership records only**, never routed content | any member | `Signature.meshInventoryDigestV1` over a `Hash.meshInventoryDigestV1` digest |
 | `fernlet.mesh.epoch-heads.v1` | — (a message, not a record) | any member | `Signature.meshEpochHeadsV1` |
 | `fernlet.mesh.removal-proposal.v1` | — (live state, not a record) | the proposer, whose proposal IS its vote | `Signature.meshRemovalProposalV1` |
 | `fernlet.mesh.removal-vote.v1` | — (live state, not a record) | any member except the target | `Signature.meshRemovalVoteV1` |
@@ -508,6 +525,7 @@ frozen English spelling, so one grep finds every layer that touches those bytes:
 | `fernlet.mesh.routed-chunk.v1` | `MeshChunk` (one slice of that item's ciphertext) | the origin only — a custodian forwards it verbatim, never re-signs | `Signature.meshRoutedChunkV1`; digests under `Hash.meshRoutedContentV1` (the whole item), `Hash.meshRoutedChunkV1` (one slice) and `Hash.meshRoutedChunkIDV1` (the derived replay-window id) |
 | `fernlet.mesh.custody-receipt.v1` | `MeshCustodyReceipt` (a custodian durably holds one item's complete ciphertext) | the **custodian**, about the origin's item — the one routed record its subject did not sign; relays forward it verbatim | `Signature.meshCustodyReceiptV1`; the derived dedup id under `Hash.meshCustodyReceiptIDV1`; the at-rest store sealed under `KeyDerivation.meshRoutedStoreV1` |
 | `fernlet.mesh.recipient-receipt.v1` | `MeshRecipientReceipt` (a destination received one item, FINALLY) | the **recipient**, about the origin's item; relays forward it verbatim, and it carries no ack stage — what "finally" meant is resolved from the origin-signed type token | `Signature.meshRecipientReceiptV1`; the derived dedup id under `Hash.meshRecipientReceiptIDV1`, one per `(recipient, item)` |
+| `fernlet.mesh.routed-inventory-digest.v1` | — (a message, not a record) — the ROUTED CONTENT a device holds: a minimal fingerprint table plus one entry per live item, each with the signed `(origin, itemID)` pair, the parked flag, the chunk count, the **exact** held-chunk bitmap and the two receipt-signer lists | the **advertiser**, about its own disk — nobody forwards it on another device's behalf | `Signature.meshRoutedInventoryDigestV1`; **no** `Hash` sibling, because the entry list IS the digest |
 
 **Nothing enters a ledger unverified.** ``MeshMembershipRecordSet`` is pure algebra and will merge
 whatever it is handed; ``MeshMembershipRecordVerifier`` is the only door. That matters because the
@@ -770,6 +788,12 @@ so did P5 item 4's `fernlet.mesh.recipient-receipt.v1`: one new signature purpos
 purpose for its derived id, **no** new `KeyDerivation` (the at-rest seal is unchanged and item 4 adds
 no file), two new vectors and its own framing case — with the inventory, manifest, chunk and
 custody-receipt goldens all re-asserted untouched.
+And so did P5 item 5's `fernlet.mesh.routed-inventory-digest.v1`: one new signature purpose, **no**
+new `Hash` purpose (the digest carries no rollup hash — the entry list is the digest), one new
+vector and its own framing case, with all four routed goldens and the membership inventory golden
+re-asserted untouched. Its own token was the item's first decision, because
+`fernlet.mesh.inventory-digest.v1` was already taken by the membership digest and the two summarise
+structurally different things.
 
 **Both halves travel in both directions** (P4 item 2c). The ask sends the digest and the heads
 together, and the answer to a *mismatched* digest sends the bounded re-gossip and the heads together,
@@ -789,6 +813,12 @@ Three consequences worth stating outright:
   that is the blip and item 1's partial heal), and closes on the honest completion signal the
   protocol already computes: a peer digest that **matches** local inventory. Splitting again abandons
   it rather than concluding it.
+  **P5 item 7 will redesign that rule, and item 5 has already defined what replaces it:** a routed
+  digest gives "the exchange is finished" a second, content-shaped meaning — close only when *every
+  asked peer* has matched, and on the routed half only when **both** sides report no local work
+  (`MeshRoutedInventoryDelta.converged(local:peerReportsQuiescent:)`, never `isQuiescent` alone,
+  which a device holding nothing satisfies against every peer). Nothing in item 5 changes today's
+  behaviour: the frame is built and unwired.
 - **Reconnect ≡ merge; admission ≠ reconnect.** The `peerCommitted` self-edge also carries every
   genuinely new member's first commit, so `openBlipMergeIfReconnected(_:from:peer:)` opens the window
   only for a peer that was **already on the derived roster** at that instant. A new admission keeps
