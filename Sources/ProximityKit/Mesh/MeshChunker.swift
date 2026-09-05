@@ -16,15 +16,17 @@
 // bytes and CryptoKit's signing is hedged, so two mints of one chunk agree on everything except
 // that field.) It is also the decisive reason item 2 does NOT seal the item: an AEAD seal mints a
 // random nonce, and that nonce would land INSIDE the blob the content hash and every chunk hash
-// measure, so a sealing chunker could not be goldened at all. The seal is item 6 / P6's. And the
+// measure, so a sealing chunker could not be goldened at all. The seal is `MeshRoutedItemSealer`'s,
+// written by P5 item 13 and goldened OPEN-side for exactly that reason. And the
 // mint **refuses to mint for a manifest the local identity did not originate** (`notTheOrigin`): a
 // custodian is a courier, not a co-signer.
 //
 // The blob is OPAQUE here. Its contract, frozen by item 2: it is self-contained — the seal's nonce
 // and tag live inside it, because the manifest carries no nonce field — and `manifest.contentHash`
 // and `manifest.size` measure the COMPLETE blob, the exact bytes a custodian stores, a chunker
-// splits and a recipient hashes before decrypting. Whatever item 6 / P6 puts inside the blob
-// changes nothing in this file.
+// splits and a recipient hashes before decrypting. P5 item 13 put the item seal inside that blob
+// (`FMRI1` marker, nonce, ciphertext, tag) and changed nothing in this file, which is the property
+// the freeze bought.
 //
 // What is deliberately NOT here: any send path, envelope, queue or pacer (item 6 dispatches; the
 // only pacing statement in item 2 is the named constant

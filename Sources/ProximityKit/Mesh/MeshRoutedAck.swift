@@ -82,8 +82,9 @@ nonisolated enum MeshRoutedTypeToken {
     static let heart = "fernlet.mesh.routed-type.heart.v1"
     /// **Reserved, not registered.** Plan §11 names an `immediate` stage but neither §11 nor §12
     /// routes a control item, and registering a token nothing mints would open a door with no
-    /// handler behind it. The `AEAD.meshRoutedItemV1` "reserved, not yet written" precedent,
-    /// applied to a token: ``MeshRoutedAckStageTable/increment1`` deliberately answers nil for it.
+    /// handler behind it. The precedent is `AEAD.meshRoutedItemV1`, which was registered by item 1
+    /// and left unwritten until item 13 built its sealer, applied to a token instead of a domain:
+    /// ``MeshRoutedAckStageTable/increment1`` deliberately answers nil for it.
     static let control = "fernlet.mesh.routed-type.control.v1"
 }
 

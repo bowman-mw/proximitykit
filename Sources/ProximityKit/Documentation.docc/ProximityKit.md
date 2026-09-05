@@ -552,7 +552,10 @@ plan §11's acknowledgement stages — fifteen types: `MeshRoutedAckStage`, `Mes
 `MeshRoutedAckShortfall`, `MeshRoutedDeliveryCommitOutcome`, `MeshRecipientReceiptFormat`,
 `MeshRecipientReceipt`, `MeshRecipientReceiptPayload`, `MeshRecipientReceiptMintError`,
 `MeshRecipientReceiptRejection`, `MeshRecipientReceiptVerifier`, `MeshRecipientDeliveryWitness`, and
-one read-only door on the heart ledger (`MeshHeartLedgerProof` + `commitProof(for:)`).
+one read-only door on the heart ledger (`MeshHeartLedgerProof` + `commitProof(for:)`). P5 item 13
+added the ITEM SEAL and the first routed body — six types: `MeshRoutedItemSealFormat`,
+`MeshRoutedItemSealError`, `MeshRoutedItemSealer`, `MeshRoutedItemBodyFormat`,
+`MeshRoutedPhotoHeader` and `MeshRoutedPhotoBody`.
 
 P5 item 5 added the ROUTED CONTENT digest and its pure comparison — eleven types:
 `MeshRoutedInventoryFormat`, `MeshRoutedInventoryEntry`, `MeshRoutedInventory`,
@@ -1377,8 +1380,40 @@ sufficient** for a custody receipt, since it is a verdict over in-memory bytes a
 §3.6) is item 3's separate gate. Chunks ride P2's existing per-transfer stream lane with **no
 transport change**: a 256 KiB payload in a signed envelope is above the 64 KiB bulk floor and below
 the 16 MiB ceiling, so `NetworkMeshSession` gives it a stream of its own by size alone. Nothing here
-seals the item (that is item 6 / P6 — item 2 chunks an opaque blob), forwards anything, persists
-anything, or tunes the transport.
+seals the item (that is ``MeshRoutedItemSealer``, P5 item 13 — item 2 chunks an opaque blob),
+forwards anything, persists anything, or tunes the transport.
+
+**The item seal: what makes branch and epoch stop deciding decryptability** (P5 item 13, plan §11,
+invariant §3.3). Item 1 wrapped a random content key per recipient; ``MeshRoutedItemSealer`` is what
+that key opens. One AES-256-GCM seal per item under `AEAD.meshRoutedItemV1`, with **four**
+authenticated fields: the purpose, the mesh id, the item id and the origin — the transplant proof, so
+a blob lifted into another `(mesh, item, origin)` triple fails the tag even if its wrap travels with
+it — plus the **routed type token**, the one field the wrap does not carry, because the receiver
+dispatches the plaintext on `manifest.typeToken` into a canonical store and "these bytes are a photo"
+should be authenticated by the same tag as the bytes. `contentHash` and `size` are deliberately
+absent (both are functions of the blob, so binding either would be circular — C12's freeze — and both
+already ride the origin's signature); the recipient is absent too, because one key, N wraps and one
+blob is the whole point.
+
+The blob is `marker ‖ nonce ‖ ciphertext ‖ tag`. ``MeshRoutedItemSealFormat/marker`` is five ASCII
+bytes (`FMRI1`) in the clear — the `FMA2` / `FMGP2` / `FMGM2` idiom — so a future v2 is tellable
+apart without a key and an unmarked blob is refused **by name** rather than joining the silent-drop
+pile; it is not in the authenticated data, because a routed blob is hash-committed by a signed
+manifest and a flipped marker fails `contentHash` at assembly before any key is unwrapped. The seal
+bound and the open bound are **one derived number** (`maxPlaintextByteCount = maxResidentBlobByteCount
+− overheadByteCount`): deriving the write bound from the 256 MiB wire cap while the open refused at
+10 MiB would let an origin mint an item every recipient custodies, receipts and then declines to
+open — and the photo stage is final on durable *ciphertext*, so that receipt is already minted when
+the open refuses. The sealer is pure — no actor, clock, I/O or identity — which is what keeps it
+outside every locked-device wall: the predicate is consulted by the delivery door that calls it.
+
+``MeshRoutedPhotoBody`` is the plaintext for the first routed type, framed as a length-prefixed JSON
+header followed by the image **raw**. `JSONEncoder` base64s a `Data` property, so one all-`Codable`
+body would ship a JPEG at 4/3 its size and silently re-scale `manifest.size`, the chunk count charged
+against item 9's caps, the per-peer frame budget, the resident bound and the very number the sim lane
+exists to measure. The header carries **no epoch and no identity claim**: who sent a routed photo is
+the manifest's signed `originFingerprint`, and its signing key is the admission ledger's roster entry
+for that origin.
 
 **Custody: a custodian may say "I hold this" only after the ciphertext survived a write that
 returned** (P5 item 3, plan §11 and §3.6). ``MeshCustodyReceipt`` is signed by the **custodian**
@@ -1473,6 +1508,12 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshRoutedWrapBinding``
 - ``MeshRoutedKeyWrapError``
 - ``MeshRoutedContentKeyWrapper``
+- ``MeshRoutedItemSealFormat``
+- ``MeshRoutedItemSealError``
+- ``MeshRoutedItemSealer``
+- ``MeshRoutedItemBodyFormat``
+- ``MeshRoutedPhotoHeader``
+- ``MeshRoutedPhotoBody``
 - ``MeshChunkFormat``
 - ``MeshRoutedContentDigest``
 - ``MeshChunk``

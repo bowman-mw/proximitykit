@@ -18,8 +18,9 @@
 // reach the wire by mistake.
 //
 // What is deliberately NOT here: persistence (item 3, with its wipe row), dispatch and emission
-// (item 6), chunks (item 2) and the item seal (item 6 / P6 — item 2 chunks an OPAQUE blob and
-// deliberately does not seal), the type-token registry (item 11), receipts (items
+// (item 6), chunks (item 2) and the item seal (`MeshRoutedItemSealer` — P5 item 13 shipped that
+// seal and changed nothing here; item 2 chunks an OPAQUE blob and this file deliberately does not
+// seal), the type-token registry (item 11), receipts (items
 // 3/4). `MeshRoutedManifestVerifier` is the receive-side door and `MeshRoutedContentKeyWrapper`
 // the crypto; this file is the record, its bounds and its mint.
 
@@ -56,8 +57,9 @@ nonisolated enum MeshRoutedManifestFormat {
     static let nonceByteCount = 12
     /// ``MeshRecipientKeyWrap/sealedKey`` width: 32-byte content-key ciphertext ‖ 16-byte GCM tag.
     static let sealedKeyByteCount = 48
-    /// The random content key's width — 32 bytes, carried as `Data` (AES-256 material; item 6 / P6
-    /// builds the `SymmetricKey(data:)` at the seal).
+    /// The random content key's width — 32 bytes, carried as `Data` (AES-256 material;
+    /// ``MeshRoutedItemSealer`` builds the `SymmetricKey(data:)` at the seal — P5 item 13 shipped
+    /// that seal and changed nothing here).
     static let contentKeyByteCount = 32
     /// Plan §11's "20-minute development grace" past the mesh's signed `hardDeadline`. Frozen: it is
     /// bound into every origin signature via ``MeshRoutedManifest/expiresAt``.
@@ -390,8 +392,9 @@ extension MeshRoutedManifest {
     ///   - createdAt: The origin's creation instant, injected — nothing here reads a clock.
     ///   - hardDeadline: The session's signed ceiling (`MeshSessionContext.hardDeadline`).
     ///   - contentKey: The random 32-byte content key (``MeshRoutedContentKeyWrapper/makeContentKey()``),
-    ///     as `Data` so no pointer API is needed to wrap it (Power of 10 R9); item 6 / P6 builds
-    ///     the `SymmetricKey(data:)` at the seal — item 2 chunks an opaque blob and never sees a key.
+    ///     as `Data` so no pointer API is needed to wrap it (Power of 10 R9);
+    ///     ``MeshRoutedItemSealer`` builds the `SymmetricKey(data:)` at the seal (P5 item 13) —
+    ///     item 2 chunks an opaque blob and never sees a key.
     ///   - recipientKeys: Handshake-verified X25519 public keys by destination fingerprint.
     ///   - identity: The origin. Its fingerprint becomes ``originFingerprint``.
     ///   - types: The routed type registry this mint declares against (P5 item 11). A REGISTERED

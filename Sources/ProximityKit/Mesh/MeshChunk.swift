@@ -25,7 +25,8 @@
 //
 // What is deliberately NOT here: persistence (item 3, with its wipe row), dispatch and emission
 // (item 6), any relay hop or custody transfer (item 8; increment 2's hop count and TTL are not on
-// the wire), the item seal (item 6 / P6 — this file chunks an OPAQUE blob), the type-token
+// the wire), the item seal (`MeshRoutedItemSealer` — P5 item 13 shipped that seal and changed
+// nothing here; this file chunks an OPAQUE blob), the type-token
 // registry (item 11), backpressure (item 9). `MeshChunkVerifier` is the receive-side door,
 // `MeshChunker` the mint, `MeshChunkAssembly` the reassembler; this file is the record, its
 // bounds and its digests.
@@ -120,8 +121,9 @@ nonisolated enum MeshChunkFormat {
 /// `MeshRoutedManifest.size` measure the **complete sealed blob** — the exact bytes a custodian
 /// stores, a chunker splits and a recipient hashes before decrypting. The blob is therefore
 /// **self-contained**: its seal's nonce and tag live *inside* it, because the manifest carries no
-/// nonce field. Whatever item 6 / P6 ships inside the blob changes nothing here, which is the
-/// property this freeze buys.
+/// nonce field. P5 item 13 shipped that seal — ``MeshRoutedItemSealer``, whose blob is
+/// `marker ‖ nonce ‖ ciphertext ‖ tag` — and changed nothing here, which is the property this
+/// freeze buys.
 nonisolated enum MeshRoutedContentDigest {
 
     /// The zero id ``chunkID(itemID:chunkIndex:)`` falls back to if it is ever handed a short
