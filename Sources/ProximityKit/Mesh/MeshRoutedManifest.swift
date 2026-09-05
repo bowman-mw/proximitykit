@@ -139,7 +139,8 @@ nonisolated struct MeshRecipientKeyWrap: Codable, Equatable, Sendable {
 nonisolated struct MeshRoutedManifest: Codable, Equatable, Sendable {
     /// The mesh the item belongs to. A manifest for another mesh is a refusal, not a difference.
     let meshID: UUID
-    /// The item id: `MeshDeliveryTarget.contentID` and the replay window's per-sender frame id.
+    /// The item id: `MeshDeliveryTarget.contentID` and the replay window's per-author frame id —
+    /// wired by P5 item 12 under the author axis ``originFingerprint``, never an epoch.
     /// The routed store's union key is the PAIR `(originFingerprint, itemID)` — both fields are
     /// inside the signed transcript, so no wire change is needed to key on both — because the
     /// frame is unsealed and any admitted member can mint a manifest under its OWN admitted key

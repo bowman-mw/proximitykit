@@ -174,9 +174,9 @@ nonisolated struct MeshRecipientReceipt: Codable, Equatable, Sendable {
     /// recomputable, and stable across a **re-mint**: CryptoKit's Ed25519 signing is hedged, so two
     /// mints of one logical receipt differ in the signature and nothing may compare receipts by
     /// `==`. ``receivedAt`` is deliberately not an input either: a re-mint of the same claim is the
-    /// same claim, and the replay window should treat it as one. This is the frame id item 12
-    /// admits, and it is **one id per `(recipient, item)`** — the wire-level statement of
-    /// "destination-final, never per chunk".
+    /// same claim, and the replay window treats it as one. This is the frame id P5 item 12 admits —
+    /// under the author axis ``recipientFingerprint`` — and it is **one id per `(recipient, item)`**,
+    /// the wire-level statement of "destination-final, never per chunk".
     ///
     /// The result is **not** an RFC-4122 versioned UUID: it is a 128-bit dedup key that happens to
     /// have `UUID`'s shape, which is what `MeshFrameReplayWindow` takes.

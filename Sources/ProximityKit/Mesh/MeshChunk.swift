@@ -150,7 +150,10 @@ nonisolated enum MeshRoutedContentDigest {
     /// recomputable by item 3 from the `(itemID, index)` it stores. `originFingerprint` is
     /// deliberately **not** an input — `MeshFrameReplayWindow.admit(frameID:from:…)` already
     /// separates by sender, so the real key is the pair `(origin, chunkID)` and folding the origin
-    /// in twice would make the id underivable from what item 3 holds.
+    /// in twice would make the id underivable from what item 3 holds. P5 item 12 wired exactly that
+    /// pair: the window's author axis is `chunk.originFingerprint`, never the forwarding envelope's
+    /// sender, so one origin's chunk arriving via two custodians is one row and two origins' chunks
+    /// at the same `(itemID, index)` are two.
     ///
     /// The result is **not** an RFC-4122 versioned UUID: it is a 128-bit dedup key that happens to
     /// have `UUID`'s shape, which is what `MeshFrameReplayWindow` takes.
@@ -346,17 +349,27 @@ nonisolated struct MeshChunk: Codable, Equatable, Sendable {
     }
 
     /// This chunk's replay-window id — see ``MeshRoutedContentDigest/chunkID(itemID:chunkIndex:)``.
-    /// Derived, never a wire field. Item 12 wires it as
-    /// `window.admit(frameID: chunk.chunkID, from: chunk.originFingerprint, meshID: chunk.meshID,
-    /// expiresAt: chunk.expiresAt, now: now)` — all four parameters come off the chunk.
+    /// Derived, never a wire field. P5 item 12 wires it as
+    /// `window.admit(frameID: chunk.chunkID, from: chunk.originFingerprint, meshID: context.meshID,
+    /// expiresAt: chunk.expiresAt, now: now)` — the id, the author and the expiry come off the
+    /// chunk, and the author is the **origin**, never the forwarding envelope's sender; the mesh id
+    /// is the **ingest session's own** (`currentMesh.meshID`), not the frame's claimed one.
     ///
-    /// **That is the shape, not the whole wiring.** `MeshFrameReplayWindow.maxFramesPerSender` is
-    /// 64 and the window REFUSES at its cap rather than evicting (a slot is released only by
-    /// `forget(senderFingerprint:)`), while ``MeshChunkFormat/maxChunkCount`` is 1024 — so wiring
-    /// this id exactly as written answers `senderWindowFull` to the 65th chunk of any item above
-    /// 16 MiB and wedges that origin's window for the session. Item 12 must size a P5 window for
-    /// routed chunk traffic (or key a per-item chunk bitmap) before keying on this id, and must key
-    /// the sender axis on the **origin** rather than the forwarding envelope's sender.
+    /// That last parameter makes the window's own mesh guard inert on this path by construction:
+    /// the routed window is built with `context.meshID` and probed with it, so
+    /// ``MeshFrameReplayVerdict/foreignMesh`` is unreachable at the four routed doors. It is not a
+    /// gap — a chunk naming another mesh is refused by ``MeshChunkVerifier`` one step later
+    /// (`chunk.meshID == meshID`, its own `.foreignMesh`), and the same holds for the manifest and
+    /// both receipt kinds. The foreign-mesh refusal is the verifiers' and stays there; the window's
+    /// job here is the id.
+    ///
+    /// **The 64-vs-1024 caveat this doc used to carry is answered, twice over.** The routed window
+    /// is a per-instance one: `framesPerSender` is `MeshRoutedDrainBounds.sessionFramesPerPeer`
+    /// (1024 + 32 = 1056 ≥ one maximal item's 1024 chunks + its manifest + both receipt kinds), so
+    /// the 65th chunk of a 16 MiB item is ordinary traffic. And structurally, `senderWindowFull` is
+    /// a **named degradation, never a refusal**: the manager's probe acts on `.replayed` alone and
+    /// every other verdict falls through to the unchanged verify-and-store path, so no legitimate
+    /// chunk can be dropped by this defence at any window size.
     var chunkID: UUID {
         MeshRoutedContentDigest.chunkID(itemID: itemID, chunkIndex: chunkIndex)
     }

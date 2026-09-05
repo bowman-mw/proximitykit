@@ -395,9 +395,40 @@ rotation and names the reason, it does not hand out a key no restart could expla
 **Replay protection does not ride epochs** (plan §8.4). Once a predecessor key can still open a
 frame and a merge can bring two branches together, "the epoch no longer opens it" stops being a
 replay answer. `MeshFrameReplayWindow` is the replacement: dedup by frame id, per **authenticated**
-sender, with the frame's own expiry and an explicit mesh id, bounded at 8 senders × 64 ids — and it
+sender, with the frame's own expiry and an explicit mesh id, bounded on both axes — and it
 *refuses* at the cap rather than evicting, because an LRU would let a flood of fresh frames erase
 the history an attacker wants to replay into. It knows nothing about epochs, which is the point.
+
+Both bounds are **per instance** since P5 item 12. The control-frame defaults are P3's (8 senders ×
+64 ids); the routed instance overrides them, because its two axes have different populations —
+`MeshRoutedDrainBounds.sessionFramesPerPeer` ids (1056, one maximal 1024-chunk item plus its
+manifest and both receipt kinds) per author, and `MeshMembershipBounds.maxRecordsPerKind` authors
+(16), the **admission set's** capacity rather than the tighter roster cap, because a routed frame's
+author is any admitted-and-not-removed signer and a departed origin's content stays valid and keeps
+moving under custody transfer.
+
+**Wired against routed content ids** (P5 item 12, plan §11). The four routed content doors —
+manifest, chunk, custody receipt, recipient receipt — key it on the ids items 1–4 derived for this
+purpose, attributed to the frame's **author**, never to the forwarding envelope's sender and never
+to an epoch; the two digest doors are deliberately outside it (an inventory digest is bound by its
+slot and the per-peer frame budget — and, being re-recorded with no `sentAt` monotonicity guard,
+costs a stale delta rather than a lost delivery; a drain answer by advertiser + `advertisedAt`). The
+mesh id passed at the four doors is the **ingest session's own** (`currentMesh.meshID`), never the
+frame's claimed one, so the window's mesh guard is inert there by construction and the foreign-mesh
+refusal stays each routed verifier's, one step later. Two calls, not
+one: the manager **probes** with `verdict(frameID:from:meshID:expiresAt:now:)` on the unverified
+frame — safe on a claimed author precisely because it records nothing — and **records** with
+`admit(…)` after the store's door has answered, only when that outcome is `.completed` and this
+device's rung work settled, so a store that could not act, a capacity refusal, or an unfinished rung
+all stay re-offerable. A full axis is a **named degradation, never a refusal**: only `.replayed` is
+actionable and every other verdict falls through to the unchanged verify-and-store path. The routed
+instance never calls `forget(senderFingerprint:)` — releasing a departed origin's axis would hand an
+attacker a free replay of exactly the content custody transfer keeps moving — while
+`forget(frameID:from:)` un-records the one thing the store gives back, a repaired chunk slot.
+Memory-only and session-scoped: nothing persists, so there is no wipe row, and the window is cleared
+at the three session resets and nowhere else. This is the promise plan §8.4 lets item 13 delete the
+three `keyEpoch` gates against — routed content carries unique ids + meshID + expiry and dedups by
+id — so item 13 deletes rather than loosens.
 
 - ``PeerTransport``
 - ``PeerHandle``
@@ -1327,10 +1358,12 @@ derived from the 256 MiB content cap). **Signed by the origin only**, and the pa
 from the signed transcript and bound **through** `chunkHash`, so a 256 KiB slice costs 32 transcript
 bytes and a custodian forwards the exact object — signature included — inside its own envelope. Two
 domain-tagged digests keep the item hash and a slice hash apart even for a one-chunk item
-(``MeshRoutedContentDigest``), and the replay-window id item 12 keys on is **derived**
-(``MeshChunk/chunkID``), never a wire field — its doc gives item 12 the wiring's shape plus the
-caveat that `MeshFrameReplayWindow`'s 64-per-sender cap is smaller than the 1024 chunks of a maximal
-item, so a P5 window must be sized before that id is keyed on. ``MeshChunker`` is the mint and
+(``MeshRoutedContentDigest``), and the replay-window id P5 item 12 keys on is **derived**
+(``MeshChunk/chunkID``), never a wire field — `SHA-256(purpose ‖ itemID ‖ index)`, with the origin
+deliberately left out because the window separates by author, so the real key is the pair
+`(origin, chunkID)`. Item 12's routed instance is sized on that pair: 1056 ids per author carries a
+maximal item's 1024 chunks plus its manifest, and a full axis falls through rather than refusing, so
+the 64-vs-1024 caveat this page used to carry is answered twice over. ``MeshChunker`` is the mint and
 refuses to mint for a manifest this device did not originate; ``MeshChunkVerifier`` is the receive
 door (mesh → shape → admitted key → not removed → signature → chunk hash → expiry, then the manifest
 cross-checks, whose identity test is the **triple** `(itemID, originFingerprint, contentHash)` so an

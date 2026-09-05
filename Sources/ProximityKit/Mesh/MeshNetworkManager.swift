@@ -2123,6 +2123,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// re-fire. Bounded by the roster cap and, per peer, by the inventory's entry cap.
     @ObservationIgnored private var routedRefusedKeys: [String: Set<MeshRoutedItemKey>] = [:]
 
+    /// Routed content ids this device has already admitted, per AUTHOR — P5 item 12's wiring of
+    /// ``MeshFrameReplayWindow``, which P4 built, left unwired and made deliberately
+    /// epoch-independent.
+    ///
+    /// Built lazily at the first recorded frame and rebuilt whenever the mesh id changes, so a stale
+    /// window can never sit answering `foreignMesh` for a whole session. Bounded on both axes by the
+    /// window's own guards (`MeshRoutedDrainBounds.sessionFramesPerPeer` ids ×
+    /// `MeshMembershipBounds.maxRecordsPerKind` authors ⇒ ≈ 520 KiB worst case), memory-only, and
+    /// freed whole at the same three session resets ``routedRefusedKeys`` is cleared at.
+    ///
+    /// **Nothing here persists.** After a restart a captured frame can be replayed and will reach
+    /// the verifier and the store; what that costs is bounded by the store's own caps, and item 9's
+    /// hold banner is what makes the expensive half visible. Persisting the window would not close
+    /// it either — invariant 5's foreground resume runs `prepareMembershipLedger` /
+    /// `armJoinerLedger`, which clear exactly this state.
+    @ObservationIgnored private var routedReplayWindow: MeshFrameReplayWindow?
+
     /// The last capacity refusal the drain took, for item 9 to surface. Frozen reason, no display
     /// text — plan §18.2's copy is the owner's and item 6 ships none.
     @ObservationIgnored private(set) var lastRoutedDrainRefusal: MeshRoutedDrainRefusalNote?
@@ -3367,6 +3384,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         routedTypeRegistryForTesting ?? MeshRoutedTypeRegistry.increment1
     }
 
+    /// How many routed content ids one AUTHOR may occupy in this session's replay window (P5 item
+    /// 12), in ``routedTypes``' own testing-override idiom.
+    ///
+    /// Derived, never a literal: ``MeshRoutedDrainBounds/sessionFramesPerPeer`` is already this
+    /// device's OUTBOUND per-peer session budget, sized as *exactly one maximal (256 MiB) item plus
+    /// its manifests and receipts* — 1024 + 32 = 1056. The replay window is that budget's inbound
+    /// mirror, so it is reused rather than re-derived: one maximal item needs 1024 chunk ids + 1
+    /// manifest + at most one custody and one recipient receipt this author could sign for it =
+    /// 1027, and 1056 ≥ 1027. Wired at the window's static 64 instead, the 65th chunk of any item
+    /// above 16 MiB would answer `senderWindowFull`.
+    ///
+    /// `routedReplayCapacityForTesting` is the `@testable` seam that lets a cell drive a deliberately
+    /// tiny window without minting a thousand frames. An instance property, never a global (R6).
+    private var routedReplayCapacity: Int {
+        routedReplayCapacityForTesting ?? MeshRoutedDrainBounds.sessionFramesPerPeer
+    }
+
     /// Forgets every peer's routed drain state. Called from the three session resets
     /// `peerInventoryDigests` is cleared at, and nowhere else.
     ///
@@ -3376,6 +3410,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         peerRoutedInventories.removeAll()
         routedDrainFramesSpent.removeAll()
         routedRefusedKeys.removeAll()
+        routedReplayWindow = nil
         lastRoutedDrainRefusal = nil
     }
 
@@ -3552,7 +3587,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// The four content families: manifest, chunk, custody receipt, recipient receipt. One ingest
-    /// function each, one admission call site each — the shape item 12 wires its replay window into.
+    /// function each, one admission call site each — and, since P5 item 12, one replay PROBE each as
+    /// the door's first statement and one RECORD each after the store's door has answered.
+    ///
+    /// **What the window does not bound, stated rather than implied.** Three door refusals sit
+    /// *before* their store verb, so item 12's "record only a `.completed` outcome" rule never
+    /// reaches them and each stays replayable without bound at its own real cost:
+    /// `notADestinationOrHandoff` (one Ed25519 verify + one fingerprint hash per replay),
+    /// `unknownItemNotFromOrigin` and `unregisteredTypeChunk` (one sealed-index load each). Two of
+    /// them fire before their verifier, where the author is still a claim and recording would be the
+    /// window-poisoning ``MeshFrameReplayWindow`` forbids; the third is sender-DEPENDENT
+    /// (`destinations.contains(me) || sender == origin`), so recording a courier's refused copy would
+    /// drop the origin's own hand-off copy tomorrow and break exactly item 8's transfer. Closing
+    /// this channel needs a per-sender pre-verification budget — a different mechanism, with its own
+    /// denial-of-service question — and is deliberately not half-built here.
     private func dispatchRoutedContent(
         _ type: PayloadType,
         plaintext: Data,
@@ -3601,6 +3649,98 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let now: Date
     }
 
+    /// One routed content frame, reduced to what the replay window keys on (P5 item 12).
+    ///
+    /// Built once per door so the probe and the record can each be one call: without it every door
+    /// would carry two four-argument calls. A stack value; it allocates nothing.
+    private struct RoutedReplayRef {
+        /// The content id items 1–4 derived for exactly this purpose — a manifest's `itemID`, a
+        /// chunk's derived `chunkID`, or a receipt's derived `receiptID`.
+        let id: UUID
+        /// The frame's **author** — origin, custodian or recipient — never the forwarding envelope's
+        /// sender. `chunkID` deliberately omits the origin because the window separates by author,
+        /// so the real key is the pair `(author, id)`.
+        let author: String
+        /// The frame's own expiry, from the frame.
+        let expiresAt: Date
+        /// The payload type, for the audit line's frozen token.
+        let type: PayloadType
+    }
+
+    /// Whether this content frame has already been admitted from this author — the **probe**, run as
+    /// the first statement of each routed content door (P5 item 12).
+    ///
+    /// Non-mutating, and that is what makes it safe here, before the frame's signature has been
+    /// checked: an id is present under an author only because a frame that VERIFIED under that
+    /// author's ledger-resolved key put it there, so a forged frame can neither poison another
+    /// member's axis nor evict anything, and simply proceeds to the verifier that refuses it.
+    ///
+    /// Only ``MeshFrameReplayVerdict/replayed`` is actionable. `expired` and `foreignMesh` fall
+    /// through so the window can never hide a refusal the verifier owns and names better, and
+    /// `senderWindowFull` falls through because a bounded window that dropped legitimate traffic at
+    /// its cap would be a delivery denial, not a defence.
+    private func routedFrameIsReplayed(_ frame: RoutedReplayRef, in context: RoutedIngestContext) -> Bool {
+        guard let window = routedReplayWindow else { return false }
+        let verdict = window.verdict(
+            frameID: frame.id, from: frame.author, meshID: context.meshID,
+            expiresAt: frame.expiresAt, now: context.now
+        )
+        guard verdict == .replayed else { return false }
+        FernletAuditLog.log(
+            "mesh.routedDrain.rejected",
+            context: ["type": frame.type.rawValue, "reason": "replayed"]
+        )
+        return true
+    }
+
+    /// Records one content frame in the replay window — the **record**, run after the store's door
+    /// has answered, on the author the verifier just authenticated (P5 item 12).
+    ///
+    /// **Recorded iff the outer outcome is `.completed` AND `settled`.** Each half is a delivery
+    /// guarantee, not a nicety:
+    ///
+    /// - `.unavailable` (a `deferred`, `corrupt` or seal-refused store) means the store could not
+    ///   act, and the peer's next honest re-offer is exactly what the drain will make — recording
+    ///   here would answer `replayed` to it and the item could never complete.
+    /// - `.refused` (item 9's capacity family, and every other named store refusal) must stay
+    ///   re-offerable, because item 9's sweeps and reclaims free capacity mid-session.
+    /// - `settled == false` means the door completed but this device's rung work did not, and the
+    ///   honest re-offer *is* the re-drive.
+    ///
+    /// INNER refusals inside `.completed` — a `.duplicate` chunk, a `.conflictingChunk` — **are**
+    /// recorded: the gate is on the outer case only, never a per-type sub-branch. Safe because the
+    /// ids are derived from identity, not content, so a conflicting chunk carries the same id as the
+    /// honest one already held.
+    private func noteRoutedFrame<Value>(
+        _ outcome: MeshRoutedOutcome<Value>, _ frame: RoutedReplayRef, settled: Bool,
+        in context: RoutedIngestContext
+    ) {
+        guard case .completed = outcome, settled else { return }
+        if routedReplayWindow?.meshID != context.meshID {
+            routedReplayWindow = MeshFrameReplayWindow(
+                meshID: context.meshID,
+                framesPerSender: routedReplayCapacity,
+                maxSenders: MeshMembershipBounds.maxRecordsPerKind
+            )
+        }
+        guard var window = routedReplayWindow else { return }
+        let verdict = window.admit(
+            frameID: frame.id, from: frame.author, meshID: context.meshID,
+            expiresAt: frame.expiresAt, now: context.now
+        )
+        routedReplayWindow = window
+        guard verdict == .senderWindowFull else { return }
+        // A named degradation, never a refusal: the frame has already landed. The axis is named
+        // because a full frame axis (honest volume) and a refused author axis (the admission set
+        // outgrew the cap) are different faults and look identical without it. The count is
+        // unchanged by a refused admission, so reading it here is the same reading as before it.
+        let full = window.recordedCount(for: frame.author) >= routedReplayCapacity
+        FernletAuditLog.log(
+            "mesh.routedDrain.replayWindowFull",
+            context: ["type": frame.type.rawValue, "axis": full ? "frames" : "senders"]
+        )
+    }
+
     /// A peer's advertisement: verify, record, and answer it — the drain's own door.
     ///
     /// Deliberately **not** piggybacked inside ``receiveInventoryDigest(_:)``: that function returns
@@ -3610,6 +3750,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// `internal` for the same reason ``dispatchRoutedPayload(_:plaintext:decoder:slot:now:)`` is:
     /// the drain's battery drives one advertisement at a time, on an injected clock.
+    ///
+    /// **Deliberately outside P5 item 12's replay window** (D-5.12), and the reason is exactly two
+    /// facts, neither of them a freshness check: `MeshRoutedInventoryVerifier` has none —
+    /// `sentAt` is *bound into* the signature, not checked against a wall clock, which stops a
+    /// digest being re-attributed to another peer and stops nothing being re-sent. What limits a
+    /// replayed advertisement is (1) the slot binding `payload.senderFingerprint ==
+    /// senderFingerprint`, so only the same peer can replay its own, and (2)
+    /// ``MeshRoutedDrainBounds/sessionFramesPerPeer``, which bounds the amplification a repeated
+    /// advertisement can drive.
+    ///
+    /// Those two bound the *cost*; they do not make a replayed advertisement inert, and the third
+    /// effect is named here rather than left to be rediscovered.
+    /// ``recordPeerRoutedInventory(_:from:)`` overwrites `inventory` and `inventorySentAt` with **no
+    /// `sentAt` monotonicity guard**, so a peer re-presenting its own older digest regresses this
+    /// device's recorded view of that peer's holdings, and ``answerRoutedInventory(from:advertisedAt:now:)``
+    /// then re-plans and re-stamps `quiescentLocalAsOf` from that stale instant. The cost is a stale
+    /// delta — offers the peer already holds, bounded by the same per-peer frame budget — never a
+    /// lost or double-counted delivery, and the replayer can only ever be the peer itself, which
+    /// could equally have sent the same stale digest first-hand. Pre-existing (items 5 and 6); item
+    /// 12 does not close it, and a `payload.sentAt >= state.inventorySentAt` guard is left named and
+    /// unbuilt rather than smuggled into a wiring item.
     func receiveRoutedInventory(
         _ payload: MeshRoutedInventoryPayload,
         from senderFingerprint: String,
@@ -3635,6 +3796,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Stores the peer's verified holdings, bounded by the roster cap.
+    ///
+    /// A last-writer-wins overwrite with **no `sentAt` monotonicity guard**: the peer's own replayed
+    /// older digest regresses this record (and, through
+    /// ``answerRoutedInventory(from:advertisedAt:now:)``, the `quiescentLocalAsOf` stamp derived
+    /// from it). Named on ``receiveRoutedInventory(_:from:now:)`` as the third fact about a replayed
+    /// advertisement — a stale delta, never a lost delivery — and deliberately not closed by P5
+    /// item 12.
     private func recordPeerRoutedInventory(
         _ payload: MeshRoutedInventoryPayload,
         from senderFingerprint: String
@@ -3690,6 +3858,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// name **this device** as the advertiser, and must name an instant this device really
     /// advertised. Without them a replayed `quiescent: true` closes a merge window that should still
     /// be open. A bit that does not bind is logged and dropped, never recorded.
+    ///
+    /// **Outside P5 item 12's replay window** (D-6.10) because those two bindings already are one:
+    /// `advertiserFingerprint` + `advertisedAt` pin the answer to one advertisement this device
+    /// really made. That binding is the model item 12 copies at the four content doors, not a door
+    /// it needs to cover a second time.
     private func receiveRoutedDrainAnswer(
         _ payload: MeshRoutedDrainAnswerPayload,
         from senderFingerprint: String
@@ -3728,8 +3901,33 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// admitted member could fill this device's caps with content nobody asked it to hold, and §6.1
     /// would then mint a custody receipt for each. The second disjunct is not slack — a departure
     /// custodian is not a destination, and the custody evidence cannot land until the record exists.
+    ///
+    /// **P5 item 12's one sender-dependent side effect on the replayed path.** The replay probe is
+    /// sender-blind by construction (author = the origin, id = the item), so a courier's copy and
+    /// the origin's own are indistinguishable to it — and item 8's hop bound is written from
+    /// `context.sender`. Left inside the probe's early return, the ordering "custodian forwards O's
+    /// manifest to E, then O sends E the same manifest directly" would drop O's own frame as
+    /// `replayed`, leave `originServedItems` without the key, and strand E's leg at O's next
+    /// departure. So the write RUNS on the replayed path: the probe's saving is the signature and
+    /// the I/O, never the bound.
     private func ingestRoutedManifest(_ payload: MeshRoutedManifestPayload, in context: RoutedIngestContext) {
         let manifest = payload.manifest
+        let frame = RoutedReplayRef(
+            id: manifest.itemID, author: manifest.originFingerprint,
+            expiresAt: manifest.expiresAt, type: .meshRoutedManifest
+        )
+        if routedFrameIsReplayed(frame, in: context) {
+            // P5 item 8's hop bound rides the replayed path deliberately. The probe is sender-BLIND
+            // (the author is the origin, the id is the item), so a courier's copy and the origin's
+            // own are indistinguishable to it; skipping the write here would leave a leg the origin
+            // really did serve unclaimable at that origin's next departure. Safe on an unverified
+            // frame: a `replayed` verdict means a VERIFIED frame recorded this pair, and
+            // `context.sender` is the committed slot, authenticated by the envelope signature.
+            if context.sender == manifest.originFingerprint {
+                noteOriginServed(MeshRoutedItemKey(manifest))
+            }
+            return
+        }
         let door = MeshRoutedManifestVerifier(
             meshID: context.meshID, hardDeadline: context.hardDeadline, ledger: context.ledger,
             acceptedTypeTokens: routedTypes.tokens
@@ -3757,10 +3955,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if context.sender == manifest.originFingerprint { noteOriginServed(key) }
         let outcome = routedStore().admittingManifest(manifest, now: context.now)
         recordRoutedOutcome(outcome, type: .meshRoutedManifest, key: key, in: context)
-        guard let admission = outcome.value, admission.receivedCount == admission.expectedCount else {
-            return
+        // A door that never reaches the completion branch is `settled` by definition: the frame
+        // drove no rung, so an honest re-offer has nothing to re-drive.
+        var settled = true
+        if let admission = outcome.value, admission.receivedCount == admission.expectedCount {
+            settled = finishLocalRungs(for: key, from: context.sender, now: context.now)
         }
-        finishLocalRungs(for: key, from: context.sender, now: context.now)
+        noteRoutedFrame(outcome, frame, settled: settled, in: context)
     }
 
     /// A peer's chunk: the manifest it belongs to (nil means "not seen yet", which is admissible and
@@ -3784,6 +3985,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// build, like the other registry gates: every increment-1 token is registered.
     private func ingestRoutedChunk(_ payload: MeshChunkPayload, in context: RoutedIngestContext) {
         let chunk = payload.chunk
+        let frame = RoutedReplayRef(
+            id: chunk.chunkID, author: chunk.originFingerprint,
+            expiresAt: chunk.expiresAt, type: .meshRoutedChunk
+        )
+        if routedFrameIsReplayed(frame, in: context) { return }
         let key = MeshRoutedItemKey(chunk)
         let store = routedStore()
         let known = store.forwardableManifest(item: key)
@@ -3818,11 +4024,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         recordRoutedOutcome(
             outcome, type: .meshRoutedChunk, key: key, in: context, verdict: RoutedDrainVerdict.of
         )
-        guard let admission = outcome.value,
-              case .admitted(let received, let expected) = admission, received == expected else {
-            return
+        // As at the manifest door: not reaching the completion branch IS settled.
+        var settled = true
+        if case .completed(.admitted(let received, let expected)) = outcome, received == expected {
+            settled = finishLocalRungs(for: key, from: context.sender, now: context.now)
         }
-        finishLocalRungs(for: key, from: context.sender, now: context.now)
+        noteRoutedFrame(outcome, frame, settled: settled, in: context)
     }
 
     /// A forwarded custody receipt: verified, then stored as **evidence only**. It advances no rung —
@@ -3831,6 +4038,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         _ payload: MeshCustodyReceiptPayload, in context: RoutedIngestContext
     ) {
         let receipt = payload.receipt
+        let frame = RoutedReplayRef(
+            id: receipt.receiptID, author: receipt.custodianFingerprint,
+            expiresAt: receipt.expiresAt, type: .meshCustodyReceipt
+        )
+        if routedFrameIsReplayed(frame, in: context) { return }
         let key = MeshRoutedItemKey(
             originFingerprint: receipt.originFingerprint, itemID: receipt.itemID
         )
@@ -3853,6 +4065,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let outcome = store.recordingCustodyEvidence(item: key, receipt: receipt, now: context.now)
         recordRoutedOutcome(outcome, type: .meshCustodyReceipt, key: key, in: context)
+        // `settled: true`: this door drives no rung at all (D-6.7), so there is nothing a re-offer
+        // could re-drive.
+        noteRoutedFrame(outcome, frame, settled: true, in: context)
     }
 
     /// A forwarded recipient receipt: verified, then filed through the store's **one** writer of a
@@ -3861,6 +4076,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         _ payload: MeshRecipientReceiptPayload, in context: RoutedIngestContext
     ) {
         let receipt = payload.receipt
+        let frame = RoutedReplayRef(
+            id: receipt.receiptID, author: receipt.recipientFingerprint,
+            expiresAt: receipt.expiresAt, type: .meshRecipientReceipt
+        )
+        if routedFrameIsReplayed(frame, in: context) { return }
         let key = MeshRoutedItemKey(
             originFingerprint: receipt.originFingerprint, itemID: receipt.itemID
         )
@@ -3886,6 +4106,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             outcome, type: .meshRecipientReceipt, key: key, in: context,
             verdict: RoutedDrainVerdict.of
         )
+        // Recorded BEFORE the reclaim: the reclaim is what drops the item whole, and the window is
+        // then the only thing in the session that remembers this receipt was already filed.
+        noteRoutedFrame(outcome, frame, settled: true, in: context)
         reclaimDeliveredItem(key, now: context.now)
     }
 
@@ -4550,23 +4773,33 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `received == expected`, so one cheap duplicate would otherwise re-open the seal key and
     /// re-stream, re-decrypt and re-hash the whole item — up to 256 MiB, on the main actor — and
     /// send two signed receipts back, none of it charged to the peer's frame budget.
-    private func finishLocalRungs(for key: MeshRoutedItemKey, from peer: String, now: Date) {
+    ///
+    /// - Returns: whether this device has **nothing left to take** for the item — P5 item 12's
+    ///   `settled:` gate. `false` means the honest re-offer is still the re-drive (the store could
+    ///   not say what it holds, or a commit produced nothing while a rung was outstanding), and the
+    ///   replay window must therefore not record the frame that got here. The alternative gate —
+    ///   re-reading `routedRungsOutstanding` at the door — costs a sealed-index load per chunk,
+    ///   which is the exact I/O the window exists to avoid, and reads "outstanding" forever for a
+    ///   courier with no honest claim.
+    @discardableResult
+    private func finishLocalRungs(for key: MeshRoutedItemKey, from peer: String, now: Date) -> Bool {
         noteRoutedItemPlaced(key, at: now)
         guard case .completed(let held) = routedStore().forwardableManifest(item: key),
-              let manifest = held else { return }
+              let manifest = held else { return false }
         // P5 item 8's third claim door: an item that has just BECOME complete may be one a departed
         // origin handed this device. It runs before the guard below, which answers `false` for a
         // courier that is not a destination and would return before any receipt was sent; and it
         // excludes `key`, which the next line commits itself — one item, one commit, per evaluation,
         // because `committingCustody` re-streams the whole item before it finds a stored stamp.
         claimHandedOffCustody(now: now, excluding: key)
-        guard routedRungsOutstanding(for: key, manifest: manifest) else { return }
+        guard routedRungsOutstanding(for: key, manifest: manifest) else { return true }
         let custody = commitLocalCustody(for: key, manifest: manifest, now: now)
         let recipient = commitLocalDelivery(for: key, manifest: manifest, now: now)
-        guard custody != nil || recipient != nil else { return }
+        guard custody != nil || recipient != nil else { return false }
         spawnHostPinned { [weak self] in
             await self?.sendMintedReceipts(custody: custody, recipient: recipient, to: peer)
         }
+        return true
     }
 
     /// Whether either rung this device could take for `key` is still outstanding.
@@ -4608,6 +4841,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return nil
         }
         let outcome = routedStore().committingCustody(item: key, custodian: me, now: now)
+        forgetRepairedRoutedItem(key, manifest: manifest, after: outcome)
         guard case .completed(.committed(let witness)) = outcome else {
             FernletAuditLog.log("mesh.routedDrain.custodyNotCommitted", context: ["type": manifest.typeToken])
             return nil
@@ -4651,6 +4885,69 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return
         }
         originServedItems.insert(key)                                 // R3: bounded set
+    }
+
+    /// Un-records one chunk slot the store gave BACK — P5 item 12's counterpart to the record.
+    ///
+    /// `MeshRoutedCustody.repairing(_:dropping:in:token:)` removes a chunk descriptor and unlinks
+    /// its file when the bytes are missing or unauthentic; the slot then re-appears as a gap in the
+    /// advertised inventory and a peer re-offers that exact chunk. Its id is derived from
+    /// `(itemID, index)`, so the honest re-send carries the identical `(author, id)` the first
+    /// admission recorded — without this the slot could never be refilled for the rest of a session,
+    /// and no complete item means no witness, no receipt and no delivery.
+    private func forgetRepairedRoutedSlot(_ key: MeshRoutedItemKey, index: UInt32) {
+        guard var window = routedReplayWindow else { return }
+        window.forget(
+            frameID: MeshRoutedContentDigest.chunkID(itemID: key.itemID, chunkIndex: index),
+            from: key.originFingerprint
+        )
+        routedReplayWindow = window
+    }
+
+    /// Un-records a whole item's derivable id family, for the repair site that knows the ITEM but
+    /// never the slot — a streamed commit that answered `.incomplete` or `.chunkFileMismatch`.
+    ///
+    /// Over-forgetting is deliberate and safe in exactly one direction: `.incomplete` is also
+    /// reachable without a repair (a slot that simply never held), and forgetting then costs replay
+    /// *coverage* for that item and never a delivery, while under-forgetting costs the delivery. The
+    /// 1024 short hashes run only on a corruption event, never on a per-frame path.
+    private func forgetRepairedRoutedItem(
+        _ key: MeshRoutedItemKey, manifest: MeshRoutedManifest,
+        after outcome: MeshRoutedOutcome<MeshRoutedCustodyOutcome>
+    ) {
+        guard routedReplayWindow != nil, Self.routedCommitRepaired(outcome) else { return }
+        forgetRepairedRoutedManifest(key, manifest: manifest)
+    }
+
+    /// The id-family walk itself, split out so both this and the commit door stay well inside the
+    /// 60-line budget.
+    private func forgetRepairedRoutedManifest(_ key: MeshRoutedItemKey, manifest: MeshRoutedManifest) {
+        guard var window = routedReplayWindow else { return }
+        window.forget(frameID: manifest.itemID, from: key.originFingerprint)
+        let count = MeshChunkFormat.chunkCount(forSize: manifest.size) ?? 0
+        // R2: bounded by the chunk format's own maximal item.
+        for index in 0..<min(count, MeshChunkFormat.maxChunkCount) {
+            window.forget(
+                frameID: MeshRoutedContentDigest.chunkID(itemID: key.itemID, chunkIndex: UInt32(index)),
+                from: key.originFingerprint
+            )
+        }
+        routedReplayWindow = window
+    }
+
+    /// Whether a custody commit's outcome is one of the two arms a **repair** can hide behind: a
+    /// streamed shortfall, or the mismatch the repair itself answers with.
+    ///
+    /// The mismatch is an **outer** refusal, not `.completed(.refused(…))`: the stream result's
+    /// `.refused` arm is lifted straight to `MeshRoutedOutcome.refused` in
+    /// `MeshRoutedCustodyCommit.committed(…)`, and `MeshChunkRefusal` carries no `chunkFileMismatch`
+    /// case at all. Both arms have already applied `repairing(_:dropping:in:token:)`.
+    private static func routedCommitRepaired(_ outcome: MeshRoutedOutcome<MeshRoutedCustodyOutcome>) -> Bool {
+        switch outcome {
+        case .completed(.incomplete): return true
+        case .refused(.chunkFileMismatch): return true
+        default: return false
+        }
     }
 
     /// Takes the custody legs a departed origin handed THIS device — plan §10.6's custodian half.
@@ -5149,6 +5446,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 switch store.forwardableChunk(item: send.key, index: index) {
                 case .completed(let chunk):
                     guard let chunk else {
+                        forgetRepairedRoutedSlot(send.key, index: index)
                         FernletAuditLog.log("mesh.routedDrain.offerSkipped", context: ["reason": "slotNotHeld"])
                         continue
                     }
@@ -5156,6 +5454,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                         .meshRoutedChunk, MeshChunkPayload(chunk: chunk), to: [peer]
                     )
                 case .refused(let refusal):
+                    if refusal == .chunkFileMismatch { forgetRepairedRoutedSlot(send.key, index: index) }
                     FernletAuditLog.log("mesh.routedDrain.offerSkipped", context: ["reason": refusal.rawValue])
                 case .unavailable(let cause):
                     FernletAuditLog.log("mesh.routedDrain.unavailable", context: ["state": cause.logToken])
@@ -9802,6 +10101,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// widening can drop without a single test going red, and §4.2a's whole claim is that a device
     /// which took an item from a *custodian* is not entitled to courier it onward.
     var originServedItemsForTesting: Set<MeshRoutedItemKey> { originServedItems }
+
+    /// A deliberately tiny per-author frame cap for the routed replay window, or nil for the
+    /// shipping ``MeshRoutedDrainBounds/sessionFramesPerPeer`` (P5 item 12).
+    ///
+    /// The `routedTypeRegistryForTesting` idiom, for the same reason: driving the window to its cap
+    /// honestly would mean minting 1056 signed frames, so the behaviour at a full axis — a NAMED
+    /// degradation the frame falls through, never a refusal — would be untested rather than
+    /// asserted. An instance property, never a global (Power of 10 R6).
+    @ObservationIgnored var routedReplayCapacityForTesting: Int?
+
+    /// This session's routed replay window, or nil before the first recorded frame and after every
+    /// session reset (P5 item 12).
+    ///
+    /// Readable because both halves are otherwise unobservable: that the three session resets really
+    /// clear it, and that the two axes hold their bounds (`recordedCount(for:)`,
+    /// `trackedSenderCount`). A defence nothing can see is a defence a later edit can switch off with
+    /// nothing going red — and item 14's acceptance battery folds both readings into its invariants.
+    var routedReplayWindowForTesting: MeshFrameReplayWindow? { routedReplayWindow }
 
     /// How many durable custody commits are queued past this evaluation's cap
     /// (`deferredCustodyCommits`) — the named deferral, made observable so "retried at the next

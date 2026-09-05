@@ -168,7 +168,16 @@ nonisolated struct MeshCustodyReceipt: Codable, Equatable, Sendable {
     /// recomputable, and stable across a **re-mint**: CryptoKit's Ed25519 signing is hedged, so two
     /// mints of one logical receipt differ in the signature and nothing may compare receipts by
     /// `==`. ``custodiedAt`` is deliberately not an input either: a re-mint of the same claim is the
-    /// same claim, and the replay window should treat it as one. This is the frame id item 12 admits.
+    /// same claim, and the replay window treats it as one — this is the frame id P5 item 12 admits,
+    /// under the author axis ``custodianFingerprint``.
+    ///
+    /// **One named residual of that choice.** After a chunk **repair** this device can refill the
+    /// slot and re-mint its custody receipt, and the re-mint carries the same id its peers already
+    /// recorded, so their windows answer `replayed` and they keep the earlier receipt. That is
+    /// staleness, not a lost delivery — the claim (this custodian holds this item) is true again,
+    /// and `repairing`'s own doc says a receipt already sent is a point-in-time claim, not a running
+    /// promise. Closing it would need a cross-device un-record, i.e. a wire change item 12 does not
+    /// make.
     ///
     /// The result is **not** an RFC-4122 versioned UUID: it is a 128-bit dedup key that happens to
     /// have `UUID`'s shape, which is what `MeshFrameReplayWindow` takes.
