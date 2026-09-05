@@ -122,6 +122,12 @@ nonisolated struct MeshRoutedAckStageRow: Equatable, Sendable {
 /// takes it) so policy stays item 11's. Shipping code names exactly one value, ``increment1``, and a
 /// source-scan wall in `MeshRoutedStoreIsolationTests` is what keeps that true — a fixture table is
 /// a test-only affordance.
+///
+/// **Since P5 item 11 this type is a PROJECTION, not a source.** ``MeshRoutedTypeRegistry`` owns the
+/// rows — one per routed type, carrying the other four columns plan §11 makes a type declare — and
+/// ``increment1`` is `MeshRoutedTypeRegistry.increment1.ackStages`. The table survives so item 4's
+/// door contract (D-4.7) and its pins keep asserting through the new source; a caller still hands a
+/// table to a door, and the registry is what decided what is in it.
 nonisolated struct MeshRoutedAckStageTable: Equatable, Sendable {
     /// Most rows a table holds. The routed type vocabulary is a compile-time literal; this cap is
     /// what makes the build loop bounded (Power of 10 R2/R4) rather than a policy number.
@@ -144,13 +150,13 @@ nonisolated struct MeshRoutedAckStageTable: Equatable, Sendable {
         stages = resolved
     }
 
-    /// Plan §11's three registered types. Control is deliberately absent
-    /// (``MeshRoutedTypeToken/control``).
-    static let increment1 = MeshRoutedAckStageTable(rows: [
-        MeshRoutedAckStageRow(typeToken: MeshRoutedTypeToken.photo, finalAck: .durableRecipientStorage),
-        MeshRoutedAckStageRow(typeToken: MeshRoutedTypeToken.tempMessage, finalAck: .durableRecipientStorage),
-        MeshRoutedAckStageRow(typeToken: MeshRoutedTypeToken.heart, finalAck: .foregroundDecryptAndLedgerCommit)
-    ])
+    /// Plan §11's three registered types, **projected from item 11's registry** — the rows live in
+    /// ``MeshRoutedTypeRegistry/increment1``, and this value is the `finalAck` column of them.
+    ///
+    /// Derived rather than re-listed: the accepted-token set and the stage column come from one
+    /// source, so they cannot drift. Control is deliberately absent (``MeshRoutedTypeToken/control``)
+    /// because no row registers it.
+    static let increment1 = MeshRoutedTypeRegistry.increment1.ackStages
 
     /// Every token this table knows. Item 11 folds these rows into its registry and derives its
     /// accepted-token set from the same source, so the two can never disagree.

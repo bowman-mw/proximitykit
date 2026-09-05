@@ -1427,7 +1427,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             remote: peerRoutedInventories[custodian]?.inventory
                 ?? MeshRoutedInventory(meshID: mesh.meshID, members: [], entries: []),
             offerable: offerableKeys(to: custodian, in: index, at: now).intersection(pushable),
-            refused: routedRefusedKeys[custodian] ?? [],
+            refused: (routedRefusedKeys[custodian] ?? []).union(routedUnregisteredKeys(in: index)),
             frameAllowance: min(bounds.maxFrames, routedFramesRemaining(for: custodian))
         )
     }
@@ -3356,6 +3356,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         MeshRoutedStore(scope: store.meshRoutedStorage)
     }
 
+    /// The routed type registry this device admits, resolves and forwards by (P5 item 11, plan §11).
+    ///
+    /// The **one** shipping read of the registry value: the verifier's accepted-token set, the
+    /// ack-stage projection, the re-entry stage branch and the four forwarding gates all resolve
+    /// through this property, so a build cannot register a token at one door and refuse it at
+    /// another. `routedTypeRegistryForTesting` is the `@testable` seam that makes the
+    /// build-narrowed doors — unreachable in one shipping build — reachable in a cell.
+    private var routedTypes: MeshRoutedTypeRegistry {
+        routedTypeRegistryForTesting ?? MeshRoutedTypeRegistry.increment1
+    }
+
     /// Forgets every peer's routed drain state. Called from the three session resets
     /// `peerInventoryDigests` is cleared at, and nowhere else.
     ///
@@ -3721,7 +3732,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let manifest = payload.manifest
         let door = MeshRoutedManifestVerifier(
             meshID: context.meshID, hardDeadline: context.hardDeadline, ledger: context.ledger,
-            acceptedTypeTokens: MeshRoutedAckStageTable.increment1.tokens
+            acceptedTypeTokens: routedTypes.tokens
         )
         if let rejection = door.verify(manifest) {
             FernletAuditLog.log(
@@ -3761,6 +3772,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// a set on this device. Without it the harm the manifest door refuses — any admitted member
     /// filling this device's caps with content nobody asked it to hold — is reachable through the
     /// other door, one parked chunk set at a time.
+    ///
+    /// **P5 item 11's seventh door, applied exactly where the type is decidable (D-11.21).** A chunk
+    /// carries no type token, so a PARKED set has no type to resolve and none is invented here. An
+    /// item whose manifest this device already holds does: its origin-signed token is in hand, and
+    /// if this build does not register it, the item can never be acknowledged, offered, forwarded or
+    /// claimed — so growing it toward `manifest.size` would only spend the 256 MiB / 1024-item caps
+    /// on bytes with nowhere to go, and could raise item 9's user-visible `.storeFull` hold against
+    /// a type that is still registered. "Holds what it already has" means held, not grown. Whatever
+    /// was staged before the narrowing stays, and expiry collects it. Unreachable in one shipping
+    /// build, like the other registry gates: every increment-1 token is registered.
     private func ingestRoutedChunk(_ payload: MeshChunkPayload, in context: RoutedIngestContext) {
         let chunk = payload.chunk
         let key = MeshRoutedItemKey(chunk)
@@ -3773,6 +3794,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard manifest != nil || context.sender == chunk.originFingerprint else {
             FernletAuditLog.log(
                 "mesh.routedDrain.rejected", context: ["reason": "unknownItemNotFromOrigin"]
+            )
+            return
+        }
+        if let manifest, routedTypes.entry(for: manifest.typeToken) == nil {
+            FernletAuditLog.log(
+                "mesh.routedDrain.rejected", context: ["reason": "unregisteredTypeChunk"]
             )
             return
         }
@@ -4487,9 +4514,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 continue
             }
             if record.deliveredAt == nil {
-                guard let stage = MeshRoutedAckStageTable.increment1.stage(for: manifest.typeToken)
-                else { continue }
-                guard stage != .foregroundDecryptAndLedgerCommit else { hearts += 1; continue }
+                guard let entry = routedTypes.entry(for: manifest.typeToken) else { continue }
+                guard !entry.requiresForegroundDecryptBeforeFinal else { hearts += 1; continue }
                 guard record.isComplete else { continue }
             }
             if commitLocalDelivery(for: ref.key, manifest: manifest, now: now) != nil { filed += 1 }
@@ -4685,8 +4711,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // after a claim the planner sees no `pending` leg, so a re-plan is exactly what CANNOT
         // recover the overflow, and routing the retry through the plan would make the deferral
         // permanent (``deferredCustodyCommits``).
-        guard !claims.isEmpty else { return mintClaimedCustody([], at: now) }
-        applyHandedOffClaims(claims, now: now, excluding: pending)
+        // P5 item 11: a leg whose item names a type this build does not register is not claimed,
+        // not custodied and not receipted — the planner stays type-blind (item 8's value and its
+        // tests are untouched) and the refusal is applied here, once, and named.
+        let registered = claims.filter { routedTypeEntry(of: $0.item, in: index) != nil }
+        if registered.count < claims.count {
+            FernletAuditLog.log(
+                "mesh.development.handoffClaimUnknownType",
+                context: ["items": String(claims.count - registered.count)]
+            )
+        }
+        guard !registered.isEmpty else { return mintClaimedCustody([], at: now) }
+        applyHandedOffClaims(registered, now: now, excluding: pending)
     }
 
     /// Writes one planned claim batch and commits custody for what it took.
@@ -4778,7 +4814,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard manifest.destinations.contains(me) else { return nil }
         let store = routedStore()
         let outcome = store.committingDelivery(
-            item: key, recipient: me, stages: .increment1, evidence: .none, now: now
+            item: key, recipient: me, stages: routedTypes.ackStages, evidence: .none, now: now
         )
         guard case .completed(let commit) = outcome else { return nil }
         guard case .acknowledged(let witness) = commit else {
@@ -4860,7 +4896,29 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // destinations. It is scoped to that development and dies with the session.
         keys.formUnion(handoffEntitlement(to: peer, in: index, at: now))
         keys.subtract(routedRefusedKeys[peer] ?? [])
+        noteUnregisteredTypesNotOffered(refs, in: index)
         return keys
+    }
+
+    /// P5 item 11's offer refusal, **named** once per plan rather than silently subtracted: how many
+    /// otherwise-enumerable outstanding items this build declined to offer because their stored
+    /// manifest names a type it does not register.
+    ///
+    /// Counted from the registry lookup itself, never as "everything the gates removed" — the other
+    /// subtractions here (increment 1's entitlement line, a peer's capacity refusals) are ordinary
+    /// and are not this line's business.
+    ///
+    /// - Parameters:
+    ///   - refs: The outstanding refs this peer's offer set was computed from.
+    ///   - index: The index the caller already read — never a second load.
+    private func noteUnregisteredTypesNotOffered(_ refs: [MeshRoutedItemRef], in index: MeshRoutedIndex) {
+        let withheld = Set(refs.lazy
+            .filter { self.routedTypeEntry(of: $0.key, in: index) == nil }
+            .map(\.key)).count
+        guard withheld > 0 else { return }
+        FernletAuditLog.log(
+            "mesh.routedDrain.unregisteredTypeNotOffered", context: ["items": String(withheld)]
+        )
     }
 
     /// Item 5's entitlement source 2: this device's own outstanding items, offerable to a custodian
@@ -4877,7 +4935,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
               let roster = membershipVerifier?.roster else { return [] }
         return Set(index.itemsAwaitingHandoff(
             at: now, in: roster, originatedBy: identity.localFingerprint
-        ).map(\.key))
+        ).map(\.key).filter { routedTypeEntry(of: $0, in: index) != nil })
     }
 
     /// Increment 1's entitlement line, stated once: the origin's own item, or a destination's leg
@@ -4889,10 +4947,53 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `custodied(by: self)` is written by exactly one door, `recordingCustodyTransfer`, which no
     /// shipping code in item 6 calls: so item 6's only entitled offerer is an origin, and item 8
     /// widens the SOURCE of the rung rather than this predicate.
+    ///
+    /// **P5 item 11's gate leads.** An item whose stored manifest names a type this build does not
+    /// register is offered to nobody, and one whose row declares a relay-retention increment 1 does
+    /// not implement is refused rather than couriered under increment 1's rule. Both are
+    /// *unreachable in one shipping build* — nothing carrying an unregistered token can be admitted,
+    /// so no such record exists at rest — and are reachable only across a build that narrowed its
+    /// registry. The own-origin fast path moved below them and loses nothing: an own-origin record
+    /// always carries its own minted manifest, and `offerableKeys` only reaches here for refs from
+    /// `outstandingItems(at:in:)`, which needs a delivery target, which needs a manifest.
     private func mayCourier(_ key: MeshRoutedItemKey, to peer: String, in index: MeshRoutedIndex) -> Bool {
+        guard let entry = routedTypeEntry(of: key, in: index) else { return false }
+        guard entry.relayRetention == .originRetainsUntilDeparture else { return false }
         if key.originFingerprint == identity.localFingerprint { return true }
         guard let target = index.record(for: key)?.deliveryTarget else { return false }
         return target.state(of: peer) == .custodied(by: identity.localFingerprint)
+    }
+
+    /// The registry row for a held item's own stored manifest, or nil — the ONE definition of
+    /// "unknown" reaching the forwarding doors (P5 item 11).
+    ///
+    /// A PARKED record has no manifest and therefore no type to resolve, which is why it answers nil
+    /// here and is never offered: acceptance is decidable only at the manifest (a chunk carries no
+    /// token), and item 9's origin-bound clause is what disposes of a parked set.
+    private func routedTypeEntry(
+        of key: MeshRoutedItemKey, in index: MeshRoutedIndex
+    ) -> MeshRoutedTypeEntry? {
+        guard let token = index.record(for: key)?.manifest?.typeToken else { return nil }
+        return routedTypes.entry(for: token)
+    }
+
+    /// Every held key whose stored manifest names a type this build does not register (P5 item 11).
+    ///
+    /// Unioned into the `refused:` set both `MeshRoutedDrainPlan` construction sites already take,
+    /// which is the half the offer gate cannot reach: `MeshRoutedInventoryDelta.receiptsToForward()`
+    /// takes no entitlement argument, so an unregistered item's origin-signed custody and recipient
+    /// receipt refs would otherwise still cross. Removing those keys from `delta.ask` too is the
+    /// intended consequence — a build that does not register a type does not spend budget completing
+    /// it. Empty in a shipping build; the cost is one bounded pass over an already-loaded index.
+    private func routedUnregisteredKeys(in index: MeshRoutedIndex) -> Set<MeshRoutedItemKey> {
+        var unregistered: Set<MeshRoutedItemKey> = []
+        // R2: bounded by the store's own item cap.
+        for record in index.items.prefix(MeshRoutedStoreFormat.maxItems) {
+            guard let token = record.manifest?.typeToken else { continue }
+            guard routedTypes.entry(for: token) == nil else { continue }
+            unregistered.insert(record.key)
+        }
+        return unregistered
     }
 
     /// The batch this exchange with `peer` may send, and this device's own quiescence bit.
@@ -4919,8 +5020,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         noteUnrestorableDeliveries(index, at: now)
         let bounds = MeshRoutedDrainBounds.increment1
+        let withheld = (routedRefusedKeys[peer] ?? []).union(routedUnregisteredKeys(in: index))
         let plan = MeshRoutedDrainPlan(
-            delta: delta, refused: routedRefusedKeys[peer] ?? [], bounds: bounds,
+            delta: delta, refused: withheld, bounds: bounds,
             frameAllowance: min(bounds.maxFrames, routedFramesRemaining(for: peer))
         )
         return (plan, delta.isQuiescent)
@@ -9624,6 +9726,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slot.stableDistanceMeters = stableDistanceMeters
         slots.append(slot)
     }
+
+    /// A narrowed or widened routed type registry for one manager, or nil for the shipping value
+    /// ``MeshRoutedTypeRegistry/increment1``. `internal` for `@testable` unit tests only.
+    ///
+    /// P5 item 11's four forwarding gates are *unreachable in one shipping build* — nothing carrying
+    /// an unregistered token can be admitted, so no such record exists at rest. This seam is what
+    /// makes them reachable in a cell: narrow one node's registry and its own held item becomes an
+    /// unregistered type, or widen both nodes' and a fourth type flows end to end with no consumer
+    /// edited. An instance property, never a global (Power of 10 R6).
+    @ObservationIgnored var routedTypeRegistryForTesting: MeshRoutedTypeRegistry?
 
     /// The radio this manager is driving, so a test can assert WHICH one it selected — and, when it
     /// injected a fake, read back what the manager asked the radio to do.

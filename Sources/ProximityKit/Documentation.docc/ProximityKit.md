@@ -741,6 +741,59 @@ with no path from any of them to a writer. What was missing was a way **back**.
   (`sessionState == .activeForeground`) is documented **inert until P8**, when a CPT-continued mesh
   will custody ciphertext and decrypt nothing.
 
+**P5 item 11 made "unknown" ONE answer: the type-token registry** (plan §11's last line). Plan §11
+says every future routed type declares its size cap, destination semantics, relay-retention,
+final-ack condition and expiry **at registration** — and item 11 is that sentence as one value,
+``MeshRoutedTypeRegistry`` with three rows, plus the two adjacent columns items 4 and 10 put on the
+same row (the foreground-decrypt requirement, **derived** from the stage so two fields cannot
+disagree; the canonical store, **declared** as a frozen token for P6's dispatch and read by nothing
+today). ``MeshRoutedAckStageTable`` survives as its **projection** — `increment1` is now
+`MeshRoutedTypeRegistry.increment1.ackStages` — so the accepted-token set and the stage column come
+from one source and cannot drift, which is the failure item 4's forward-compat note named.
+
+- **`entry(for:) == nil` IS "unknown", and item 11 adds no fourth answer.** The manifest verifier
+  refuses ``MeshRoutedManifestRejection/unknownTypeToken`` before the origin lookup, the ack door
+  refuses ``MeshRoutedStoreRefusal/unknownTypeToken``, the re-entry pass skips the item, and four
+  gates that had **no type check at all** now answer the same way: the drain offer (`mayCourier` +
+  `handoffEntitlement` inside `offerableKeys`, which the departure push inherits by narrowing
+  through `offerableKeys(…).intersection(pushable)` rather than building its own offer set), the
+  answer builder's **receipt and ask half** (an unregistered key is unioned into the `refused:` set
+  both `MeshRoutedDrainPlan` sites already take, because `receiptsToForward()` takes no entitlement
+  argument and the origin's signed receipts would otherwise still cross), the hand-off claim, and
+  the **chunk ingest door wherever the type is decidable** — a chunk carries no token, but an item
+  whose manifest this device already holds does, so a narrowed build stops growing what it can never
+  acknowledge instead of filling its caps with it. The parked-set drop is untouched: it keeps item
+  9's single origin-bound clause, which is the one place a chunk has no type to resolve.
+- **The four new gates are UNREACHABLE in one shipping build**, and that is said rather than
+  dressed up: nothing carrying an unregistered token can be admitted, so no such record exists at
+  rest. They are reachable only across a build that narrowed its own registry — held, never grown,
+  never offered, never forwarded, never claimed, never acknowledged, collected by expiry, and **not
+  dropped**, because a build narrowing itself is not the origin's refusal.
+- **Two policies are unreachable by construction, by two different mechanisms, and the asymmetry is
+  derived.** Increment 2's ``MeshRoutedRelayRetention/relayInFlight`` is *unregisterable* —
+  `init(entries:)` drops such a row, so its token answers nil at every door and no hop plumbing is
+  built ahead of plan §11's device-measurement gate — as is a row whose declared cap falls outside
+  `1 … MeshRoutedManifestFormat.maxContentByteCount`. ``MeshRoutedDestinationSemantics/singleRecipient``
+  is instead *registerable but unmintable*, because that column has **no receiver-side reader at
+  all**: a manifest carries its destination set on the wire and the verifier binds wraps ≡
+  destinations from those bytes, so a registered row cannot fall through to increment-1 behaviour on
+  receive, and P6 keeps the row to flip when `MeshDeliveryTarget`'s withheld subset initializer lands.
+- **The per-type size cap is a MINT guard, and the mint has no shipping caller yet.** Every
+  increment-1 cap equals the wire bound, so the guard cannot fire today; a receiver-side check would
+  add a `MeshRoutedManifestRejection` case that `MeshRoutedParkedDrop` switches over exhaustively,
+  i.e. it would force D-9.3's drop rule to be re-decided for a condition no row can produce. That
+  check, its rejection case and its **non-dropping** drop arm are P6's, in the same commit as its
+  first narrowed cap. The mint also does **not** refuse an unregistered token: acceptance is a
+  receiver-side statement, so an unregistered item mints under the shared bounds and is refused at
+  every receiver door — loud, and documented as an asymmetry rather than left to be discovered.
+- **The registry is not a wire change, not persisted and not a gate.** No golden, purpose, framing
+  case or `PayloadType` moves; nothing is stored (the index already holds the origin's manifest
+  verbatim, and a persisted policy would outlive the build that wrote it); and the file names none of
+  ``MeshRoutedAccessGate``'s symbols — a type's declared column is a property of the type, never the
+  gate. Three source-scan walls hold it: one registry construction site, one named value
+  (`increment1`), and **no per-type branch anywhere** — a token spelling has one source, a lookup
+  argument and a branch on a *resolved* value stay legal, and a `switch` on a token does not.
+
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
 frozen English spelling, so one grep finds every layer that touches those bytes:
@@ -1235,7 +1288,8 @@ by name** rather than unioning or intersecting, either of which would invent or 
 The type carries no key epoch, no branch id and no partition of origin, by construction. Nothing is
 `Codable`: `MeshSessionContext`'s schema stays **2**, and P5 persists targets inside its routed
 store. What makes an item final at a destination is plan §11's per-type table
-(``MeshRoutedAckStageTable``), resolved from the ORIGIN-signed type token — photos and text on
+(``MeshRoutedAckStageTable``, since item 11 a projection of ``MeshRoutedTypeRegistry``'s rows),
+resolved from the ORIGIN-signed type token — photos and text on
 durable recipient storage, hearts only after a foreground decrypt and a ``ProximityHeartLedger``
 commit, control immediately — and the stage is never on the wire and never the recipient's to state. The two existing seams are derivations rather than duplicates —
 ``MeshDevelopmentPlan/handoffTargets`` is `outstandingReachable(from:in:)` and
@@ -1257,7 +1311,8 @@ origin's by name (``MeshRoutedManifestRejection/originRemoved``: removal is the 
 act, and the group-key rotation that enforces it on live traffic cannot reach a static-key wrap),
 does not look destinations up in the ledger (a destination outside the roster reads as departed,
 bounded by expiry and the relay caps), and refuses any type token outside the accepted set it is
-built with (item 11 substitutes the registry). The routed store keys on the signed pair
+built with — which since item 11 is ``MeshRoutedTypeRegistry``'s `tokens`, the same rows the
+ack-stage table projects. The routed store keys on the signed pair
 `(originFingerprint, itemID)`, never on `itemID` alone — the frame is unsealed and any admitted
 member can mint under its own key reusing another origin's id. Verification needs public material only;
 ``MeshRoutedContentKeyWrapper/unwrap(_:binding:localFingerprint:localKeyAgreementPublicKey:staticAgreement:)``
@@ -1443,6 +1498,12 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshRoutedParkedDrop``
 - ``MeshRoutedDeliveryHold``
 - ``MeshRoutedDeliveryHoldCause``
+- ``MeshRoutedTypeEntry``
+- ``MeshRoutedDestinationSemantics``
+- ``MeshRoutedRelayRetention``
+- ``MeshRoutedExpiryRule``
+- ``MeshRoutedCanonicalStore``
+- ``MeshRoutedTypeRegistry``
 - ``MeshRoutedAccessGate``
 - ``MeshRoutedCapability``
 - ``MeshRoutedAccessEdge``

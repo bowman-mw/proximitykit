@@ -225,8 +225,11 @@ nonisolated struct MeshRoutedDrainPlan: Equatable, Sendable {
     ///
     /// - Parameters:
     ///   - delta: Item 5's comparison. Its entitlement was already applied by the caller.
-    ///   - refused: Keys this peer refused for a capacity reason, this session. Removed from **both**
-    ///     directions, so a refusal does not re-fire and a refused ask is not re-logged.
+    ///   - refused: The keys this answer withholds, from **two** sources the caller unions: keys this
+    ///     peer refused for a capacity reason this session (item 9), and keys whose stored manifest
+    ///     names a routed type this build does not register (item 11). Removed from **both**
+    ///     directions, so a refusal does not re-fire, a refused ask is not re-logged, and an
+    ///     unregistered item's receipts are not forwarded nor its completion asked for.
     ///   - bounds: The per-answer caps.
     ///   - frameAllowance: `min(bounds.maxFrames, sessionFramesPerPeer - spent)`. The session budget
     ///     **narrows** the answer rather than refusing it, so a nearly-spent peer still gets whatever

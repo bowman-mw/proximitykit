@@ -126,7 +126,7 @@ nonisolated struct MeshRecipientKeyWrap: Codable, Equatable, Sendable {
 ///
 /// **The destination set is immutable and is `MeshDeliveryTarget.destinations`** — the full derived
 /// roster at creation minus the origin, in the roster's sorted order — captured once by
-/// ``signed(meshID:target:typeToken:contentHash:size:createdAt:hardDeadline:contentKey:recipientKeys:identity:)``
+/// ``signed(meshID:target:typeToken:contentHash:size:createdAt:hardDeadline:contentKey:recipientKeys:identity:types:)``
 /// and never re-derived from the connected set, a branch view, or a bare list. Every destination
 /// has exactly one wrap at the same index. ``expiresAt`` is the mesh's signed `hardDeadline` plus
 /// ``MeshRoutedManifestFormat/developmentGraceSeconds``, bound into the signature so a custodian can
@@ -310,7 +310,7 @@ nonisolated struct MeshRoutedManifestPayload: Codable, Equatable, Sendable {
 
 // MARK: - MeshRoutedManifestMintError
 
-/// Why ``MeshRoutedManifest/signed(meshID:target:typeToken:contentHash:size:createdAt:hardDeadline:contentKey:recipientKeys:identity:)``
+/// Why ``MeshRoutedManifest/signed(meshID:target:typeToken:contentHash:size:createdAt:hardDeadline:contentKey:recipientKeys:identity:types:)``
 /// refused to mint. Thrown, never returned as `nil`, and never silent: a manifest that could not
 /// be built for the WHOLE destination set is not built at all (destination immutability, plan
 /// §10.1). Not `LocalizedError` — ``diagnosticDescription`` is frozen English for the audit log and
@@ -335,6 +335,15 @@ nonisolated enum MeshRoutedManifestMintError: Error, Equatable, Sendable {
     case invalidContentKey
     /// No handshake-verified X25519 key was supplied for this destination (D1).
     case missingRecipientKey(fingerprint: String)
+    /// `size` is above the cap the type's own registry row declares (P5 item 11). Distinct from
+    /// ``invalidSize``, which is the wire bound every type shares: this one names a POLICY the
+    /// registry set for one type, and in increment 1 no row can raise it because every row's cap
+    /// equals the wire bound.
+    case sizeExceedsTypeCap(token: String)
+    /// The type's registry row declares a destination semantics this build cannot mint — today only
+    /// ``MeshRoutedDestinationSemantics/singleRecipient``, which needs a `MeshDeliveryTarget`
+    /// initializer P4 deliberately withheld. Registerable, unmintable, refused by name.
+    case unsupportedDestinationSemantics(token: String)
 
     /// Frozen English for the diagnostic surface. Never shown as user copy.
     var diagnosticDescription: String {
@@ -349,6 +358,10 @@ nonisolated enum MeshRoutedManifestMintError: Error, Equatable, Sendable {
         case .invalidContentKey: return "The content key is not 32 bytes."
         case .missingRecipientKey(let fingerprint):
             return "No handshake-verified key-agreement key for destination \(fingerprint)."
+        case .sizeExceedsTypeCap(let token):
+            return "The content size is above the declared cap for routed type \(token)."
+        case .unsupportedDestinationSemantics(let token):
+            return "Routed type \(token) declares a destination semantics this build cannot mint."
         }
     }
 }
@@ -380,6 +393,14 @@ extension MeshRoutedManifest {
     ///     the `SymmetricKey(data:)` at the seal — item 2 chunks an opaque blob and never sees a key.
     ///   - recipientKeys: Handshake-verified X25519 public keys by destination fingerprint.
     ///   - identity: The origin. Its fingerprint becomes ``originFingerprint``.
+    ///   - types: The routed type registry this mint declares against (P5 item 11). A REGISTERED
+    ///     token's row supplies the per-type size cap, the destination semantics the mint is allowed
+    ///     to use, and the expiry rule. An UNREGISTERED token still mints, under the shared wire
+    ///     bounds — a documented asymmetry: acceptance is a receiver-side statement (D13), so an
+    ///     unregistered item is refused at every receiver door rather than at its author's. The
+    ///     default is written as `MeshRoutedTypeRegistry.increment1` rather than `.increment1` on
+    ///     purpose: the one-registry wall's member scanner reads the spelled-out form only, so a
+    ///     leading dot here would let a second registry value reach a value position unseen.
     /// - Throws: ``MeshRoutedManifestMintError``, ``MeshRoutedKeyWrapError``, or the identity's
     ///   signing error. Never a trap.
     @MainActor
@@ -393,13 +414,15 @@ extension MeshRoutedManifest {
         hardDeadline: Date,
         contentKey: Data,
         recipientKeys: [String: Data],
-        identity: IdentityService
+        identity: IdentityService,
+        types: MeshRoutedTypeRegistry = MeshRoutedTypeRegistry.increment1
     ) throws -> MeshRoutedManifest {
         let origin = identity.localFingerprint
         try validated(
             target: target, typeToken: typeToken, contentHash: contentHash, size: size,
-            contentKey: contentKey, originFingerprint: origin
+            contentKey: contentKey, originFingerprint: origin, types: types
         )
+        let rule = types.entry(for: typeToken)?.expiry ?? .meshHardDeadlinePlusGrace
         let binding = MeshRoutedWrapBinding(meshID: meshID, itemID: target.contentID, originFingerprint: origin)
         let wraps = try mintWraps(
             for: target.destinations, binding: binding, contentKey: contentKey, recipientKeys: recipientKeys
@@ -407,7 +430,7 @@ extension MeshRoutedManifest {
         let unsigned = MeshRoutedManifest(
             meshID: meshID, itemID: target.contentID, originFingerprint: origin, typeToken: typeToken,
             contentHash: contentHash, size: size, createdAt: floored(createdAt),
-            expiresAt: expiry(afterHardDeadline: hardDeadline), destinations: target.destinations,
+            expiresAt: rule.expiry(afterHardDeadline: hardDeadline), destinations: target.destinations,
             keyWraps: wraps, signature: Data()
         )
         let signature = try identity.sign(
@@ -424,13 +447,18 @@ extension MeshRoutedManifest {
 
     /// The mint's guard chain, in ``MeshRoutedManifestMintError``'s case order. Every refusal is
     /// named before a single wrap is minted.
+    ///
+    /// The two registry guards run **last**, after the shared wire bounds, so a per-type policy
+    /// refusal is never confused with a shape refusal. They are skipped entirely for a token no row
+    /// registers (D-11.5): the mint does not enforce acceptance, receivers do.
     private static func validated(
         target: MeshDeliveryTarget,
         typeToken: String,
         contentHash: Data,
         size: UInt64,
         contentKey: Data,
-        originFingerprint: String
+        originFingerprint: String,
+        types: MeshRoutedTypeRegistry
     ) throws {
         guard target.destinationCount > 0 else { throw MeshRoutedManifestMintError.noDestinations }
         guard target.destinationCount <= MeshRoutedManifestFormat.maxDestinations else {
@@ -448,6 +476,14 @@ extension MeshRoutedManifest {
         }
         guard contentKey.count == MeshRoutedManifestFormat.contentKeyByteCount else {
             throw MeshRoutedManifestMintError.invalidContentKey
+        }
+        if let entry = types.entry(for: typeToken) {
+            guard size <= entry.maxItemByteCount else {
+                throw MeshRoutedManifestMintError.sizeExceedsTypeCap(token: typeToken)
+            }
+            guard entry.destinations == .fullRosterAtCreation else {
+                throw MeshRoutedManifestMintError.unsupportedDestinationSemantics(token: typeToken)
+            }
         }
     }
 
