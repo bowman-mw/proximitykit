@@ -179,6 +179,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Network prompt. Set only by the transport `onTransportError`; cleared on every (re)search.
     public var discoveryError: String?
 
+    /// What this device could not take or place — the ONE user-visible backpressure surface (P5 item
+    /// 9, plan §11's "nothing grows silently").
+    ///
+    /// **Observed**, unlike every other routed seam, and that is the point: a capacity refusal that
+    /// no view can re-render on is exactly the silent growth the wall forbids. Counts and a frozen
+    /// cause only — no display text, and no item id (the diagnostic seams keep those).
+    ///
+    /// Cleared when a NEW mesh replaces the fact (``prepareMembershipLedger(meshID:founderSigningPublicKey:now:)``
+    /// / ``armJoinerLedger(_:now:)``) and deliberately **not** at `leaveMesh`: held custody outlives
+    /// the session, and the Friends tab is exactly where a tester goes after leaving the session that
+    /// produced the refusal. Released the moment a sweep gives the store room again — a surface that
+    /// keeps asserting a condition the store has escaped is the same defect as an invisible refusal.
+    public private(set) var routedDeliveryHold: MeshRoutedDeliveryHold?
+
     @ObservationIgnored private unowned let store: any ProximityHost
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one.
     /// `MeshTransportFactory` picks it: MultipeerConnectivity on every shipping path, the QUIC
@@ -1247,6 +1261,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 "mesh.development.handoffUnplaced",
                 context: ["items": String(planned.unplacedItemKeys.count)]
             )
+            noteRoutedUnplaced(planned.unplacedItemKeys, at: now)
         }
         if unrestorable > 0 {
             FernletAuditLog.log(
@@ -1586,6 +1601,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         membershipVerifier = nil
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
+        routedSweptFingerprints.removeAll()
         clearRoutedDrainState()
         pendingAdoptionLedger = .empty
         isSessionOpen = true
@@ -2060,6 +2076,34 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// text — plan §18.2's copy is the owner's and item 6 ships none.
     @ObservationIgnored private(set) var lastRoutedDrainRefusal: MeshRoutedDrainRefusalNote?
 
+    // MARK: Routed backpressure state (P5 item 9, plan §11)
+
+    /// Items a capacity refusal held back this session — the `.storeFull` half of
+    /// ``routedDeliveryHold``.
+    ///
+    /// Kept APART from the unplaced set on purpose: one key set with one cause field would publish a
+    /// count that is the union of two different facts. Bounded by ``MeshRoutedStoreFormat/maxItems``,
+    /// and the bound is **named** in an audit line when it is reached rather than passed in silence.
+    @ObservationIgnored private var routedHeldBackKeys: Set<MeshRoutedItemKey> = []
+
+    /// Items a departure hand-off could not place with any custodian — item 8's `unplacedItemKeys`,
+    /// and the `.notPlaced` half. Same bound, same named audit line.
+    @ObservationIgnored private var routedUnplacedKeys: Set<MeshRoutedItemKey> = []
+
+    /// How many held items the byte budget can no longer complete, from the last usage walk.
+    ///
+    /// Keyless, because the over-commit walk yields a count and not keys, and recomputed at **every**
+    /// walk, so it self-clears rather than needing its own heal.
+    @ObservationIgnored private var routedUncompletableCount = 0
+
+    /// Peers whose exchange has already spent this session's one capacity sweep, in
+    /// ``reGossipedToFingerprints``' exact idiom.
+    ///
+    /// `answerRoutedInventory` fires once per inventory ADVERTISEMENT, so without this budget the
+    /// sweep's index I/O would be per advertisement instead of roster-bounded per session. Cleared
+    /// at the same three session resets.
+    @ObservationIgnored private var routedSweptFingerprints: Set<String> = []
+
     /// Items whose MANIFEST this device admitted **from their own origin** — P5 item 8's hop bound.
     ///
     /// A departure record alone bounds nothing: `custodyHandoff.custodianFingerprints` is the whole
@@ -2095,7 +2139,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Idempotent for the same mesh so a re-broadcast descriptor cannot discard verified records;
     /// a DIFFERENT mesh id replaces the ledger outright, because records never cross meshes.
-    func prepareMembershipLedger(meshID: UUID, founderSigningPublicKey: Data?) {
+    func prepareMembershipLedger(meshID: UUID, founderSigningPublicKey: Data?, now: Date = Date()) {
         if let existing = membershipVerifier, existing.meshID == meshID { return }
         membershipVerifier = MeshMembershipRecordVerifier(
             meshID: meshID,
@@ -2103,7 +2147,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
+        routedSweptFingerprints.removeAll()
         clearRoutedDrainState()
+        // P5 item 9: a different mesh replaces the fact, and the arm is the seam that collects the
+        // PREVIOUS session's expired bytes — a routed item expires `hardDeadline + 20 min`, i.e.
+        // after the session that could have swept it has ended.
+        clearRoutedDeliveryHold()
+        sweepRoutedExpiry(now: now)
         pendingAdoptionLedger = .empty
     }
 
@@ -3101,7 +3151,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// - Returns: `false` only when the verified admission was itself refused — which would leave
     ///   this device believing it had joined a mesh whose roster does not contain it.
-    func armJoinerLedger(_ grant: MeshAdmissionGrantPayload) -> Bool {
+    func armJoinerLedger(_ grant: MeshAdmissionGrantPayload, now: Date = Date()) -> Bool {
         let ownAdmission = SignedAdmissionRecord(token: grant.token)
         if let existing = membershipVerifier, existing.meshID == grant.meshID,
            !existing.ledger.admissions.isEmpty {
@@ -3112,7 +3162,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             membershipVerifier = verifier
             peerInventoryDigests.removeAll()
             reGossipedToFingerprints.removeAll()
+            routedSweptFingerprints.removeAll()
             clearRoutedDrainState()
+            // P5 item 9, as at the founder's arm: a new mesh replaces the fact, and this is where the
+            // previous session's expired bytes are collected.
+            clearRoutedDeliveryHold()
+            sweepRoutedExpiry(now: now)
             pendingAdoptionLedger = .empty
             FernletAuditLog.log("mesh.membershipLedger.bootstrapped")
             return true
@@ -3522,6 +3577,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // an item to become complete. It costs nothing in the common case — the claim returns
         // before any I/O when no leaver named this device.
         claimHandedOffCustody(now: now)
+        // P5 item 9's reclaim + expiry seam, one line from the claim door on purpose: this is the
+        // one entry that fires on every reconnect and already re-reads the store. Budgeted once per
+        // peer per session, so the cost is roster-bounded rather than per advertisement.
+        sweepRoutedCapacity(for: peer, now: now)
         guard let planned = routedDrainPlan(for: peer, at: now) else { return }
         recordLocalQuiescence(planned.quiescent, for: peer, asOf: advertisedAt)
         spawnHostPinned { [weak self] in
@@ -3597,6 +3656,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 "mesh.routedDrain.rejected",
                 context: ["type": PayloadType.meshRoutedManifest.rawValue, "reason": rejection.rawValue]
             )
+            dropParkedSetIfTerminal(rejection, manifest: manifest, in: context)
             return
         }
         guard manifest.destinations.contains(identity.localFingerprint)
@@ -3727,6 +3787,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             outcome, type: .meshRecipientReceipt, key: key, in: context,
             verdict: RoutedDrainVerdict.of
         )
+        reclaimDeliveredItem(key, now: context.now)
     }
 
     /// The frozen-English name of what a store verb actually did, so an admission line distinguishes
@@ -3801,6 +3862,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         .capacityReceipts, .capacityRecipientReceipts
     ]
 
+    /// The subset that may raise a **user-visible** `.storeFull` hold: the three STORE-level
+    /// admission caps, and exactly the three ``MeshRoutedCapacityUsage/hasRoomToAdmit`` measures.
+    ///
+    /// The other three are per-**item** caps: `.capacityChunksPerItem` bounds one item's slot count,
+    /// `.capacityReceipts` and `.capacityRecipientReceipts` are raised only against an item this
+    /// device already holds. Two consequences follow, and both are why they are excluded rather than
+    /// merely undocumented. A key refused for a receipt cap is in the index, so counting it beside
+    /// `routedUncompletableCount` could count one item twice; and the store-level release predicate
+    /// cannot see a per-item cap at all, so a hold raised by one would be dropped by a sweep while
+    /// the door that raised it still refuses. They stay refused by name, audited and
+    /// entitlement-narrowing — they are simply not "this device is full" for a reader.
+    static let routedStoreFullRefusals: Set<MeshRoutedStoreRefusal> = [
+        .capacityItems, .capacityBytes, .capacityChunkFiles
+    ]
+
+    /// How many orphan-sweep passes one swept peer may spend. Each pass is itself bounded by
+    /// `2 × maxHeldChunkFiles` inside the store, so two passes drain any directory a bounded store
+    /// can produce (R2).
+    static let routedOrphanSweepPasses = 2
+
     /// Remembers one capacity refusal so it neither re-fires nor stays invisible.
     private func noteRoutedCapacityRefusal(
         _ refusal: MeshRoutedStoreRefusal, key: MeshRoutedItemKey, from peer: String, at now: Date
@@ -3808,6 +3889,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         lastRoutedDrainRefusal = MeshRoutedDrainRefusalNote(
             peerFingerprint: peer, reason: refusal.rawValue, at: now
         )
+        // Only a store-level cap is "full" for a reader — and only those three are what the release
+        // predicate can ever see again.
+        if Self.routedStoreFullRefusals.contains(refusal) { noteRoutedHeldBack(key, at: now) }
         guard routedRefusedKeys[peer] != nil
                 || routedRefusedKeys.count < MeshMembershipBounds.maxRosterMembers else { return }
         var keys = routedRefusedKeys[peer] ?? []
@@ -3817,6 +3901,299 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         keys.insert(key)
         routedRefusedKeys[peer] = keys                                // R3: bounded map
+    }
+
+    // MARK: Routed backpressure (P5 item 9, plan §11)
+
+    /// Records that a capacity refusal held one key back, so the visible surface can count it.
+    ///
+    /// `internal` rather than `private` for the reason ``receiveRoutedInventory(_:from:now:)`` is:
+    /// the bound this set names when it is full is 1024 distinct signed refusals away from any
+    /// wire-driven cell, and a bound asserted only in a comment is not asserted at all. Production
+    /// reaches it from exactly one place — ``noteRoutedCapacityRefusal(_:key:from:at:)``.
+    func noteRoutedHeldBack(_ key: MeshRoutedItemKey, at now: Date) {
+        guard routedHeldBackKeys.contains(key)
+                || routedHeldBackKeys.count < MeshRoutedStoreFormat.maxItems else {
+            FernletAuditLog.log("mesh.routedDrain.heldBackSetFull")
+            refreshRoutedDeliveryHold(at: now)
+            return
+        }
+        routedHeldBackKeys.insert(key)                                // R3: bounded set
+        refreshRoutedDeliveryHold(at: now)
+    }
+
+    /// Records the items a departure hand-off could not place — the first honest "content this device
+    /// could not pass on", given a user-visible consequence rather than one audit line.
+    private func noteRoutedUnplaced(_ keys: [MeshRoutedItemKey], at now: Date) {
+        // R2: bounded by the hand-off batch, itself bounded by `maxItems`.
+        for key in keys {
+            guard routedUnplacedKeys.contains(key)
+                    || routedUnplacedKeys.count < MeshRoutedStoreFormat.maxItems else {
+                FernletAuditLog.log("mesh.development.unplacedSetFull")
+                break
+            }
+            routedUnplacedKeys.insert(key)                            // R3: bounded set
+        }
+        refreshRoutedDeliveryHold(at: now)
+    }
+
+    /// One key actually landed COMPLETE on this device — the one heal that means "the content is
+    /// here".
+    ///
+    /// Deliberately **not** `recordRoutedOutcome`'s `.completed`, which means only "the door ran" and
+    /// is also reached by a duplicate, by a conflicting-chunk refusal, by one staged chunk out of
+    /// 1024 and by a receipt write involving no content at all. Healing there would clear the surface
+    /// while the refused item was still not held — the wall's own failure mode, re-introduced through
+    /// the heal.
+    private func noteRoutedItemPlaced(_ key: MeshRoutedItemKey, at now: Date) {
+        guard routedHeldBackKeys.contains(key) || routedUnplacedKeys.contains(key) else { return }
+        routedHeldBackKeys.remove(key)
+        routedUnplacedKeys.remove(key)
+        refreshRoutedDeliveryHold(at: now)
+    }
+
+    /// Forgets every routed hold and the facts behind it. A different mesh replaces them.
+    private func clearRoutedDeliveryHold() {
+        routedHeldBackKeys.removeAll()
+        routedUnplacedKeys.removeAll()
+        routedUncompletableCount = 0
+        routedDeliveryHold = nil
+    }
+
+    /// Derives the one published value from the three facts kept apart, under a FIXED precedence so
+    /// the count never unions two of them.
+    ///
+    /// `.storeFull` outranks `.notPlaced` because storage pressure is the live, actionable condition
+    /// while "couldn't hand these on before you left" is a settled fact about a past departure. The
+    /// two `.storeFull` inputs are disjoint **because the held-back set is narrowed to the three
+    /// store-level admission caps** (``routedStoreFullRefusals``): a key refused by one of those was
+    /// never admitted, so it has no record and cannot also be counted as uncompletable. The per-item
+    /// receipt caps, which are raised only against a record the index already holds, are excluded for
+    /// exactly that reason.
+    private func refreshRoutedDeliveryHold(at now: Date) {
+        let full = routedHeldBackKeys.count + routedUncompletableCount
+        if full > 0 {
+            routedDeliveryHold = MeshRoutedDeliveryHold(cause: .storeFull, itemCount: full, at: now)
+            return
+        }
+        guard !routedUnplacedKeys.isEmpty else {
+            routedDeliveryHold = nil
+            return
+        }
+        routedDeliveryHold = MeshRoutedDeliveryHold(
+            cause: .notPlaced, itemCount: routedUnplacedKeys.count, at: now
+        )
+    }
+
+    /// Folds one usage walk into the visible surface: the census line, the over-commit count, and the
+    /// RELEASE rule.
+    ///
+    /// The release half is what keeps the surface **true** rather than merely present. A refused key
+    /// stays in `routedRefusedKeys` for the session (it is never refunded), so the per-key heal is
+    /// unreachable in the common case; the room predicate is what lets the hold fall away once the
+    /// store has escaped the condition.
+    ///
+    /// - Parameters:
+    ///   - index: The index just read — the same one the caller already holds, never a second load.
+    ///   - store: The store that vended it: it supplies **both** its own cap model and its own chunk
+    ///     directory, so the doors and the accounting are one model measured against one disk.
+    ///   - now: The injected instant.
+    ///   - releaseOnly: `true` at the expiry-only seams, which may clear a hold but must never raise
+    ///     one: they run at a session boundary and on the Friends tab, where a fresh `.storeFull`
+    ///     would be a claim nobody's action provoked.
+    private func recordRoutedCapacityUsage(
+        _ index: MeshRoutedIndex, in store: MeshRoutedStore, at now: Date, releaseOnly: Bool = false
+    ) {
+        let usage = store.capacityUsage(of: index, at: now)
+        FernletAuditLog.log(
+            "mesh.routedStore.capacity",
+            context: ["items": String(usage.itemCount), "parked": String(usage.parkedItemCount),
+                      "uncompletable": String(usage.uncompletableItemCount),
+                      "unrestorable": String(usage.unrestorableItemCount)]
+        )
+        routedUncompletableCount = releaseOnly
+            ? min(routedUncompletableCount, usage.uncompletableItemCount)
+            : usage.uncompletableItemCount
+        if usage.hasRoomToAdmit { routedHeldBackKeys.removeAll() }
+        // "Fernlet could not hand this on" stops being true once this device no longer holds it.
+        // R2: bounded by `maxItems`.
+        routedUnplacedKeys = routedUnplacedKeys.filter { index.record(for: $0) != nil }
+        refreshRoutedDeliveryHold(at: now)
+    }
+
+    /// Frees what has genuinely expired. **No roster**: expiry is a pure clock predicate, which is
+    /// what lets this run at a session boundary, where there is no verifier at all.
+    ///
+    /// Every non-`loaded` state returns, so a locked device sweeps nothing.
+    private func sweepRoutedExpiry(now: Date = Date()) {
+        let store = routedStore()
+        guard case .loaded(let index, _) = store.load() else { return }
+        let current = expireIfDue(index, in: store, now: now).index
+        recordRoutedCapacityUsage(current, in: store, at: now, releaseOnly: true)
+    }
+
+    /// One load in the common case: the fresh index is re-read ONLY when something was actually
+    /// removed, because `sweepingExpired` answers a report rather than an index.
+    ///
+    /// - Returns: the current index, and how many payload files the removal could **not** unlink —
+    ///   the count that makes an orphan, and therefore the orphan sweep's trigger.
+    private func expireIfDue(
+        _ index: MeshRoutedIndex, in store: MeshRoutedStore, now: Date
+    ) -> (index: MeshRoutedIndex, filesFailed: Int) {
+        guard index.items.contains(where: { !$0.isLive(at: now) }) else { return (index, 0) }
+        let failed = recordRoutedSweep(
+            store.sweepingExpired(now: now), reason: "expired"
+        )?.chunkFilesFailed ?? 0
+        guard case .loaded(let fresh, _) = store.load() else { return (index, failed) }
+        return (fresh, failed)
+    }
+
+    /// Frees what is genuinely free, once per peer per session, bounded twice.
+    ///
+    /// The budget is spent **after** the store has answered `.loaded`, and that order is
+    /// load-bearing: a locked (`deferred`), corrupt or seal-`refused` store does no work at all, and
+    /// burning this peer's one entry on it would strand the reclaim — and with it the hold's release
+    /// — for the whole session, on a two-node mesh for every peer there is.
+    private func sweepRoutedCapacity(for peer: String, now: Date) {
+        guard let roster = membershipVerifier?.roster else { return }
+        let store = routedStore()
+        guard case .loaded(let index, _) = store.load() else { return }
+        // The re-gossip budget's idiom: `answerRoutedInventory` fires once per ADVERTISEMENT, so
+        // without this the sweep's index I/O would be unbounded per session.
+        guard routedSweptFingerprints.count < MeshMembershipBounds.maxRosterMembers,
+              routedSweptFingerprints.insert(peer).inserted else { return }
+        let expired = expireIfDue(index, in: store, now: now)
+        var current = expired.index
+        var filesFailed = expired.filesFailed
+        let keys = reclaimableRoutedKeys(in: current, roster: roster, now: now)
+        if !keys.isEmpty {
+            let report = recordRoutedSweep(
+                store.dropping(items: keys, reason: "delivered"), reason: "delivered"
+            )
+            filesFailed += report?.chunkFilesFailed ?? 0
+            if case .loaded(let fresh, _) = store.load() { current = fresh }
+        }
+        sweepRoutedOrphans(in: store, index: current, filesFailed: filesFailed)
+        recordRoutedCapacityUsage(current, in: store, at: now)
+    }
+
+    /// Reclaims payload files the index no longer names — the **file cap's only recovery route**.
+    ///
+    /// Orphans are produced by shipping code, which is why this has a caller at all: every drop verb
+    /// saves the index **before** unlinking, so a force-quit in that window strands the whole batch,
+    /// and `removeChunkFiles` counts an unlink failure rather than swallowing it. Either shows up
+    /// here — a non-zero failure count, or a directory holding more payload files than the index
+    /// names — and both are conditions the chunk door refuses against but no other sweep can clear.
+    ///
+    /// Runs inside the caller's once-per-peer budget and never on its own cadence: a directory
+    /// listing is `maxHeldChunkFiles` stats on the main actor, which is not a thing to do per frame.
+    private func sweepRoutedOrphans(
+        in store: MeshRoutedStore, index: MeshRoutedIndex, filesFailed: Int
+    ) {
+        let onDisk = store.chunkDirectoryFileNames()?.count
+        guard filesFailed > 0 || (onDisk ?? 0) > index.heldChunkFileCount else { return }
+        // R2: a hard constant ceiling; each pass is itself bounded by `2 × maxHeldChunkFiles`.
+        for _ in 0..<Self.routedOrphanSweepPasses {
+            let report = recordRoutedSweep(store.sweepingOrphanChunkFiles(), reason: "orphan")
+            guard report?.sweptToCeiling == true else { return }
+        }
+    }
+
+    /// The courier copies this device may reclaim.
+    ///
+    /// ``MeshRoutedIndex/itemsReclaimableAsCustodian(at:in:for:)`` — never `itemsFullyDelivered` and
+    /// never `isAcknowledgedLocally` — intersected with the POSITIVE
+    /// ``MeshRoutedIndex/everyDestinationDelivered(_:in:)``, because "nothing outstanding" reads true
+    /// for a destination this device's ledger has simply not heard of yet, and a drop on that answer
+    /// would delete content still owed while auditing it as `delivered`.
+    private func reclaimableRoutedKeys(
+        in index: MeshRoutedIndex, roster: MeshDerivedRoster, now: Date
+    ) -> [MeshRoutedItemKey] {
+        // R2: the source walk is bounded by `maxItems` and each test by `maxDestinations`; the BATCH
+        // by `MeshRoutedDrainBounds.increment1.maxItems`. The filter runs BEFORE the prefix —
+        // filtering a 16-item prefix would let sixteen vacuous candidates hide every reclaimable item
+        // behind them.
+        Array(
+            index.itemsReclaimableAsCustodian(at: now, in: roster, for: identity.localFingerprint)
+                .lazy
+                .map(\.key)
+                .filter { index.everyDestinationDelivered($0, in: roster) }
+                .prefix(MeshRoutedDrainBounds.increment1.maxItems)
+        )
+    }
+
+    /// One item just became fully delivered here — the only event that can do that without an
+    /// exchange. Exactly **one** item, through the same enumerator and the same positive predicate.
+    private func reclaimDeliveredItem(_ key: MeshRoutedItemKey, now: Date) {
+        guard let roster = membershipVerifier?.roster else { return }
+        let store = routedStore()
+        guard case .loaded(let index, _) = store.load() else { return }
+        let reclaimable = index.itemsReclaimableAsCustodian(
+            at: now, in: roster, for: identity.localFingerprint
+        )
+        guard reclaimable.contains(where: { $0.key == key }),
+              index.everyDestinationDelivered(key, in: roster) else { return }
+        recordRoutedSweep(store.dropping(item: key, reason: "delivered"), reason: "delivered")
+    }
+
+    /// Names what a sweep actually did. A removal with no line is the violation; a sweep that removed
+    /// nothing writes nothing, so the census does not drown the diagnostic it exists to give.
+    /// - Returns: the report when the sweep completed, so a caller can act on what it actually did —
+    ///   nil for a refusal or an unavailable store, which are named on their own lines.
+    @discardableResult
+    private func recordRoutedSweep(
+        _ outcome: MeshRoutedOutcome<MeshRoutedSweepReport>, reason: String
+    ) -> MeshRoutedSweepReport? {
+        switch outcome {
+        case .completed(let report):
+            guard report.itemsRemoved > 0 || report.chunkFilesRemoved > 0
+                    || report.chunkFilesFailed > 0 else { return report }
+            FernletAuditLog.log(
+                "mesh.routedStore.swept",
+                context: ["reason": reason, "items": String(report.itemsRemoved),
+                          "files": String(report.chunkFilesRemoved),
+                          "failed": String(report.chunkFilesFailed)]
+            )
+            return report
+        case .refused(let refusal):
+            FernletAuditLog.log(
+                "mesh.routedStore.sweepRefused", context: ["reason": refusal.rawValue]
+            )
+            return nil
+        case .unavailable(let cause):
+            FernletAuditLog.log(
+                "mesh.routedStore.sweepUnavailable", context: ["state": cause.logToken]
+            )
+            return nil
+        }
+    }
+
+    /// A parked chunk set whose own origin sent a manifest this build refuses TERMINALLY is dropped;
+    /// every other rejection keeps the bytes. The rule itself is ``MeshRoutedParkedDrop``.
+    private func dropParkedSetIfTerminal(
+        _ rejection: MeshRoutedManifestRejection,
+        manifest: MeshRoutedManifest,
+        in context: RoutedIngestContext
+    ) {
+        guard let reason = MeshRoutedParkedDrop.reason(
+            rejection: rejection,
+            senderIsClaimedOrigin: context.sender == manifest.originFingerprint
+        ) else { return }
+        dropParkedSet(key: MeshRoutedItemKey(manifest), reason: reason)
+    }
+
+    /// Drops one PARKED record, and only a parked one — the caller is the guard, exactly as
+    /// `itemsReclaimableAsCustodian` is the reclaim's.
+    ///
+    /// Without the parked test an origin could retract content this device had already fully received
+    /// by sending one bogus-type manifest: `dropping(item:reason:)` has no guard of its own.
+    private func dropParkedSet(key: MeshRoutedItemKey, reason: MeshRoutedParkedDrop.Reason) {
+        let store = routedStore()
+        guard case .loaded(let index, _) = store.load(),
+              index.record(for: key)?.isParked == true else { return }
+        recordRoutedSweep(
+            store.dropping(item: key, reason: reason.rawValue), reason: reason.rawValue
+        )
     }
 
     /// An item just became complete on this device: take whichever rungs this device is entitled to,
@@ -3831,6 +4208,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// re-stream, re-decrypt and re-hash the whole item — up to 256 MiB, on the main actor — and
     /// send two signed receipts back, none of it charged to the peer's frame budget.
     private func finishLocalRungs(for key: MeshRoutedItemKey, from peer: String, now: Date) {
+        noteRoutedItemPlaced(key, at: now)
         guard case .completed(let held) = routedStore().forwardableManifest(item: key),
               let manifest = held else { return }
         // P5 item 8's third claim door: an item that has just BECOME complete may be one a departed
@@ -6217,6 +6595,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func startSearching() {
         isSearching = true
+        // P5 item 9: the Friends tab — the banner's own screen — is one tap away, so a hold whose
+        // condition has since expired is corrected before it is read. Guarded on the hold, so this
+        // costs nothing at all (no load, no I/O) in the overwhelmingly common case.
+        if routedDeliveryHold != nil { sweepRoutedExpiry() }
         // Clear any stale discovery failure before re-arming the radios, so a fixed permission
         // (or a fresh attempt after a transient failure) drops the banner instead of pinning it up
         // over a search that is now healthy.

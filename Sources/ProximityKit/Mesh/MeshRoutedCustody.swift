@@ -427,18 +427,18 @@ nonisolated extension MeshRoutedStore {
         existing: MeshRoutedItemRecord?,
         in index: MeshRoutedIndex
     ) -> MeshRoutedStoreRefusal? {
-        guard existing != nil || index.itemCount < MeshRoutedStoreFormat.maxItems else {
+        guard existing != nil || index.itemCount < capacity.maxItems else {
             return .capacityItems
         }
         guard let derived = MeshChunkFormat.chunkCount(forSize: manifest.size) else {
             return .chunkCountMismatch
         }
         let otherBytes = index.totalContentBytesHeld - (existing?.contentBytesHeld ?? 0)
-        guard UInt64(otherBytes) + manifest.size <= MeshRoutedStoreFormat.maxContentBytes else {
+        guard UInt64(otherBytes) + manifest.size <= capacity.maxContentBytes else {
             return .capacityBytes
         }
         let otherFiles = index.heldChunkFileCount - (existing?.chunks.count ?? 0)
-        guard otherFiles + derived <= MeshRoutedStoreFormat.maxHeldChunkFiles else {
+        guard otherFiles + derived <= capacity.maxHeldChunkFiles else {
             return .capacityChunkFiles
         }
         return nil
@@ -605,16 +605,16 @@ nonisolated extension MeshRoutedStore {
         in index: MeshRoutedIndex,
         directoryFileCount: Int
     ) -> MeshRoutedStoreRefusal? {
-        guard existing != nil || index.itemCount < MeshRoutedStoreFormat.maxItems else {
+        guard existing != nil || index.itemCount < capacity.maxItems else {
             return .capacityItems
         }
-        guard (existing?.chunks.count ?? 0) < MeshRoutedStoreFormat.maxChunksPerItem else {
+        guard (existing?.chunks.count ?? 0) < capacity.maxChunksPerItem else {
             return .capacityChunksPerItem
         }
         let bytes = index.totalContentBytesHeld + chunk.payload.count
-        guard UInt64(bytes) <= MeshRoutedStoreFormat.maxContentBytes else { return .capacityBytes }
+        guard UInt64(bytes) <= capacity.maxContentBytes else { return .capacityBytes }
         let files = max(index.heldChunkFileCount, directoryFileCount)
-        guard files < MeshRoutedStoreFormat.maxHeldChunkFiles else { return .capacityChunkFiles }
+        guard files < capacity.maxHeldChunkFiles else { return .capacityChunkFiles }
         return nil
     }
 
@@ -743,7 +743,7 @@ nonisolated extension MeshRoutedStore {
         against record: MeshRoutedItemRecord
     ) -> MeshRoutedStoreRefusal? {
         let alreadyStored = record.receipts.contains { $0.custodianFingerprint == receipt.custodianFingerprint }
-        guard alreadyStored || record.receipts.count < MeshRoutedStoreFormat.maxReceiptsPerItem else {
+        guard alreadyStored || record.receipts.count < capacity.maxReceiptsPerItem else {
             return .capacityReceipts
         }
         return nil
@@ -1028,6 +1028,59 @@ nonisolated extension MeshRoutedStore {
         let removal = removeChunkFiles(named: names)
         return .completed(
             MeshRoutedSweepReport(itemsRemoved: 1, chunkFilesRemoved: removal.removed,
+                                  chunkFilesFailed: removal.failed, sweptToCeiling: false)
+        )
+    }
+
+    /// Removes a whole batch of items deliberately — P5 item 9's reclaim — in **one** load and
+    /// **one** save.
+    ///
+    /// The bulk sibling exists for a cost reason worth stating: ``dropping(item:reason:)`` opens its
+    /// own `indexForWriting()` and re-seals the whole index per item, so a sixteen-item reclaim
+    /// through it is sixteen loads and sixteen full seals on the main actor. This is
+    /// ``sweepingExpired(now:)``'s exact shape with an explicit key list instead of a clock
+    /// predicate.
+    ///
+    /// It has **no destination, parked or liveness guard of its own** — the caller is the guard,
+    /// exactly as it is for the single-item verb. A key the store does not hold is skipped, so the
+    /// batch is idempotent under a replay.
+    ///
+    /// - Parameters:
+    ///   - items: The signed pairs to drop. The caller owes the bound; item 9's reclaim passes at
+    ///     most ``MeshRoutedDrainBounds/increment1``'s item allowance.
+    ///   - reason: A frozen English audit token naming why. Never localized, never user copy.
+    /// - Returns: what was removed, or the store's unavailability. An empty list writes nothing.
+    func dropping(items: [MeshRoutedItemKey], reason: String) -> MeshRoutedOutcome<MeshRoutedSweepReport> {
+        var index: MeshRoutedIndex
+        let token: LoadToken
+        switch indexForWriting() {
+        case .unavailable(let cause): return .unavailable(cause)
+        case .writable(let loaded, let vended): index = loaded; token = vended
+        }
+        var names: [String] = []
+        var removed = 0
+        // R2: bounded by the caller's list, itself bounded by `maxItems`.
+        for key in items where index.record(for: key) != nil {
+            names.append(contentsOf: index.remove(key))
+            removed += 1
+        }
+        guard removed > 0 else {
+            return .completed(
+                MeshRoutedSweepReport(itemsRemoved: 0, chunkFilesRemoved: 0, chunkFilesFailed: 0,
+                                      sweptToCeiling: false)
+            )
+        }
+        do {
+            try save(index, token: token)
+        } catch {
+            return .unavailable(unavailability(from: error))
+        }
+        FernletAuditLog.log(
+            "mesh.routedStore.itemDropped", context: ["reason": reason, "items": String(removed)]
+        )
+        let removal = removeChunkFiles(named: names)
+        return .completed(
+            MeshRoutedSweepReport(itemsRemoved: removed, chunkFilesRemoved: removal.removed,
                                   chunkFilesFailed: removal.failed, sweptToCeiling: false)
         )
     }

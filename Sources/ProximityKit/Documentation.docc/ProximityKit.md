@@ -628,6 +628,65 @@ drain's own narrowing planner and frame budget, bounded by the plan's deadline r
 — a frame cap is not a time bound. Everything the push sends is the origin's exact stored objects:
 **a custodian is a courier, never a co-signer.**
 
+**P5 item 9 gave BACKPRESSURE a consequence** (plan §11, §3.4). Every cap was already refused by
+name at every writer door and every collection already had a bound; what did not exist was one value
+that *is* the cap model, any caller for the three reclaim verbs, any drop rule for a parked set whose
+manifest was refused, the fourth at-rest guard, or a user-visible consequence of any of it — a
+refusal ended in one audit line nobody reads, which is precisely "grows past its cap without telling
+anyone". Five types close that, in two files: `MeshRoutedCapacity` (the caps as one **injectable**
+value, `.production` defined *as* `MeshRoutedStoreFormat` so no number is written twice, threaded
+through `MeshRoutedStore.init(scope:capacity:)` and read back off the store by everything that
+accounts, so the doors and the accounting can never measure against two models), `MeshRoutedCapacityUsage`
+(the accounting rule stated once — parked items count, staged bytes count, and the manifest door's
+**over-commit** is named by `uncompletableItemCount` rather than fixed, because a durable reservation
+would need at-rest state), `MeshRoutedParkedDrop` (the ONE-clause terminal-refusal rule) and the
+bounded observable `MeshRoutedDeliveryHold` + `MeshRoutedDeliveryHoldCause`. The store gained a bulk
+`dropping(items:reason:)` — one load and one seal for a whole reclaim batch, where sixteen calls to
+the single-item verb would be sixteen full index seals on the main actor — and `MeshRoutedIndex`
+gained `parkedItems(at:)` (C10 made countable), `everyDestinationDelivered(_:in:)` and the fourth
+at-rest sibling `capacityExceeded("chunkCount")`.
+
+Four decisions are worth reading before touching any of it:
+
+- **The parked-set drop has exactly one clause, and it is origin-bound.** `unknownTypeToken` **and**
+  `sender == manifest.originFingerprint`, because that rejection is checked *before* the signature
+  and the origin is the only party the chunk door lets park a set. A clause on
+  `notADestinationOrHandoff` was designed and removed: that guard's else branch fires whenever the
+  sender is not the origin, so any co-destination holding the origin's genuine manifest could have
+  deleted a hand-off custodian's parked ciphertext with a replayable frame. Only a **parked** record
+  is ever dropped — the caller is that guard — and never on a capacity refusal, which would turn
+  backpressure into data loss.
+- **The reclaim reads `itemsReclaimableAsCustodian` intersected with the POSITIVE
+  `everyDestinationDelivered(_:in:)`.** "Nothing outstanding" reads true for a destination this
+  device's ledger has not heard of yet (an absent fingerprint derives as `departed`), so a reclaim on
+  that answer would delete content still owed and audit it as `delivered`. A roster-absent
+  destination therefore frees no byte; such an item waits for expiry instead.
+- **The release predicate measures what the DOOR measures.** `MeshRoutedCapacityUsage.hasRoomToAdmit`
+  takes the file cap against `max(index-named files, files the directory actually holds)`, exactly as
+  the chunk door does, and an unreadable directory reads as "no room" rather than as room — otherwise
+  the visible hold clears while the door is still refusing. Orphans are not hypothetical: every drop
+  verb saves the index *before* it unlinks, and a failed unlink is counted rather than swallowed, so
+  `sweepingOrphanChunkFiles()` is the file cap's only recovery route and runs inside the same
+  once-per-peer budget. Only the three **store-level** caps
+  (`MeshNetworkManager.routedStoreFullRefusals`) may raise the hold this predicate releases; the three
+  per-item caps are refused by name and narrow the entitlement, but they are not "this device is
+  full", and a store-level release must never drop a hold raised by a cap it cannot see.
+- **Expiry needs no roster, so it has three seams** — the drain-exchange entry, the next session's
+  ledger arm, and the Friends-tab search *while a hold is showing*. A routed item expires
+  `hardDeadline + 20 minutes`, i.e. **after** the session that could have swept it: a sweep wired only
+  to the exchange could never collect one in the common case. Every seam is gated on `case .loaded`,
+  so nothing sweeps while protected data is unavailable.
+- **The visible surface has to be TRUE, not merely present.** `MeshNetworkManager.routedDeliveryHold`
+  is derived from three facts kept apart (refused keys, the over-commit count, item 8's unplaced keys)
+  under a fixed precedence, so one count never unions two of them; the two key sets are bounded by
+  `MeshRoutedStoreFormat.maxItems` and **name that bound in an audit line** when full, so the count
+  saturates rather than lying. It is cleared by a new ledger and **not** by `leaveMesh` — the Friends
+  tab is where it is read — and it is *released* the moment a sweep gives the store room again. It is
+  the module's only observed routed seam, on purpose. `deferred`, seal-`refused` and `corrupt` set no
+  hold at all: they are three other answers, not "full" — and the sweep budget is spent only **after**
+  the store answers `.loaded`, so an exchange that did no work does not strand that peer's reclaim,
+  and its release, for the rest of the session.
+
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
 frozen English spelling, so one grep finds every layer that touches those bytes:
@@ -1325,6 +1384,11 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshRoutedSweepReport``
 - ``MeshRoutedIndexLoad``
 - ``MeshRoutedStagedFile``
+- ``MeshRoutedCapacity``
+- ``MeshRoutedCapacityUsage``
+- ``MeshRoutedParkedDrop``
+- ``MeshRoutedDeliveryHold``
+- ``MeshRoutedDeliveryHoldCause``
 - ``MeshSessionCeiling``
 - ``MeshSessionCeilingBound``
 - ``MeshSessionCeilingVerdict``

@@ -68,7 +68,7 @@ nonisolated extension MeshRoutedStore {
         }
         guard var record = index.record(for: item) else { return .refused(.unknownItem) }
         guard let manifest = record.manifest else { return .refused(.manifestMismatch) }
-        if let refusal = Self.recipientReceiptRefusal(receipt, against: record, manifest: manifest) {
+        if let refusal = recipientReceiptRefusal(receipt, against: record, manifest: manifest) {
             return .refused(refusal)
         }
         guard let target = record.deliveryTarget else {
@@ -92,7 +92,7 @@ nonisolated extension MeshRoutedStore {
     /// The identity check is the triple the verifier makes plus the mesh, re-asked against **this
     /// device's own record**: the verifier answers about the manifest it was handed, and this door is
     /// what ties the receipt to the item it is being filed under.
-    private static func recipientReceiptRefusal(
+    private func recipientReceiptRefusal(
         _ receipt: MeshRecipientReceipt,
         against record: MeshRoutedItemRecord,
         manifest: MeshRoutedManifest
@@ -110,7 +110,7 @@ nonisolated extension MeshRoutedStore {
             $0.recipientFingerprint == receipt.recipientFingerprint
         }
         guard alreadyStored
-                || record.recipientReceipts.count < MeshRoutedStoreFormat.maxReceiptsPerItem else {
+                || record.recipientReceipts.count < capacity.maxReceiptsPerItem else {
             return .capacityRecipientReceipts
         }
         return nil

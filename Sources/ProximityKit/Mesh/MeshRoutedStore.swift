@@ -283,12 +283,27 @@ public nonisolated struct MeshRoutedStore: Sendable {
     /// the routed store**, and the reason a grep-wall can assert the store names no decryption seam.
     private let crypto = ColumnCrypto(purpose: FernletCryptoPurpose.KeyDerivation.meshRoutedStoreV1)
 
+    /// The caps this store refuses at, as ONE value (P5 item 9).
+    ///
+    /// Read back by everything that *accounts* — ``capacityUsage(of:at:)`` is the one seam that
+    /// builds a usage for a real store, and it hands over this value and this store's own chunk
+    /// directory, never ``MeshRoutedCapacity/production`` — so the writer doors and the sweep can
+    /// never measure against two different models or two different disks. The at-rest guards in `MeshRoutedIndex` keep
+    /// reading ``MeshRoutedStoreFormat`` directly and deliberately: a `Codable` initialiser has no
+    /// injection point, and an injected capacity is always ≤ production, so an index written under
+    /// small bounds still decodes clean.
+    let capacity: MeshRoutedCapacity
+
     /// Builds a store on one scope.
     ///
-    /// - Parameter scope: Directory + keychain service. Pass ``MeshRoutedStorageScope/production``
-    ///   in the app; tests pass a temp directory and a unique service.
-    init(scope: MeshRoutedStorageScope) {
+    /// - Parameters:
+    ///   - scope: Directory + keychain service. Pass ``MeshRoutedStorageScope/production`` in the
+    ///     app; tests pass a temp directory and a unique service.
+    ///   - capacity: The cap model this store's doors refuse at. Shipping code takes the default;
+    ///     a test drives a door to its bound in milliseconds by injecting a small one.
+    init(scope: MeshRoutedStorageScope, capacity: MeshRoutedCapacity = .production) {
         self.scope = scope
+        self.capacity = capacity
     }
 
     /// The sealed catalogue.
@@ -601,6 +616,24 @@ public nonisolated struct MeshRoutedStore: Sendable {
             contents
                 .filter { $0.pathExtension == Self.chunkFileExtension }
                 .map(\.lastPathComponent)
+        )
+    }
+
+    /// What this index is spending against **this store's** caps, measured with the file cap taken
+    /// against the real directory exactly as the chunk door takes it (P5 item 9).
+    ///
+    /// The one seam that builds a ``MeshRoutedCapacityUsage`` for a real store, so the accounting and
+    /// the doors can never measure a different capacity or a different disk. A directory that cannot
+    /// be listed reaches the usage as nil, which reads as "no room" rather than as room.
+    ///
+    /// - Parameters:
+    ///   - index: The index just loaded — never a second load.
+    ///   - now: The injected instant; expiry-sensitive counts are taken against it.
+    /// - Returns: the usage value.
+    func capacityUsage(of index: MeshRoutedIndex, at now: Date) -> MeshRoutedCapacityUsage {
+        MeshRoutedCapacityUsage(
+            index: index, at: now, capacity: capacity,
+            directoryFileCount: chunkDirectoryFileNames()?.count
         )
     }
 

@@ -105,8 +105,8 @@ nonisolated enum MeshRoutedIndexDecodingError: Error, Equatable, Sendable {
     /// The blob decoded, but its `schemaVersion` is not ``MeshRoutedIndexSchema/current``.
     case unsupportedSchemaVersion(Int)
     /// A cap this build owns was exceeded by bytes already on disk. Carries the cap's frozen
-    /// English name: `items`, `chunksPerItem`, `receiptsPerItem`, `recipientReceiptsPerItem`,
-    /// `contentBytes` or `chunkFiles`.
+    /// English name: `items`, `chunksPerItem`, `chunkCount`, `receiptsPerItem`,
+    /// `recipientReceiptsPerItem`, `contentBytes` or `chunkFiles`.
     ///
     /// A refusal rather than a clamp, on purpose: these are OUR durable records, and clamping one
     /// away silently drops an item whose chunk files stay on disk as orphans.
@@ -395,8 +395,15 @@ nonisolated struct MeshRoutedItemRecord: Codable, Equatable, Sendable {
         let storedChunks = try container.decode([MeshRoutedChunkDescriptor].self, forKey: .chunks)
         let storedReceipts = try container.decode([MeshCustodyReceipt].self, forKey: .receipts)
         let storedAcks = try container.decode([MeshRecipientReceipt].self, forKey: .recipientReceipts)
+        let storedCount = try container.decode(UInt32.self, forKey: .chunkCount)
         guard storedChunks.count <= MeshRoutedStoreFormat.maxChunksPerItem else {
             throw MeshRoutedIndexDecodingError.capacityExceeded("chunksPerItem")
+        }
+        // The fourth sibling (P5 item 9): the DECLARED count is a bare scalar, so without this an
+        // at-rest record could claim 2^32 − 1 chunks beside three guarded collections. `Int(UInt32)`
+        // cannot trap; `UInt32(Int)` could, so the comparison is spelled this way round.
+        guard Int(storedCount) <= MeshRoutedStoreFormat.maxChunksPerItem else {
+            throw MeshRoutedIndexDecodingError.capacityExceeded("chunkCount")
         }
         guard storedReceipts.count <= MeshRoutedStoreFormat.maxReceiptsPerItem else {
             throw MeshRoutedIndexDecodingError.capacityExceeded("receiptsPerItem")
@@ -407,7 +414,7 @@ nonisolated struct MeshRoutedItemRecord: Codable, Equatable, Sendable {
         self.init(
             key: try container.decode(MeshRoutedItemKey.self, forKey: .key),
             contentHash: try container.decode(Data.self, forKey: .contentHash),
-            chunkCount: try container.decode(UInt32.self, forKey: .chunkCount),
+            chunkCount: storedCount,
             expiresAt: try container.decode(Date.self, forKey: .expiresAt),
             manifest: try container.decodeIfPresent(MeshRoutedManifest.self, forKey: .manifest),
             firstSeenAt: try container.decode(Date.self, forKey: .firstSeenAt),
@@ -671,6 +678,17 @@ nonisolated struct MeshRoutedIndex: Codable, Equatable, Sendable {
 
     // MARK: Enumeration (item 6's drain, item 8's handoff)
 
+    /// Live items held with **no manifest** — chunk sets that arrived ahead of their manifest (C10).
+    ///
+    /// They already count against every cap; what was missing until P5 item 9 was any way to *say
+    /// so*. In index order, bounded by ``MeshRoutedStoreFormat/maxItems`` like every enumerator here.
+    ///
+    /// - Parameter now: The injected instant; expired items are excluded, as everywhere else.
+    /// - Returns: the refs, each with ``MeshRoutedItemRef/isParked`` set.
+    func parkedItems(at now: Date) -> [MeshRoutedItemRef] {
+        items.filter { $0.isLive(at: now) && $0.isParked }.map(\.reference)
+    }
+
     /// The destinations of `key` that still have work outstanding — pending plus custodied,
     /// departed and delivered excluded — against the CURRENT roster.
     ///
@@ -687,6 +705,35 @@ nonisolated struct MeshRoutedIndex: Codable, Equatable, Sendable {
     ) -> [String] {
         guard let target = record(for: key)?.deliveryTarget else { return [] }
         return target.outstanding(in: roster)
+    }
+
+    /// Whether **every** destination of `key` is positively `delivered` against `roster` — the
+    /// POSITIVE predicate a reclaim needs, as opposed to "nothing is outstanding".
+    ///
+    /// The difference is a deletion. ``MeshDeliveryTarget/disposition(of:in:)`` answers `.departed`
+    /// for any fingerprint the **local** roster does not contain, and `isFullyDelivered` is only
+    /// "outstanding is empty" — so a destination this device has simply not heard of yet reads as
+    /// closed. A reclaim on that answer deletes content still owed to a member admitted after the
+    /// manifest was created, and audits it as `delivered`. This asks for the delivered state itself,
+    /// and a roster-absent destination therefore frees no byte.
+    ///
+    /// - Parameters:
+    ///   - key: The signed pair.
+    ///   - roster: The current merged roster.
+    /// - Returns: `false` for a missing record, a parked item, an unrestorable delivery map, an empty
+    ///   destination set, and any destination that is not `.delivered`.
+    func everyDestinationDelivered(_ key: MeshRoutedItemKey, in roster: MeshDerivedRoster) -> Bool {
+        guard let record = record(for: key), let manifest = record.manifest,
+              let target = record.deliveryTarget else {
+            return false
+        }
+        let answers = target.dispositions(in: roster)
+        guard !manifest.destinations.isEmpty,
+              answers.count == manifest.destinations.count else {
+            return false
+        }
+        // R2: bounded by `MeshRoutedManifestFormat.maxDestinations`.
+        return answers.values.allSatisfy { $0 == .delivered }
     }
 
     /// The outstanding destinations of `key` this branch can reach right now.
