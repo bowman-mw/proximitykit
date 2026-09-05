@@ -21,8 +21,17 @@ import Foundation
 /// a storage sentence states the opposite of what happened for ``notPlaced``.
 ///
 /// Deliberately **silent about three other states**. `deferred`, seal-`refused` and `corrupt` are not
-/// "full" (plan §19.5's fifth wrinkle) and set no hold at all; item 10 adds its own case for
-/// locked-device wording rather than collapsing them here.
+/// "full" (plan §19.5's fifth wrinkle) and set no hold at all.
+///
+/// **P5 item 10 declined the third case it was offered here (D-10.9).** The user-visible hold stays
+/// the three store-level capacity refusals: a locked device that is holding ciphertext perfectly well
+/// has nothing to tell the user, and the genuinely blocked window (pre-first-unlock) is already
+/// fail-closed in five named states. Locked-device visibility therefore ships as **counts and frozen
+/// tokens** instead — `MeshNetworkManager.routedAccessGate`, ``MeshRoutedReentryReport``,
+/// `mesh.routedStore.readSuppressed` / `sweepSuppressed` and the `mesh.routedAccess.*` family. The
+/// copy question (whether a device that could hold nothing all session should say so, and in what
+/// words) is an **owner** question, parked with item 9's blocked display literals — not a silent
+/// drop, and not a case added here on a guess.
 public nonisolated enum MeshRoutedDeliveryHoldCause: String, CaseIterable, Equatable, Sendable {
 
     /// A capacity refusal at a writer door, or an item admitted that the byte budget can no longer

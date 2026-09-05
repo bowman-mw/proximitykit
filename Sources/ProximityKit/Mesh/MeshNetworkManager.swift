@@ -193,6 +193,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// keeps asserting a condition the store has escaped is the same defect as an invisible refusal.
     public private(set) var routedDeliveryHold: MeshRoutedDeliveryHold?
 
+    /// The three app-level facts that decide whether routed PLAINTEXT may exist on this device right
+    /// now (P5 item 10, plan §11's locked-device rule, §19.5).
+    ///
+    /// **Pushed by the app** through ``applyRoutedAccessGate(_:now:)``, never observed here: plan
+    /// §13 rejects a ProximityKit-side scene observer by name, and the re-entry is defined by an
+    /// *edge* that a pulled property could not produce. `.closed` until the first push, which is
+    /// fail-closed and — since no decrypt call site exists yet (P6 owns the first one) — a regression
+    /// no-op.
+    ///
+    /// It is **not** a proxy for store readability. After the first post-boot unlock a locked
+    /// device's routed store is `loaded` and ciphertext-only custody continues with the screen off;
+    /// the store answers readability itself, in five states.
+    @ObservationIgnored public private(set) var routedAccessGate: MeshRoutedAccessGate = .closed
+
     @ObservationIgnored private unowned let store: any ProximityHost
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one.
     /// `MeshTransportFactory` picks it: MultipeerConnectivity on every shipping path, the QUIC
@@ -1078,6 +1092,41 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         sessionRoster.removeAll()
     }
 
+    /// Pushes the three lock facts in, and runs the re-entry pass whichever legs moved owe (P5 item
+    /// 10, plan §11, §19.5).
+    ///
+    /// The **one** door onto ``routedAccessGate``, and deliberately `apply(_:)`-shaped: P7's
+    /// `ProximityRunPolicy` becomes its single writer without the seam moving. It says what may be
+    /// decrypted, **never which radios run** — that is P7's decision and merging the two would give
+    /// one radio two owners (plan §13, design C, rejected by name).
+    ///
+    /// An unchanged push is silent and does nothing. A changed one always logs, and runs the pass
+    /// only when a **ciphertext leg rose** (an unlock or a foreground makes the sealed store readable
+    /// again) or a **duress session cleared** — see ``MeshRoutedAccessEdge``. It is not
+    /// `isOpen`'s edge: jobs that only move ciphertext must run on an unlock even while the app is
+    /// backgrounded, which is exactly the window in which the store became readable.
+    ///
+    /// - Parameters:
+    ///   - gate: The facts as the app now knows them.
+    ///   - now: The injected instant every job is judged against.
+    /// - Returns: what the pass did, or nil when nothing moved or no leg owed work.
+    @discardableResult
+    public func applyRoutedAccessGate(
+        _ gate: MeshRoutedAccessGate, now: Date
+    ) -> MeshRoutedReentryReport? {
+        guard gate != routedAccessGate else { return nil }
+        let edge = MeshRoutedAccessEdge(from: routedAccessGate, to: gate)
+        routedAccessGate = gate
+        FernletAuditLog.log(
+            "mesh.routedAccess.gateChanged",
+            context: ["protectedData": String(gate.protectedDataAvailable),
+                      "foreground": String(gate.appIsForeground),
+                      "duress": String(gate.duressActive)]
+        )
+        guard edge.runsPass else { return nil }
+        return runRoutedReentry(edge, now: now)
+    }
+
     /// End the current session (pairwise or mesh) and clear session photos.
     /// Call this after the develop/review flow completes.
     public func leaveSession() {
@@ -1364,7 +1413,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func handoffPushBatch(
         to custodian: String, limitedTo pushable: Set<MeshRoutedItemKey>, at now: Date
     ) -> MeshRoutedDrainPlan? {
-        guard let mesh = currentMesh, let index = routedIndexForAdvertising() else { return nil }
+        guard let mesh = currentMesh,
+              let index = routedIndexForReading(reason: .handoffPush) else { return nil }
         guard let local = MeshRoutedInventory(
             meshID: mesh.meshID, index: index, selfFingerprint: identity.localFingerprint, at: now
         ) else {
@@ -1602,6 +1652,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
         routedSweptFingerprints.removeAll()
+        routedSweepsDeferredFingerprints.removeAll()
         clearRoutedDrainState()
         pendingAdoptionLedger = .empty
         isSessionOpen = true
@@ -2104,6 +2155,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// at the same three session resets.
     @ObservationIgnored private var routedSweptFingerprints: Set<String> = []
 
+    /// Peers whose one capacity sweep a **non-loaded** store took away — P5 item 10's re-entry
+    /// budget, and the only sweeps it is allowed to spend (D-10.11).
+    ///
+    /// Sweeping every reachable roster peer at every unlock would spend D-9.4's once-per-peer budget
+    /// for the whole session on the **common** case — after the first post-boot unlock a locked
+    /// device's store is `loaded`, so nothing suppressed those sweeps — and pre-empt the
+    /// drain-exchange seam's bulk `dropping(items:reason:"delivered")` and `sweepRoutedOrphans`, the
+    /// file cap's only recovery route.
+    ///
+    /// Written at ``sweepRoutedCapacity(for:now:)``'s non-loaded exit, drained by the re-entry, and
+    /// cleared at the same three session resets ``routedSweptFingerprints`` is. Bounded by the
+    /// roster cap, memory-only: a lost entry costs one peer's reclaim latency, never content.
+    @ObservationIgnored private var routedSweepsDeferredFingerprints: Set<String> = []
+
     /// Items whose MANIFEST this device admitted **from their own origin** — P5 item 8's hop bound.
     ///
     /// A departure record alone bounds nothing: `custodyHandoff.custodianFingerprints` is the whole
@@ -2148,6 +2213,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
         routedSweptFingerprints.removeAll()
+        routedSweepsDeferredFingerprints.removeAll()
         clearRoutedDrainState()
         // P5 item 9: a different mesh replaces the fact, and the arm is the seam that collects the
         // PREVIOUS session's expired bytes — a routed item expires `hardDeadline + 20 min`, i.e.
@@ -3163,6 +3229,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             peerInventoryDigests.removeAll()
             reGossipedToFingerprints.removeAll()
             routedSweptFingerprints.removeAll()
+            routedSweepsDeferredFingerprints.removeAll()
             clearRoutedDrainState()
             // P5 item 9, as at the founder's arm: a new mesh replaces the fact, and this is where the
             // previous session's expired bytes are collected.
@@ -3301,8 +3368,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         lastRoutedDrainRefusal = nil
     }
 
-    /// The index this device may advertise from, or nil when the store is not in a state that KNOWS
-    /// what it holds.
+    /// The index this device may read from, or nil when the store is not in a state that KNOWS what
+    /// it holds — the shared five-state door, with the CALLER's reason named (P5 item 10, E3).
     ///
     /// Two states know: `.loaded`, and `.absent`, which is answered from the file read **before the
     /// seal key is ever consulted** and therefore cannot be a locked-device artefact — its empty
@@ -3313,25 +3380,30 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Never `indexForWriting()`: that collapses `.absent` into a writable empty index and would
     /// answer out of a *deferred* classification path.
-    private func routedIndexForAdvertising() -> MeshRoutedIndex? {
+    ///
+    /// The `reason:` is what makes a suppressed read **named** rather than silent — the claim door's
+    /// exit was the only silent one in the routed path — and what keeps the line one per pass: the
+    /// two per-item predicates (``MeshRoutedIndexReadReason/rung``,
+    /// ``MeshRoutedIndexReadReason/courier``) run inside the drain's per-item loops and say
+    /// `logsSuppression == false`.
+    ///
+    /// - Parameter reason: Which caller class is asking.
+    /// - Returns: the index for the two states that know what this device holds, else nil.
+    private func routedIndexForReading(reason: MeshRoutedIndexReadReason) -> MeshRoutedIndex? {
+        let state: MeshRoutedUnavailability
         switch routedStore().load() {
-        case .loaded(let index, _):
-            return index
-        case .absent:
-            return MeshRoutedIndex()
-        case .deferred(let deferral):
-            FernletAuditLog.log(
-                "mesh.routedStore.advertisementSuppressed",
-                context: ["state": "deferred", "reason": deferral.reason.rawValue]
-            )
-            return nil
-        case .corrupt:
-            FernletAuditLog.log("mesh.routedStore.advertisementSuppressed", context: ["state": "corrupt"])
-            return nil
-        case .refused:
-            FernletAuditLog.log("mesh.routedStore.advertisementSuppressed", context: ["state": "sealRefused"])
-            return nil
+        case .loaded(let index, _): return index
+        case .absent: return MeshRoutedIndex()
+        case .deferred(let deferral): state = .deferred(deferral)
+        case .corrupt(let corruption): state = .corrupt(corruption)
+        case .refused(let refusal): state = .refused(refusal)
         }
+        guard reason.logsSuppression else { return nil }
+        FernletAuditLog.log(
+            "mesh.routedStore.readSuppressed",
+            context: ["reason": reason.rawValue, "state": state.logToken]
+        )
+        return nil
     }
 
     /// Sends this device's signed ROUTED inventory to one peer or to the named set — the routed twin
@@ -3347,7 +3419,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func sendRoutedInventory(to recipients: Set<String>? = nil, now: Date = Date()) async {
         guard let mesh = currentMesh, membershipVerifier != nil else { return }
         if let recipients, recipients.isEmpty { return }
-        guard let index = routedIndexForAdvertising() else { return }
+        guard let index = routedIndexForReading(reason: .advertise) else { return }
         do {
             let payload = try MeshRoutedInventoryPayload.signed(
                 meshID: mesh.meshID, index: index, sentAt: now, identity: identity
@@ -4027,9 +4099,60 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Every non-`loaded` state returns, so a locked device sweeps nothing.
     private func sweepRoutedExpiry(now: Date = Date()) {
         let store = routedStore()
-        guard case .loaded(let index, _) = store.load() else { return }
+        guard let index = loadedIndexForSweep(store, verb: .expiry).index else { return }
         let current = expireIfDue(index, in: store, now: now).index
         recordRoutedCapacityUsage(current, in: store, at: now, releaseOnly: true)
+    }
+
+    /// The four sweeps' shared five-state read, with the sweep NAMED when a non-`loaded` store
+    /// suppresses it (P5 item 10, E4).
+    ///
+    /// Behaviour is unchanged — every sweep already exited on `deferred`, `corrupt` and
+    /// seal-`refused`, which is D-9.4's fail-closed direction — but the exit was silent, so a device
+    /// that swept nothing all session was indistinguishable from one with nothing to sweep.
+    /// `.absent` returns nil **without** a line: an absent store has nothing to sweep and is not a
+    /// suppression.
+    ///
+    /// - Parameters:
+    ///   - store: The store to read.
+    ///   - verb: Which sweep is asking.
+    /// - Returns: the loaded index, and whether a non-`loaded` state actually **suppressed** this
+    ///   sweep — which `.absent` does not, and which is why the two answers are separate. A caller
+    ///   that recorded an absent store as a suppression would hand the unlock re-entry every peer's
+    ///   once-per-session budget on a **fresh** device, pre-empting exactly the seam D-10.11 keeps.
+    private func loadedIndexForSweep(
+        _ store: MeshRoutedStore, verb: MeshRoutedSweepVerb
+    ) -> (index: MeshRoutedIndex?, suppressed: Bool) {
+        let state: MeshRoutedUnavailability
+        switch store.load() {
+        case .loaded(let index, _): return (index, false)
+        case .absent: return (nil, false)
+        case .deferred(let deferral): state = .deferred(deferral)
+        case .corrupt(let corruption): state = .corrupt(corruption)
+        case .refused(let refusal): state = .refused(refusal)
+        }
+        FernletAuditLog.log(
+            "mesh.routedStore.sweepSuppressed",
+            context: ["verb": verb.rawValue, "state": state.logToken]
+        )
+        return (nil, true)
+    }
+
+    /// Records that a NON-LOADED store took away one peer's capacity sweep — the only budget the
+    /// unlock/foreground re-entry is allowed to spend (P5 item 10, D-10.11).
+    ///
+    /// Bounded in ``routedSweptFingerprints``' own idiom, and full is a named line rather than
+    /// unbounded growth.
+    ///
+    /// - Parameter peer: The peer whose exchange reached a store that could not answer.
+    private func noteRoutedSweepDeferred(for peer: String) {
+        guard routedSweepsDeferredFingerprints.contains(peer)
+                || routedSweepsDeferredFingerprints.count < MeshMembershipBounds.maxRosterMembers
+        else {
+            FernletAuditLog.log("mesh.routedStore.sweepDeferredSetFull")
+            return
+        }
+        routedSweepsDeferredFingerprints.insert(peer)             // R3: bounded set
     }
 
     /// One load in the common case: the fresh index is re-read ONLY when something was actually
@@ -4057,7 +4180,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func sweepRoutedCapacity(for peer: String, now: Date) {
         guard let roster = membershipVerifier?.roster else { return }
         let store = routedStore()
-        guard case .loaded(let index, _) = store.load() else { return }
+        let read = loadedIndexForSweep(store, verb: .capacity)
+        guard let index = read.index else {
+            // P5 item 10: the peer's budget was NOT spent (the insert below is still ahead), so
+            // record that a non-loaded store took this sweep away — that set, and only that set, is
+            // what the unlock/foreground re-entry may spend (D-10.11). An `.absent` store is
+            // deliberately NOT recorded: it suppressed nothing, and on a fresh device every peer
+            // would otherwise enter the set and have its budget spent at the first unlock.
+            if read.suppressed { noteRoutedSweepDeferred(for: peer) }
+            return
+        }
         // The re-gossip budget's idiom: `answerRoutedInventory` fires once per ADVERTISEMENT, so
         // without this the sweep's index I/O would be unbounded per session.
         guard routedSweptFingerprints.count < MeshMembershipBounds.maxRosterMembers,
@@ -4127,7 +4259,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func reclaimDeliveredItem(_ key: MeshRoutedItemKey, now: Date) {
         guard let roster = membershipVerifier?.roster else { return }
         let store = routedStore()
-        guard case .loaded(let index, _) = store.load() else { return }
+        guard let index = loadedIndexForSweep(store, verb: .reclaimDelivered).index else { return }
         let reclaimable = index.itemsReclaimableAsCustodian(
             at: now, in: roster, for: identity.localFingerprint
         )
@@ -4189,11 +4321,196 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// by sending one bogus-type manifest: `dropping(item:reason:)` has no guard of its own.
     private func dropParkedSet(key: MeshRoutedItemKey, reason: MeshRoutedParkedDrop.Reason) {
         let store = routedStore()
-        guard case .loaded(let index, _) = store.load(),
+        guard let index = loadedIndexForSweep(store, verb: .parkedDrop).index,
               index.record(for: key)?.isParked == true else { return }
         recordRoutedSweep(
             store.dropping(item: key, reason: reason.rawValue), reason: reason.rawValue
         )
+    }
+
+    // MARK: Routed re-entry after a lock window (P5 item 10, plan §11, §19.5)
+
+    /// The whole pass an unlock, a foreground or a cleared duress session owes — five jobs, fixed
+    /// order, every one idempotent and bounded.
+    ///
+    /// **Nothing here sends a frame.** Minted receipts are filed durably and forwarded at the next
+    /// exchange through the drain's own doors, exactly as `mintClaimedCustody(_:at:)` documents; a
+    /// broadcast from here would be a send on a link that did not just open. It also never opens a
+    /// merge exchange, refunds a budget, quarantines an index, changes membership or starts a radio.
+    ///
+    /// Cost of a pass with nothing owed, counted honestly — ``routedStore()`` builds a fresh store
+    /// per call and ``MeshRoutedStore/load()`` caches nothing, so every one is a file read plus a
+    /// keychain fetch plus an AES-GCM open. A **rising** edge: three index `load()`s (job 2's
+    /// `.commit` read, job 3's expiry sweep, and job 4's own `.commit` read), plus one per peer still
+    /// in the deferred sweep set. A **duress-fall** edge skips jobs 2 and 3 entirely, so it is one.
+    /// On top of either, when the ledger names a leaver `claimHandedOffCustody(now:)` adds a `.claim`
+    /// read, and `mintClaimedCustody(_:at:)` a `.commit` read whenever its queue is non-empty. No
+    /// timer, no poller, no retry counter.
+    ///
+    /// - Parameters:
+    ///   - edge: Which legs moved.
+    ///   - now: The injected instant.
+    /// - Returns: what each job did, in counts.
+    private func runRoutedReentry(
+        _ edge: MeshRoutedAccessEdge, now: Date
+    ) -> MeshRoutedReentryReport {
+        let restored = reentryRetryRestore(edge, now: now)
+        let committed = reentryRecoverCustody(edge, now: now)
+        let swept = reentrySweep(edge, now: now)
+        let index = routedIndexForReading(reason: .commit)
+        let acks = index.map { reentryFinishLocalAcks(now: now, index: $0) } ?? (filed: 0, hearts: 0)
+        // A hold whose condition expired during the locked window is dropped at the first edge
+        // rather than surviving the session. Pure in-memory re-derivation, so calling it on every
+        // pass — including one where the sweeps already reached it — costs nothing.
+        refreshRoutedDeliveryHold(at: now)
+        FernletAuditLog.log(
+            "mesh.routedAccess.reentry",
+            context: ["legs": edge.logToken, "restored": String(restored),
+                      "committed": String(committed), "sweptPeers": String(swept),
+                      "acksFiled": String(acks.filed), "heartsPending": String(acks.hearts)]
+        )
+        return MeshRoutedReentryReport(
+            legs: edge, restoredSession: restored, committedCustodyCount: committed,
+            sweptPeerCount: swept, acksFiled: acks.filed, heartsPending: acks.hearts
+        )
+    }
+
+    /// Job 1 — retries a session restore that deferred or was refused.
+    ///
+    /// ``retrySessionRestoreIfPending(now:)``'s own doc says "called on unlock or foreground, never
+    /// on a timer", and until now it had **no production caller** at all. First in the pass, because
+    /// a restore arms `membershipVerifier`, which job 2 needs.
+    ///
+    /// The `.idle` guard is load-bearing: `restoreSessionContextAtLaunch(now:)` calls
+    /// `startSessionCeiling` (re-arming `sessionMonotonicOrigin` and re-deriving the monotonic
+    /// budget) and re-assigns `knownEpochHeads` **before** `applySessionEvent(.contextRestored)`
+    /// reaches the state machine's `restoreOnlyFromIdle` refusal — so a mid-session edge would
+    /// re-grant the manipulation-resistant half of the ceiling and only then be told no.
+    ///
+    /// - Parameters:
+    ///   - edge: Which legs moved.
+    ///   - now: The injected instant.
+    /// - Returns: whether a restore was actually attempted.
+    private func reentryRetryRestore(_ edge: MeshRoutedAccessEdge, now: Date) -> Bool {
+        guard edge.protectedDataRose, sessionState == .idle else { return false }
+        return retrySessionRestoreIfPending(now: now) != nil
+    }
+
+    /// Job 2 — the claim derivation, its deferred commits, and the durable recovery a restart needs.
+    ///
+    /// The **fifth** caller of the one idempotent derivation; item 8's four doors all stay (D-8.20,
+    /// D-10.6). `claimHandedOffCustody(now:)` already drains `deferredCustodyCommits` through
+    /// `mintClaimedCustody(_:at:)`, so no second drain path is added here.
+    ///
+    /// What IS new is the recovery: `itemsWithUncommittedOwnCustody(at:for:)` reads the durable
+    /// **rung**, so a restart between claiming a leg and committing custody for it now costs latency
+    /// instead of the receipt — which is why the queue stays memory-only (D-10.7).
+    ///
+    /// - Parameters:
+    ///   - edge: Which legs moved; ciphertext work runs on a rising leg only.
+    ///   - now: The injected instant.
+    /// - Returns: how many items were handed to the durable commit door.
+    private func reentryRecoverCustody(_ edge: MeshRoutedAccessEdge, now: Date) -> Int {
+        guard edge.isRising else { return 0 }
+        claimHandedOffCustody(now: now)
+        guard let index = routedIndexForReading(reason: .commit) else { return 0 }
+        // R3: bounded by the store's item cap; `mintClaimedCustody` commits at most the per-answer
+        // allowance per call and skips anything already stamped, so no item is ever re-streamed twice.
+        let recovered = index
+            .itemsWithUncommittedOwnCustody(at: now, for: identity.localFingerprint)
+            .map(\.key)
+        guard !recovered.isEmpty else { return 0 }
+        mintClaimedCustody(recovered, at: now)
+        return recovered.count
+    }
+
+    /// Job 3 — the retention residual, plus the sweep budget a non-loaded store actually took away.
+    ///
+    /// `sweepRoutedExpiry(now:)` is roster-free, which is what lets it run after `leaveMesh()` has
+    /// nilled `membershipVerifier` — and that is precisely D-9.4's residual ("keeps *expired*
+    /// ciphertext until it searches again"), for which this is the earlier seam.
+    ///
+    /// The capacity half spends **only** the peers in `routedSweepsDeferredFingerprints` (D-10.11):
+    /// sweeping every reachable peer would burn D-9.4's once-per-peer budget for the whole session
+    /// on the common `loaded` case and pre-empt the drain-exchange seam's bulk reclaim.
+    ///
+    /// - Parameters:
+    ///   - edge: Which legs moved.
+    ///   - now: The injected instant.
+    /// - Returns: how many peers' suppressed sweeps were spent.
+    private func reentrySweep(_ edge: MeshRoutedAccessEdge, now: Date) -> Int {
+        guard edge.isRising else { return 0 }
+        sweepRoutedExpiry(now: now)
+        var spent = 0
+        // R2: bounded by the deferred set's own roster cap; a still-deferred store re-inserts,
+        // idempotently, so the set empties exactly as fast as the sweeps actually succeed.
+        for peer in routedSweepsDeferredFingerprints {
+            guard !routedSweptFingerprints.contains(peer) else { continue }
+            sweepRoutedCapacity(for: peer, now: now)
+            guard routedSweptFingerprints.contains(peer) else { continue }
+            spent += 1
+        }
+        routedSweepsDeferredFingerprints.subtract(routedSweptFingerprints)
+        return spent
+    }
+
+    /// Job 4 — D-4.19's retry list, split by what each item actually owes (D-10.13).
+    ///
+    /// `itemsAwaitingLocalAck(at:for:)` is "a retry list that misses an item strands it forever" and
+    /// had **no production caller**. Three branches:
+    ///
+    /// - **4a** `deliveredAt` stamped, receipt unfiled (`mesh.routedDrain.receiptNotStored`'s exact
+    ///   aftermath) — re-commit. Idempotent by construction: with the stamp already written,
+    ///   `committingDelivery` skips the stage shortfall check and re-uses the stored instant, so the
+    ///   canonical bytes are re-minted byte-identically and the heart ledger is never re-asked.
+    /// - **4b** unstamped, complete, and a stage that is final on durable ciphertext (D-4.4) —
+    ///   commit for real.
+    /// - **4c** unstamped hearts — counted and gated, never committed here (P6 owns the unwrap).
+    ///
+    /// Incomplete items are skipped **without** a line: `committingDelivery` would answer
+    /// `.unsatisfied` once per item per pass, which is noise for a state a peer's next chunk fixes.
+    ///
+    /// - Parameters:
+    ///   - now: The injected instant.
+    ///   - index: The index the pass already read — never a second load.
+    /// - Returns: how many receipts were filed, and how many hearts are still pending.
+    private func reentryFinishLocalAcks(
+        now: Date, index: MeshRoutedIndex
+    ) -> (filed: Int, hearts: Int) {
+        let me = identity.localFingerprint
+        var filed = 0
+        var hearts = 0
+        // R2: bounded by the per-answer item allowance, over a list bounded by the store's item cap.
+        for ref in index.itemsAwaitingLocalAck(at: now, for: me)
+            .prefix(MeshRoutedDrainBounds.increment1.maxItems) {
+            guard let record = index.record(for: ref.key), let manifest = record.manifest else {
+                continue
+            }
+            if record.deliveredAt == nil {
+                guard let stage = MeshRoutedAckStageTable.increment1.stage(for: manifest.typeToken)
+                else { continue }
+                guard stage != .foregroundDecryptAndLedgerCommit else { hearts += 1; continue }
+                guard record.isComplete else { continue }
+            }
+            if commitLocalDelivery(for: ref.key, manifest: manifest, now: now) != nil { filed += 1 }
+        }
+        reentryHeartStage(count: hearts)
+        return (filed, hearts)
+    }
+
+    /// Job 4c — says whether the heart stage is evaluable right now, and counts what is waiting.
+    ///
+    /// **A documented, counted no-op until P6**, said plainly rather than dressed up as enforcement:
+    /// item 10 wires the predicate and the enumeration, and P6 replaces this with unwrap → ledger
+    /// commit → `MeshRoutedAckEvidence.heartLedgerCommit`, behind the same predicate.
+    ///
+    /// - Parameter count: How many unstamped heart-stage items the retry list named.
+    private func reentryHeartStage(count: Int) {
+        guard count > 0 else { return }
+        let event = mayCommitRoutedHeartLedgerJudgement
+            ? "mesh.routedAccess.heartStageEvaluable"
+            : "mesh.routedAccess.heartStageDeferred"
+        FernletAuditLog.log(event, context: ["items": String(count)])
     }
 
     /// An item just became complete on this device: take whichever rungs this device is entitled to,
@@ -4231,10 +4548,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// A store that cannot say what it holds answers **true**: the fail-closed direction here is to
     /// re-do bounded work, never to skip a rung. A held item whose custody rung is taken and whose
     /// own recipient receipt is filed has nothing left to take, so a duplicate frame is a no-op.
+    ///
+    /// **Silent by design** (P5 item 10, E5): the read's reason says `logsSuppression == false`,
+    /// because this runs once per item inside the drain's loops and a suppression line each would be
+    /// the very noise the reason vocabulary exists to remove. Note the direction is the OPPOSITE of
+    /// ``holdsHandedOffLeg(of:as:)``'s, and both are right — do not "make them consistent".
     private func routedRungsOutstanding(
         for key: MeshRoutedItemKey, manifest: MeshRoutedManifest
     ) -> Bool {
-        guard let record = routedIndexForAdvertising()?.record(for: key) else { return true }
+        guard let record = routedIndexForReading(reason: .rung)?.record(for: key) else { return true }
         guard record.custodiedAt != nil else { return true }
         let me = identity.localFingerprint
         guard manifest.destinations.contains(me) else { return false }
@@ -4279,8 +4601,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Whether some destination's leg of `key` was explicitly handed to this device at a departure.
     /// ``claimHandedOffCustody(now:excluding:)`` is what writes that rung (P5 item 8); the predicate
     /// itself has not moved since item 6, which is exactly the increment-1 line.
+    ///
+    /// A store that cannot say what it holds answers **false** — fail-closed in the opposite
+    /// direction to ``routedRungsOutstanding(for:manifest:)``, and correctly so: claiming custody
+    /// this device cannot prove would put something untrue in a signed receipt. **Silent by design**
+    /// for the same per-item reason (P5 item 10, E5).
     private func holdsHandedOffLeg(of key: MeshRoutedItemKey, as me: String) -> Bool {
-        guard let target = routedIndexForAdvertising()?.record(for: key)?.deliveryTarget else {
+        let record = routedIndexForReading(reason: .courier)?.record(for: key)
+        guard let target = record?.deliveryTarget else {
             return false
         }
         // R2: bounded by the destination cap.
@@ -4340,7 +4668,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 .map(\.memberFingerprint)
                 .filter { !removed.contains($0) }
         )
-        guard !leavers.isEmpty, let index = routedIndexForAdvertising() else { return }
+        guard !leavers.isEmpty, let index = routedIndexForReading(reason: .claim) else { return }
         let stranded = MeshCustodyHandoffPlan.notOriginServedCount(
             in: index, from: leavers, originServed: originServedItems, at: now
         )
@@ -4418,7 +4746,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // R3: bounded below by the store's own item cap, deduped so a re-deferred key cannot double.
         let queued = (deferredCustodyCommits + keys).filter { seen.insert($0).inserted }
         guard !queued.isEmpty else { return }
-        guard let index = routedIndexForAdvertising() else {
+        guard let index = routedIndexForReading(reason: .commit) else {
             // Nothing was committed, so nothing may be dropped: a store that cannot say what it
             // holds defers the WHOLE queue rather than the overflow alone.
             deferredCustodyCommits = Array(queued.prefix(MeshRoutedStoreFormat.maxItems))
@@ -4576,7 +4904,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) -> (plan: MeshRoutedDrainPlan, quiescent: Bool)? {
         guard let mesh = currentMesh,
               let remote = peerRoutedInventories[peer]?.inventory,
-              let index = routedIndexForAdvertising() else { return nil }
+              let index = routedIndexForReading(reason: .drainPlan) else { return nil }
         guard let local = MeshRoutedInventory(
             meshID: mesh.meshID, index: index, selfFingerprint: identity.localFingerprint, at: now
         ) else {
@@ -4748,9 +5076,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // R2: bounded by `MeshRoutedDrainBounds.increment1.maxReceipts`.
         for ref in refs.prefix(MeshRoutedDrainBounds.increment1.maxReceipts) {
             if ref.kind == .recipient {
-                let held = store.forwardableRecipientReceipts(item: ref.key).value ?? []
-                guard let receipt = held.first(where: { $0.recipientFingerprint == ref.signer }) else {
-                    FernletAuditLog.log("mesh.routedDrain.receiptSkipped", context: ["kind": ref.kind.rawValue])
+                let held = store.forwardableRecipientReceipts(item: ref.key)
+                guard let receipt = held.value?.first(where: { $0.recipientFingerprint == ref.signer })
+                else {
+                    noteRoutedReceiptSkipped(ref, outcome: held)
                     continue
                 }
                 await broadcastMembershipFrame(
@@ -4765,15 +5094,36 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
+    /// Names why one receipt reference could not be forwarded — and, when the store could not answer
+    /// at all, **which state it was in** (P5 item 10, E1/E2).
+    ///
+    /// The `.value ?? []` this replaced collapsed three different answers into one empty array: a
+    /// deferred store (ask again), a refusal (the field may be full) and a genuinely receipt-less
+    /// item all produced the identical line. That is invariant 7's failure mode expressed as a
+    /// diagnostic, and it is the reason no routed door collapses an outcome to a default any more.
+    ///
+    /// - Parameters:
+    ///   - ref: The reference that was being forwarded.
+    ///   - outcome: What the store answered.
+    private func noteRoutedReceiptSkipped<Value>(
+        _ ref: MeshRoutedInventoryReceiptRef, outcome: MeshRoutedOutcome<Value>
+    ) {
+        var context = ["kind": ref.kind.rawValue]
+        if let cause = outcome.unavailability { context["state"] = cause.logToken }
+        if let refusal = outcome.refusal { context["reason"] = refusal.rawValue }
+        FernletAuditLog.log("mesh.routedDrain.receiptSkipped", context: context)
+    }
+
     /// The custody receipt a reference names: another member's stored bytes, or — when the signer is
     /// this device — a re-mint from the durable ciphertext.
     private func custodyReceiptToForward(
         _ ref: MeshRoutedInventoryReceiptRef, in store: MeshRoutedStore, now: Date
     ) -> MeshCustodyReceipt? {
         guard ref.signer == identity.localFingerprint else {
-            let held = store.forwardableCustodyReceipts(item: ref.key).value ?? []
-            guard let receipt = held.first(where: { $0.custodianFingerprint == ref.signer }) else {
-                FernletAuditLog.log("mesh.routedDrain.receiptSkipped", context: ["kind": ref.kind.rawValue])
+            let held = store.forwardableCustodyReceipts(item: ref.key)
+            guard let receipt = held.value?.first(where: { $0.custodianFingerprint == ref.signer })
+            else {
+                noteRoutedReceiptSkipped(ref, outcome: held)
                 return nil
             }
             return receipt
@@ -5001,6 +5351,44 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Where this device is in plan §8.2's lifecycle. Memory-only — the DURABLE half is the sealed
     /// context, and a relaunch re-derives this from it (``restoreSessionContextAtLaunch(now:)``).
     @ObservationIgnored private(set) var sessionState: MeshSessionState = .idle
+
+    /// The ONE predicate every decrypt of routed content consults (P5 item 10, D-10.12).
+    ///
+    /// Consultation sites today: **zero**, by construction — `MeshRoutedContentKeyWrapper.unwrap`
+    /// has no shipping caller and P6 owns the first one. This is a predicate plus a source wall
+    /// (`everyRoutedPlaintextSeamNamesItsPredicate`), not a claim that something is being blocked
+    /// today; the wall fails the moment a decrypt appears that does not name it.
+    ///
+    /// Deliberately **without** a `sessionState` leg: routed ciphertext outlives the session (expiry
+    /// is `hardDeadline + 20 min`, D-9.4) and `MeshRoutedAckStage.durableRecipientStorage` states in
+    /// its own doc that no decrypt and no foreground are in its condition, so ANDing the session in
+    /// would make P6's later read of already-final photo/text bytes impossible outside a live mesh.
+    var mayDecryptRoutedContent: Bool { routedAccessGate.permits(.decryptContent) }
+
+    /// The ONE predicate every canonical-store mutation of routed content consults.
+    ///
+    /// The **same strength** as ``mayDecryptRoutedContent``, deliberately: a plaintext write is not
+    /// a weaker act than a plaintext read. Two names rather than one so a future non-decrypt
+    /// canonical mutation has its own tested answer, never so it can be answered more weakly.
+    var mayMutateCanonicalStoreWithRoutedContent: Bool {
+        routedAccessGate.permits(.mutateCanonicalStore)
+    }
+
+    /// The heart stage's stronger leg (D-4.16, D-10.4): the two plaintext predicates **and** a live
+    /// foreground mesh session, which is what `MeshRoutedHeartAck`'s own doc demands of its caller.
+    ///
+    /// The `sessionState` leg is documented **inert until P8**: nothing fires `.backgrounded` /
+    /// `.foregrounded` today, so `sessionState` never leaves `.activeForeground` inside a session
+    /// and the real foreground enforcement is the pushed `appIsForeground` fact. It is written now
+    /// because when `.continuingInBackground` becomes real the two legs must disagree deliberately —
+    /// a CPT-continued mesh custodies ciphertext and decrypts nothing.
+    ///
+    /// Named residual (D-4.5's documented shape): a heart awaiting its ledger judgement when the
+    /// mesh ends cannot reach `delivered`, and the item expires at `hardDeadline + 20 min`.
+    var mayCommitRoutedHeartLedgerJudgement: Bool {
+        mayDecryptRoutedContent && mayMutateCanonicalStoreWithRoutedContent
+            && sessionState == .activeForeground
+    }
 
     /// The dual-bound ceiling for this run, armed when a session starts or is restored.
     @ObservationIgnored private(set) var sessionCeiling: MeshSessionCeiling?
@@ -9307,6 +9695,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// (`deferredCustodyCommits`) — the named deferral, made observable so "retried at the next
     /// evaluation" is a measured claim rather than a comment.
     var deferredCustodyCommitCountForTesting: Int { deferredCustodyCommits.count }
+
+    /// The peers whose one capacity sweep has already been spent this session (D-9.15's budget).
+    ///
+    /// Readable so P5 item 10's cell can prove the re-entry does **not** pre-empt the
+    /// drain-exchange seam on the common (`loaded`) case: a budget nothing can observe is a budget
+    /// a future "sweep everything on unlock" can spend invisibly.
+    var routedSweptFingerprintsForTesting: Set<String> { routedSweptFingerprints }
+
+    /// The peers whose capacity sweep a NON-LOADED store took away — the only budget the re-entry
+    /// may spend (D-10.11).
+    var routedSweepsDeferredFingerprintsForTesting: Set<String> { routedSweepsDeferredFingerprints }
 
     /// Runs the custody claim exactly as the four shipping doors run it.
     ///

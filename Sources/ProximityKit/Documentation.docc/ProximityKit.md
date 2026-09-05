@@ -687,6 +687,60 @@ Four decisions are worth reading before touching any of it:
   the store answers `.loaded`, so an exchange that did no work does not strand that peer's reclaim,
   and its release, for the rest of the session.
 
+**P5 item 10 answered the LOCKED DEVICE** (plan §11's locked-device row, §19.5's fifth wrinkle).
+The finding it is built on inverts the obvious design: after the first post-boot unlock a locked
+device's routed store is **`loaded`** — the seal key is `AfterFirstUnlockThisDeviceOnly` and the
+files are `…UntilFirstUserAuthentication` — so ciphertext-only custody, custody receipts and
+photo/text recipient receipts already work with the screen off, by design rather than by accident.
+`UIApplication.isProtectedDataAvailable` is `false` in exactly that state, so the gate item 10 adds
+is **not** a proxy for store readability: the store answers readability itself, in five states, and
+``MeshRoutedAccessGate`` answers a different question — *may plaintext exist on this device right
+now.* The genuinely blocked window is **pre-first-unlock**, already fail-closed in five named states
+with no path from any of them to a writer. What was missing was a way **back**.
+
+- **One pushed value, three facts, three questions.** The app pushes iOS data protection, the scene
+  and `FernletLockService`'s duress session through
+  ``MeshNetworkManager/applyRoutedAccessGate(_:now:)`` — ProximityKit observes no lifecycle
+  (plan §13 rejects that by name), and a pulled property would have no **edge**. The push is P7's
+  `apply(_:)` shape, so `ProximityRunPolicy` later becomes its single writer without the seam moving.
+  ``MeshRoutedCapability/sealCustody`` is answered `true` **deliberately**: custody's authority is the
+  store's own five-state load, a *type-level* gate, and a lock fact at a ciphertext door would delete
+  the locked-device feature. The two plaintext capabilities are answered at the **same** strength — a
+  plaintext write is not a weaker act than a plaintext read.
+- **Which lock gates what.** iOS data protection gates plaintext, and (at the store) readability. The
+  **app lock gates nothing in the mesh** — no `FernletLockScope` covers Friends, and ProximityKit
+  cannot import `FernletLock` — with one exception: **duress**, which closes the gate, because a
+  friend's content must never be committed into a canonical store during a duress session. It is
+  observed on its own `onChange` because it moves at neither a scene nor a protected-data transition.
+- **The identity key's keychain protection is never weakened for background decryption, full stop.**
+  Every row stays `AfterFirstUnlockThisDeviceOnly`, including the routed seal key: strengthening it
+  makes every background custody write unsealable — and an unsealable write is an unacknowledgeable
+  one — while weakening it to a syncable class is prohibited and pointless, since V3 ciphertext
+  authenticates a `ThisDeviceOnly` binding. This is a **policy** gate, not a capability one: the
+  identity KA key is cached in memory after `ensureProvisioned()`, so a locked device *could* unwrap.
+  It does not, and the answer to "background decrypt would be convenient" is *no*, never a class
+  change.
+- **The re-entry is defined by an EDGE, not by `isOpen`.** ``MeshRoutedAccessEdge`` runs the pass when
+  a **ciphertext** leg rises (an unlock or a foreground makes the sealed store readable again — those
+  jobs must run even while the app is backgrounded) or when a **duress session clears**, which is the
+  one fact that closes the gate with no other leg moving. Five jobs, fixed order, each idempotent and
+  bounded: the session-restore retry that had no caller (guarded on `sessionState == .idle`, because
+  the launch restore re-arms the ceiling before the state machine's refusal is reached), the claim
+  derivation plus a durable re-derivation of item 8's memory-only commit queue from the **rung**, the
+  roster-free expiry sweep plus only the capacity sweeps a non-loaded store actually suppressed, the
+  stranded-receipt retry list, and a re-derivation of the delivery hold. **It sends no frame**:
+  receipts are filed durably and forwarded at the next exchange.
+- **A counted no-op is said plainly.** No decrypt call site exists yet (P6 owns the first), so item 10
+  ships the three predicates, the heart stage's enumeration and source walls that fail the moment a
+  plaintext seam appears — a tripwire plus a predicate, never a claim that something is being blocked
+  today. The wall **pins the count** of each plaintext seam across all of `ProximityKit` rather than
+  only asking each file to name its predicate: the manager defines all three predicates, so a
+  containment-only wall could never fire in the one file where such a seam would most naturally be
+  written. Moving a pin obliges the same file to name its predicate, and the custody-door wall
+  exempts exactly those files, so the first decrypt outside the manager is not forced anywhere. The heart stage's extra leg
+  (`sessionState == .activeForeground`) is documented **inert until P8**, when a CPT-continued mesh
+  will custody ciphertext and decrypt nothing.
+
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
 the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
 frozen English spelling, so one grep finds every layer that touches those bytes:
@@ -1389,6 +1443,10 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshRoutedParkedDrop``
 - ``MeshRoutedDeliveryHold``
 - ``MeshRoutedDeliveryHoldCause``
+- ``MeshRoutedAccessGate``
+- ``MeshRoutedCapability``
+- ``MeshRoutedAccessEdge``
+- ``MeshRoutedReentryReport``
 - ``MeshSessionCeiling``
 - ``MeshSessionCeilingBound``
 - ``MeshSessionCeilingVerdict``

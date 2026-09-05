@@ -904,6 +904,34 @@ nonisolated struct MeshRoutedIndex: Codable, Equatable, Sendable {
         }.map(\.reference)
     }
 
+    /// Live items whose delivery target names THIS device custodian for some destination and whose
+    /// own custody stamp is not yet written — P5 item 10's durable re-derivation of item 8's
+    /// memory-only `deferredCustodyCommits` queue.
+    ///
+    /// It reads the **rung**, not the claim plan, and that is the whole point: after a claim no named
+    /// leg is `pending`, so re-planning recovers nothing (D-8.36), while the rung is durable and
+    /// survives a restart. A restart between claiming a leg and committing custody for it therefore
+    /// costs latency rather than the receipt (D-10.7).
+    ///
+    /// - Parameters:
+    ///   - now: The injected instant; expired items are excluded.
+    ///   - selfFingerprint: This device.
+    /// - Returns: the refs, in index order.
+    func itemsWithUncommittedOwnCustody(
+        at now: Date, for selfFingerprint: String
+    ) -> [MeshRoutedItemRef] {
+        items.filter { item in
+            guard item.isLive(at: now), item.manifest != nil, item.custodiedAt == nil else {
+                return false
+            }
+            guard let target = item.deliveryTarget else { return false }
+            // R2: bounded by the destination cap.
+            return target.destinations.contains {
+                target.state(of: $0) == .custodied(by: selfFingerprint)
+            }
+        }.map(\.reference)
+    }
+
     /// How many items ``itemsAwaitingHandoff(at:in:originatedBy:)`` would name.
     ///
     /// - Important: this is a **candidate** count, never `MeshCustodyHandoffSummary.handedOffItemCount`.
