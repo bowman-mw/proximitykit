@@ -74,9 +74,10 @@ nonisolated enum MeshFrameReplayVerdict: Equatable, Sendable {
 /// The four routed content doors key it on the ids items 1–4 derived for this purpose —
 /// `MeshRoutedManifest.itemID`, `MeshChunk.chunkID`, `MeshCustodyReceipt.receiptID`,
 /// `MeshRecipientReceipt.receiptID` — attributed to the frame's **author** (origin, custodian,
-/// recipient), never to the forwarding envelope's sender and never to an epoch. That keeps plan
-/// §8.4's promise the three `keyEpoch` gates are retired against: routed content carries unique
-/// ids + meshID + expiry and dedups by id.
+/// recipient), never to the forwarding envelope's sender and never to an epoch. That kept plan
+/// §8.4's promise the three `keyEpoch` gates were retired against, and P5 item 13 collected on it:
+/// routed content carries unique ids + meshID + expiry and dedups by id, which is what let two of
+/// the three be deleted with the paths they gated rather than loosened.
 ///
 /// Two calls, not one, and the split is the whole reason both ``verdict(frameID:from:meshID:expiresAt:now:)``
 /// and ``admit(frameID:from:meshID:expiresAt:now:)`` exist: the manager PROBES with `verdict` on the

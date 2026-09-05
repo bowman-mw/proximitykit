@@ -86,7 +86,8 @@ public final class MeshClothingShop {
 
     /// Accepts a verified `.clothingCatalog` envelope from a committed, unblocked peer. The caller
     /// (MeshNetworkManager) has already enforced the committed-slot gate and the blocked-fingerprint
-    /// drop (mirroring `.friendPhoto`); `verifiedFingerprint` is the transport-authenticated identity,
+    /// drop (mirroring `.tempMessage`; the `.friendPhoto` dispatch this once named retired with P5
+    /// item 13); `verifiedFingerprint` is the transport-authenticated identity,
     /// never a wire-claimed value — catalogs are keyed by it exclusively.
     public func receiveCatalog(
         _ envelope: FernletIdentityEnvelope,

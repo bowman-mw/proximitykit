@@ -183,8 +183,10 @@ nonisolated struct MeshContentSet<Item: MeshMergeableContent>: Equatable, Sendab
 ///
 /// A projection of ``FriendPhotoManifestEntry`` plus what the holder knows about the bytes — the
 /// digest is a **local** value, not a wire field, so no manifest golden moves. `keyEpoch` is carried
-/// because it is what the live path gates on, and because a photo created in the *other* branch of
-/// a split necessarily names another epoch (see `MeshContentIngest.swift`'s note on the P5 handoff).
+/// because the legacy path gated on it and a photo created in the *other* branch of a split
+/// necessarily names another epoch. Since P5 item 13 the LIVE photo path gates on no epoch at all
+/// (see `MeshContentIngest.swift`'s note), and this value is untouched by that retirement: it is a
+/// pure value with no manager call site, and P6 owns its wiring.
 nonisolated struct MeshMergedPhoto: MeshMergeableContent {
 
     static let setCapacity = FriendPhotoLimits.maxManifestEntries

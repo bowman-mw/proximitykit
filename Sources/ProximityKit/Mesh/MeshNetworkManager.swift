@@ -199,8 +199,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// **Pushed by the app** through ``applyRoutedAccessGate(_:now:)``, never observed here: plan
     /// §13 rejects a ProximityKit-side scene observer by name, and the re-entry is defined by an
     /// *edge* that a pulled property could not produce. `.closed` until the first push, which is
-    /// fail-closed and — since no decrypt call site exists yet (P6 owns the first one) — a regression
-    /// no-op.
+    /// fail-closed: since P5 item 13 there IS a decrypt call site, so an app that never pushes now
+    /// defers every projection instead of doing nothing — the same answer a locked device gets, and
+    /// the next rising edge runs it.
     ///
     /// It is **not** a proxy for store readability. After the first post-boot unlock a locked
     /// device's routed store is `loaded` and ciphertext-only custody continues with the screen off;
@@ -237,13 +238,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var observationTask: Task<Void, Never>?
     public private(set) var photosAddedThisSession = 0
     @ObservationIgnored private var sessionQuotaMeshID: UUID?
-    /// Distinct photo IDs accepted per *authenticated* peer this mesh session. Bounds the
-    /// receive path the same way `photosAddedThisSession` bounds the send path, so a single
-    /// connected peer cannot flood the session with unbounded photos (each decoded, cached,
-    /// and — when it claims the active session — retained in memory). Keyed on the
-    /// transport-authenticated fingerprint, not the spoofable `payload.senderFingerprint`.
-    @ObservationIgnored private var receivedPhotoIDsByFingerprint: [String: Set<UUID>] = [:]
-    @ObservationIgnored private var receiveQuotaMeshID: UUID?
     @ObservationIgnored private var photoSessionStartedAt: Date?
     @ObservationIgnored private var activePhotoSessionID: UUID?
     // voucherFingerprint → cached payload; never persisted across app launches
@@ -316,15 +310,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `clearGroupKeyState` (R3: bounded by ``maxOutstandingAdmissionRequests``).
     @ObservationIgnored private var outstandingAdmissionRequestBySlot: [UUID: UUID] = [:]
 
-    /// Photo AUTHORS announced in manifests this session, after the block filter.
-    ///
-    /// A one-hop relay (`sendRequestedPhotos`) can legitimately carry a third peer's photo before
-    /// that peer appears in our mesh descriptor or session roster — the manifest entry is our only
-    /// advance notice of the author. `photoAuthorIsAcceptable` treats that notice as "known", which
-    /// keeps the relay working while staying attacker-bounded (we asked for these ids).
-    /// Bounded by ``maxSessionPhotos``; cleared with the roster at new-session reset (R3).
-    @ObservationIgnored private var manifestAnnouncedPhotoAuthors: Set<String> = []
-
     @ObservationIgnored private(set) var currentGroupKey: MeshGroupKey?
 
     /// The epoch this device is on, plus the predecessors still inside their grace window
@@ -375,10 +360,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The single in-flight rotation-sync drain (see `scheduleRotationSyncAck`), so a sync flood
     /// cannot accumulate sleeping tasks (R3).
     @ObservationIgnored private var rotationSyncTask: Task<Void, Never>?
-    /// Slot ids with a photo-send run in flight — at most one per slot, so a peer cannot fan out
-    /// unbounded hydrating sends by re-requesting the session in a loop (R3).
-    @ObservationIgnored private var photoSendsInFlight: Set<UUID> = []
-
     private static let rotationInterval: TimeInterval = 15 * 60   // 15 minutes
     private static let beaconInterval: TimeInterval = 20          // 20 seconds
     private static let beaconLivenessTimeout: TimeInterval = 45   // 45 seconds
@@ -544,8 +525,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Phase 3a: the shop rides the friend mesh as registered feature payloads. The dispatch default's
     /// committed-slot gate has already run by the time these fire; the remaining guards mirror
-    /// `.friendPhoto`: a transport-VERIFIED fingerprint is required (catalogs are keyed by it
-    /// exclusively — never a display name) and blocked fingerprints drop silently.
+    /// the routed photo projection: a transport-VERIFIED fingerprint is required (catalogs are keyed
+    /// by it exclusively — never a display name) and blocked fingerprints drop silently.
     private func registerClothingShopHandler() {
         registerPayloadHandler(for: .clothingCatalog) { [weak self] envelope, plaintext, peer in
             guard let self else { return }
@@ -694,8 +675,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Phase 5: live-session temporary messages ride the friend mesh as registered feature payloads.
     /// The dispatch default's committed-slot gate has already run; the remaining guards mirror
-    /// `.friendPhoto`/`.clothingCatalog`: a transport-VERIFIED fingerprint is required and blocked
-    /// fingerprints drop silently. `.tempMessage` is in `sealingRequiredTypes`, so an unsealed message
+    /// `.clothingCatalog` and the routed photo projection: a transport-VERIFIED fingerprint is
+    /// required and blocked fingerprints drop silently. `.tempMessage` is in `sealingRequiredTypes`, so an unsealed message
     /// was already rejected at `verify()` — this handler only ever sees a decrypted, sealed payload.
     /// Dedup / per-sender rate limit / sanitize + cap all live in `SessionMessageStore.receiveIncoming`.
     private func registerSessionMessageHandler() {
@@ -1050,8 +1031,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// (`noteSlotCommittedForShop`).
     func resetSessionRosterForNewSession() {
         sessionRoster.removeAll()
-        // Manifest-announced authors are session-scoped evidence, exactly like the roster (R3).
-        manifestAnnouncedPhotoAuthors.removeAll()
     }
 
     /// Scoped roster consume for the in-session camera review flow: removes ONLY the presented
@@ -1621,8 +1600,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         isSessionOpen = true
         photosAddedThisSession = 0
         sessionQuotaMeshID = nil
-        receivedPhotoIDsByFingerprint.removeAll()
-        receiveQuotaMeshID = nil
         sessionPhotos.removeAll()
         // Live-roster reset only (new session). pendingFriendReview is deliberately untouched:
         // an unreviewed batch from the previous session survives into this search cycle.
@@ -1663,8 +1640,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         removalQuorum.removeAll()
         photosAddedThisSession = 0
         sessionQuotaMeshID = nil
-        receivedPhotoIDsByFingerprint.removeAll()
-        receiveQuotaMeshID = nil
         clearGroupKeyState()
         clearActiveVerifyQR()
         // P3 item 6: the run-scoped halves of the machine go with the session; a TERMINAL state
@@ -1781,6 +1756,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
+    /// Captures one photo onto this device's own wall and shares it as a routed item (P5 item 13).
+    ///
+    /// **The local echo is unconditional**, and that is the shipped behaviour, not a new decision
+    /// (D-13.8): both retired arms cached before any send and incremented the session counter
+    /// whichever way the send went, so a solo member has always got a wall entry and no error.
+    /// Only the TRANSPORT is conditional — the routed door answers `.skipped` where there is nobody
+    /// to send to, `.staged` where the item is minted, and `.refused` only for a mint that was
+    /// attempted and failed.
+    ///
+    /// What replaced what: the group-key seal and the epoch-0 plaintext broadcast are both gone,
+    /// with the per-recipient content-key wrap in their place. An open-mesh photo used to travel in
+    /// the clear at epoch 0 and is now encrypted per recipient, which is a confidentiality
+    /// improvement (D-13.9); and the destination set is the full roster at creation rather than
+    /// whichever slots happened to be active, so a temporarily disconnected member is delivered at
+    /// reunion instead of never.
     public func addPhoto(_ data: Data) {
         // Reset counter when the mesh changes between calls.
         if currentMesh?.meshID != sessionQuotaMeshID {
@@ -1793,60 +1783,63 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         guard let image = UIImage(data: data),
               let normalized = image.resizedForFriendSharing().jpegData(compressionQuality: 0.82) else { return }
-
-        let wirePhoto: FriendPhotoPayload
+        let itemID = UUID()
+        let addedAt = Date()
         let session = currentPhotoSessionMetadata()
-        if let key = currentGroupKey {
-            // FAIL CLOSED (R7): while a group key exists the photo is sealed or not sent at all —
-            // the old `try?`-into-else fallback silently downgraded it to an epoch-0 plaintext send.
-            let ciphertext: Data
-            let nonce: Data
-            do {
-                (ciphertext, nonce) = try Self.encryptPhoto(normalized, key: key)
-            } catch {
-                meshError = "Couldn't encrypt that photo — it wasn't shared."
-                FernletAuditLog.log(
-                    "mesh.photo.encryptFailed",
-                    context: ["error": String(describing: error)]
-                )
-                return
-            }
-            // Epoch ≥ 1: send encrypted; cache the locally-decrypted form.
-            wirePhoto = FriendPhotoPayload(
-                encryptedImageData: ciphertext,
-                nonce: nonce,
-                keyEpoch: key.epoch,
-                senderName: displayName,
-                senderFingerprint: identity.localFingerprint,
-                senderSigningPublicKey: identity.localSigningPublicKey,
-                session: session
-            )
-            cachePhoto(FriendPhotoPayload(
-                id: wirePhoto.id,
-                imageData: normalized,
-                addedAt: wirePhoto.addedAt,
-                senderName: displayName,
-                senderFingerprint: identity.localFingerprint,
-                senderSigningPublicKey: identity.localSigningPublicKey,
-                session: session
-            ), includeInSession: true)
-        } else {
-            // Epoch 0: solo member or rotation not yet started; send unencrypted.
-            wirePhoto = FriendPhotoPayload(
-                imageData: normalized,
-                senderName: displayName,
-                senderFingerprint: identity.localFingerprint,
-                senderSigningPublicKey: identity.localSigningPublicKey,
-                session: session
-            )
-            cachePhoto(wirePhoto, includeInSession: true)
-        }
+        cachePhoto(FriendPhotoPayload(
+            id: itemID,
+            imageData: normalized,
+            addedAt: addedAt,
+            senderName: displayName,
+            senderFingerprint: identity.localFingerprint,
+            senderSigningPublicKey: identity.localSigningPublicKey,
+            session: session
+        ), includeInSession: true)
         photosAddedThisSession += 1
-        for slot in activeSlots {
-            spawnHostPinned { [weak self] in
-                await self?.sendEnvelope(.friendPhoto, encodable: wirePhoto, via: slot, sealed: true)
-            }
+        shareRoutedPhoto(itemID: itemID, addedAt: addedAt, imageData: normalized, session: session)
+    }
+
+    /// Frames one captured photo as a routed item body and puts it through the routed sender door.
+    ///
+    /// The body carries **no identity claim**: who sent it is the manifest's signed
+    /// `originFingerprint`, and the signing key is the receiver's own admission ledger. Only a
+    /// refusal reaches the user, on the same `meshError` seam this function's predecessor used.
+    private func shareRoutedPhoto(
+        itemID: UUID, addedAt: Date, imageData: Data, session: FriendPhotoSessionMetadata
+    ) {
+        let header = MeshRoutedPhotoHeader(
+            id: itemID, addedAt: addedAt, senderName: displayName, session: session
+        )
+        let body: Data
+        do {
+            body = try MeshRoutedPhotoBody(header: header, imageData: imageData).encoded()
+        } catch {
+            noteRoutedShareRefusal(.sealFailed, error: error)
+            return
         }
+        guard let typeToken = routedTypes.token(forCanonicalStore: .friendPhotoWall) else {
+            noteRoutedShareRefusal(.mintFailed, error: nil)
+            return
+        }
+        let outcome = originateRoutedItem(
+            body: body, typeToken: typeToken, itemID: itemID, now: Date()
+        )
+        guard case .refused(let refusal) = outcome else { return }
+        noteRoutedShareRefusal(refusal, error: nil)
+    }
+
+    /// The one user-visible half of a share refusal: the existing `meshError` seam plus one audit
+    /// line carrying the frozen reason token (D-13.15).
+    ///
+    /// No third `MeshRoutedDeliveryHoldCause`: that observable states what this device HOLDS, not
+    /// what it failed to send. The sentence below is composed inside the package and therefore
+    /// renders in English everywhere — an inherited defect of this seam, not a new one, and one line
+    /// on item 9's existing owner-blocked display-literal row.
+    private func noteRoutedShareRefusal(_ refusal: MeshRoutedShareRefusal, error: (any Error)?) {
+        meshError = "Couldn't share that photo with the mesh — it's saved on your own wall."
+        var context = ["reason": refusal.rawValue]
+        if let error { context["error"] = String(describing: error) }
+        FernletAuditLog.log("mesh.routedShare.refused", context: context)
     }
 
     public func allowAdmission(_ request: MeshAdmissionRequestPayload) {
@@ -1989,8 +1982,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             handleVerifyChallenge(envelope, plaintext: plaintext, slot: slot)
         case .verifyResponse:
             handleVerifyResponse(envelope, plaintext: plaintext, slot: slot)
-        case .friendPhoto, .friendPhotoManifest, .friendPhotoRequest:
-            dispatchPhotoPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
+        // The three friend-photo tokens are PARKED, never dispatched (P5 item 13, D-13.5): their
+        // declarations, frozen `rawValue`s and payload structs stay so an older peer's frame is
+        // parked by name rather than mis-dispatched, but the transport they named retired with the
+        // three `keyEpoch` gates. Photo content now rides the routed store.
         case .meshFriendVouchList:
             if let payload = try? decoder.decode(MeshFriendVouchListPayload.self, from: plaintext) {
                 receiveVouchList(payload, senderFingerprint: peer?.fingerprint)
@@ -2143,6 +2138,48 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The last capacity refusal the drain took, for item 9 to surface. Frozen reason, no display
     /// text — plan §18.2's copy is the owner's and item 6 ships none.
     @ObservationIgnored private(set) var lastRoutedDrainRefusal: MeshRoutedDrainRefusalNote?
+
+    // MARK: Routed projection state (P5 item 13, plan §11, §12)
+
+    /// The routed items whose plaintext has already been handed to a canonical store this session.
+    ///
+    /// **Memory-only, and deliberately not a fourth stored rung** (D-13.16): a stored "handed to the
+    /// app" state is exactly what ``MeshDeliveryTarget`` was built to avoid, since a max-merge could
+    /// then overwrite it. This set exists so the per-origin quota is not spent twice inside one
+    /// session; across a restart the friend-photo wall's own `photo.id` dedup absorbs a re-hand.
+    /// Bounded by the store's item cap, cleared with the rest of the drain state, and therefore
+    /// owed no `Docs/PrivacyWipeCoverage.md` row.
+    @ObservationIgnored private var routedProjectedItems: Set<MeshRoutedItemKey> = []
+
+    /// The incoming per-origin photo budget, keyed on the ITEM's mesh (D-13.23).
+    ///
+    /// The legacy counter keyed on `currentMesh?.meshID` and reset whenever the live mesh changed —
+    /// sound while the check always ran inside the session that produced the photo, and wrong on a
+    /// routed path whose hand-off runs at any later access-gate edge. Keying on the origin's signed
+    /// `manifest.meshID` means a deferred hand-off cannot buy a fresh ten-slot budget.
+    ///
+    /// Memory-only, bounded on both axes (``MeshRoutedStoreFormat/maxItems`` keys, the per-sender
+    /// cap of ids in each) and **not cleared by a mesh change** — see ``clearRoutedDrainState()``,
+    /// which every production mesh change goes through and which would otherwise refund the budget
+    /// for items minted in the mesh that is being left (D-13.23a). It is therefore owed no
+    /// `Docs/PrivacyWipeCoverage.md` row for the same reason the drain state is not: nothing here
+    /// reaches disk, and the ciphertext it accounts for has its own row.
+    @ObservationIgnored private var routedOriginPhotoQuota: [MeshRoutedOriginQuotaKey: Set<UUID>] = [:]
+
+    /// The routed type tokens this build can actually hand to a canonical store — one per store
+    /// ``routedCanonicalDispatch(_:author:manifest:)`` has an arm for, asked of the registry rather
+    /// than typed (D-13.31).
+    ///
+    /// Increment 1 dispatches one store, so this is one token; `.sessionTranscript` and
+    /// `.heartLedger` are registered, admitted, custodied and completed today with **no** arm behind
+    /// them, and P6 adds each store here in the same edit that lands its arm. Everything that spends
+    /// a bounded per-pass allowance on projection work reads this, so an unfinishable type cannot
+    /// occupy a slot forever (R-19).
+    private var projectableRoutedTypeTokens: Set<String> {
+        Set([MeshRoutedCanonicalStore.friendPhotoWall].compactMap {
+            routedTypes.token(forCanonicalStore: $0)
+        })
+    }
 
     // MARK: Routed backpressure state (P5 item 9, plan §11)
 
@@ -3349,6 +3386,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     // offered is item 5's `MeshRoutedInventoryDelta`, what may be admitted is items 1–4's verifiers
     // and store doors, and what may be spent is `MeshRoutedDrainPlan`'s bounds.
     //
+    // Two doors move BULK without an exchange, and neither is an ask: item 8's
+    // `pushCustodyToCustodians` at a departure, and item 13's `pushOriginatedItem` when this device
+    // mints content of its own. Both tell, neither asks — they send no digest of either kind and
+    // record no advertisement, because the ask doors fire as a link opens and there is no link event
+    // at a departure or a capture. `MeshRoutedDrainWallTests.theDrainFiresOnlyFromTheMergeDoor` is
+    // where the four door classes are pinned by name.
+    //
     // Nothing here reads a `keyEpoch`, a group key, a branch id or a partition id: the routed path's
     // authorisation is the origin's signature plus the per-recipient key wrap, which is exactly what
     // lets item 13 *delete* the three epoch gates rather than loosen them.
@@ -3406,12 +3450,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// **Not** from `abandonMergeExchange()`: a partition is not a new session, and refunding the
     /// per-peer frame budget on every flap is precisely what that budget exists to prevent.
+    ///
+    /// **`routedOriginPhotoQuota` is deliberately absent** (D-13.23a). Every one of this function's
+    /// callers is a real "this device moved to another mesh" — `leaveMesh()`, a
+    /// `prepareMembershipLedger` for a different mesh id, the grant-time bootstrap — and mesh A's
+    /// items outlive that move (expiry is A's `hardDeadline + 20 min`, and the projection never
+    /// compares the item's mesh to the live one). Clearing the budget here would therefore hand an
+    /// origin a fresh ten slots for the backlog it queued in mesh A, which is exactly the case
+    /// D-13.23 keyed that map on `manifest.meshID` to close. It is bounded on both axes without a
+    /// clear, and the ciphertext it accounts for survives the same move.
     private func clearRoutedDrainState() {
         peerRoutedInventories.removeAll()
         routedDrainFramesSpent.removeAll()
         routedRefusedKeys.removeAll()
         routedReplayWindow = nil
         lastRoutedDrainRefusal = nil
+        routedProjectedItems.removeAll()
     }
 
     /// The index this device may read from, or nil when the store is not in a state that KNOWS what
@@ -3458,6 +3512,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// An empty **named** set is "nobody to ask", not "ask everybody", exactly as the membership
     /// digest reads it. The advertisement instant recorded per peer is the **minted payload's own
     /// floored `sentAt`**, never `now` — see ``recordRoutedAdvertisement(to:at:)``.
+    ///
+    /// **P5 item 13 deliberately did NOT add a fourth site here.** An advertisement asks the peer to
+    /// push to *this* device, which is the opposite of what an origination needs; and it would
+    /// overwrite the `advertisedAt` an inbound quiescence answer has to quote, dropping the bit item
+    /// 7's merge window closes on. The origination door pushes its bulk instead — see
+    /// ``pushOriginatedItem(_:to:now:)``.
     ///
     /// - Parameters:
     ///   - recipients: The members to advertise to, or nil for every slot.
@@ -4578,10 +4638,240 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
     }
 
+    // MARK: Routed origination (P5 item 13, plan §11, §22.1)
+
+    /// Mints one routed item from this device's own bytes, stages it into this device's own store,
+    /// and tells the committed slots it exists.
+    ///
+    /// The **generic** sender door: photos are its one caller today, and P6's text and heart callers
+    /// are three lines each. It re-uses the two store doors the ingest path uses, so item 9's caps
+    /// and item 12's bookkeeping apply to an origin's own item exactly as they do to an inbound one;
+    /// it runs **no verifier** on its own mint (the origin is not receiving and there is no envelope
+    /// sender); and it never calls `finishLocalRungs` — `commitLocalCustody` skips own items by name
+    /// and `commitLocalDelivery` requires this device to be a destination, which an origin is not.
+    /// An origin stages, offers, and acknowledges nothing to itself.
+    ///
+    /// Three answers, and only the third reaches the user: a **skip** when there is no destination
+    /// set at all (a solo member, or the pairwise phase before promotion), a **staged** key, or a
+    /// named **refusal** for a mint that was attempted and failed.
+    ///
+    /// - Parameters:
+    ///   - body: The framed plaintext — for photos, ``MeshRoutedPhotoBody/encoded()``.
+    ///   - typeToken: The registered routed type token.
+    ///   - itemID: The item id, minted by the caller so its local echo can carry the same id.
+    ///   - now: The injected instant; the manifest's `createdAt`.
+    /// - Returns: what the door did.
+    private func originateRoutedItem(
+        body: Data, typeToken: String, itemID: UUID, now: Date
+    ) -> MeshRoutedOriginationOutcome {
+        guard let mesh = currentMesh, let roster = membershipVerifier?.roster,
+              let hardDeadline = routedHardDeadline else { return .skipped(.noDestinations) }
+        let target = MeshDeliveryTarget(
+            contentID: itemID, roster: roster, selfFingerprint: identity.localFingerprint
+        )
+        guard target.destinationCount > 0 else { return .skipped(.noDestinations) }
+        guard let recipientKeys = routedDestinationKeys(for: target.destinations) else {
+            return .refused(.destinationNotAddressable)
+        }
+        do {
+            let minted = try mintOwnRoutedItem(
+                body: body, typeToken: typeToken, meshID: mesh.meshID, target: target,
+                recipientKeys: recipientKeys, hardDeadline: hardDeadline, now: now
+            )
+            return stageOwnRoutedItem(manifest: minted.manifest, chunks: minted.chunks, now: now)
+        } catch is MeshRoutedItemSealError {
+            return .refused(.sealFailed)
+        } catch {
+            FernletAuditLog.log(
+                "mesh.routedShare.mintFailed",
+                context: ["type": typeToken, "error": String(describing: error)]
+            )
+            return .refused(.mintFailed)
+        }
+    }
+
+    /// The handshake-verified X25519 key for every destination, or nil when one is not addressable.
+    ///
+    /// **Verified sources only** (D-13.1): a live slot's `verifiedKeyAgreementPublicKey`, and the
+    /// session roster entry `recordSessionParticipant` wrote from that same verified value. Refused
+    /// by name: `MeshMember.keyAgreementPublicKey` from descriptor gossip, and the peer-relayed
+    /// claimed key a grant wrap uses — for a CONTENT wrap either would let an admitter substitute
+    /// its own key and read another member's photo.
+    ///
+    /// Nil refuses the whole mint rather than minting to the addressable subset: destinations are
+    /// the full roster at creation by construction, and a subset target is P6's. The stated outage
+    /// that buys (D-13.22): a star topology, a roster above the slot cap, and any resumption — a
+    /// restart, an idle-lapse resume or a rejoin restores the ledger but not the memory-only
+    /// session roster.
+    private func routedDestinationKeys(for destinations: [String]) -> [String: Data]? {
+        var verified: [String: Data] = [:]
+        // R2: bounded by the slot cap.
+        for slot in slots {
+            guard let fingerprint = slot.fingerprint,
+                  let key = slot.verifiedKeyAgreementPublicKey else { continue }
+            verified[fingerprint] = key
+        }
+        // R2: bounded by the session roster cap.
+        for entry in sessionRoster { verified[entry.fingerprint] = entry.keyAgreementPublicKey }
+        var resolved: [String: Data] = [:]
+        // R2: bounded by the destination cap.
+        for destination in destinations {
+            guard let key = verified[destination] else {
+                FernletAuditLog.log("mesh.routedShare.destinationNotAddressable")
+                return nil
+            }
+            resolved[destination] = key
+        }
+        return resolved
+    }
+
+    /// Seals the body under a fresh single-use content key, hashes the blob, signs the manifest and
+    /// mints its chunks — the first shipping caller of all four (D-11.4).
+    ///
+    /// Order is fixed by item 2's C12 freeze: seal first, hash the **complete** blob second, mint
+    /// last. The content key never leaves this function except inside the manifest's per-recipient
+    /// wraps.
+    private func mintOwnRoutedItem(
+        body: Data, typeToken: String, meshID: UUID, target: MeshDeliveryTarget,
+        recipientKeys: [String: Data], hardDeadline: Date, now: Date
+    ) throws -> (manifest: MeshRoutedManifest, chunks: [MeshChunk]) {
+        let contentKey = MeshRoutedContentKeyWrapper.makeContentKey()
+        let binding = MeshRoutedWrapBinding(
+            meshID: meshID, itemID: target.contentID, originFingerprint: identity.localFingerprint
+        )
+        let blob = try MeshRoutedItemSealer.seal(
+            body, contentKey: contentKey, binding: binding, typeToken: typeToken
+        )
+        let manifest = try MeshRoutedManifest.signed(
+            meshID: meshID, target: target, typeToken: typeToken,
+            contentHash: MeshRoutedContentDigest.contentHash(of: blob), size: UInt64(blob.count),
+            createdAt: now, hardDeadline: hardDeadline, contentKey: contentKey,
+            recipientKeys: recipientKeys, identity: identity, types: routedTypes
+        )
+        return (manifest, try MeshChunker.chunks(of: blob, for: manifest, identity: identity))
+    }
+
+    /// Puts an own item through the same two store doors every inbound item goes through, then
+    /// advertises it once.
+    ///
+    /// An origin's own item spends item 9's byte and slot budget like anything else, and a capacity
+    /// refusal raises the **existing** `.storeFull` hold rather than inventing a second surface —
+    /// item 9's rule is refuse visibly, and it already built the surface that says so.
+    ///
+    /// A refusal partway through the chunks leaves the manifest admitted and the item incomplete —
+    /// exactly the state an interrupted INGEST leaves, which the expiry sweep already reclaims. No
+    /// unwind is attempted: a partial rollback would be a second write path into the store for a
+    /// state the store's own model already has a name for.
+    private func stageOwnRoutedItem(
+        manifest: MeshRoutedManifest, chunks: [MeshChunk], now: Date
+    ) -> MeshRoutedOriginationOutcome {
+        let key = MeshRoutedItemKey(manifest)
+        let store = routedStore()
+        switch store.admittingManifest(manifest, now: now) {
+        case .completed: break
+        case .refused(let refusal): return refusedOwnRoutedItem(refusal, key: key, at: now)
+        case .unavailable: return .refused(.storeUnavailable)
+        }
+        // R2: bounded by the item's own chunk count, itself capped at `maxChunkCount`.
+        for chunk in chunks {
+            switch store.stagingChunk(chunk, now: now) {
+            case .completed: continue
+            case .refused(let refusal): return refusedOwnRoutedItem(refusal, key: key, at: now)
+            case .unavailable: return .refused(.storeUnavailable)
+            }
+        }
+        noteRoutedItemPlaced(key, at: now)
+        pushOriginatedItem(key, to: Set(activeSlots.compactMap(\.fingerprint)), now: now)
+        return .staged(key, chunkCount: chunks.count)
+    }
+
+    /// One store refusal of this device's OWN item, made visible through item 9's existing surface.
+    private func refusedOwnRoutedItem(
+        _ refusal: MeshRoutedStoreRefusal, key: MeshRoutedItemKey, at now: Date
+    ) -> MeshRoutedOriginationOutcome {
+        FernletAuditLog.log("mesh.routedShare.storeRefused", context: ["reason": refusal.rawValue])
+        if Self.routedStoreFullRefusals.contains(refusal) { noteRoutedHeldBack(key, at: now) }
+        return .refused(.storeRefused)
+    }
+
+    /// The **third** bulk door: one push per committed peer for an item this device just minted.
+    ///
+    /// The drain's three ask doors all fire as a link OPENS, so an item minted mid-session with the
+    /// links already open would otherwise wait for the next reconnect — in a stable session,
+    /// forever. This door closes that for content, and it is a **push**, not an advertisement: a
+    /// routed inventory digest asks the PEER to push to this device, which is the opposite of what
+    /// an origination needs, and recording an advertisement here would overwrite the `advertisedAt`
+    /// an inbound quiescence answer has to quote — dropping the bit item 7's merge window closes on.
+    ///
+    /// So it TELLS, exactly as item 8's `pushCustodyToCustodians` does at a departure: it sends no
+    /// digest of either kind, opens no exchange, records nothing, and moves bytes through the one
+    /// extracted sender. Bounded three times over — one batch per peer, the roster cap on peers, and
+    /// the per-peer session frame budget `sendRoutedBulk` charges — and narrowed to the single item
+    /// just minted, so a user action can never cost more than that item's frames.
+    ///
+    /// A peer this device has never heard an inventory from is pushed to anyway, against an EMPTY
+    /// remote inventory (item 8's fallback): a peer that has not advertised holds nothing of ours,
+    /// which is exactly what an empty inventory says.
+    private func pushOriginatedItem(
+        _ key: MeshRoutedItemKey, to recipients: Set<String>, now: Date
+    ) {
+        // R2: bounded by the roster cap.
+        for peer in recipients.prefix(MeshMembershipBounds.maxRosterMembers) {
+            guard let batch = originationPushBatch(to: peer, item: key, at: now),
+                  batch.frameCount > 0 else { continue }
+            FernletAuditLog.log(
+                "mesh.routedShare.pushed", context: ["frames": String(batch.frameCount)]
+            )
+            spawnHostPinned { [weak self] in
+                _ = await self?.sendRoutedBulk(batch, to: peer, now: now)
+            }
+        }
+    }
+
+    /// The plan behind one origination push: this device's inventory, the peer's if it has ever
+    /// advertised one, and **only the newly minted key** as the offerable set.
+    ///
+    /// Narrowed to one key on purpose. `routedDrainPlan(for:at:)` offers everything outstanding for
+    /// that peer, which is right when answering an advertisement and wrong here: a user sharing one
+    /// photo should not re-push the session's backlog, and the drain's own doors already carry that
+    /// at the next exchange.
+    private func originationPushBatch(
+        to peer: String, item key: MeshRoutedItemKey, at now: Date
+    ) -> MeshRoutedDrainPlan? {
+        guard let mesh = currentMesh,
+              let index = routedIndexForReading(reason: .drainPlan) else { return nil }
+        guard let local = MeshRoutedInventory(
+            meshID: mesh.meshID, index: index, selfFingerprint: identity.localFingerprint, at: now
+        ) else {
+            FernletAuditLog.log("mesh.routedDrain.inventoryOverCap")
+            return nil
+        }
+        let remote = peerRoutedInventories[peer]?.inventory
+            ?? MeshRoutedInventory(meshID: mesh.meshID, members: [], entries: [])
+        guard let delta = MeshRoutedInventoryDelta.between(
+            local: local, remote: remote,
+            offerableToPeer: offerableKeys(to: peer, in: index, at: now).intersection([key])
+        ) else {
+            FernletAuditLog.log("mesh.routedDrain.foreignMeshDelta")
+            return nil
+        }
+        let bounds = MeshRoutedDrainBounds.increment1
+        return MeshRoutedDrainPlan(
+            delta: delta,
+            refused: (routedRefusedKeys[peer] ?? []).union(routedUnregisteredKeys(in: index)),
+            bounds: bounds,
+            frameAllowance: min(bounds.maxFrames, routedFramesRemaining(for: peer))
+        )
+    }
+
     // MARK: Routed re-entry after a lock window (P5 item 10, plan §11, §19.5)
 
-    /// The whole pass an unlock, a foreground or a cleared duress session owes — five jobs, fixed
+    /// The whole pass an unlock, a foreground or a cleared duress session owes — six jobs, fixed
     /// order, every one idempotent and bounded.
+    ///
+    /// Job 5 (P5 item 13) is the plaintext half: the projection a closed gate deferred, run over the
+    /// index this pass already read. It is last because it is the only job that produces plaintext,
+    /// and every ciphertext obligation should be settled before any of it exists.
     ///
     /// **Nothing here sends a frame.** Minted receipts are filed durably and forwarded at the next
     /// exchange through the drain's own doors, exactly as `mintClaimedCustody(_:at:)` documents; a
@@ -4609,6 +4899,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let swept = reentrySweep(edge, now: now)
         let index = routedIndexForReading(reason: .commit)
         let acks = index.map { reentryFinishLocalAcks(now: now, index: $0) } ?? (filed: 0, hearts: 0)
+        let projected = index.map { reentryProjectRoutedContent(edge, now: now, index: $0) } ?? 0
         // A hold whose condition expired during the locked window is dropped at the first edge
         // rather than surviving the session. Pure in-memory re-derivation, so calling it on every
         // pass — including one where the sweeps already reached it — costs nothing.
@@ -4617,7 +4908,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             "mesh.routedAccess.reentry",
             context: ["legs": edge.logToken, "restored": String(restored),
                       "committed": String(committed), "sweptPeers": String(swept),
-                      "acksFiled": String(acks.filed), "heartsPending": String(acks.hearts)]
+                      "acksFiled": String(acks.filed), "heartsPending": String(acks.hearts),
+                      "projected": String(projected)]
         )
         return MeshRoutedReentryReport(
             legs: edge, restoredSession: restored, committedCustodyCount: committed,
@@ -4747,6 +5039,56 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return (filed, hearts)
     }
 
+    /// Job 5 — the plaintext pass a locked window deferred (P5 item 13).
+    ///
+    /// Job 4 is about **receipts**, which are ciphertext facts and are filed whether or not the gate
+    /// is open; this is about **plaintext**, and it is the reason a photo that landed while the
+    /// device was locked reaches the wall at all. Deliberately a job of its own rather than a widened
+    /// 4b: 4b commits a receipt for an item that has none, while an item this pass owes has had its
+    /// receipt for some time. Job **4c stays P6's counted heart no-op** — a heart's plaintext is its
+    /// own ceremony behind a stronger predicate.
+    ///
+    /// Idempotent by the projected set and, across a restart, by the wall's own id dedup; bounded by
+    /// the per-answer item allowance over a list bounded by the store's item cap. Nothing here sends
+    /// a frame.
+    ///
+    /// The allowance is spent on items that still owe work — the projected set is subtracted from
+    /// the list **before** the prefix, not checked inside it. Job 4 may do the opposite because its
+    /// list shrinks as its durable stamps are written; this one does not shrink at all, so a prefix
+    /// taken first would re-take the same head at every rising edge and strand the tail (R-18).
+    ///
+    /// For the same reason the list is narrowed to ``projectableRoutedTypeTokens``: a routed type
+    /// with no dispatch arm in this build is complete, live and locally destined forever, so leaving
+    /// it in would let it hold an allowance slot at every edge and strand a photo sorted behind it
+    /// until expiry — the index is ordered by ``MeshRoutedItemKey``, i.e. by origin fingerprint, so
+    /// that position is an attacker's to choose (R-19).
+    ///
+    /// - Parameters:
+    ///   - edge: Which legs moved; plaintext work runs on a rising leg only.
+    ///   - now: The injected instant.
+    ///   - index: The index the pass already read — never a second load.
+    /// - Returns: how many items were handed to a canonical store.
+    private func reentryProjectRoutedContent(
+        _ edge: MeshRoutedAccessEdge, now: Date, index: MeshRoutedIndex
+    ) -> Int {
+        guard edge.isRising, mayDecryptRoutedContent else { return 0 }
+        var projected = 0
+        // The already-projected are dropped BEFORE the allowance is spent, never inside it: this
+        // list does not shrink as work is done, so a prefix taken first would hand every later
+        // rising edge the same items and strand the remainder until expiry (R-18). The type filter
+        // is the same rule applied to a type this build cannot finish at all (R-19).
+        let pending = index.itemsAwaitingLocalProjection(
+            at: now, for: identity.localFingerprint, types: projectableRoutedTypeTokens
+        ).filter { !routedProjectedItems.contains($0.key) }
+        // R2: bounded by the per-answer item allowance, over a list bounded by the store's item cap.
+        for ref in pending.prefix(MeshRoutedDrainBounds.increment1.maxItems) {
+            guard let manifest = index.record(for: ref.key)?.manifest else { continue }
+            projectRoutedItemIfPermitted(key: ref.key, manifest: manifest)
+            if routedProjectedItems.contains(ref.key) { projected += 1 }
+        }
+        return projected
+    }
+
     /// Job 4c — says whether the heart stage is evaluable right now, and counts what is waiting.
     ///
     /// **A documented, counted no-op until P6**, said plainly rather than dressed up as enforcement:
@@ -4795,6 +5137,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard routedRungsOutstanding(for: key, manifest: manifest) else { return true }
         let custody = commitLocalCustody(for: key, manifest: manifest, now: now)
         let recipient = commitLocalDelivery(for: key, manifest: manifest, now: now)
+        // P5 item 13's first projection caller. It runs only where a recipient receipt was just
+        // minted — this device is a destination and the item's bytes are final — and it is a no-op
+        // behind a closed access gate, which the re-entry pass's job 5 then re-runs.
+        if recipient != nil { projectRoutedItemIfPermitted(key: key, manifest: manifest) }
         guard custody != nil || recipient != nil else { return false }
         spawnHostPinned { [weak self] in
             await self?.sendMintedReceipts(custody: custody, recipient: recipient, to: peer)
@@ -5170,6 +5516,231 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 .meshRecipientReceipt, MeshRecipientReceiptPayload(receipt: recipient), to: [peer]
             )
         }
+    }
+
+    // MARK: Routed delivery projection (P5 item 13, plan §11, §12)
+
+    /// Hands one already-delivered routed item's plaintext to the canonical store its registered
+    /// type names — behind the two access predicates, and only then.
+    ///
+    /// **Everything above it is unchanged.** The replay verdict, the verifiers, the store doors, the
+    /// custody rung and the recipient receipt all ran on ciphertext, and the photo stage is final on
+    /// durable ciphertext by design (D-4.4). This is a later, separate pass over bytes that are
+    /// already final, which is why a locked device loses nothing by deferring it: the item stays
+    /// `custodied(by: self)`, no fourth rung is invented, and the next rising access edge runs the
+    /// same derivation.
+    ///
+    /// Two orderings are load-bearing. The **author** is resolved from the admission ledger and the
+    /// **block list** is applied *before* the content key is unwrapped, which is the position the
+    /// legacy handler's `photoAuthorIsAcceptable` held: materialising a blocked person's photo and
+    /// then discarding it would be pure loss. The **quota**, by contrast, is spent at the dispatch,
+    /// 1:1 with a wall entry, so an item that fails to open never burns a slot.
+    ///
+    /// - Parameters:
+    ///   - key: The item.
+    ///   - manifest: The origin's signed manifest.
+    private func projectRoutedItemIfPermitted(
+        key: MeshRoutedItemKey, manifest: MeshRoutedManifest
+    ) {
+        guard mayDecryptRoutedContent else {
+            FernletAuditLog.log(
+                "mesh.routedProjection.deferred", context: ["type": manifest.typeToken]
+            )
+            return
+        }
+        guard let entry = routedTypes.entry(for: manifest.typeToken),
+              entry.canonicalStore == .friendPhotoWall else {
+            FernletAuditLog.log(
+                "mesh.routedProjection.noDispatchArm", context: ["type": manifest.typeToken]
+            )
+            return
+        }
+        guard !routedProjectedItems.contains(key) else { return }
+        guard let author = routedProjectionAuthor(for: manifest) else { return }
+        guard manifest.size <= UInt64(MeshRoutedItemSealFormat.maxResidentBlobByteCount) else {
+            FernletAuditLog.log(
+                "mesh.routedProjection.blobTooLarge", context: ["size": String(manifest.size)]
+            )
+            return
+        }
+        guard let blob = routedProjectionBlob(key: key, manifest: manifest),
+              let body = openedRoutedPhotoBody(blob, manifest: manifest) else { return }
+        guard mayMutateCanonicalStoreWithRoutedContent else {
+            FernletAuditLog.log("mesh.routedProjection.mutationDeferred")
+            return
+        }
+        routedCanonicalDispatch(body, author: author, manifest: manifest)
+        noteRoutedItemProjected(key)
+    }
+
+    /// The item's complete blob, or nil with the STORE's own answer named rather than collapsed.
+    ///
+    /// The five-state door read as five states (invariant 7, W4): a `.deferred` sidecar (protected
+    /// data unavailable), a seal the store refused to open, and an unknown item are three different
+    /// facts, and a routed photo that never reached the wall for one of them must not read in the
+    /// log like one that was simply never completed. `.completed(nil)` is the one silent return —
+    /// an item that is incomplete or whose bytes do not measure up to the manifest, which the drain
+    /// re-drives by itself and which every other rung already logs.
+    ///
+    /// - Parameters:
+    ///   - key: The item.
+    ///   - manifest: The manifest the assembled bytes must measure up to.
+    /// - Returns: the blob, or nil.
+    private func routedProjectionBlob(
+        key: MeshRoutedItemKey, manifest: MeshRoutedManifest
+    ) -> Data? {
+        switch routedStore().assembledBlob(item: key, expecting: manifest) {
+        case .completed(let held):
+            return held
+        case .unavailable(let cause):
+            FernletAuditLog.log(
+                "mesh.routedProjection.storeUnavailable",
+                context: ["type": manifest.typeToken, "state": cause.logToken]
+            )
+            return nil
+        case .refused(let refusal):
+            FernletAuditLog.log(
+                "mesh.routedProjection.storeRefused",
+                context: ["type": manifest.typeToken, "reason": refusal.rawValue]
+            )
+            return nil
+        }
+    }
+
+    /// The item's author as the ADMISSION LEDGER resolves it, or nil with one named audit line.
+    ///
+    /// Fail-closed by design (D-13.21). The routed body carries no identity claim at all, so the
+    /// wall entry's fingerprint and signing key come from `manifest.originFingerprint` (signed) and
+    /// the ledger's admission for it. If the ledger cannot resolve that origin — after `leaveMesh()`
+    /// it is gone — the projection refuses: custody is kept, the wall is not fed, and **no** entry is
+    /// ever written with a nil, empty or body-supplied signing key. Those are the two tempting
+    /// implementations, and both re-open what the legacy author check existed to prevent.
+    ///
+    /// **Resolved against exactly the set that admitted the item** — `admissions − removals`, with
+    /// departures never consulted, which is `MeshRoutedManifestVerifier`'s own door (D-13.33). A
+    /// departed member's content stays valid, because leaving is not a retraction; `members +
+    /// barred` IS the admitted set, since `MeshDerivedRoster` partitions the admissions between the
+    /// two. Reading `roster.members` alone would refuse increment 1's headline case: §11's
+    /// origin-retains + custody-transfer-on-departure has the origin depart, hand its outstanding
+    /// items to the custodians it named, and those custodians deliver afterwards — by which time
+    /// every destination's derived roster already excludes the origin, so the transferred custody
+    /// would be ciphertext no wall could ever open while the origin read `delivered`.
+    ///
+    /// A quorum REMOVAL still refuses, by the ledger's own removal set: removal is the mesh's
+    /// moderation act rather than the member's own choice, and it is the one membership record the
+    /// content path consults (plan §10.4).
+    ///
+    /// The block check is hoisted here, before any unwrap, on the origin's signed fingerprint.
+    private func routedProjectionAuthor(for manifest: MeshRoutedManifest) -> MeshRosterMember? {
+        // One derivation, taken before the guard: `roster` re-derives from the ledger on every read,
+        // and `.empty` for a device with no verifier reaches the same named refusal below.
+        let roster = membershipVerifier?.roster ?? .empty
+        guard let verifier = membershipVerifier,
+              let author = (roster.members + roster.barred)
+                .first(where: { $0.fingerprint == manifest.originFingerprint }) else {
+            FernletAuditLog.log(
+                "mesh.routedProjection.originUnresolvable", context: ["type": manifest.typeToken]
+            )
+            return nil
+        }
+        guard !verifier.ledger.removals.memberFingerprints.contains(author.fingerprint) else {
+            FernletAuditLog.log("mesh.routedProjection.originRemoved")
+            return nil
+        }
+        guard !store.isBlockedFingerprint(author.fingerprint) else {
+            FernletAuditLog.log("mesh.routedProjection.blockedOrigin")
+            return nil
+        }
+        return author
+    }
+
+    /// The one plaintext seam's manager-side caller: the predicate is passed in by name and the
+    /// refusal is named in an audit line rather than swallowed.
+    private func openedRoutedPhotoBody(
+        _ blob: Data, manifest: MeshRoutedManifest
+    ) -> MeshRoutedPhotoBody? {
+        do {
+            return try MeshRoutedItemDelivery.openPhotoBody(
+                blob, manifest: manifest, identity: identity,
+                mayDecryptRoutedContent: mayDecryptRoutedContent
+            )
+        } catch {
+            FernletAuditLog.log(
+                "mesh.routedProjection.openFailed",
+                context: ["type": manifest.typeToken, "error": String(describing: error)]
+            )
+            return nil
+        }
+    }
+
+    /// The canonical-store write itself: the SAME effects the legacy `.friendPhoto` handler produced,
+    /// reached through the same functions.
+    ///
+    /// The per-origin quota, the display-field sanitisation, `cachePhoto` (and with it the wall, the
+    /// FIFO cap, the preference pruning and the sealed `PrivateMediaStore` index) and the closeness
+    /// hook are all unchanged. Two things are corrected rather than reproduced: the attribution
+    /// comes from the origin's signed fingerprint and the ledger's key for it instead of an unsigned
+    /// claim in the payload, and the closeness hook is called with the **origin** rather than the
+    /// courier that happened to carry the bytes.
+    ///
+    /// The one call site is ``projectRoutedItemIfPermitted(key:manifest:)``, which has just
+    /// consulted ``mayMutateCanonicalStoreWithRoutedContent``; the pin in
+    /// `MeshRoutedLockedDeviceTests` is what makes a second, ungated one a build failure.
+    ///
+    /// It takes **no clock**: every instant it writes is the origin's signed one
+    /// (`body.header.addedAt`), and the session question is `isPhotoFromCurrentSession`'s, which
+    /// reads this device's own session window. A `now:` parameter here would be read by nothing and
+    /// would say, falsely, that the projection dates what it stores.
+    private func routedCanonicalDispatch(
+        _ body: MeshRoutedPhotoBody,
+        author: MeshRosterMember,
+        manifest: MeshRoutedManifest
+    ) {
+        guard allowIncomingRoutedPhoto(body.header.id, from: manifest) else { return }
+        let photo = Self.sanitizedIncomingPhoto(FriendPhotoPayload(
+            id: body.header.id,
+            imageData: body.imageData,
+            addedAt: body.header.addedAt,
+            senderName: body.header.senderName,
+            senderFingerprint: author.fingerprint,
+            senderSigningPublicKey: author.signingPublicKey,
+            session: body.header.session
+        ))
+        let inSession = isPhotoFromCurrentSession(photo)
+        cachePhoto(photo, includeInSession: inSession)
+        if inSession { onFriendPhotoSession?(author.fingerprint) }
+    }
+
+    /// The incoming per-origin photo budget, keyed on the ITEM's mesh (D-13.23) — the routed twin of
+    /// the legacy per-sender quota, which keyed on the live one.
+    ///
+    /// Re-sends of an already-accepted id are free, exactly as the legacy counter allowed, so a
+    /// re-projection after a restart cannot cost a slot it already spent.
+    private func allowIncomingRoutedPhoto(_ photoID: UUID, from manifest: MeshRoutedManifest) -> Bool {
+        let budget = MeshRoutedOriginQuotaKey(manifest)
+        var accepted = routedOriginPhotoQuota[budget] ?? []
+        if accepted.contains(photoID) { return true }
+        guard accepted.count < Self.maxPhotosPerSenderPerSession else {
+            FernletAuditLog.log("mesh.routedProjection.quotaSpent")
+            return false
+        }
+        guard routedOriginPhotoQuota[budget] != nil
+                || routedOriginPhotoQuota.count < MeshRoutedStoreFormat.maxItems else {
+            FernletAuditLog.log("mesh.routedProjection.quotaMapFull")
+            return false
+        }
+        accepted.insert(photoID)
+        routedOriginPhotoQuota[budget] = accepted                     // R3: bounded map
+        return true
+    }
+
+    /// Remembers that one item's plaintext has been handed on, so the quota is not spent twice.
+    private func noteRoutedItemProjected(_ key: MeshRoutedItemKey) {
+        guard routedProjectedItems.count < MeshRoutedStoreFormat.maxItems else {
+            FernletAuditLog.log("mesh.routedProjection.projectedSetFull")
+            return
+        }
+        routedProjectedItems.insert(key)                              // R3: bounded set
     }
 
     /// The keys this device may move to `peer`: item 5's entitlement source 1, narrowed to what
@@ -5755,10 +6326,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// The ONE predicate every decrypt of routed content consults (P5 item 10, D-10.12).
     ///
-    /// Consultation sites today: **zero**, by construction — `MeshRoutedContentKeyWrapper.unwrap`
-    /// has no shipping caller and P6 owns the first one. This is a predicate plus a source wall
-    /// (`everyRoutedPlaintextSeamNamesItsPredicate`), not a claim that something is being blocked
-    /// today; the wall fails the moment a decrypt appears that does not name it.
+    /// Consultation sites: **two, both real since P5 item 13** — this device's own outer guard in
+    /// `projectRoutedItemIfPermitted(key:manifest:)`, and the parameter
+    /// `MeshRoutedItemDelivery.openPhotoBody(_:manifest:identity:mayDecryptRoutedContent:)` guards
+    /// on as its first line, so the two halves of one fact are stated at both ends. The source wall
+    /// (`everyRoutedPlaintextSeamNamesItsPredicate`) pins the unwrap and the item open to that one
+    /// file and requires it to hold a `guard` on this spelling, not a mention.
     ///
     /// Deliberately **without** a `sessionState` leg: routed ciphertext outlives the session (expiry
     /// is `hardDeadline + 20 min`, D-9.4) and `MeshRoutedAckStage.durableRecipientStorage` states in
@@ -6839,132 +7412,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
     }
 
-    /// The friend-photo family: one shared photo, a manifest, or a request for missing ids
-    /// (R4: one function per case family).
-    private func dispatchPhotoPayload(
-        _ type: PayloadType,
-        plaintext: Data,
-        decoder: JSONDecoder,
-        peer: ProximityCoordinator.PeerIdentity?,
-        slot: PeerSlot?
-    ) {
-        // Photos are the PERSISTENT wall, so the whole family is member business: require a
-        // COMMITTED slot, the same boundary `dispatchRemovalPayload` and `dispatchRegistryPayload`
-        // enforce. `peer` is the coordinator's connected-OR-PENDING identity, so without this a
-        // peer that has only introduced itself — no commit, no user action — can write the wall.
-        // Drop only, never fail the session: a peer must not be able to get itself disconnected
-        // by mistiming a photo.
-        guard slot?.fingerprint != nil else {
-            FernletAuditLog.log("mesh.photoPayload.droppedUncommittedSlot", context: ["type": type.rawValue])
-            return
-        }
-        switch type {
-        case .friendPhoto:
-            if let payload = try? decoder.decode(FriendPhotoPayload.self, from: plaintext) {
-                handleFriendPhotoEnvelope(payload, from: peer?.fingerprint)
-            }
-        case .friendPhotoManifest:
-            if let payload = try? decoder.decode(FriendPhotoManifestPayload.self, from: plaintext),
-               let slot {
-                handlePhotoManifest(payload, from: slot)
-            }
-        case .friendPhotoRequest:
-            if let payload = try? decoder.decode(FriendPhotoRequestPayload.self, from: plaintext),
-               let slot {
-                sendRequestedPhotos(payload.missingPhotoIDs, to: slot)
-            }
-        default:
-            break
-        }
-    }
-
-    /// Authorizes a photo's CLAIMED author before it reaches the persistent wall.
-    ///
-    /// The envelope signature authenticates only the RELAYER — `sendRequestedPhotos` re-sends other
-    /// peers' cached photos by design, so `senderName`/`senderFingerprint`/`senderSigningPublicKey`
-    /// are an unsigned claim about a third party. Four independent checks make the claim usable:
-    /// neither party blocked, the claim present at all, the claim self-consistent (fingerprint ==
-    /// hash of the claimed key), and the claimed author known to THIS session (the relayer itself,
-    /// a mesh member, a session-roster participant, or an author announced in a manifest we already
-    /// accepted). An un-attributable photo is rejected outright: it can be neither blocked nor
-    /// honestly displayed. Do NOT "fix" this by stamping the relayer over the attribution fields —
-    /// that mis-attributes every legitimately relayed photo on the wall.
-    private func photoAuthorIsAcceptable(_ payload: FriendPhotoPayload, relayer: String?) -> Bool {
-        guard let relayer, !store.isBlockedFingerprint(relayer) else {
-            FernletAuditLog.log("mesh.friendPhoto.droppedUnattributedRelayer")
-            return false
-        }
-        guard let claimed = payload.senderFingerprint, let claimedKey = payload.senderSigningPublicKey else {
-            FernletAuditLog.log("mesh.friendPhoto.droppedMissingAuthor")
-            return false
-        }
-        guard !store.isBlockedFingerprint(claimed) else {
-            FernletAuditLog.log("mesh.friendPhoto.droppedBlockedAuthor")
-            return false
-        }
-        // The same binding `handleAdmissionRequest` applies — reuse it, don't reinvent it.
-        guard IdentityService.fingerprintsMatch(IdentityService.fingerprint(of: claimedKey), claimed) else {
-            FernletAuditLog.log("mesh.friendPhoto.droppedKeyFingerprintMismatch")
-            return false
-        }
-        let known = claimed == relayer
-            || currentMesh?.members.contains { $0.fingerprint == claimed } == true
-            || sessionRoster.contains { $0.fingerprint == claimed }
-            || manifestAnnouncedPhotoAuthors.contains(claimed)
-        guard known else {
-            FernletAuditLog.log("mesh.friendPhoto.droppedUnknownAuthor")
-            return false
-        }
-        return true
-    }
-
-    /// Receives one peer photo: author authorization, per-sender quota, epoch decrypt, cache,
-    /// closeness hook.
-    ///
-    /// The payload's peer-supplied display fields are sanitized and capped here (R3/R5) — this is
-    /// where untrusted photo metadata enters the PERSISTENT wall cache.
-    private func handleFriendPhotoEnvelope(_ payload: FriendPhotoPayload, from senderFingerprint: String?) {
-        guard photoAuthorIsAcceptable(payload, relayer: senderFingerprint) else { return }
-        guard allowIncomingPhoto(payload.id, from: senderFingerprint) else { return }
-        // The payload must carry an image in the shape its epoch claims (R5) — an empty or
-        // mismatched payload would otherwise occupy a wall slot and a per-sender quota unit.
-        if payload.keyEpoch > 0 {
-            guard payload.encryptedImageData != nil, payload.nonce != nil else { return }
-        } else {
-            guard payload.imageData != nil else { return }
-        }
-        let photo = Self.sanitizedIncomingPhoto(payload)
-        let inSession = isPhotoFromCurrentSession(photo)
-        if photo.keyEpoch > 0 {
-            // Encrypted photo: decrypt before caching.
-            guard let key = currentGroupKey, key.epoch == photo.keyEpoch,
-                  let ciphertext = photo.encryptedImageData, let nonce = photo.nonce,
-                  let decrypted = Self.decryptedIncomingPhoto(ciphertext, nonce: nonce, key: key) else { return }
-            cachePhoto(photo.withDecryptedImageData(decrypted), includeInSession: inSession)
-        } else {
-            cachePhoto(photo, includeInSession: inSession)   // epoch 0: unencrypted, accept as-is
-        }
-        // A photo shared with this friend in the current session feeds the closeness photo signal
-        // (day-capped downstream, so multiple photos from one friend count once).
-        if inSession, let fingerprint = senderFingerprint { onFriendPhotoSession?(fingerprint) }
-    }
-
-    /// Opens one inbound photo, naming the single failure that is NOT "wrong key, stale epoch or
-    /// tampered bytes": a payload carrying no `FMGP2` marker, i.e. the retired pre-marker format
-    /// whose reader Phase 4 deleted. Every drop on this path is invisible to the user, so the audit
-    /// line is the only place the reason exists, and "these bytes never reached the AEAD" has to be
-    /// separable from "the AEAD rejected them" for anyone diagnosing a friend who cannot share.
-    private static func decryptedIncomingPhoto(_ ciphertext: Data, nonce: Data, key: MeshGroupKey) -> Data? {
-        do {
-            return try decryptPhoto(ciphertext, nonce: nonce, key: key)
-        } catch MeshEncryptionError.legacyWireFormat {
-            FernletAuditLog.log("mesh.friendPhoto.droppedLegacyWireFormat")
-            return nil
-        } catch {
-            return nil
-        }
-    }
-
     /// The two-party removal vote, gated at the wire boundary (R5).
     ///
     /// Removal votes are member business, so both types require a COMMITTED slot; a proposal is
@@ -7414,7 +7861,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slots.removeAll()
         slotTrustPolicies.removeAll()
         pendingQRVerifications.removeAll()
-        photoSendsInFlight.removeAll()
         // Group crypto cannot outlive the slots (R2/R3): without this the 20 s beacon loop and the
         // rotation timer kept waking for the manager's lifetime after a stopJoin-ended session.
         clearGroupKeyState()
@@ -7645,7 +8091,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Same rule for the outstanding join request: it dies with its slot, so it can neither
         // leak for the manager's lifetime nor authorize a grant on a reused slot id (R3).
         outstandingAdmissionRequestBySlot.removeValue(forKey: slot.id)
-        photoSendsInFlight.remove(slot.id)
         slots.removeAll { $0.id == slot.id }
         slotTrustPolicies.removeValue(forKey: slot.id)
         pruneShopSendTracking(for: slot.id)
@@ -7675,7 +8120,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Same rule for the outstanding join request: it dies with its slot, so it can neither
         // leak for the manager's lifetime nor authorize a grant on a reused slot id (R3).
         outstandingAdmissionRequestBySlot.removeValue(forKey: slot.id)
-        photoSendsInFlight.remove(slot.id)
         slots.removeAll { $0.id == slot.id }
         slotTrustPolicies.removeValue(forKey: slot.id)
         pruneShopSendTracking(for: slot.id)
@@ -7740,10 +8184,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 promoteToMesh()
                 return  // promoteToMesh handles descriptor + manifest sync for all slots
             }
-            // First committed peer — pairwise, sync photos and return early.
+            // First committed peer — pairwise. The photo-manifest sync retired with the pull
+            // protocol (P5 item 13): a pairwise pair has no meshID and no membership ledger, so it
+            // has no routed destination set either, and a capture there is cached locally and
+            // shared when the session promotes. Named outage, D-13.18.
             spawnHostPinned { [weak self] in
                 guard let self else { return }
-                await self.syncPhotoManifest(to: slot)
                 await self.sendVouchList(to: slot)
             }
             return
@@ -7753,7 +8199,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             spawnHostPinned { [weak self] in
                 guard let self else { return }
                 await self.sendMeshDescriptor(to: slot)
-                await self.syncPhotoManifest(to: slot)
             }
         }
         // Exchange vouch lists after every successful identity verification
@@ -7834,7 +8279,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             guard let self else { return }
             for slot in committed {
                 await self.sendMeshDescriptor(to: slot)
-                await self.syncPhotoManifest(to: slot)
                 await self.sendVouchList(to: slot)
             }
         }
@@ -8540,7 +8984,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } else {
             // No key included — adopt the grant's epoch, which the monotonicity guard above has
             // already proved never decreases. Resetting to 0 here let any keyless grant rewind the
-            // `localJoinedEpoch` manifest filter and re-open retired epochs.
+            // epoch this device joined at. The photo-manifest filter that reading once fed retired
+            // with the pull protocol in P5 item 13; `localJoinedEpoch` is control plane only now.
             localJoinedEpoch = grant.currentKeyEpoch
         }
         startBeaconLoop()
@@ -8560,8 +9005,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     // MARK: - Photo handling
 
     /// Coerces a peer-supplied photo payload before it reaches the PERSISTENT wall cache (R3/R5):
-    /// moderated sender name, moderated + capped session participants, capped mesh name. The
-    /// caller has already validated that the image half matches the claimed epoch.
+    /// moderated sender name, moderated + capped session participants, capped mesh name.
+    ///
+    /// Its one caller is now ``routedCanonicalDispatch(_:author:manifest:now:)``, which hands it a
+    /// payload built from an opened routed body — so the encrypted branch below is unreachable for
+    /// routed input. It stays: the `guard let imageData else { return payload }` fallback would
+    /// otherwise return an UNSANITIZED payload for a legacy-shaped one, which is the wrong direction
+    /// for a function whose whole job is coercion.
     private static func sanitizedIncomingPhoto(_ payload: FriendPhotoPayload) -> FriendPhotoPayload {
         let session = payload.session.map { metadata in
             FriendPhotoSessionMetadata(
@@ -8619,29 +9069,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if evictedByCap { prunePhotoWallPreferences() }
         if includeInSession {
             // Store metadata only; the full-resolution bytes were just persisted to the disk
-            // cache above and are rehydrated on demand (see sendRequestedPhotos / imageData()).
+            // cache above and are rehydrated on demand (see `imageData(for:)`).
             // Retaining raw bytes here grew unbounded in memory for the whole session.
             sessionPhotos.insert(cachedPhoto.withoutImageData(), at: 0)
             sessionPhotos = Array(sessionPhotos.prefix(Self.maxSessionPhotos))
         }
-    }
-
-    /// Enforces a per-authenticated-peer cap on *incoming* photos for the current mesh
-    /// session and records acceptance. Resets when the mesh changes. Returns false once a
-    /// peer has contributed `maxPhotosPerSenderPerSession` distinct photos; re-sends of an
-    /// already-accepted ID are allowed so legitimate manifest re-sync is not dropped.
-    private func allowIncomingPhoto(_ photoID: UUID, from authenticatedFingerprint: String?) -> Bool {
-        if currentMesh?.meshID != receiveQuotaMeshID {
-            receiveQuotaMeshID = currentMesh?.meshID
-            receivedPhotoIDsByFingerprint.removeAll()
-        }
-        let key = authenticatedFingerprint ?? ""
-        var accepted = receivedPhotoIDsByFingerprint[key, default: []]
-        if accepted.contains(photoID) { return true }
-        guard accepted.count < Self.maxPhotosPerSenderPerSession else { return false }
-        accepted.insert(photoID)
-        receivedPhotoIDsByFingerprint[key] = accepted
-        return true
     }
 
     public func imageData(for photo: FriendPhotoPayload) -> Data? {
@@ -8789,87 +9221,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func isPhotoFromCurrentSession(_ photo: FriendPhotoPayload) -> Bool {
         photoSessionStartedAt != nil && photo.session != nil
-    }
-
-    private func syncPhotoManifest(to slot: PeerSlot) async {
-        let entries = sessionPhotos.map { photo in
-            FriendPhotoManifestEntry(
-                id: photo.id,
-                senderFingerprint: photo.senderFingerprint ?? identity.localFingerprint,
-                keyEpoch: photo.keyEpoch
-            )
-        }
-        let payload = FriendPhotoManifestPayload(entries: entries)
-        if currentMesh?.mode == .closed, currentGroupKey != nil {
-            await sendEncryptedMetadata(.friendPhotoManifest, encodable: payload, via: slot)
-        } else {
-            await sendEnvelope(.friendPhotoManifest, encodable: payload, via: slot)
-        }
-    }
-
-    private func handlePhotoManifest(_ manifest: FriendPhotoManifestPayload, from slot: PeerSlot) {
-        // The manifest is unbounded wire input and every unknown id is reflected back inside a
-        // request payload, so an oversize manifest is an amplification lever (R3/R5).
-        guard manifest.entries.count <= Self.maxSessionPhotos else {
-            FernletAuditLog.log("mesh.photoManifest.droppedOversized")
-            return
-        }
-        // The entry filter below already skips a blocked AUTHOR; this is the reciprocal check on
-        // the RELAYER, so a blocked peer cannot drive our request traffic at all.
-        guard !store.isBlockedFingerprint(slot.fingerprint ?? "") else {
-            FernletAuditLog.log("mesh.photoManifest.droppedBlockedRelayer")
-            return
-        }
-        let haveIDs = Set(meshPhotos.map { $0.id })
-        let announced = manifest.entries
-            .filter { !store.isBlockedFingerprint($0.senderFingerprint) }
-            .prefix(Self.maxSessionPhotos)
-        // Remember the authors we accepted here so a legitimately relayed photo whose author has
-        // not yet reached our descriptor or roster is still attributable (R3: bounded above).
-        for entry in announced where manifestAnnouncedPhotoAuthors.count < Self.maxSessionPhotos {
-            manifestAnnouncedPhotoAuthors.insert(entry.senderFingerprint)
-        }
-        let missing = announced
-            .filter { !haveIDs.contains($0.id) }
-            .filter { $0.keyEpoch >= localJoinedEpoch }   // epoch guard: skip photos we can't decrypt
-            .map(\.id)
-            .prefix(Self.maxSessionPhotos)
-        guard !missing.isEmpty else { return }
-        spawnHostPinned { [weak self] in
-            guard let self else { return }
-            let req = FriendPhotoRequestPayload(missingPhotoIDs: Array(missing))
-            if self.currentMesh?.mode == .closed, self.currentGroupKey != nil {
-                await self.sendEncryptedMetadata(.friendPhotoRequest, encodable: req, via: slot)
-            } else {
-                await self.sendEnvelope(.friendPhotoRequest, encodable: req, via: slot)
-            }
-        }
-    }
-
-    /// Answers a peer's request for missing session photos.
-    ///
-    /// R3: the id list is unbounded wire input and each hydrated photo pulls full-resolution bytes
-    /// off disk, so the request is rejected above the session cap, matched through a `Set`, and
-    /// sent SEQUENTIALLY from ONE task per request (previously one task per photo, with no
-    /// per-slot dedupe — a peer could re-request the whole session in a loop). At most one
-    /// send run per slot is in flight; a second request while one is running is dropped.
-    private func sendRequestedPhotos(_ ids: [UUID], to slot: PeerSlot) {
-        guard ids.count <= Self.maxSessionPhotos else {
-            FernletAuditLog.log("mesh.photoRequest.droppedOversized")
-            return
-        }
-        guard photoSendsInFlight.insert(slot.id).inserted else {
-            FernletAuditLog.log("mesh.photoRequest.droppedSendInFlight")
-            return
-        }
-        let wanted = Set(ids)
-        let requested = sessionPhotos.filter { wanted.contains($0.id) }.compactMap { photoCacheStore.hydrated($0) }
-        spawnHostPinned { [weak self] in
-            defer { self?.photoSendsInFlight.remove(slot.id) }
-            for photo in requested {
-                await self?.sendEnvelope(.friendPhoto, encodable: photo, via: slot, sealed: true)
-            }
-        }
     }
 
     // MARK: - Clothing shop (Phase 3a)
@@ -9185,72 +9536,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         throw archiveError
     }
 
-    // MARK: - Phase 3: Static encrypt / decrypt helpers
+    // MARK: - Phase 3: Static decrypt helper (the surviving control half)
 
-    /// Prefixes select a typed AEAD purpose without overloading an unauthenticated metadata field.
-    /// They are REQUIRED on read: the old unprefixed blobs are no longer openable (Phase 4), and
-    /// the markers now serve only to tell a current payload from one an older build sent.
-    private static let groupPhotoFormatV2 = Data("FMGP2".utf8)
+    /// The prefix selects a typed AEAD purpose without overloading an unauthenticated metadata
+    /// field. It is REQUIRED on read: the old unprefixed blobs are no longer openable (Phase 4), and
+    /// the marker now serves only to tell a current payload from one an older build sent.
+    ///
+    /// The photo family's `FMGP2` sibling retired with the group-key photo path (P5 item 13): photo
+    /// bytes ride the routed store under a per-recipient content-key wrap, so nothing in this build
+    /// seals or opens a photo under the group key any more.
     private static let groupMetadataFormatV2 = Data("FMGM2".utf8)
 
-    /// AES-256-GCM encrypt `imageData` using the group key.
-    /// Returns (ciphertext + 16-byte tag, 12-byte nonce) stored separately in FriendPhotoPayload.
-    public static func encryptPhoto(_ imageData: Data, key: MeshGroupKey) throws -> (ciphertext: Data, nonce: Data) {
-        let symKey = SymmetricKey(data: key.keyBytes)
-        let gcmNonce = AES.GCM.Nonce()
-        let sealedBox = try AES.GCM.seal(
-            imageData,
-            using: symKey,
-            nonce: gcmNonce,
-            authenticating: FernletCryptoPurpose.AEAD.meshGroupPhotoV2.data
-        )
-        // `AES.GCM.Nonce` is a `Sequence` of `UInt8`, so the 12 bytes copy out without a pointer
-        // seam (R9) — byte-identical to the previous `withUnsafeBytes` spelling.
-        let nonce = Data(gcmNonce)
-        var ciphertextWithTag = Self.groupPhotoFormatV2 + sealedBox.ciphertext
-        ciphertextWithTag.append(sealedBox.tag)
-        return (ciphertextWithTag, nonce)
-    }
-
-    /// The `FMGP2` marker is REQUIRED, not preferred. The pre-marker photo — opened with no AAD at
-    /// all — was read here until the crypto standardization round's Phase 4; unmarked bytes are now
-    /// refused as ``MeshEncryptionError/legacyWireFormat`` so a peer on an older build fails by name
-    /// instead of failing as a generic decrypt error.
-    public static func decryptPhoto(_ ciphertextWithTag: Data, nonce nonceData: Data, key: MeshGroupKey) throws -> Data {
-        guard ciphertextWithTag.starts(with: Self.groupPhotoFormatV2) else {
-            throw MeshEncryptionError.legacyWireFormat
-        }
-        let prefixLength = Self.groupPhotoFormatV2.count
-        guard ciphertextWithTag.count > prefixLength + 16 else { throw MeshEncryptionError.decryptionFailed }
-        let symKey = SymmetricKey(data: key.keyBytes)
-        let gcmNonce = try AES.GCM.Nonce(data: nonceData)
-        let ciphertext = ciphertextWithTag.dropFirst(prefixLength).dropLast(16)
-        let tag = ciphertextWithTag.suffix(16)
-        let box = try AES.GCM.SealedBox(nonce: gcmNonce, ciphertext: ciphertext, tag: tag)
-        return try AES.GCM.open(
-            box,
-            using: symKey,
-            authenticating: FernletCryptoPurpose.AEAD.meshGroupPhotoV2.data
-        )
-    }
-
-    // Shared implementation used by closed-mode metadata wrapping.
-    private static func encryptPayload(_ data: Data, key: MeshGroupKey) throws -> (ciphertext: Data, nonce: Data) {
-        let symKey = SymmetricKey(data: key.keyBytes)
-        let gcmNonce = AES.GCM.Nonce()
-        let sealedBox = try AES.GCM.seal(
-            data,
-            using: symKey,
-            nonce: gcmNonce,
-            authenticating: FernletCryptoPurpose.AEAD.meshEncryptedMetadataV2.data
-        )
-        var ciphertext = Self.groupMetadataFormatV2 + sealedBox.ciphertext
-        ciphertext.append(sealedBox.tag)
-        return (ciphertext, Data(gcmNonce))
-    }
-
-    /// Mirror of ``decryptPhoto(_:nonce:key:)``: the `FMGM2` marker is required, and the pre-marker
-    /// unauthenticated form is refused by name rather than opened (Phase 4).
+    /// The `FMGM2` marker is required, and the pre-marker unauthenticated form is refused by name
+    /// rather than opened (Phase 4).
+    ///
+    /// The seal half retired with `sendEncryptedMetadata` (P5 item 13) — its only two call sites
+    /// were the photo manifest and request, which the routed drain replaced — so this device opens
+    /// wrapped control metadata and never writes any.
     private static func decryptPayload(_ ciphertextWithTag: Data, nonce: Data, key: MeshGroupKey) throws -> Data {
         guard ciphertextWithTag.starts(with: Self.groupMetadataFormatV2) else {
             throw MeshEncryptionError.legacyWireFormat
@@ -9271,36 +9573,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: - Phase 3: Closed-mode metadata encryption
 
-    /// Wraps any control payload in AES-256-GCM when the mesh is closed and a group key is established.
-    private func sendEncryptedMetadata<T: Encodable>(
-        _ payloadType: PayloadType,
-        encodable: T,
-        via slot: PeerSlot
-    ) async {
-        guard let key = currentGroupKey,
-              let innerData = try? JSONEncoder().encode(encodable) else { return }
-        let inner = EncryptedMetadataInner(payloadType: payloadType.rawValue, payload: innerData)
-        guard let innerJSON = try? JSONEncoder().encode(inner) else {
-            logSendFailure(payloadType, stage: "encodeEncryptedMetadata")
-            return
-        }
-        let ciphertext: Data
-        let nonce: Data
-        do {
-            (ciphertext, nonce) = try Self.encryptPayload(innerJSON, key: key)
-        } catch {
-            // Fail closed and NAMED (R7): closed-mode metadata is never downgraded to a plain send.
-            FernletAuditLog.log(
-                "mesh.encryptedMetadata.sealFailed",
-                context: ["type": payloadType.rawValue, "error": String(describing: error)]
-            )
-            return
-        }
-        let wrapper = MeshEncryptedMetadataPayload(ciphertext: ciphertext, nonce: nonce, keyEpoch: key.epoch)
-        await sendEnvelope(.meshEncryptedMetadata, encodable: wrapper, via: slot)
-    }
-
-    /// Decrypts a `meshEncryptedMetadata` wrapper and re-dispatches the inner payload.
+    /// Decrypts a `meshEncryptedMetadata` wrapper and re-dispatches the inner CONTROL payload.
+    ///
+    /// **The gate retires by its ARMS, not by its clause** (P5 item 13, D-13.5b). The two content
+    /// arms — the friend-photo manifest and the request for missing ids — retired with the pull
+    /// protocol the routed drain replaced, and with them the whole grievance the plan had against
+    /// this compare: nothing here carries content across a branch any more. The compare itself
+    /// STAYS, because the two surviving arms have no routed successor and deleting it over them
+    /// would be loosening a gate in place — the one move the wall forbids.
+    ///
+    /// It is not redundant either. ``decryptPayload(_:nonce:key:)`` authenticates the metadata AEAD
+    /// purpose **alone** and takes the key it is handed, so a wrapper sealed under the CURRENT key
+    /// but stamped with a foreign epoch would open and dispatch — including into
+    /// ``handleAdmissionGrant(_:slot:senderSigningPublicKey:)``. The compare is what drops it.
+    ///
+    /// If this door is ever judged dead, the admissible move is to delete it WHOLE, with
+    /// `PayloadType.meshEncryptedMetadata` parked per the `sessionGoodbye` precedent — never to keep
+    /// it minus its gate.
     private func handleEncryptedMetadata(
         _ wrapper: MeshEncryptedMetadataPayload,
         from peer: ProximityCoordinator.PeerIdentity?,
@@ -9328,14 +9617,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshDescriptor, .meshStateChange:
             if let payload = try? decoder.decode(MeshStateChangePayload.self, from: data) {
                 handleMeshDescriptor(payload.descriptor, from: peer?.fingerprint)
-            }
-        case .friendPhotoManifest:
-            if let payload = try? decoder.decode(FriendPhotoManifestPayload.self, from: data) {
-                handlePhotoManifest(payload, from: slot)
-            }
-        case .friendPhotoRequest:
-            if let payload = try? decoder.decode(FriendPhotoRequestPayload.self, from: data) {
-                sendRequestedPhotos(payload.missingPhotoIDs, to: slot)
             }
         case .meshAdmissionGrant:
             if let payload = try? decoder.decode(MeshAdmissionGrantPayload.self, from: data) {

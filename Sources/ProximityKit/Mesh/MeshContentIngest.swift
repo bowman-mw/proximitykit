@@ -21,12 +21,16 @@
 //      copy of them — arbitrates. A duplicate that crossed the split is collapsed by the union
 //      *before* the ledger sees it, so the cooldown is judged once, not twice.
 //
-// **The `keyEpoch` gates are NOT touched here (plan §21.5).** `MeshNetworkManager`'s
-// `key.epoch == photo.keyEpoch` (the photo decrypt), the `keyEpoch >= localJoinedEpoch` manifest
-// filter and the `wrapper.keyEpoch == currentGroupKey?.epoch` metadata guard each wrongly reject
-// content created in the other branch of a split. They retire **with the path P5 replaces**, never
-// by loosening them in place — so ``MeshMergedPhoto`` carries `keyEpoch` through the union
-// untouched and this file adds no epoch judgement of its own.
+// **The `keyEpoch` gates were never touched here, and P5 item 13 retired them where they lived
+// (plan §21.5).** Two are gone with the path they gated — `key.epoch == photo.keyEpoch` with the
+// group-key photo decrypt, and the `keyEpoch >= localJoinedEpoch` manifest filter with the pull
+// protocol the routed drain replaced — because a routed item carries a per-recipient content-key
+// wrap, so branch and epoch stop deciding decryptability. The third,
+// `wrapper.keyEpoch == currentGroupKey?.epoch`, was KEPT: its two content arms retired, but its
+// door survives with control arms that have no routed successor, and deleting the compare over
+// those would be loosening a gate in place. Nothing was ever loosened, here or there — so
+// ``MeshMergedPhoto`` still carries `keyEpoch` through the union untouched and this file still adds
+// no epoch judgement of its own.
 
 import Foundation
 import CryptoKit

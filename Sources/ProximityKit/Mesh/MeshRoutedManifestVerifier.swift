@@ -112,6 +112,11 @@ nonisolated struct MeshRoutedManifestVerifier: Sendable {
     /// key/fingerprint agreement → signature → wrap/destination alignment → distinct set without
     /// the origin → expiry equality. Destinations are NOT looked up in the ledger (D12), and
     /// departures are never consulted.
+    ///
+    /// `MeshNetworkManager.routedProjectionAuthor(for:)` resolves the same origin against the same
+    /// set at the far end of the item's life (P5 item 13, D-13.33). The two must agree: a door that
+    /// admits on `admissions − removals` and a projection that attributes on the DERIVED roster
+    /// would custody, complete and receipt a departed member's item and then refuse it forever.
     /// - Returns: the named rejection, or nil when the manifest verified.
     func verify(_ manifest: MeshRoutedManifest) -> MeshRoutedManifestRejection? {
         guard manifest.meshID == meshID else { return .foreignMesh }

@@ -14,7 +14,9 @@ import FernletDomainModel
 ///    room-broadcasts it sealed to every active committed slot advertising the `messages` capability.
 ///  - **Inbound** — the manager's Phase-1 payload registry dispatches verified `.tempMessage` envelopes
 ///    (committed-slot gate + blocked-fingerprint drop already enforced by the manager, mirroring
-///    `.friendPhoto`) to `receiveIncoming(...)`, which dedupes by id, rate-limits per sender, sanitizes,
+///    `.clothingCatalog` — the `.friendPhoto` dispatch this once named retired with P5 item 13, whose
+///    routed successor applies the block at the projection instead) to `receiveIncoming(...)`, which
+///    dedupes by id, rate-limits per sender, sanitizes,
 ///    and caps.
 ///  - **Clear** — the manager calls `clear()` at EVERY session-end path (the same last-committed-slot-gone
 ///    moment that promotes `pendingFriendReview` / opens the shop window: stopSearching's teardown funnel,

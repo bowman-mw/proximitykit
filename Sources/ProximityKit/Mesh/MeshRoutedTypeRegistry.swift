@@ -167,7 +167,7 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
     ///   - relayRetention: Who may hold and forward the item.
     ///   - finalAck: What makes it final at a destination.
     ///   - expiry: The expiry rule.
-    ///   - canonicalStore: The store P6's dispatch will write.
+    ///   - canonicalStore: The store the delivery projection writes (P5 item 13 for photos; P6 for the other two rows).
     init(
         token: String,
         maxItemByteCount: UInt64,
@@ -209,12 +209,16 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 /// the one place with no answer to give: a chunk carries no token, so item 9's origin-bound clause
 /// is what disposes of it.
 ///
-/// **Three of the columns have no shipping reader yet, and this is said rather than implied.**
-/// `MeshRoutedManifest.signed(…)` has zero shipping call sites — every caller in the tree is a test —
-/// so ``MeshRoutedTypeEntry/maxItemByteCount``, ``MeshRoutedTypeEntry/destinations`` and
-/// ``MeshRoutedTypeEntry/expiry`` are, like ``MeshRoutedTypeEntry/canonicalStore``, declarations
-/// ahead of their reader: **P6 is the first shipping caller.** The guards they feed are correct and
-/// tested; they are not blocking anything today.
+/// **Every column has a shipping reader since P5 item 13.** `MeshRoutedManifest.signed(…)` gained
+/// its first shipping caller — the routed sender door behind `addPhoto` — so
+/// ``MeshRoutedTypeEntry/maxItemByteCount``, ``MeshRoutedTypeEntry/destinations`` and
+/// ``MeshRoutedTypeEntry/expiry`` are now read at a real mint, and
+/// ``MeshRoutedTypeEntry/canonicalStore`` is the dispatch key the delivery projection switches on
+/// (`.friendPhotoWall` is the worked example; the other two are P6's). What is still ahead of its
+/// reader is the NARROWED per-type cap: every row's `maxItemByteCount` is the shared wire bound, so
+/// `sizeExceedsTypeCap` remains structurally unreachable until P6 narrows one (D-11.4). Item 13
+/// bounded a routed photo's bytes at its own seam instead — ``MeshRoutedItemSealFormat`` — which is
+/// a local bound, not a registry cap, and is deleted in favour of the row when P6 lands it.
 ///
 /// Shipping code names exactly one value, ``increment1``, constructs a registry in exactly one file,
 /// and branches on no routed type token anywhere — three source-scan walls in
@@ -296,6 +300,25 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
     /// - Returns: the entry, or nil — which is a refusal at every door that asks.
     func entry(for token: String) -> MeshRoutedTypeEntry? {
         entries[token]
+    }
+
+    /// The token an ORIGIN mints under to reach one canonical store — the registry read a sender
+    /// needs, and the reason `MeshNetworkManager` names no token spelling of its own (P5 item 13).
+    ///
+    /// The wall `noShippingCodeBranchesOnARoutedTypeToken` permits `MeshRoutedTypeToken.` only where
+    /// the constants are declared and where these rows are built from them, and it is right to: a
+    /// sender that typed `MeshRoutedTypeToken.photo` at its mint would be a second per-type source,
+    /// free to drift from the row that decides what the RECEIVER does with the bytes. Asking the
+    /// registry keeps one source for both directions, and gives P6's text and heart callers the same
+    /// three-line shape.
+    ///
+    /// Deterministic when a store has more than one row — which increment 1 does not have — by
+    /// taking the lowest token, so two builds cannot mint the same content under different tokens.
+    ///
+    /// - Parameter store: The canonical store the item is destined for.
+    /// - Returns: the token, or nil when no row names that store.
+    func token(forCanonicalStore store: MeshRoutedCanonicalStore) -> String? {
+        entries.values.filter { $0.canonicalStore == store }.map(\.token).min()
     }
 
     /// The final-ack column, projected into item 4's door parameter

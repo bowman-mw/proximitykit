@@ -63,15 +63,17 @@ nonisolated enum MeshRoutedItemBodyFormat {
 /// Frozen JSON keys (invariant 8). Unknown fields are ignored on decode, and no key is ever reused
 /// for a new meaning.
 ///
-/// **``id`` MUST equal the manifest's item id, and nothing checks it yet.** The seal binds
+/// **``id`` MUST equal the manifest's item id, and the delivery door enforces it.** The seal binds
 /// `binding.itemID` — the MANIFEST's id — and deliberately not this field, so an origin picks the
-/// body's id freely inside an otherwise fully authenticated blob. Pass B's
-/// `MeshRoutedItemDelivery.openPhotoBody` is where the obligation becomes a guard
-/// (`body.header.id == manifest.itemID`, cell B-3); **until it lands the equality is an obligation
-/// on the mint, not a fact about the wire.** The consequence, stated so the guard cannot be dropped
-/// if pass B is re-scoped: the friend-photo surface keys and dedups on the photo id
-/// (`FriendPhotoPayload.id`, `MeshContentSet`'s content-id dedup), so a body carrying ANOTHER
-/// sender's photo id would land in that row's dedup contest.
+/// body's id freely inside an otherwise fully authenticated blob. `MeshRoutedItemDelivery.openPhotoBody`
+/// closes that with `guard body.header.id == manifest.itemID`, throwing
+/// ``MeshRoutedDeliveryError/bodyIdentityMismatch``, and cell `aBodyWhoseIDIsNotTheItemIDIsRefused`
+/// is the claim. The equality is therefore a fact about what a receiver will accept, not only an
+/// obligation on the mint. The consequence, stated so the guard cannot be dropped: the friend-photo
+/// surface keys and dedups on the photo id (`FriendPhotoPayload.id`, `MeshContentSet`'s content-id
+/// dedup), so a body carrying ANOTHER sender's photo id would land in that row's dedup contest.
+/// A P6 body type that copies this framing copies the guard with it, or says why its id is not a
+/// key anywhere.
 ///
 /// Carries **no identity claim**: who sent this is `manifest.originFingerprint`, signed, and the
 /// signing key is the admission ledger's roster entry for that origin.

@@ -298,8 +298,9 @@ nonisolated enum MeshDeliveryOutcome: Equatable, Sendable {
 ///   ``MeshDeliveryDisposition/departed`` at read, from the ledger, not by a caller's judgement.
 /// - **Do not put a key epoch, a branch id, or a "created in partition X" on it.** It carries none
 ///   by design (§10.1: nothing about content depends on which partition or which epoch it was
-///   created in), and `MeshNetworkManager`'s three surviving `keyEpoch` gates are retired by P5's
-///   routed path (plan §21.5), not by a field here.
+///   created in). P5 item 13 collected on that: the two `keyEpoch` gates that decided CONTENT are
+///   deleted with the paths they gated, and the third kept its compare over control arms with no
+///   routed successor (plan §21.5). None of it was ever a field here.
 /// - **Do not treat custody as delivery**, and do not mark a heart delivered on receipt of bytes.
 ///
 /// ## Equality and normalization

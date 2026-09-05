@@ -904,6 +904,45 @@ nonisolated struct MeshRoutedIndex: Codable, Equatable, Sendable {
         }.map(\.reference)
     }
 
+    /// Live, COMPLETE items where this device is a destination — P5 item 13's projection retry list.
+    ///
+    /// Deliberately not conditioned on `deliveredAt`, on the stored receipt or on any "handed to the
+    /// app" state: there is no such rung, and inventing a fourth stored state is exactly what
+    /// `MeshDeliveryTarget` was designed to avoid. Idempotence is the caller's memory-only projected
+    /// set plus the friend-photo wall's own id dedup; a list that missed an item would strand a
+    /// photo until expiry.
+    ///
+    /// **This list therefore does not shrink as the work is done**, unlike
+    /// ``itemsAwaitingLocalAck(at:for:)``, whose durable stamps remove an item once it is filed. A
+    /// caller that spends a bounded per-pass allowance must drop the items it has already handled
+    /// **before** taking its prefix, or every later pass re-takes the same head of this list and the
+    /// tail is never reached (P5 item 13, R-18).
+    ///
+    /// `types` is the same rule applied to work the caller cannot finish at all: a routed type whose
+    /// canonical store this build has no dispatch arm for is live, complete and locally destined
+    /// forever, so an unfiltered list would let it hold an allowance slot at every pass and strand
+    /// whatever sorts behind it — and ``items`` is ordered by ``MeshRoutedItemKey``, i.e. by origin
+    /// fingerprint first, so that position is chosen by whoever minted the item (P5 item 13, R-19).
+    /// The parameter is required rather than defaulted: the registry answers what a token means, and
+    /// a caller that has no opinion should not silently acquire one.
+    ///
+    /// - Parameters:
+    ///   - now: The injected instant; expired items are excluded.
+    ///   - selfFingerprint: This device.
+    ///   - types: The type tokens the caller can actually project.
+    /// - Returns: the refs, in index order.
+    func itemsAwaitingLocalProjection(
+        at now: Date, for selfFingerprint: String, types: Set<String>
+    ) -> [MeshRoutedItemRef] {
+        items.filter { item in
+            guard item.isLive(at: now), let manifest = item.manifest, item.isComplete else {
+                return false
+            }
+            guard types.contains(manifest.typeToken) else { return false }
+            return manifest.destinations.contains(selfFingerprint)
+        }.map(\.reference)
+    }
+
     /// Live items whose delivery target names THIS device custodian for some destination and whose
     /// own custody stamp is not yet written — P5 item 10's durable re-derivation of item 8's
     /// memory-only `deferredCustodyCommits` queue.

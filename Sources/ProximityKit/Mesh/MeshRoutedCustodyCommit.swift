@@ -282,6 +282,104 @@ nonisolated extension MeshRoutedStore {
         return .measured(bytes: bytes, contentHash: hasher.finalized())
     }
 
+    // MARK: - The reassembly read (P5 item 13)
+
+    /// The complete ciphertext blob of `item`, or nil when this device cannot stand behind it.
+    ///
+    /// The one read door that returns a whole item, added for P5 item 13's delivery projection.
+    /// ``forwardableChunk(item:index:)``'s doc says there is deliberately no such API and that a
+    /// caller iterates the held indices — which is right for the FORWARD path, where one chunk is
+    /// resident at a time and each is sent as it is read. It is the wrong shape for an open: that
+    /// spelling costs an `indexForWriting()` and an `openKey()` **per chunk**, so a maximal item
+    /// would be 1024 sealed-index loads on the main actor before a single byte was decrypted.
+    ///
+    /// This is a **ciphertext** door like every other one here: custody is never gated on the
+    /// access gate, nothing about a lock is consulted, and the caller has already bounded
+    /// `manifest.size` before it asks — residency is bounded before the first byte is read. The
+    /// blob is returned **only** when the re-measured digest equals the manifest's, so a caller can
+    /// never open bytes this store cannot re-authenticate.
+    ///
+    /// - Parameters:
+    ///   - item: The signed pair.
+    ///   - manifest: The origin's manifest, whose `size` and `contentHash` the bytes must meet.
+    /// - Returns: the blob, `nil` when the item is incomplete or does not measure up, or the
+    ///   store's unavailability.
+    func assembledBlob(
+        item: MeshRoutedItemKey,
+        expecting manifest: MeshRoutedManifest
+    ) -> MeshRoutedOutcome<Data?> {
+        var index: MeshRoutedIndex
+        let token: LoadToken
+        switch indexForWriting() {
+        case .unavailable(let cause): return .unavailable(cause)
+        case .writable(let loaded, let vended): index = loaded; token = vended
+        }
+        guard let record = index.record(for: item) else { return .refused(.unknownItem) }
+        guard record.manifest == manifest, record.isComplete else { return .completed(nil) }
+        let contentKey: SymmetricKey
+        switch openKey() {
+        case .available(let key): contentKey = key
+        case .deferred(let reason):
+            return .unavailable(.deferred(MeshRoutedDeferral(reason: reason, detail: Self.chunkDirectoryName)))
+        case .refused(let cause):
+            return .unavailable(.refused(MeshRoutedSealRefusal(operation: .open, cause: cause)))
+        }
+        return assembled(record, manifest: manifest, index: &index, token: token, contentKey: contentKey)
+    }
+
+    /// The streaming half of ``assembledBlob(item:expecting:)``: read every slot in index order,
+    /// hash while concatenating, and hand back the bytes only if they measure up.
+    ///
+    /// The repair branch is ``streamedContentHash(of:in:token:contentKey:)``'s, verbatim: a missing
+    /// or unauthentic file drops the descriptor and clears `custodiedAt`, because the index is
+    /// authoritative over what this device has and bytes it cannot authenticate are bytes it does
+    /// not have.
+    private func assembled(
+        _ record: MeshRoutedItemRecord,
+        manifest: MeshRoutedManifest,
+        index: inout MeshRoutedIndex,
+        token: LoadToken,
+        contentKey: SymmetricKey
+    ) -> MeshRoutedOutcome<Data?> {
+        var hasher = MeshRoutedContentHasher()
+        var blob = Data()
+        // R2: bounded by `maxChunksPerItem`.
+        for slot in 0..<Int(record.chunkCount) {
+            guard let stored = record.chunk(at: UInt32(slot)) else { return .completed(nil) }
+            switch readChunkFile(expecting: stored, contentKey: contentKey) {
+            case .chunk(let chunk):
+                hasher.update(chunk.payload)
+                blob.append(chunk.payload)
+            case .unavailable(let cause):
+                return .unavailable(cause)
+            case .missing:
+                return repairedBlob(record.key, dropping: stored, in: &index, token: token, refusing: nil)
+            case .unauthentic:
+                return repairedBlob(record.key, dropping: stored, in: &index, token: token,
+                                    refusing: .chunkFileMismatch)
+            }
+        }
+        guard UInt64(blob.count) == manifest.size else { return .completed(nil) }
+        guard hasher.finalized() == manifest.contentHash else { return .completed(nil) }
+        return .completed(blob)
+    }
+
+    /// ``repaired(_:dropping:in:token:refusing:)`` in the blob door's own answer shape: nothing is
+    /// returned once a descriptor has been dropped, because the item is no longer complete.
+    private func repairedBlob(
+        _ key: MeshRoutedItemKey,
+        dropping stored: MeshRoutedChunkDescriptor,
+        in index: inout MeshRoutedIndex,
+        token: LoadToken,
+        refusing refusal: MeshRoutedStoreRefusal?
+    ) -> MeshRoutedOutcome<Data?> {
+        if let cause = repairing(key, dropping: stored, in: &index, token: token) {
+            return .unavailable(cause)
+        }
+        if let refusal { return .refused(refusal) }
+        return .completed(nil)
+    }
+
     /// Applies the repair and reports what the commit should answer once it has been written.
     private func repaired(
         _ key: MeshRoutedItemKey,

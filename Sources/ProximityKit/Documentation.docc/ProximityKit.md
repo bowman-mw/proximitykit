@@ -426,9 +426,9 @@ instance never calls `forget(senderFingerprint:)` — releasing a departed origi
 attacker a free replay of exactly the content custody transfer keeps moving — while
 `forget(frameID:from:)` un-records the one thing the store gives back, a repaired chunk slot.
 Memory-only and session-scoped: nothing persists, so there is no wipe row, and the window is cleared
-at the three session resets and nowhere else. This is the promise plan §8.4 lets item 13 delete the
+at the three session resets and nowhere else. This is the promise plan §8.4 let item 13 retire the
 three `keyEpoch` gates against — routed content carries unique ids + meshID + expiry and dedups by
-id — so item 13 deletes rather than loosens.
+id — and item 13 collected on it: two gates deleted with the paths they gated, none loosened.
 
 - ``PeerTransport``
 - ``PeerHandle``
@@ -553,9 +553,11 @@ plan §11's acknowledgement stages — fifteen types: `MeshRoutedAckStage`, `Mes
 `MeshRecipientReceipt`, `MeshRecipientReceiptPayload`, `MeshRecipientReceiptMintError`,
 `MeshRecipientReceiptRejection`, `MeshRecipientReceiptVerifier`, `MeshRecipientDeliveryWitness`, and
 one read-only door on the heart ledger (`MeshHeartLedgerProof` + `commitProof(for:)`). P5 item 13
-added the ITEM SEAL and the first routed body — six types: `MeshRoutedItemSealFormat`,
-`MeshRoutedItemSealError`, `MeshRoutedItemSealer`, `MeshRoutedItemBodyFormat`,
-`MeshRoutedPhotoHeader` and `MeshRoutedPhotoBody`.
+added the ITEM SEAL, the first routed body, the sender door's vocabulary and the one plaintext
+delivery seam — twelve types: `MeshRoutedItemSealFormat`, `MeshRoutedItemSealError`,
+`MeshRoutedItemSealer`, `MeshRoutedItemBodyFormat`, `MeshRoutedPhotoHeader`, `MeshRoutedPhotoBody`,
+`MeshRoutedShareSkip`, `MeshRoutedShareRefusal`, `MeshRoutedOriginationOutcome`,
+`MeshRoutedDeliveryError`, `MeshRoutedOriginQuotaKey` and `MeshRoutedItemDelivery`.
 
 P5 item 5 added the ROUTED CONTENT digest and its pure comparison — eleven types:
 `MeshRoutedInventoryFormat`, `MeshRoutedInventoryEntry`, `MeshRoutedInventory`,
@@ -757,21 +759,26 @@ with no path from any of them to a writer. What was missing was a way **back**.
 - **The re-entry is defined by an EDGE, not by `isOpen`.** ``MeshRoutedAccessEdge`` runs the pass when
   a **ciphertext** leg rises (an unlock or a foreground makes the sealed store readable again — those
   jobs must run even while the app is backgrounded) or when a **duress session clears**, which is the
-  one fact that closes the gate with no other leg moving. Five jobs, fixed order, each idempotent and
+  one fact that closes the gate with no other leg moving. Six jobs, fixed order, each idempotent and
   bounded: the session-restore retry that had no caller (guarded on `sessionState == .idle`, because
   the launch restore re-arms the ceiling before the state machine's refusal is reached), the claim
   derivation plus a durable re-derivation of item 8's memory-only commit queue from the **rung**, the
   roster-free expiry sweep plus only the capacity sweeps a non-loaded store actually suppressed, the
-  stranded-receipt retry list, and a re-derivation of the delivery hold. **It sends no frame**:
-  receipts are filed durably and forwarded at the next exchange.
-- **A counted no-op is said plainly.** No decrypt call site exists yet (P6 owns the first), so item 10
-  ships the three predicates, the heart stage's enumeration and source walls that fail the moment a
-  plaintext seam appears — a tripwire plus a predicate, never a claim that something is being blocked
-  today. The wall **pins the count** of each plaintext seam across all of `ProximityKit` rather than
-  only asking each file to name its predicate: the manager defines all three predicates, so a
-  containment-only wall could never fire in the one file where such a seam would most naturally be
-  written. Moving a pin obliges the same file to name its predicate, and the custody-door wall
-  exempts exactly those files, so the first decrypt outside the manager is not forced anywhere. The heart stage's extra leg
+  stranded-receipt retry list, **item 13's projection pass** (the plaintext half a closed gate
+  deferred, last because it is the only job that produces plaintext), and a re-derivation of the
+  delivery hold. **It sends no frame**: receipts are filed durably and forwarded at the next
+  exchange.
+- **A counted no-op was said plainly, and P5 item 13 cashed it.** Item 10 shipped the three
+  predicates, the heart stage's enumeration and source walls that fail the moment a plaintext seam
+  appears — a tripwire plus a predicate, never a claim that something was being blocked at the time.
+  Item 13 wrote the first two seams: the decrypt predicate is a **parameter guarded on as the first
+  line** of ``MeshRoutedItemDelivery``, and the mutation predicate gates the canonical dispatch. The
+  wall **pins the count** of each plaintext seam across all of `ProximityKit` rather than only asking
+  each file to name its predicate: the manager defines all three predicates, so a containment-only
+  wall could never fire in the one file where such a seam would most naturally be written. Moving a
+  pin obliges the same file to name its predicate, and the custody-door wall exempts exactly those
+  files — an exemption item 13 is the first to exercise, and asserts it exercises. The heart stage
+  remains the counted no-op (P6 owns the unwrap), and its extra leg
   (`sessionState == .activeForeground`) is documented **inert until P8**, when a CPT-continued mesh
   will custody ciphertext and decrypt nothing.
 
@@ -780,8 +787,10 @@ says every future routed type declares its size cap, destination semantics, rela
 final-ack condition and expiry **at registration** — and item 11 is that sentence as one value,
 ``MeshRoutedTypeRegistry`` with three rows, plus the two adjacent columns items 4 and 10 put on the
 same row (the foreground-decrypt requirement, **derived** from the stage so two fields cannot
-disagree; the canonical store, **declared** as a frozen token for P6's dispatch and read by nothing
-today). ``MeshRoutedAckStageTable`` survives as its **projection** — `increment1` is now
+disagree; the canonical store, **declared** as a frozen token for the delivery dispatch — read by
+nobody when item 11 shipped it, and since **P5 item 13** the dispatch key the photo projection
+switches on, in both directions: `entry(for:)` names the store a delivered item belongs in, and
+`token(forCanonicalStore:)` is how the sender door gets a type token without typing a spelling). ``MeshRoutedAckStageTable`` survives as its **projection** — `increment1` is now
 `MeshRoutedTypeRegistry.increment1.ackStages` — so the accepted-token set and the stage column come
 from one source and cannot drift, which is the failure item 4's forward-compat note named.
 
@@ -812,7 +821,7 @@ from one source and cannot drift, which is the failure item 4's forward-compat n
   all**: a manifest carries its destination set on the wire and the verifier binds wraps ≡
   destinations from those bytes, so a registered row cannot fall through to increment-1 behaviour on
   receive, and P6 keeps the row to flip when `MeshDeliveryTarget`'s withheld subset initializer lands.
-- **The per-type size cap is a MINT guard, and the mint has no shipping caller yet.** Every
+- **The per-type size cap is a MINT guard, and since P5 item 13 the mint has a shipping caller.** Every
   increment-1 cap equals the wire bound, so the guard cannot fire today; a receiver-side check would
   add a `MeshRoutedManifestRejection` case that `MeshRoutedParkedDrop` switches over exhaustively,
   i.e. it would force D-9.3's drop rule to be re-decided for a condition no row can produce. That
@@ -1287,12 +1296,15 @@ from the seams that already enforce them — `isChatAllowed`, ``ProximityHost/is
 the same shape as the termination downgrade: a blocked sender's message still unions everywhere, and
 a member whose age gate refuses chat simply renders no transcript — re-opening the gate reveals the
 merged records with no second merge. The photo ``MeshMergedPhoto/keyEpoch`` rides through the union
-untouched: `MeshNetworkManager`'s three `keyEpoch` gates (the manifest's
-`keyEpoch >= localJoinedEpoch` filter, the photo decrypt's `key.epoch == photo.keyEpoch`, and the
-metadata wrapper's `wrapper.keyEpoch == currentGroupKey?.epoch` in `handleEncryptedMetadata`) would each reject content minted in
-the other branch of a split, and plan §21.5 retires them **with the path P5 replaces** rather than
-loosening them here. P5 owns the routed store and the drain; P6 owns feature routing; this layer owns
-only the rules.
+untouched, and P5 item 13 has now retired the gates that read one. The manifest's
+`keyEpoch >= localJoinedEpoch` filter and the photo decrypt's `key.epoch == photo.keyEpoch` are
+**deleted**, each with the path it gated — the pull protocol and the group-key photo decrypt, both
+replaced by routed items under a per-recipient content-key wrap. The metadata wrapper's
+`wrapper.keyEpoch == currentGroupKey?.epoch` is **kept**: its two content arms retired with the same
+flow, but its door survives with control arms that have no routed successor, so deleting the compare
+over those would be loosening a gate in place (plan §21.5's rule, honoured in both directions). P5
+owns the routed store, the drain and now the photo transport; P6 owns text, hearts and the rest of
+feature routing; this layer still owns only the rules.
 
 **Delivery targets: who content is for, held apart from how far each copy has got** (P4 item 8,
 plan §10.1). ``MeshDeliveryTarget`` is the vocabulary ``MeshRoutedManifest`` expresses its
@@ -1415,6 +1427,39 @@ exists to measure. The header carries **no epoch and no identity claim**: who se
 the manifest's signed `originFingerprint`, and its signing key is the admission ledger's roster entry
 for that origin.
 
+**The friend-photo wall moved onto the routed store, and the three `keyEpoch` gates retired with the
+path they gated** (P5 item 13's second pass, plan §11/§21.5). The SENDER door is
+`addPhoto` → `originateRoutedItem` → seal → hash → `MeshRoutedManifest.signed` (its first shipping
+caller) → `MeshChunker.chunks` → the two store doors every inbound item goes through → one push to
+the committed slots. Nothing new writes the store, so item 9's caps and item 12's bookkeeping apply
+to an origin's own item unchanged; the local echo onto the user's own wall is **unconditional**, and
+only the transport is conditional, so a solo member's capture is silent rather than an error.
+``MeshRoutedShareRefusal`` names what a failed mint failed at, on the manager's existing `meshError`
+seam. Wrap keys come from **handshake-verified** sources only — a live slot's verified key, or the
+session-roster entry written from that same value — so a destination with neither refuses the whole
+mint by name: the stated outage covers a star topology, a roster above the slot cap and any
+resumption, and the real fix is a signed key-advertisement frame, handed forward.
+
+The RECEIVER is unchanged down to and including the recipient receipt — the photo stage is final on
+durable ciphertext — and the plaintext is a later, separate pass over already-final bytes:
+``MeshRoutedItemDelivery/openPhotoBody(_:manifest:identity:mayDecryptRoutedContent:)`` behind
+`mayDecryptRoutedContent`, then the canonical dispatch behind
+`mayMutateCanonicalStoreWithRoutedContent`, into the same `cachePhoto` the legacy handler fed. Two
+policy checks keep their positions: the origin is resolved from the **admission ledger** and the
+block list is applied **before** the content key is unwrapped, and the per-origin quota is spent at
+the dispatch, 1:1 with a wall entry. "Admission ledger" is exact and is the same set
+``MeshRoutedManifestVerifier`` authenticated the item against — `admissions − removals`, departures
+never consulted — so a **departed** origin's already-custodied content still reaches the wall, which
+is what increment 1's custody-transfer-on-departure delivers: the origin leaves, the custodians it
+named deliver afterwards, and by then every destination's derived roster has already dropped it. A
+quorum **removal** refuses, by its own audit line. A projection whose origin the ledger cannot
+resolve at all **refuses** — custody kept, wall unfed, one audit line — because an entry is never
+written with a nil, empty or body-supplied signing key. A locked device defers the whole pass and the
+unlock's re-entry runs it, which is what makes the access gate the enforcement rather than the
+plumbing; that pass spends its bounded allowance only on items this build can finish, so a
+registered type with no dispatch arm yet (text, hearts — P6's) can never hold a slot and strand a
+photo sorted behind it.
+
 **Custody: a custodian may say "I hold this" only after the ciphertext survived a write that
 returned** (P5 item 3, plan §11 and §3.6). ``MeshCustodyReceipt`` is signed by the **custodian**
 about the **origin's** item — the one routed record whose subject did not author it — and it carries
@@ -1514,6 +1559,12 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshRoutedItemBodyFormat``
 - ``MeshRoutedPhotoHeader``
 - ``MeshRoutedPhotoBody``
+- ``MeshRoutedShareSkip``
+- ``MeshRoutedShareRefusal``
+- ``MeshRoutedOriginationOutcome``
+- ``MeshRoutedDeliveryError``
+- ``MeshRoutedOriginQuotaKey``
+- ``MeshRoutedItemDelivery``
 - ``MeshChunkFormat``
 - ``MeshRoutedContentDigest``
 - ``MeshChunk``
