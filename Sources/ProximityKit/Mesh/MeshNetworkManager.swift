@@ -193,6 +193,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// keeps asserting a condition the store has escaped is the same defect as an invisible refusal.
     public private(set) var routedDeliveryHold: MeshRoutedDeliveryHold?
 
+    /// The last routed share the sender door refused, as a frozen token (P5 item 13, D-13.15; the
+    /// P5 review's finding 5).
+    ///
+    /// **Observed**, like ``routedDeliveryHold`` and for the same reason: a refusal no view can
+    /// re-render on is a silent refusal. Carries no display text — the app forks the sentence per
+    /// case (`RoutedShareRefusalCopy`), so it localizes; the `String` this seam composed before
+    /// rendered English in every language. Cleared by ``clearRoutedShareRefusal()`` when the alert
+    /// is dismissed, and with the rest of the routed state when a new mesh replaces the facts.
+    public private(set) var routedShareRefusal: MeshRoutedShareRefusal?
+
     /// The three app-level facts that decide whether routed PLAINTEXT may exist on this device right
     /// now (P5 item 10, plan §11's locked-device rule, §19.5).
     ///
@@ -1631,6 +1641,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         routedSweptFingerprints.removeAll()
         routedSweepsDeferredFingerprints.removeAll()
         clearRoutedDrainState()
+        // A share refusal about a session that has ended has no reader; the hold deliberately
+        // survives (custody outlives the session), the refusal does not.
+        routedShareRefusal = nil
         pendingAdoptionLedger = .empty
         isSessionOpen = true
         pendingAdmissionRequests.removeAll()
@@ -1803,7 +1816,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// The body carries **no identity claim**: who sent it is the manifest's signed
     /// `originFingerprint`, and the signing key is the receiver's own admission ledger. Only a
-    /// refusal reaches the user, on the same `meshError` seam this function's predecessor used.
+    /// refusal reaches the user, as a frozen token on ``routedShareRefusal``.
     private func shareRoutedPhoto(
         itemID: UUID, addedAt: Date, imageData: Data, session: FriendPhotoSessionMetadata
     ) {
@@ -1828,18 +1841,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         noteRoutedShareRefusal(refusal, error: nil)
     }
 
-    /// The one user-visible half of a share refusal: the existing `meshError` seam plus one audit
-    /// line carrying the frozen reason token (D-13.15).
+    /// The one user-visible half of a share refusal: the frozen token published on
+    /// ``routedShareRefusal`` for the app to fork into localized copy, plus one audit line carrying
+    /// the same token (D-13.15; the P5 review's finding 5).
     ///
     /// No third `MeshRoutedDeliveryHoldCause`: that observable states what this device HOLDS, not
-    /// what it failed to send. The sentence below is composed inside the package and therefore
-    /// renders in English everywhere — an inherited defect of this seam, not a new one, and one line
-    /// on item 9's existing owner-blocked display-literal row.
+    /// what it failed to send. No sentence is composed here: a `String` written inside the package
+    /// renders in English in every language, which is the live defect of the `meshError` seam this
+    /// refusal used to ride.
     private func noteRoutedShareRefusal(_ refusal: MeshRoutedShareRefusal, error: (any Error)?) {
-        meshError = "Couldn't share that photo with the mesh — it's saved on your own wall."
+        routedShareRefusal = refusal
         var context = ["reason": refusal.rawValue]
         if let error { context["error"] = String(describing: error) }
         FernletAuditLog.log("mesh.routedShare.refused", context: context)
+    }
+
+    /// Dismisses the share refusal the app has shown.
+    public func clearRoutedShareRefusal() {
+        routedShareRefusal = nil
     }
 
     public func allowAdmission(_ request: MeshAdmissionRequestPayload) {
@@ -2111,6 +2130,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Charged the plan's `frameCount`, so an empty plan costs nothing; refused past
     /// ``MeshRoutedDrainBounds/sessionFramesPerPeer``.
     @ObservationIgnored private var routedDrainFramesSpent: [String: Int] = [:]
+
+    /// The per-sender budget for routed content frames refused BEFORE any store verb (the P5
+    /// review's finding 3, closing D-12.14) — the inbound mirror of ``routedDrainFramesSpent``.
+    ///
+    /// Reset with the drain state at the three session resets only; never at a partition flap and
+    /// never on a slot's disconnect, which would be the attacker's reset lever.
+    @ObservationIgnored private var routedRefusalBudget = MeshRoutedRefusalBudget()
 
     /// Keys this device REFUSED from a peer for a capacity reason, per peer, per session.
     ///
@@ -3462,6 +3488,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func clearRoutedDrainState() {
         peerRoutedInventories.removeAll()
         routedDrainFramesSpent.removeAll()
+        routedRefusalBudget.reset()
         routedRefusedKeys.removeAll()
         routedReplayWindow = nil
         lastRoutedDrainRefusal = nil
@@ -3650,45 +3677,60 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// function each, one admission call site each — and, since P5 item 12, one replay PROBE each as
     /// the door's first statement and one RECORD each after the store's door has answered.
     ///
-    /// **What the window does not bound, stated rather than implied.** Three door refusals sit
-    /// *before* their store verb, so item 12's "record only a `.completed` outcome" rule never
-    /// reaches them and each stays replayable without bound at its own real cost:
-    /// `notADestinationOrHandoff` (one Ed25519 verify + one fingerprint hash per replay),
-    /// `unknownItemNotFromOrigin` and `unregisteredTypeChunk` (one sealed-index load each). Two of
-    /// them fire before their verifier, where the author is still a claim and recording would be the
-    /// window-poisoning ``MeshFrameReplayWindow`` forbids; the third is sender-DEPENDENT
+    /// **What the window does not bound is bounded per sender instead** (the P5 review's finding 3,
+    /// closing D-12.14). Every refusal that sits *before* a store verb — a verifier rejection at any
+    /// of the four doors (and, behind the manifest door's `unknownTypeToken`, the parked-set drop's
+    /// index load on an unsigned claim), `notADestinationOrHandoff` (one Ed25519 verify + one
+    /// fingerprint hash), `unknownItemNotFromOrigin` and `unregisteredTypeChunk` (one sealed-index
+    /// load each), an undecodable frame — is never recorded by the window: two fire before their
+    /// verifier, where the author is still a claim and recording would be the window-poisoning
+    /// ``MeshFrameReplayWindow`` forbids, and the third is sender-DEPENDENT
     /// (`destinations.contains(me) || sender == origin`), so recording a courier's refused copy would
-    /// drop the origin's own hand-off copy tomorrow and break exactly item 8's transfer. Closing
-    /// this channel needs a per-sender pre-verification budget — a different mechanism, with its own
-    /// denial-of-service question — and is deliberately not half-built here.
+    /// drop the origin's own hand-off copy tomorrow and break exactly item 8's transfer. Each is
+    /// instead charged to the **envelope sender** through
+    /// ``refuseRoutedFrameBeforeStore(event:_:in:)`` against ``MeshRoutedRefusalBudget`` — capped at
+    /// `MeshRoutedDrainBounds.sessionFramesPerPeer`, which an honest peer cannot reach because that
+    /// is already the most frames the drain lets it make this device serve — and a spent sender's
+    /// content is dropped here unread. Bounded aggregate work, not just bounded frame size.
     private func dispatchRoutedContent(
         _ type: PayloadType,
         plaintext: Data,
         decoder: JSONDecoder,
         in context: RoutedIngestContext
     ) {
+        // A sender whose pre-store refusal budget is spent is dropped here, before the decode —
+        // silently, because the one line was written when it spent.
+        guard !routedRefusalBudget.isSpent(context.sender) else { return }
         switch type {
         case .meshRoutedManifest:
             guard let payload = try? decoder.decode(MeshRoutedManifestPayload.self, from: plaintext) else {
-                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                refuseRoutedFrameBeforeStore(
+                    event: "mesh.routedDrain.undecodable", ["type": type.rawValue], in: context
+                )
                 return
             }
             ingestRoutedManifest(payload, in: context)
         case .meshRoutedChunk:
             guard let payload = try? decoder.decode(MeshChunkPayload.self, from: plaintext) else {
-                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                refuseRoutedFrameBeforeStore(
+                    event: "mesh.routedDrain.undecodable", ["type": type.rawValue], in: context
+                )
                 return
             }
             ingestRoutedChunk(payload, in: context)
         case .meshCustodyReceipt:
             guard let payload = try? decoder.decode(MeshCustodyReceiptPayload.self, from: plaintext) else {
-                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                refuseRoutedFrameBeforeStore(
+                    event: "mesh.routedDrain.undecodable", ["type": type.rawValue], in: context
+                )
                 return
             }
             ingestCustodyReceipt(payload, in: context)
         default:
             guard let payload = try? decoder.decode(MeshRecipientReceiptPayload.self, from: plaintext) else {
-                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                refuseRoutedFrameBeforeStore(
+                    event: "mesh.routedDrain.undecodable", ["type": type.rawValue], in: context
+                )
                 return
             }
             ingestRecipientReceipt(payload, in: context)
@@ -3751,6 +3793,60 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             context: ["type": frame.type.rawValue, "reason": "replayed"]
         )
         return true
+    }
+
+    /// The one door for a routed content frame refused BEFORE any store verb — the P5 review's
+    /// finding 3, closing D-12.14: the named audit line the door always wrote, plus one charge to
+    /// the sender's pre-store refusal budget.
+    ///
+    /// Charged to the **envelope sender** — the committed slot the signature authenticated — never
+    /// to the frame's claimed author, which is exactly the value the replay window cannot record
+    /// here (two of these refusals fire before any verifier; a third is sender-dependent). Every
+    /// such exit in the four content doors and the dispatch decode comes through here;
+    /// `MeshRoutedRefusalBudgetTests` pins that `"mesh.routedDrain.rejected"` is spelled here and
+    /// at the replay probe only. The budget's one transition writes one line; after it the sender's
+    /// content is dropped at ``dispatchRoutedContent(_:plaintext:decoder:in:)`` unread and unlogged
+    /// — a per-drop line would be the unbounded channel wearing a bound's name.
+    ///
+    /// **The one exemption:** a frame for an item THIS device already capacity-refused from THIS
+    /// sender (`routedRefusedKeys`) is the receiver's own refusal arriving in pieces — a courier's
+    /// batch carries the manifest and up to 64 chunks together and re-offers it every exchange
+    /// until capacity frees — so it is named but never charged; charging it would spend an honest
+    /// courier's budget on a full receiver's behalf.
+    ///
+    /// - Parameters:
+    ///   - event: The audit event — `mesh.routedDrain.rejected` for a named refusal,
+    ///     `mesh.routedDrain.undecodable` for a frame that never decoded.
+    ///   - auditContext: The door's own context, unchanged.
+    ///   - context: The ingest context, for the sender.
+    ///   - charge: `false` for the capacity-held exemption above; the line is still written.
+    private func refuseRoutedFrameBeforeStore(
+        event: String = "mesh.routedDrain.rejected",
+        _ auditContext: [String: String],
+        in context: RoutedIngestContext,
+        charge: Bool = true
+    ) {
+        FernletAuditLog.log(event, context: auditContext)
+        guard charge else { return }
+        let reason = auditContext["reason"] ?? auditContext["type"] ?? "unknown"
+        switch routedRefusalBudget.charge(context.sender) {
+        case .charged, .alreadySpent:
+            return
+        case .spent:
+            FernletAuditLog.log("mesh.routedDrain.refusalBudgetSpent", context: ["reason": reason])
+        case .untracked:
+            // Unreachable through `dispatchRoutedContent`'s gate, which refuses a row-less sender on
+            // a full axis before any door runs; kept so the switch is exhaustive and the bug's
+            // signature has a name if that gate is ever loosened.
+            FernletAuditLog.log("mesh.routedDrain.refusalBudgetUntracked", context: ["reason": reason])
+        }
+    }
+
+    /// Whether `key` is an item this device already capacity-refused from `sender` — the frames that
+    /// follow such a refusal are the receiver's own doing, never charged (see
+    /// ``refuseRoutedFrameBeforeStore(event:_:in:charge:)``).
+    private func routedRefusalIsHeldForCapacity(_ key: MeshRoutedItemKey, from sender: String) -> Bool {
+        routedRefusedKeys[sender]?.contains(key) == true
     }
 
     /// Records one content frame in the replay window — the **record**, run after the store's door
@@ -3993,18 +4089,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             acceptedTypeTokens: routedTypes.tokens
         )
         if let rejection = door.verify(manifest) {
-            FernletAuditLog.log(
-                "mesh.routedDrain.rejected",
-                context: ["type": PayloadType.meshRoutedManifest.rawValue, "reason": rejection.rawValue]
+            refuseRoutedFrameBeforeStore(
+                ["type": PayloadType.meshRoutedManifest.rawValue, "reason": rejection.rawValue],
+                in: context
             )
             dropParkedSetIfTerminal(rejection, manifest: manifest, in: context)
             return
         }
         guard manifest.destinations.contains(identity.localFingerprint)
                 || context.sender == manifest.originFingerprint else {
-            FernletAuditLog.log(
-                "mesh.routedDrain.rejected", context: ["reason": "notADestinationOrHandoff"]
-            )
+            refuseRoutedFrameBeforeStore(["reason": "notADestinationOrHandoff"], in: context)
             return
         }
         let key = MeshRoutedItemKey(manifest)
@@ -4057,16 +4151,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             recordRoutedOutcome(known, type: .meshRoutedChunk, key: key, in: context)
             return
         }
+        let charge = !routedRefusalIsHeldForCapacity(key, from: context.sender)
         guard manifest != nil || context.sender == chunk.originFingerprint else {
-            FernletAuditLog.log(
-                "mesh.routedDrain.rejected", context: ["reason": "unknownItemNotFromOrigin"]
-            )
+            refuseRoutedFrameBeforeStore(["reason": "unknownItemNotFromOrigin"], in: context, charge: charge)
             return
         }
         if let manifest, routedTypes.entry(for: manifest.typeToken) == nil {
-            FernletAuditLog.log(
-                "mesh.routedDrain.rejected", context: ["reason": "unregisteredTypeChunk"]
-            )
+            refuseRoutedFrameBeforeStore(["reason": "unregisteredTypeChunk"], in: context, charge: charge)
             return
         }
         let door = MeshChunkVerifier(
@@ -4074,9 +4165,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             ledger: context.ledger, manifest: manifest
         )
         if let rejection = door.verify(chunk) {
-            FernletAuditLog.log(
-                "mesh.routedDrain.rejected",
-                context: ["type": PayloadType.meshRoutedChunk.rawValue, "reason": rejection.rawValue]
+            refuseRoutedFrameBeforeStore(
+                ["type": PayloadType.meshRoutedChunk.rawValue, "reason": rejection.rawValue],
+                in: context, charge: charge
             )
             return
         }
@@ -4117,9 +4208,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             ledger: context.ledger, manifest: manifest
         )
         if let rejection = door.verify(receipt) {
-            FernletAuditLog.log(
-                "mesh.routedDrain.rejected",
-                context: ["type": PayloadType.meshCustodyReceipt.rawValue, "reason": rejection.rawValue]
+            refuseRoutedFrameBeforeStore(
+                ["type": PayloadType.meshCustodyReceipt.rawValue, "reason": rejection.rawValue],
+                in: context, charge: !routedRefusalIsHeldForCapacity(key, from: context.sender)
             )
             return
         }
@@ -4155,9 +4246,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             ledger: context.ledger, manifest: manifest
         )
         if let rejection = door.verify(receipt) {
-            FernletAuditLog.log(
-                "mesh.routedDrain.rejected",
-                context: ["type": PayloadType.meshRecipientReceipt.rawValue, "reason": rejection.rawValue]
+            refuseRoutedFrameBeforeStore(
+                ["type": PayloadType.meshRecipientReceipt.rawValue, "reason": rejection.rawValue],
+                in: context, charge: !routedRefusalIsHeldForCapacity(key, from: context.sender)
             )
             return
         }
@@ -4340,6 +4431,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         routedUnplacedKeys.removeAll()
         routedUncompletableCount = 0
         routedDeliveryHold = nil
+        routedShareRefusal = nil
     }
 
     /// Derives the one published value from the three facts kept apart, under a FIXED precedence so
@@ -8186,8 +8278,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             }
             // First committed peer — pairwise. The photo-manifest sync retired with the pull
             // protocol (P5 item 13): a pairwise pair has no meshID and no membership ledger, so it
-            // has no routed destination set either, and a capture there is cached locally and
-            // shared when the session promotes. Named outage, D-13.18.
+            // has no routed destination set either. A capture there is cached on the user's own
+            // wall and reaches NOBODY — nothing re-shares it when the session promotes, and no
+            // notice says so. Named outage, D-13.18; the fix (a mesh identity for the pairwise
+            // phase) is plan §23.4's, and `startJoin()` is the app's only session entry, so this is
+            // the default two-device path. (The P5 review's finding 2.)
             spawnHostPinned { [weak self] in
                 guard let self else { return }
                 await self.sendVouchList(to: slot)
@@ -10373,6 +10468,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     var routedDrainFramesSpentForTesting: [String: Int] {
         get { routedDrainFramesSpent }
         set { routedDrainFramesSpent = newValue }
+    }
+
+    /// The per-sender pre-store refusal budget (the P5 review's finding 3) — readable so a suite can
+    /// pin that a refusal was charged, and writable so a cell can trip a tiny cap without sending a
+    /// thousand refused frames.
+    var routedRefusalBudgetForTesting: MeshRoutedRefusalBudget {
+        get { routedRefusalBudget }
+        set { routedRefusalBudget = newValue }
     }
 
     /// The items whose manifest this device admitted **from their own origin** — P5 item 8's hop

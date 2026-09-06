@@ -55,8 +55,13 @@ public nonisolated enum MeshRoutedCapability: String, CaseIterable, Equatable, S
 ///
 /// - ``protectedDataAvailable`` is **iOS data protection** — the OS device lock. It gates plaintext
 ///   and, at the store, readability.
-/// - ``appIsForeground`` is the app scene. It is the *real* foreground enforcement; the mesh's own
-///   `MeshSessionState.activeForeground` never leaves that value today, so it is not one.
+/// - ``appIsForeground`` is the app scene, and **foreground means not backgrounded**: `.active`
+///   or `.inactive`, never `.background`. `.inactive` (Control Center, a call banner, a system
+///   prompt, the app's own Face ID sheet, iPad Split View) is a transient foreground state with the
+///   device unlocked and the process live; this leg exists to refuse a backgrounded, CPT-continued
+///   mesh its plaintext, not to track key-window focus. It is the *real* foreground enforcement;
+///   the mesh's own `MeshSessionState.activeForeground` never leaves that value today, so it is
+///   not one.
 /// - ``duressActive`` is the only clause of **Fernlet's own app lock** that reaches the mesh: no
 ///   `FernletLockScope` covers Friends and ProximityKit cannot import `FernletLock`, so claiming the
 ///   app lock gates the mesh would be false. Never commit a friend's content into a canonical store
@@ -76,7 +81,8 @@ public nonisolated struct MeshRoutedAccessGate: Equatable, Sendable {
     /// iOS data protection: the device is unlocked **now**.
     public let protectedDataAvailable: Bool
 
-    /// The app scene is active.
+    /// The app scene is not backgrounded — `.active` or `.inactive`. The app decides this in one
+    /// place (`FernletApp.routedGateForeground(for:)`), never at a push site.
     public let appIsForeground: Bool
 
     /// Fernlet's app lock is in a duress session.
@@ -92,7 +98,7 @@ public nonisolated struct MeshRoutedAccessGate: Equatable, Sendable {
     ///
     /// - Parameters:
     ///   - protectedDataAvailable: Whether iOS data protection currently permits protected reads.
-    ///   - appIsForeground: Whether the app scene is active.
+    ///   - appIsForeground: Whether the app scene is not backgrounded (`.active` or `.inactive`).
     ///   - duressActive: Whether the app lock is in a duress session.
     public init(protectedDataAvailable: Bool, appIsForeground: Bool, duressActive: Bool) {
         self.protectedDataAvailable = protectedDataAvailable
@@ -142,7 +148,7 @@ public nonisolated struct MeshRoutedAccessEdge: Equatable, Sendable {
     /// Data protection became available on this push.
     public let protectedDataRose: Bool
 
-    /// The app scene became active on this push.
+    /// The app scene left the background on this push.
     public let foregroundRose: Bool
 
     /// A duress session ended on this push.
@@ -152,7 +158,7 @@ public nonisolated struct MeshRoutedAccessEdge: Equatable, Sendable {
     ///
     /// - Parameters:
     ///   - protectedDataRose: Whether data protection became available.
-    ///   - foregroundRose: Whether the scene became active.
+    ///   - foregroundRose: Whether the scene left the background.
     ///   - duressCleared: Whether a duress session ended.
     public init(protectedDataRose: Bool, foregroundRose: Bool, duressCleared: Bool) {
         self.protectedDataRose = protectedDataRose

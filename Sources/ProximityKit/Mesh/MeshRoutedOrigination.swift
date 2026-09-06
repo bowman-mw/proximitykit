@@ -11,8 +11,9 @@
 // count so the caller can say what it staged without re-reading the store.
 //
 // Not here: any user copy. Every case below is a frozen English token for an audit line and a
-// switch; the sentence the user reads is composed at the manager's `meshError` seam, which is the
-// surface `addPhoto` already used for `mesh.photo.encryptFailed` (D-13.15).
+// switch; the manager publishes the refusal on `routedShareRefusal` and the APP forks the sentence
+// per case (`RoutedShareRefusalCopy`), so it localizes — the `meshError` `String` seam this first
+// rode rendered English in every language (D-13.15; the P5 review's finding 5).
 
 import Foundation
 
@@ -32,10 +33,11 @@ nonisolated enum MeshRoutedShareSkip: String, Equatable, Sendable {
 
 /// Why an origination was attempted and failed (P5 item 13, D-13.15).
 ///
-/// Every case is **visible**: the manager raises `meshError` and writes one
-/// `mesh.routedShare.refused` audit line carrying the token. Frozen English `rawValue`s — they are
-/// audit vocabulary, never user copy.
-nonisolated enum MeshRoutedShareRefusal: String, Equatable, Sendable {
+/// Every case is **visible**: the manager publishes it on `routedShareRefusal` — which the app forks
+/// into localized copy, one sentence per case — and writes one `mesh.routedShare.refused` audit line
+/// carrying the token. Frozen English `rawValue`s — they are audit vocabulary, never user copy.
+/// `public` and `CaseIterable` so the app's copy switch is exhaustive and its test covers every case.
+public nonisolated enum MeshRoutedShareRefusal: String, CaseIterable, Equatable, Sendable {
     /// The body could not be framed, or ``MeshRoutedItemSealer`` refused the plaintext — empty,
     /// above the resident bound (D-13.19), or an invalid content key. One token for both halves of
     /// "these bytes never became a sealed blob": the framing is a pure encode of the origin's own
