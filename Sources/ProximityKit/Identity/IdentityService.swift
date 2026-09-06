@@ -57,6 +57,14 @@ public enum IdentityError: Error, Equatable {
     /// Raised by ``IdentityService/wipe()`` so a "your identity is gone" promise the keychain
     /// refused is loud rather than silent — the private keys may still be on the device.
     case keychainDeleteFailed(OSStatus)
+    /// A keychain READ the identity depends on failed with an `OSStatus` other than
+    /// `errSecItemNotFound`, carrying that status. Raised by ``IdentityService/ensureProvisioned()``
+    /// instead of treating the row as absent: every non-`found` answer there leads to a mint, and a
+    /// mint `KeychainItem.store`s each identity row **delete-then-add** — so a transient read error
+    /// (`errSecInteractionNotAllowed` before first unlock, `errSecNotAvailable`, an I/O failure)
+    /// that fell through would overwrite the live identity and silently orphan every trust
+    /// relationship built on it. Nothing is written when this is thrown; the next launch retries.
+    case keychainReadFailed(OSStatus)
     /// The bytes carry no CURRENT format marker — a transport seal with no `FPT2` prefix, or a
     /// 92-byte group-key wrap with no `FGK2` prefix. Both are the shapes a peer on a pre-marker
     /// build sends, and the crypto standardization round's Phase 4 deleted the readers for them,
@@ -511,13 +519,21 @@ public final class IdentityService {
     /// the original race where a fresh second device, opened before the genuine escrow key had synced,
     /// minted a DIVERGENT synchronizable key — stranding cross-device restore and risking a key conflict.
     /// The open/restore path must never mint (see `loadBackupEscrowKeyForOpen`).
+    ///
+    /// **Fail closed on an unreadable row (F-1, P5 close-out).** Every case below Case 1 mints, and a
+    /// mint `KeychainItem.store`s each identity row delete-then-add. The two identity-row reads and
+    /// Case 3's legacy read therefore use `KeychainItem.loadDistinguishingAbsence`: only
+    /// `errSecItemNotFound` is absence, and any other status throws
+    /// ``IdentityError/keychainReadFailed(_:)`` with nothing written. The decision is
+    /// ``classifyDeviceIdentityRows(signing:keyAgreement:)``, pure and tested on its own.
     public func ensureProvisioned() throws {
         if signingKey != nil && keyAgreementKey != nil { return }
 
         let deviceOnly = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as CFString
 
-        // Case 1: Signing + proximity KA keys present on this device (normal relaunch).
-        if let existing = loadExistingDeviceIdentity() {
+        // Case 1: Signing + proximity KA keys present on this device (normal relaunch). Throws —
+        // never falls through — when either row could not be read.
+        if let existing = try loadExistingDeviceIdentity() {
             signingKey      = existing.signing
             keyAgreementKey = existing.keyAgreement
             // Adopt an existing backup escrow key if one is present (synced preferred). Do NOT mint one
@@ -547,8 +563,7 @@ public final class IdentityService {
         // identity. This reuses an existing synced key, not a fresh mint, so there is no divergence risk —
         // and it is published at the key's CONTENT-ADDRESSED account (two devices running Case 3 derive the
         // same account from the same KA key → same slot, same value → no conflict), never the legacy slot.
-        if let kaData = KeychainItem.load(account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue, service: keychainService),
-           let loadedKA = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: kaData) {
+        if let loadedKA = try loadLegacyKeyAgreementKey() {
             let newSigning = Curve25519.Signing.PrivateKey()
             let newKA      = Curve25519.KeyAgreement.PrivateKey()
             try promoteLegacyKeyAgreementKeyToEscrow(loadedKA)
@@ -569,17 +584,110 @@ public final class IdentityService {
         backupEscrowKey = nil
     }
 
-    /// The device identity already on this device (Case 1), or nil when either private-key row is
-    /// missing or unparseable — in which case provisioning falls through to the mint cases.
-    private func loadExistingDeviceIdentity()
-    -> (signing: Curve25519.Signing.PrivateKey, keyAgreement: Curve25519.KeyAgreement.PrivateKey)? {
-        guard let sigData = KeychainItem.load(account: IdentityKeychainKey.signingPrivateKey.rawValue, service: keychainService),
-              let kaData  = KeychainItem.load(account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue, service: keychainService),
-              let loadedSigning = try? Curve25519.Signing.PrivateKey(rawRepresentation: sigData),
-              let loadedKA      = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: kaData) else {
-            return nil
+    /// What the two private-key rows of the device identity amount to, decided from their raw
+    /// keychain reads so the rule can be tested without a keychain (F-1, P5 close-out).
+    ///
+    /// The ORDER of the rules is the safety property: an unreadable row wins over everything else,
+    /// because the only thing ``ensureProvisioned()`` does with a non-`found` answer is mint, and a
+    /// mint delete-then-adds every row — including the one that could not be read.
+    enum DeviceIdentityRead {
+        /// Both rows present and parseable — the identity to adopt.
+        case found(signing: Curve25519.Signing.PrivateKey, keyAgreement: Curve25519.KeyAgreement.PrivateKey)
+        /// At least one row is authoritatively absent (`errSecItemNotFound`) and neither is
+        /// unreadable — provisioning may fall through to the mint cases.
+        case absent
+        /// A row was read but its bytes are not a key of the expected shape. Permanent — the key
+        /// can never be used — so the caller treats it as absence, but by name, with an audit line.
+        /// Carries the row's account.
+        case unparseable(row: String)
+        /// A row could not be read (any `OSStatus` other than `errSecItemNotFound`, or a success
+        /// that returned no data). Nothing may be minted. Carries the row's account and the status.
+        case unreadable(row: String, status: OSStatus)
+    }
+
+    /// The pure half of Case 1: classifies the two identity-row reads.
+    ///
+    /// - Parameters:
+    ///   - signing: The `signingPrivateKey` row's read.
+    ///   - keyAgreement: The `keyAgreementPrivateKey` row's read.
+    /// - Returns: what provisioning may do — see ``DeviceIdentityRead`` for the precedence.
+    static func classifyDeviceIdentityRows(
+        signing: KeychainItem.ReadResult,
+        keyAgreement: KeychainItem.ReadResult
+    ) -> DeviceIdentityRead {
+        let signingRow = IdentityKeychainKey.signingPrivateKey.rawValue
+        let keyAgreementRow = IdentityKeychainKey.keyAgreementPrivateKey.rawValue
+        if case .unreadable(let status) = signing {
+            return .unreadable(row: signingRow, status: status)
         }
-        return (loadedSigning, loadedKA)
+        if case .unreadable(let status) = keyAgreement {
+            return .unreadable(row: keyAgreementRow, status: status)
+        }
+        guard case .found(let sigData) = signing, case .found(let kaData) = keyAgreement else {
+            return .absent
+        }
+        guard let loadedSigning = try? Curve25519.Signing.PrivateKey(rawRepresentation: sigData) else {
+            return .unparseable(row: signingRow)
+        }
+        guard let loadedKA = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: kaData) else {
+            return .unparseable(row: keyAgreementRow)
+        }
+        return .found(signing: loadedSigning, keyAgreement: loadedKA)
+    }
+
+    /// The device identity already on this device (Case 1), or nil when either private-key row is
+    /// **absent** or unparseable — in which case provisioning falls through to the mint cases.
+    ///
+    /// Throws ``IdentityError/keychainReadFailed(_:)`` when either row is **unreadable**: a
+    /// transient keychain error is not absence, and the mint cases delete-then-add every identity
+    /// row, so falling through would destroy the live identity. Reads with
+    /// `KeychainItem.loadDistinguishingAbsence`, never the nil-collapsing `load` — the wall in
+    /// `IdentityProvisioningReadTests` pins that.
+    private func loadExistingDeviceIdentity() throws
+    -> (signing: Curve25519.Signing.PrivateKey, keyAgreement: Curve25519.KeyAgreement.PrivateKey)? {
+        let signingRow = KeychainItem.loadDistinguishingAbsence(
+            account: IdentityKeychainKey.signingPrivateKey.rawValue, service: keychainService
+        )
+        let keyAgreementRow = KeychainItem.loadDistinguishingAbsence(
+            account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue, service: keychainService
+        )
+        switch Self.classifyDeviceIdentityRows(signing: signingRow, keyAgreement: keyAgreementRow) {
+        case .found(let signing, let keyAgreement):
+            return (signing, keyAgreement)
+        case .absent:
+            return nil
+        case .unparseable(let row):
+            FernletAuditLog.log("identity.keychain.unparseableRow", context: ["row": row, "stage": "provisioning"])
+            return nil
+        case .unreadable(let row, let status):
+            FernletAuditLog.log("identity.keychain.readFailed", context: [
+                "row": row, "stage": "provisioning", "status": "\(status)"
+            ])
+            throw IdentityError.keychainReadFailed(status)
+        }
+    }
+
+    /// Case 3's read of the legacy synced key-agreement row, on the same fail-closed rule as
+    /// ``loadExistingDeviceIdentity()``: an unreadable row throws rather than falling through to
+    /// Case 4, whose `KeychainItem.store(…, replacing: .any)` would delete the synced row it could
+    /// not read. Absent, or present but unparseable, is nil — Case 4 is then the right answer.
+    private func loadLegacyKeyAgreementKey() throws -> Curve25519.KeyAgreement.PrivateKey? {
+        let row = IdentityKeychainKey.keyAgreementPrivateKey.rawValue
+        switch KeychainItem.loadDistinguishingAbsence(account: row, service: keychainService) {
+        case .absent:
+            return nil
+        case .found(let data):
+            guard let key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: data) else {
+                FernletAuditLog.log("identity.keychain.unparseableRow", context: ["row": row, "stage": "legacyKeyAgreement"])
+                return nil
+            }
+            return key
+        case .unreadable(let status):
+            FernletAuditLog.log("identity.keychain.readFailed", context: [
+                "row": row, "stage": "legacyKeyAgreement", "status": "\(status)"
+            ])
+            throw IdentityError.keychainReadFailed(status)
+        }
     }
 
     /// Re-stores the loaded proximity KA key device-only (dropping a legacy synchronizable flag).
