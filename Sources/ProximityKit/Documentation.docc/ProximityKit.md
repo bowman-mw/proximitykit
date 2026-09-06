@@ -430,6 +430,26 @@ at the three session resets and nowhere else. This is the promise plan §8.4 let
 three `keyEpoch` gates against — routed content carries unique ids + meshID + expiry and dedups by
 id — and item 13 collected on it: two gates deleted with the paths they gated, none loosened.
 
+**What the window does not bound is bounded per sender** (the P5 review's finding 3, 2026-09-06,
+closing D-12.14). Every refusal that sits *before* a store verb — a verifier rejection at any
+content door, `notADestinationOrHandoff`, `unknownItemNotFromOrigin`, `unregisteredTypeChunk`, an
+undecodable frame, and the parked-set drop's index load behind an unsigned `unknownTypeToken`
+claim — is never recorded by the window and costs real work each time (an Ed25519 verify, or a
+sealed-index load). ``MeshRoutedRefusalBudget`` counts them per **authenticated envelope sender** —
+never the frame's claimed author, which is exactly the value the window cannot trust there — through
+the manager's one door `refuseRoutedFrameBeforeStore`, capped at
+`MeshRoutedDrainBounds.sessionFramesPerPeer`, which an honest peer cannot reach because that is
+already the most frames the drain lets it make this device serve. The one transition writes
+`mesh.routedDrain.refusalBudgetSpent`; after it the sender's content is dropped at
+`dispatchRoutedContent` before the decode, unlogged — a per-drop line would be the unbounded channel
+wearing a bound's name. Bounded on both axes (the sender axis is the admission set's 16, as the
+window's author axis is), fail-closed on a full sender axis, and reset with the drain state at the
+three session resets only — never on a disconnect or a partition flap, the attacker's reset lever.
+One exemption: a frame for an item this device already capacity-refused from this sender
+(`routedRefusedKeys`) is the receiver's own refusal arriving in pieces — a courier's batch carries a
+manifest and up to 64 chunks and re-offers it every exchange until capacity frees — so it is named
+but never charged. The two digest doors stay outside it by D-5.12 / D-6.10.
+
 - ``PeerTransport``
 - ``PeerHandle``
 - ``PeerEndpointKey``
@@ -1434,8 +1454,9 @@ caller) → `MeshChunker.chunks` → the two store doors every inbound item goes
 the committed slots. Nothing new writes the store, so item 9's caps and item 12's bookkeeping apply
 to an origin's own item unchanged; the local echo onto the user's own wall is **unconditional**, and
 only the transport is conditional, so a solo member's capture is silent rather than an error.
-``MeshRoutedShareRefusal`` names what a failed mint failed at, on the manager's existing `meshError`
-seam. Wrap keys come from **handshake-verified** sources only — a live slot's verified key, or the
+``MeshRoutedShareRefusal`` names what a failed mint failed at, published as a frozen token on the
+manager's observed `routedShareRefusal` for the app to fork into localized copy (the P5 review's
+finding 5 retired the in-package `meshError` sentence). Wrap keys come from **handshake-verified** sources only — a live slot's verified key, or the
 session-roster entry written from that same value — so a destination with neither refuses the whole
 mint by name: the stated outage covers a star topology, a roster above the slot cap and any
 resumption, and the real fix is a signed key-advertisement frame, handed forward.
