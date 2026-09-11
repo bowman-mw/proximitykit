@@ -252,7 +252,9 @@ nonisolated struct MeshRoutedPhotoBody: Equatable, Sendable {
 /// a restart, an idle-lapse resume or a rejoin does not restore — or from the gossiped descriptor,
 /// which is strictly WEAKER because a descriptor carries rows for fingerprints other than the
 /// sender's. `SessionMessageStore.receiveIncoming` re-applies
-/// `ItemNameModeration.moderatedPeerDisplayName` to it, so the arm adds no second moderation.
+/// `ItemNameModeration.moderatedPeerDisplayName` to it, so the arm adds no second moderation. Its
+/// LENGTH, unlike its content, is refused rather than coerced: a decoded name above
+/// ``MeshRoutedTextBody/maxSenderNameUTF8ByteCount`` is `malformed` (P6 item 4 fix review, P3-1).
 nonisolated struct MeshRoutedTextHeader: Codable, Equatable, Sendable {
 
     /// The message id, equal to the routed item id the manifest signs.
@@ -312,6 +314,13 @@ nonisolated struct MeshRoutedTextBody: Equatable, Sendable {
     /// (a flag is 8 bytes, so 16 of them fit), and it is what keeps a maximal header at a quarter of
     /// its allowance: the name is the header's ONLY variable-length field, so bounding it here is
     /// what makes the allowance a statement about this family rather than a hope.
+    ///
+    /// **Enforced on the WIRE as well as at the sender** (P6 item 4 fix review, P3-1): a body whose
+    /// decoded name exceeds it is ``MeshRoutedItemSealError/malformed``. The allowance's whole claim
+    /// is arithmetic over *this* bound, so a receiver that accepted an 8 KB name would be holding a
+    /// header the formula says cannot exist — and the name is a peer's claim, not honest input this
+    /// device produced. It is the one place the family departs from its "an allowance, not a
+    /// refusal" doctrine, and it departs by refusing a shape no shipped sender can mint.
     static let maxSenderNameUTF8ByteCount = 128
 
     /// The text row's registry cap: the widest CIPHERTEXT a routed text item can measure, stated as
@@ -385,9 +394,12 @@ nonisolated struct MeshRoutedTextBody: Equatable, Sendable {
     /// a hostile prefix yields ``MeshRoutedItemSealError/malformed`` rather than a trap or a
     /// truncated read.
     ///
-    /// **FOUR hostile framing shapes for text, not three**, all landing on that one frozen token:
-    /// too short to carry the prefix, a prefix past the remaining bytes, an in-bounds slice that is
-    /// not the header's JSON — and **payload bytes that are not valid UTF-8**. The fourth is text's
+    /// **FIVE hostile shapes for text**, all landing on that one frozen token: too short to carry
+    /// the prefix, a prefix past the remaining bytes, an in-bounds slice that is not the header's
+    /// JSON, **payload bytes that are not valid UTF-8** — and a decoded ``MeshRoutedTextHeader``
+    /// whose `senderName` exceeds ``maxSenderNameUTF8ByteCount`` (P6 item 4 fix review, P3-1: the
+    /// header allowance's arithmetic is over that bound, so accepting a wider name would admit a
+    /// header the formula says cannot exist). The fourth is text's
     /// own, and it is the one a copy of ``MeshRoutedPhotoBody/init(decoding:)`` gets wrong:
     /// `String(decoding:as:)` **cannot fail**, it substitutes U+FFFD, and U+FFFD is neither a
     /// control character nor in `SessionMessageStore.sanitize`'s invisible-scalar list — so the
@@ -412,6 +424,9 @@ nonisolated struct MeshRoutedTextBody: Equatable, Sendable {
             decoded = try MeshRoutedItemBodyFormat.headerDecoder()
                 .decode(MeshRoutedTextHeader.self, from: headerJSON)
         } catch {
+            throw MeshRoutedItemSealError.malformed
+        }
+        guard decoded.senderName.utf8.count <= Self.maxSenderNameUTF8ByteCount else {
             throw MeshRoutedItemSealError.malformed
         }
         guard let decodedText = String(data: Data(bytes[headerEnd...]), encoding: .utf8) else {

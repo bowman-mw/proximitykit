@@ -14,7 +14,8 @@ import FernletDomainModel
 ///    routed item for it, and appends the local echo here **only once the mint staged**.
 ///  - **Inbound** — the routed projection's `.sessionTranscript` arm calls
 ///    ``receiveIncoming(id:senderFingerprint:senderDisplayName:text:sentAt:seenAt:)``, which dedupes
-///    by id, sanitizes, caps, and returns which of the three things it did. The author's fingerprint
+///    by ``MeshContentKey`` (author **and** id), sanitizes, caps, and returns which of the three
+///    things it did. The author's fingerprint
 ///    is the origin's signed one resolved against the admission ledger, with the block list and the
 ///    removal set applied **before** the content key is unwrapped; the display name is the body's
 ///    own claim, re-moderated here.
@@ -37,8 +38,25 @@ import FernletDomainModel
 /// off sees the affected rows again with no second delivery, because the gate is a view filter over
 /// an unmutated union.
 ///
+/// ## A row's identity is `(author, id)`, never the id alone (P6 item 4 fix review, P1-1)
+///
+/// Every dedup here — ``seenKeys``, the held ``MeshContentSet``, the attribution table and
+/// ``Message/id`` itself — keys on ``MeshContentKey``. The id on the wire is the **origin's own
+/// choice**, the routed index's key is `(originFingerprint, itemID)`, and the signed manifest
+/// carrying that id reaches the whole roster-at-creation in the clear before the content does — so
+/// an admitted member could otherwise read another member's message id, mint its own text under it,
+/// win the race to a partitioned third device, and have the genuine message land `alreadyHeld` →
+/// marked final → gone for the session, while its sender saw `.staged`. The key is local: nothing
+/// about the manifest or the body changed.
+///
 /// The gate value arrives through ``refreshGates(chatAllowed:isRefused:)``, which the manager calls
-/// at every ingest. Its `isRefused` half is `ProximityHost.isBlockedFingerprint` and **not** yet
+/// at every ingest — **and only there**. A block or an age-gate flip therefore re-renders at the
+/// NEXT ingest, not at the flip: the arm that folds the gates is the text projection itself, and it
+/// is unreachable while `isChatAllowed` is false, so a mid-session flip changes nothing visible
+/// until another message arrives. That is display only, and deliberately so — the *projection* is
+/// fail-closed at both ends (`projectableRoutedTypeTokens` omits `.sessionTranscript` while the
+/// gate is shut, and the live arm marks a gated item final), which is the load-bearing half and is
+/// tested. Its `isRefused` half is `ProximityHost.isBlockedFingerprint` and **not** yet
 /// `ModerationBanStore.isPeerBanned`: the ban store is not reachable from `ProximityHost`, so the
 /// routed path consults the block half only — the same gap the photo arm has, inherited and named
 /// rather than silently different.
@@ -62,7 +80,16 @@ public final class SessionMessageStore {
     /// A single message in the current session's transcript. Value-typed + `Sendable` so views can key
     /// off it; never persisted (its holder is not Codable).
     public struct Message: Identifiable, Equatable, Sendable {
-        public let id: UUID
+
+        /// The row's identity: the **author and the id together** (P6 item 4 fix review, P1-1).
+        ///
+        /// `Identifiable`'s `id`, so the transcript's `ForEach` is keyed on something unique: two
+        /// origins may legitimately mint one message id, and both rows land.
+        public var id: MeshContentKey {
+            MeshContentKey(senderFingerprint: senderFingerprint, contentID: messageID)
+        }
+        /// The author's own message id — equal to the routed item id the origin signed.
+        public let messageID: UUID
         /// Transport-VERIFIED sender fingerprint (local fingerprint for outgoing). Never a wire claim.
         public let senderFingerprint: String
         public let senderDisplayName: String
@@ -75,14 +102,14 @@ public final class SessionMessageStore {
         public let isOutgoing: Bool
 
         public init(
-            id: UUID,
+            messageID: UUID,
             senderFingerprint: String,
             senderDisplayName: String,
             text: String,
             sentAt: Date,
             isOutgoing: Bool
         ) {
-            self.id = id
+            self.messageID = messageID
             self.senderFingerprint = senderFingerprint
             self.senderDisplayName = senderDisplayName
             self.text = text
@@ -108,14 +135,18 @@ public final class SessionMessageStore {
     /// to conflate (P6 item 4).
     ///
     /// The caller needs the distinction because it decides whether the routed item still owes the
-    /// projection anything, and **all three are final**: `seenIDs` deliberately never forgets a
-    /// dropped id ("a re-send cannot resurrect them"), and "empty after sanitizing" is a
+    /// projection anything, and **all three are final**: ``seenKeys`` deliberately never forgets a
+    /// dropped key ("a re-send cannot resurrect them"), and "empty after sanitizing" is a
     /// deterministic verdict over origin-signed bytes. Frozen English tokens — audit vocabulary,
     /// never user copy.
+    ///
+    /// `alreadyHeld` is a statement about **this author's** id and no one else's (P1-1): the key is
+    /// `(senderFingerprint, id)`, so another member cannot spend it.
     public enum Acceptance: String, Equatable, Sendable {
         /// The message entered the held set, and shows unless a gate filters it.
         case appended
-        /// This id has already been seen — a duplicate delivery, or this device's own echo.
+        /// This author's copy of this id has already been seen — a duplicate delivery, or this
+        /// device's own echo.
         case alreadyHeld
         /// Nothing survived the sanitizer.
         case emptyAfterSanitizing
@@ -142,10 +173,12 @@ public final class SessionMessageStore {
 
     public var hasUnread: Bool { unreadCount > 0 }
 
-    /// Dedup set across incoming AND outgoing ids — a reflected/duplicate id is never appended twice.
-    @ObservationIgnored private var seenIDs: Set<UUID> = []
-    /// Insertion order for `seenIDs`, so the set can evict oldest-first at its cap.
-    @ObservationIgnored private var seenOrder: [UUID] = []
+    /// Dedup set across incoming AND outgoing rows, keyed on ``MeshContentKey`` — the author and
+    /// the id — so a reflected or duplicate delivery is never appended twice and **another
+    /// member's message id is not this member's to spend** (P6 item 4 fix review, P1-1).
+    @ObservationIgnored private var seenKeys: Set<MeshContentKey> = []
+    /// Insertion order for ``seenKeys``, so the set can evict oldest-first at its cap.
+    @ObservationIgnored private var seenOrder: [MeshContentKey] = []
 
     /// The messages this device HOLDS — the union half of plan §10.3, capped at
     /// `MeshMergedMessage.setCapacity` (which is ``maxMessages``) by the set itself.
@@ -154,13 +187,16 @@ public final class SessionMessageStore {
     /// destroy the rows it was hiding.
     @ObservationIgnored private var held: MeshContentSet<MeshMergedMessage> = .empty
 
-    /// What ``held`` cannot carry, per message id: the display name the message arrived with and
-    /// whether it was ours.
+    /// What ``held`` cannot carry, per ``MeshContentKey``: the display name the message arrived
+    /// with and whether it was ours.
     ///
     /// ``MeshMergedMessage`` is the merge layer's value and holds no display name and no direction —
     /// correctly, because neither participates in the order or the union. Pruned to ``held``'s own
-    /// ids on every insert, so it is bounded by the same 500 (R3).
-    @ObservationIgnored private var attributionByID: [UUID: (displayName: String, isOutgoing: Bool)] = [:]
+    /// keys on every insert, so it is bounded by the same 500 (R3). Keyed on the pair rather than
+    /// the id so two authors' rows carrying one id cannot overwrite each other's name and
+    /// direction (P1-1).
+    @ObservationIgnored private var attributionByKey:
+        [MeshContentKey: (displayName: String, isOutgoing: Bool)] = [:]
 
     /// This member's own view gates — the 13+ chat gate and the local block/ban set — folded from
     /// the live seams by ``refreshGates(chatAllowed:isRefused:)``.
@@ -190,8 +226,12 @@ public final class SessionMessageStore {
         text: String,
         sentAt: Date
     ) {
-        guard !seenIDs.contains(id) else { return }
-        rememberSeen(id)
+        // Keyed on this device's OWN fingerprint, exactly as an inbound row is keyed on its
+        // author's, so the echo and a hypothetical reflection of it are one row and another
+        // member's same-id message is a different one (P1-1).
+        let key = MeshContentKey(senderFingerprint: senderFingerprint, contentID: id)
+        guard !seenKeys.contains(key) else { return }
+        rememberSeen(key)
         hold(
             MeshMergedMessage(
                 messageID: id, senderFingerprint: senderFingerprint, text: text,
@@ -213,7 +253,10 @@ public final class SessionMessageStore {
     /// the 13+ gate, judged the session live, and spent the per-origin routed quota.
     /// `senderDisplayName` is the body's own display claim and is re-moderated here.
     ///
-    /// Applies, in order: dedup by id, sanitize + length-cap (empty after sanitize is refused).
+    /// Applies, in order: dedup by `(senderFingerprint, id)`, sanitize + length-cap (empty after
+    /// sanitize is refused). The dedup key is the PAIR and not the id, because the id is the
+    /// origin's own choice and its manifest publishes it to the whole roster before the content
+    /// arrives (P6 item 4 fix review, P1-1).
     ///
     /// **`seenAt` is required, not defaulted** (P6 item 4, D-13.36's direction). It is the
     /// RECEIVER's instant at which this item entered this device's view — the re-entry pass reads
@@ -231,13 +274,14 @@ public final class SessionMessageStore {
         sentAt: Date,
         seenAt: Date
     ) -> Acceptance {
-        guard !seenIDs.contains(id) else { return .alreadyHeld }
+        let key = MeshContentKey(senderFingerprint: senderFingerprint, contentID: id)
+        guard !seenKeys.contains(key) else { return .alreadyHeld }
         let text = Self.sanitize(rawText)
         guard !text.isEmpty else { return .emptyAfterSanitizing }
 
-        // Only record the dedup id once the message is actually accepted, so a dropped (empty)
+        // Only record the dedup key once the message is actually accepted, so a dropped (empty)
         // message never poisons a later legitimate one carrying the same id.
-        rememberSeen(id)
+        rememberSeen(key)
         hold(
             MeshMergedMessage(
                 messageID: id, senderFingerprint: senderFingerprint, text: text,
@@ -249,7 +293,7 @@ public final class SessionMessageStore {
         // TF b19 item 6: a message that arrives while the panel is closed is unread. While the panel is
         // on screen the user is already reading, so it stays at zero — and a row a gate is filtering
         // is not something the user can go and read, so it never counts either.
-        if !isViewing, messages.contains(where: { $0.id == id }) { unreadCount += 1 }
+        if !isViewing, messages.contains(where: { $0.id == key }) { unreadCount += 1 }
         return .appended
     }
 
@@ -259,6 +303,15 @@ public final class SessionMessageStore {
     /// came from (`MeshContentGates.folding`'s own contract). Because the transcript is a
     /// derivation, a gate that closes hides rows without destroying them and a gate that re-opens
     /// shows them again with no second delivery.
+    ///
+    /// **The trigger is the next INGEST, not the flip** (P6 item 4 fix review, P3-3). The one
+    /// shipping caller is the routed text arm, which is unreachable while `isChatAllowed` is false,
+    /// so a block or an age-gate flip mid-session changes nothing *visible* until another message
+    /// arrives. That is the display half only: the projection is fail-closed at both ends and is
+    /// tested, so nothing new is shown — a row that should now be hidden stays on screen until the
+    /// next ingest. Calling this from the gate's own setter would re-render on the flip; it is not
+    /// wired that way because the setters are the app's (`ProximityHost`, `AgeAssurance`) and the
+    /// store is not observable from them.
     ///
     /// - Parameters:
     ///   - chatAllowed: `MeshNetworkManager.isChatAllowed` at this member.
@@ -300,9 +353,9 @@ public final class SessionMessageStore {
     public func clear() {
         messages.removeAll()
         held = .empty
-        attributionByID.removeAll()
+        attributionByKey.removeAll()
         gates = .open
-        seenIDs.removeAll()
+        seenKeys.removeAll()
         seenOrder.removeAll()
         // Reset the badge, but leave `isViewing` to the panel's own onAppear/onDisappear — a session may
         // clear (formation / end) while the panel is still on screen, and forcing it false there would
@@ -337,16 +390,17 @@ public final class SessionMessageStore {
     // MARK: - Private
 
     /// R3: the dedup set is fed by peer messages, so it needs its own explicit cap — the 500-row
-    /// transcript cap does not bound it (dropped ids are deliberately kept so a re-send cannot
-    /// resurrect them). An id older than `maxSeenIDs` messages is past any realistic re-send window.
+    /// transcript cap does not bound it (dropped keys are deliberately kept so a re-send cannot
+    /// resurrect them). A key older than `maxSeenIDs` messages is past any realistic re-send window.
     static let maxSeenIDs = maxMessages * 4
 
-    private func rememberSeen(_ id: UUID) {
-        guard seenIDs.insert(id).inserted else { return }
-        seenOrder.append(id)
+    private func rememberSeen(_ key: MeshContentKey) {
+        guard seenKeys.insert(key).inserted else { return }
+        seenOrder.append(key)
         guard seenOrder.count > Self.maxSeenIDs else { return }
         let evicted = seenOrder.prefix(seenOrder.count - Self.maxSeenIDs)
-        for old in evicted { seenIDs.remove(old) }
+        // R2: bounded by the overflow this call created.
+        for old in evicted { seenKeys.remove(old) }
         seenOrder.removeFirst(evicted.count)
     }
 
@@ -357,11 +411,11 @@ public final class SessionMessageStore {
     /// `removeFirst` made, with the correct result on a backlog that drains out of send order.
     private func hold(_ message: MeshMergedMessage, displayName: String, isOutgoing: Bool) {
         held = held.inserting(message)
-        attributionByID[message.messageID] = (displayName, isOutgoing)
-        let kept = held.contentIDs
-        // R3: the attribution table is pruned to the set's own ids, so it is bounded by the same
+        attributionByKey[message.mergeKey] = (displayName, isOutgoing)
+        let kept = held.mergeKeys
+        // R3: the attribution table is pruned to the set's own keys, so it is bounded by the same
         // `setCapacity` and an evicted row cannot leak an entry for the session's lifetime.
-        attributionByID = attributionByID.filter { kept.contains($0.key) }
+        attributionByKey = attributionByKey.filter { kept.contains($0.key) }
         rederiveTranscript()
     }
 
@@ -376,9 +430,9 @@ public final class SessionMessageStore {
         messages = MeshContentLedger(messages: held)
             .visibleTranscript(gates: gates)
             .compactMap { merged in
-                guard let who = attributionByID[merged.messageID] else { return nil }
+                guard let who = attributionByKey[merged.mergeKey] else { return nil }
                 return Message(
-                    id: merged.messageID,
+                    messageID: merged.messageID,
                     senderFingerprint: merged.senderFingerprint,
                     senderDisplayName: who.displayName,
                     text: merged.text,

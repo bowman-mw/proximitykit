@@ -7,12 +7,22 @@
 // deterministic re-derivation; nothing is overwritten because nothing conflicting can exist (only
 // missing).* This file is that sentence as code, for the three content kinds a partition can split:
 //
-//   * **Photos** — union by manifest ID, hash-validated on reassembly (``MeshPhotoReassembly``),
-//     then the existing review flow.
-//   * **Texts** — union by message ID; the visible transcript is re-derived in total order
-//     `(claimedSentAt clamped to ±10 min of first-seen, senderFingerprint, messageID)`.
-//   * **Hearts** — union by gift ID; the final receipt is still only the foreground decrypt +
-//     ``ProximityHeartLedger`` commit, which is why receipt state is deliberately NOT a field here.
+//   * **Photos** — union by `(author, manifest ID)`, hash-validated on reassembly
+//     (``MeshPhotoReassembly``), then the existing review flow.
+//   * **Texts** — union by `(author, message ID)`; the visible transcript is re-derived in total
+//     order `(claimedSentAt clamped to ±10 min of first-seen, senderFingerprint, messageID)`.
+//   * **Hearts** — union by `(author, gift ID)`; the final receipt is still only the foreground
+//     decrypt + ``ProximityHeartLedger`` commit, which is why receipt state is deliberately NOT a
+//     field here.
+//
+// **The author is part of the identity for all three, and that is the P6 item 4 fix-review change**
+// (finding P1-1; see ``MeshContentKey``). Only the TEXT set has a shipping call site today
+// (`SessionMessageStore`), so only text's hazard was live — but the photo and heart sets are keyed
+// the same way for the same reason: the routed index's key is `(originFingerprint, itemID)` for
+// every family, a manifest publishes that id to the whole roster before delivery, and neither
+// `MeshRoutedManifestVerifier` nor `MeshRoutedIndex` refuses a duplicate id from a second origin.
+// Closing it at the protocol means item 6's heart wiring and any future photo wiring inherit the
+// fix rather than re-deriving it. The key is LOCAL: no wire field, no golden, no persisted surface.
 //
 // **Deliberately the same shape as ``MeshMembershipLedger``**, and for the same reason: a pure value
 // with a pure union means reconnect, merge after a partition and reload after a process death are
@@ -34,18 +44,60 @@
 import Foundation
 import FernletDomainModel
 
+// MARK: - MeshContentKey
+
+/// The identity of one merged item: **the authenticated author AND the id that author minted**
+/// (P6 item 4 fix review, finding P1-1).
+///
+/// The union used to key on the id alone, which is only sound while one id can belong to one
+/// author. On the routed store it cannot: an item's id is chosen freely by its origin
+/// (`MeshRoutedManifest.itemID`), the routed index's own key is `(originFingerprint, itemID)` and
+/// `MeshRoutedManifestVerifier` has no duplicate-id rejection — two origins may legitimately hold
+/// items with the same id — while the signed manifest publishing that id travels **in the clear**
+/// to the whole roster at creation. So an admitted member B could read A's id off a manifest, mint
+/// its own text carrying it, and win the race to a partitioned member C; A's genuine message would
+/// then land `alreadyHeld`, be marked final, and be gone from C's transcript for the session while
+/// A saw `.staged`. A censorship primitive between admitted members, closed here by making the
+/// author part of the identity.
+///
+/// **This is a LOCAL key and nothing else.** It is not persisted, not serialized and never on the
+/// wire: the manifest and the body are byte-for-byte what they were, no golden moves, and
+/// `contentID` is still the id the inventory half of a merge exchange asks about
+/// (``MeshContentSet/contentIDs``). What changed is only which pairs of items the union treats as
+/// one item.
+///
+/// §10.3's order is untouched too, and did not need to move: ``MeshContentOrder/precedes`` already
+/// ranks `senderFingerprint` above `contentID`, so two same-id items from different authors were
+/// always totally ordered — the dedup was the only half that conflated them.
+public nonisolated struct MeshContentKey: Hashable, Sendable {
+
+    /// The transport-verified author. Never a wire claim.
+    public let senderFingerprint: String
+    /// The id that author minted.
+    public let contentID: UUID
+
+    /// Builds a merged-content identity.
+    public init(senderFingerprint: String, contentID: UUID) {
+        self.senderFingerprint = senderFingerprint
+        self.contentID = contentID
+    }
+}
+
 // MARK: - MeshMergeableContent
 
 /// One kind of merged content: what its union keys on, and the total order it re-derives in.
 ///
-/// Every conformer is keyed by a `UUID` the author minted, which is what makes the union
-/// *ID-keyed*: two members holding the same id hold the same item, so a merge can only ever be
-/// missing something, never in conflict. ``mergeTiebreak`` exists so that even the pathological
-/// case — two copies of one id that the instant and the sender cannot separate — resolves the same
-/// way at every member, which is what keeps the union commutative.
+/// Every conformer carries a `UUID` its author minted plus the transport-verified author, and the
+/// union keys on **both** (``MeshContentKey``): two members holding the same pair hold the same
+/// item, so a merge can only ever be missing something, never in conflict — while two *authors*
+/// holding one id are two items, which is what ``MeshContentKey`` exists to say.
+/// ``mergeTiebreak`` exists so that even the pathological case — two copies of one item that the
+/// instant and the sender cannot separate — resolves the same way at every member, which is what
+/// keeps the union commutative.
 nonisolated protocol MeshMergeableContent: Equatable, Sendable {
 
-    /// The id the union keys on. Two items with equal ids are the same item.
+    /// The id this item's author minted. One half of ``mergeKey``, which is what the union
+    /// actually keys on: two items with equal ids are the same item only if their AUTHORS agree.
     var contentID: UUID { get }
 
     /// The transport-verified author. Never a wire claim, and the second key of the total order.
@@ -55,14 +107,25 @@ nonisolated protocol MeshMergeableContent: Equatable, Sendable {
     /// *clamped* claim, never the raw one, so a forged stamp cannot jump the queue.
     var orderingInstant: Date { get }
 
-    /// A stable, content-derived last resort for two copies of one id that the instant and the
-    /// sender cannot separate. Never a clock and never arrival order: either would make the union
+    /// A stable, content-derived last resort for two copies of one ``MeshContentKey`` that the
+    /// instant cannot separate. Never a clock and never arrival order: either would make the union
     /// order-dependent, and the laws would fail.
     var mergeTiebreak: String { get }
 
     /// How many items of this kind one member keeps. Matches the live surface's own cap so a merged
     /// view and a live one bound identically.
     static var setCapacity: Int { get }
+}
+
+extension MeshMergeableContent {
+
+    /// This item's identity for the union: its author and its id, never the id alone.
+    ///
+    /// Derived rather than stored, and not overridable by a conformer — the two halves are already
+    /// required members of the protocol, so every kind gets the same rule and none can weaken it.
+    nonisolated var mergeKey: MeshContentKey {
+        MeshContentKey(senderFingerprint: senderFingerprint, contentID: contentID)
+    }
 }
 
 // MARK: - MeshContentOrder
@@ -92,10 +155,14 @@ nonisolated enum MeshContentOrder {
 
 // MARK: - MeshContentSet
 
-/// An ID-keyed, order-normalized set of one content kind — the union half of plan §10.3.
+/// A key-keyed, order-normalized set of one content kind — the union half of plan §10.3. The key
+/// is ``MeshContentKey``: the author and the id together.
 ///
-/// Normalization runs on every construction, so a set is always: one item per ``contentID``
-/// (the ``MeshContentOrder``-least copy wins), sorted by that same order oldest-first, and capped
+/// Normalization runs on every construction, so a set is always: one item per ``MeshContentKey``
+/// — i.e. per `(author, id)`, never per id alone (P6 item 4 fix review, finding P1-1: an id is the
+/// origin's own choice and a manifest publishes it to the whole roster before delivery, so keying
+/// on it alone lets one admitted member spend another's dedup slot) — with the
+/// ``MeshContentOrder``-least copy winning, sorted by that same order oldest-first, and capped
 /// at `Item.setCapacity` keeping the **newest** k — which is what all three live surfaces do
 /// (`SessionMessageStore` drops oldest, the photo wall prefixes a newest-first list,
 /// `ProximityHeartLedger` suffixes its records).
@@ -104,7 +171,8 @@ nonisolated enum MeshContentOrder {
 /// sealed `MeshSessionContext` schema stays 2 because of it.
 ///
 /// **The precondition the cap laws rest on.** "Keep the max k under a fixed total order" composes,
-/// so the laws hold at the cap for every id whose copies agree on their ordering keys — which is
+/// so the laws hold at the cap for every ``MeshContentKey`` whose copies agree on their ordering
+/// keys — which is
 /// every honest item, because the keys are the author's own values. The single place two copies of
 /// one id can disagree is a *receiver-local* field (`firstSeenAt`), and it reaches
 /// ``MeshMergeableContent/orderingInstant`` only for a message whose claimed stamp is outside its
@@ -142,12 +210,24 @@ nonisolated struct MeshContentSet<Item: MeshMergeableContent>: Equatable, Sendab
     var isAtCapacity: Bool { ordered.count >= Item.setCapacity }
 
     /// The ids the set holds — the inventory half of a merge exchange.
+    ///
+    /// Still the **ids**, deliberately: "do you hold item X?" is the question a merge exchange
+    /// asks, and an id is what a peer can name. The set's own identity is ``mergeKeys``, and the
+    /// two differ only in the pathological case two authors minted one id.
     var contentIDs: Set<UUID> { Set(ordered.map(\.contentID)) }
 
-    /// Whether the set already holds `id`.
+    /// The identities the set holds — one per item, author included. The key a holder of the items
+    /// keys its own side tables on.
+    var mergeKeys: Set<MeshContentKey> { Set(ordered.map(\.mergeKey)) }
+
+    /// Whether the set already holds `id`, from **any** author.
     func contains(_ id: UUID) -> Bool { ordered.contains { $0.contentID == id } }
 
-    /// The set with `item` added. An existing copy of the same id that sorts earlier wins.
+    /// Whether the set already holds that author's copy of that id.
+    func contains(_ key: MeshContentKey) -> Bool { ordered.contains { $0.mergeKey == key } }
+
+    /// The set with `item` added. An existing copy of the same ``MeshContentKey`` that sorts
+    /// earlier wins.
     func inserting(_ item: Item) -> MeshContentSet<Item> {
         MeshContentSet(ordered + [item])
     }
@@ -158,20 +238,22 @@ nonisolated struct MeshContentSet<Item: MeshMergeableContent>: Equatable, Sendab
         MeshContentSet(ordered + other.ordered)
     }
 
-    /// Dedupes by id (the order-least copy wins), sorts by the total order, then keeps the newest
-    /// `Item.setCapacity`.
+    /// Dedupes by ``MeshContentKey`` (the order-least copy wins), sorts by the total order, then
+    /// keeps the newest `Item.setCapacity`.
     private static func normalized(_ items: [Item]) -> [Item] {
-        var winnerByID: [UUID: Item] = [:]
+        var winnerByKey: [MeshContentKey: Item] = [:]
+        // R2: bounded by `maxInputItems`.
         for item in items.prefix(Self.maxInputItems) {
-            guard let existing = winnerByID[item.contentID] else {
-                winnerByID[item.contentID] = item
+            let key = item.mergeKey
+            guard let existing = winnerByKey[key] else {
+                winnerByKey[key] = item
                 continue
             }
             if MeshContentOrder.precedes(item, existing) {
-                winnerByID[item.contentID] = item
+                winnerByKey[key] = item
             }
         }
-        let sorted = winnerByID.values.sorted(by: MeshContentOrder.precedes)
+        let sorted = winnerByKey.values.sorted(by: MeshContentOrder.precedes)
         return Array(sorted.suffix(Item.setCapacity))
     }
 }
@@ -306,7 +388,8 @@ nonisolated struct MeshMergedHeart: MeshMergeableContent {
 
 // MARK: - MeshContentLedger
 
-/// Everything a member holds of a split's *content*: three ID-keyed sets, and nothing else.
+/// Everything a member holds of a split's *content*: three ``MeshContentKey``-keyed sets, and
+/// nothing else.
 ///
 /// The content-side twin of ``MeshMembershipLedger`` — pure value data with a pure union, so
 /// §16.2's convergence property needs no store and no transport. Merging is the only way two views

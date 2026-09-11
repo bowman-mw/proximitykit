@@ -120,7 +120,9 @@ nonisolated enum MeshRoutedOriginationOutcome: Equatable, Sendable {
 /// exactly one consumer — a session `.alert` on `DisposableCameraView`, the view the chat panel is
 /// presented *over*, so publishing a chat refusal there fires an alert on a covered presenter and
 /// one of the two presentations is dropped. Its copy is photo-worded in every arm as well. The
-/// panel reads this value instead and shows the non-staged cases inline beneath the compose bar,
+/// panel reads this value instead and shows the non-staged cases inline at the top of the compose
+/// bar — directly ABOVE the text field, between it and the transcript (P6 item 4 fix review, P3-2:
+/// five docs said "beneath the compose bar", which is not where `SessionChatPanel` draws it) —
 /// keeping the draft so "send again" is the retry.
 ///
 /// Deliberately **not** `@discardableResult`: an unread outcome here is a message the user believes

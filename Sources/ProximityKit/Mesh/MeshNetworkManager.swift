@@ -929,6 +929,25 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// in.
     @ObservationIgnored private(set) var transcriptGeneration = 0
 
+    /// Whether the app's "delete everything" funnel is running right now (P6 item 4 fix review,
+    /// finding P2-1).
+    ///
+    /// Delete-all is a multi-step funnel with real suspension points, and the routed store's
+    /// ciphertext is destroyed near the END of it (`rotateProximityIdentityAndPurgeDeadDrop`) while
+    /// the live transcript is dropped at the start. Without this flag a rising access edge in
+    /// between re-projects items whose bytes the user has just asked to have destroyed — into a
+    /// transcript that is still live, in the same mesh. So ``beginPrivacyWipe()`` raises it before
+    /// the funnel's first suspension and ``endPrivacyWipe()`` lowers it after its last, and
+    /// ``projectRoutedItemIfPermitted(key:manifest:seenAt:)`` refuses above every other guard
+    /// while it stands — for BOTH arms, because the photo corpora are wiped in the same funnel.
+    ///
+    /// The refusal is `refusedForNow` and the item is deliberately **not** offered: a wipe is the
+    /// gate's own answer for every item, not a fact about any one of them, so it must neither mark
+    /// an item final nor spend its turn in the retry rotation. Memory-only, and owed no
+    /// `Docs/PrivacyWipeCoverage.md` row of its own (it is the wipe's own state, and it is lowered
+    /// by the funnel that raised it).
+    @ObservationIgnored private(set) var privacyWipeInProgress = false
+
     /// Controls whether additional friends can join the active Friends session. Read at the
     /// founding (it picks the new mesh's `.open`/`.closed` mode) and at every seat and admission
     /// decision after it.
@@ -2664,7 +2683,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// session; across a restart the friend-photo wall's own `photo.id` dedup absorbs a re-hand.
     /// Bounded by the store's item cap, cleared with the rest of the drain state, and therefore
     /// owed no `Docs/PrivacyWipeCoverage.md` row.
-    @ObservationIgnored private var routedProjectedItems: Set<MeshRoutedItemKey> = []
+    /// `private(set)` rather than `private` so a tier-1 cell can OBSERVE the mark instead of
+    /// inferring it: two delivery cells claimed "…AndIsMarkedFinal" while asserting only that the
+    /// transcript stayed empty, which stays green if the verdict flips to `refusedForNow` (P6
+    /// item 4 fix review, finding P2-5). Nothing outside this type writes it.
+    @ObservationIgnored private(set) var routedProjectedItems: Set<MeshRoutedItemKey> = []
 
     /// What each re-entry retry list has already attempted this session — item 5's half of D-13.32.
     ///
@@ -6582,8 +6605,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameters:
     ///   - ref: The item, from the list the pass already read.
     ///   - index: The same index — never a second load.
+    /// Internal rather than private so the two delivery cells that claim a session-ended item is
+    /// FINAL can observe the thing that actually happens to it (P6 item 4 fix review, P2-5). The
+    /// `routedProjectedItems` mark is unreachable for those items: this filter runs first and drops
+    /// them from the list, so the verdict never runs — which is a *stronger* statement than the
+    /// mark, because the item does not even spend a pass slot. **Not a door:** no caller outside
+    /// this type, and the shipping caller is the re-entry pass.
+    ///
     /// - Returns: whether to spend an allowance slot on it.
-    private func isProjectableAtThisPass(_ ref: MeshRoutedItemRef, in index: MeshRoutedIndex) -> Bool {
+    func isProjectableAtThisPass(_ ref: MeshRoutedItemRef, in index: MeshRoutedIndex) -> Bool {
         guard let manifest = index.record(for: ref.key)?.manifest,
               let entry = routedTypes.entry(for: manifest.typeToken) else { return true }
         switch entry.canonicalStore {
@@ -7051,6 +7081,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func projectRoutedItemIfPermitted(
         key: MeshRoutedItemKey, manifest: MeshRoutedManifest, seenAt: Date
     ) -> MeshRoutedProjectionVerdict {
+        // Delete-all is running: refuse ABOVE the offer, so the item is not even stamped with a
+        // generation. The funnel drops the transcript at its start and destroys the routed
+        // ciphertext near its end, and every step between them is a suspension point a rising
+        // access edge can land in (P6 item 4 fix review, P2-1). Retryable and uncharged, because
+        // this is the gate's own answer for every item rather than a fact about this one.
+        guard !privacyWipeInProgress else {
+            FernletAuditLog.log("mesh.routedProjection.privacyWipeInProgress")
+            return .refusedForNow
+        }
         noteRoutedItemOffered(key)
         let verdict = routedProjectionVerdict(key: key, manifest: manifest, seenAt: seenAt)
         // The ONE place both of item 5's marks are written, because this is the one place the
@@ -7470,7 +7509,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// What else bounds a hostile origin: the per-peer session frame budget
     /// (`sessionFramesPerPeer` 1056, and a 9 065-byte item is one chunk), the store's item and byte
     /// caps, the replay window, the 500-row transcript ring and `maxSeenIDs` (2000).
-    private func allowIncomingRoutedText(_ messageID: UUID, from manifest: MeshRoutedManifest) -> Bool {
+    /// Internal rather than private so its three legs have a behavioural cell rather than only a
+    /// constants pin: making the body `return true` used to redden nothing (P6 item 4 fix review,
+    /// finding P2-4). **Not a door** — no caller outside this type, and the one shipping caller is
+    /// the text arm.
+    func allowIncomingRoutedText(_ messageID: UUID, from manifest: MeshRoutedManifest) -> Bool {
         let budget = MeshRoutedOriginQuotaKey(manifest)
         var accepted = routedOriginTextQuota[budget] ?? []
         if accepted.contains(messageID) { return true }
@@ -7537,6 +7580,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// items sorted first occupy every rising edge until expiry, for both arms, and a malformed
     /// text item costs its origin ~600 bytes. ``MeshRoutedProjectionVerdict`` is where each refusal
     /// is classified, and its doc carries the honesty test the memory-only mark has to pass.
+    ///
+    /// **What the memory-only mark costs at a restart, stated** (P6 item 4 fix review, P3-7): on the
+    /// first rising access edge of a fresh process every final-refusing item is re-derived once and
+    /// re-marked — bounded to ONE pass per launch, never permanent (a malformed or id-mismatch
+    /// refusal costs an unwrap plus a decode; author, gate and quota refusals are pre-unwrap). The
+    /// starvation half of that is item 5's: `MeshRoutedRetryPlan` arms a session cut on the first
+    /// pass and charges every ref held before it to the retry share, so a genuinely new item is
+    /// still projected on that very first pass.
     private func noteRoutedItemProjected(_ key: MeshRoutedItemKey) {
         guard routedProjectedItems.count < MeshRoutedStoreFormat.maxItems else {
             FernletAuditLog.log("mesh.routedProjection.projectedSetFull")
@@ -11179,7 +11230,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Coerces a peer-supplied photo payload before it reaches the PERSISTENT wall cache (R3/R5):
     /// moderated sender name, moderated + capped session participants, capped mesh name.
     ///
-    /// Its one caller is now ``routedCanonicalDispatch(_:author:manifest:now:)``, which hands it a
+    /// Its one caller is now ``routedCanonicalDispatch(_:author:manifest:)``, which hands it a
     /// payload built from an opened routed body — so the encrypted branch below is unreachable for
     /// routed input. It stays: the `guard let imageData else { return payload }` fallback would
     /// otherwise return an UNSANITIZED payload for a legacy-shaped one, which is the wrong direction
@@ -11523,11 +11574,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// re-check emptiness — because the byte bound can empty a message the Character cap admitted,
     /// and minting an empty body would echo an empty row the user cannot dismiss.
     ///
+    /// **The byte bound TRUNCATES rather than refuses, and it is audited when it bites** (P6 item 4
+    /// fix review, P3-4). "Never a surprise refusal for honest input" is bought with a silent edit:
+    /// the bounded text is what is minted *and* what the local echo shows, so sender and recipient
+    /// agree and the user sees the shortened row with no label. Only a draft whose whole allowance
+    /// is one grapheme cluster becomes `.empty`. The audit line is the honest half — a diagnostic,
+    /// never user copy, and never a second refusal path.
+    ///
     /// **It RETURNS its outcome and publishes nothing.** `routedShareRefusal` is the photo path's
     /// seam and is consumed by one `.alert` on `DisposableCameraView` — the very view the chat panel
     /// is presented *over*, so a refusal published there would fire an alert on a covered presenter
     /// — and every one of its sentences is photo-worded. The panel shows the non-staged outcomes
-    /// inline instead, beneath the compose bar, and keeps the draft so "send again" is the retry.
+    /// inline instead, at the top of the compose bar (i.e. directly ABOVE the text field, between it
+    /// and the transcript), and keeps the draft so "send again" is the retry.
     ///
     /// - Parameter rawText: What the user typed.
     /// - Returns: what happened, including `.noDestinations` — which for text is **not** silent:
@@ -11541,8 +11600,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.routedShare.textBlockedAgeGated")
             return noteTextSendOutcome(.ageGated)
         }
-        let text = MeshRoutedTextBody.boundedText(SessionMessageStore.sanitize(rawText))
+        let sanitized = SessionMessageStore.sanitize(rawText)
+        let text = MeshRoutedTextBody.boundedText(sanitized)
         guard !text.isEmpty else { return noteTextSendOutcome(.empty) }
+        if text != sanitized {
+            FernletAuditLog.log(
+                "mesh.routedShare.textByteBounded",
+                context: ["characters": String(sanitized.count),
+                          "bytes": String(sanitized.utf8.count)]
+            )
+        }
         let id = UUID()
         let now = Date()
         guard let typeToken = routedTypes.token(forCanonicalStore: .sessionTranscript) else {
@@ -11614,15 +11681,42 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The ONE place the transcript is dropped, so the generation cannot be bumped by one clear and
     /// not another (P6 item 2 fix review, finding P2-3).
     ///
-    /// Two callers, both real: session end (``clearSessionMessagesIfSessionEnded()``) and the next
-    /// session's formation (``noteSlotCommittedForShop(slot:identity:)``). Bumping here rather than
-    /// at each site is the difference between "the projection agrees with the clear" and "the
-    /// projection agrees with one of the clears".
+    /// **Three callers, all real:** session end (``clearSessionMessagesIfSessionEnded()``), the next
+    /// session's formation (``noteSlotCommittedForShop(slot:identity:)``), and the app's delete-all
+    /// funnel through ``beginPrivacyWipe()``. The third was a fourth, bypassing clear until P6 item
+    /// 4's fix review found it (`FernletStore.clearInboxesAndExports` called
+    /// `sessionMessages.clear()` directly, so the generation did not move and the just-wiped
+    /// messages could re-project). Bumping here rather than at each site is the difference between
+    /// "the projection agrees with the clear" and "the projection agrees with one of the clears".
     private func clearSessionTranscript() {
         sessionMessages.clear()
         // R2/R3: a monotone counter bounded by the number of sessions one process holds; it names
         // a generation, it is never an index into anything.
         transcriptGeneration += 1
+    }
+
+    /// The app's "delete everything" funnel has started: drop the live transcript through the ONE
+    /// clear funnel, and refuse every routed projection until ``endPrivacyWipe()`` (P6 item 4 fix
+    /// review, finding P2-1).
+    ///
+    /// Called at the TOP of `FernletStore.deleteAllData(includingHealthKitSamples:)`, before its
+    /// first suspension point, and paired with `endPrivacyWipe()` in a `defer` so no exit leaves the
+    /// projection switched off for the process. See ``privacyWipeInProgress`` for why the window
+    /// between the transcript clear and the ciphertext purge needed closing at all.
+    ///
+    /// It is the transcript's clear, not the routed store's: the sealed store's own wipe
+    /// (`MeshRoutedStore.wipeForDeleteAll`) stays where it is, later in the same funnel.
+    public func beginPrivacyWipe() {
+        privacyWipeInProgress = true
+        FernletAuditLog.log("mesh.privacyWipe.began")
+        clearSessionTranscript()
+    }
+
+    /// The delete-all funnel has finished (completely or not): the routed projection may run again.
+    public func endPrivacyWipe() {
+        guard privacyWipeInProgress else { return }
+        privacyWipeInProgress = false
+        FernletAuditLog.log("mesh.privacyWipe.ended")
     }
 
     // MARK: - Envelope sending

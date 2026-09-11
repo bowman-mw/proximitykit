@@ -1454,11 +1454,13 @@ actually run — a device with no mesh or no ledger keeps
 ``MeshIntroductionRejection/divergentEpoch``, and the parameter's default is `false` so a caller that
 forgets it fails closed.
 
-**Content merges by ID-keyed union, and the gates re-run at the receiving member** (P4 item 7, plan
-§10.3 + §21.3). ``MeshContentLedger`` is the content twin of ``MeshMembershipLedger``: three
-``MeshContentSet``s — photos by manifest ID, messages by message ID, hearts by gift ID — each
-deduped by id, sorted by one total order and capped at the same bound its live surface already
-applies (`SessionMessageStore.maxMessages`, `ProximityHeartLedger.maxStoredHearts`,
+**Content merges by key-keyed union, and the gates re-run at the receiving member** (P4 item 7,
+plan §10.3 + §21.3). ``MeshContentLedger`` is the content twin of ``MeshMembershipLedger``: three
+``MeshContentSet``s — photos, messages and hearts — each deduped by ``MeshContentKey``, i.e. by
+`(author, id)` and **never by the id alone** (P6 item 4's fix review; the id is its author's own
+choice and a manifest publishes it to the whole roster before the content arrives, so an id-only key
+let one admitted member spend another's dedup slot at a third device), sorted by one total order and
+capped at the same bound its live surface already applies (`SessionMessageStore.maxMessages`, `ProximityHeartLedger.maxStoredHearts`,
 `FriendPhotoLimits.maxManifestEntries`, reused rather than restated). Union is commutative,
 associative and idempotent at the cap as well as below it, so an N-way partition tree converges with
 pairwise merges only and no special case. Nothing conflicting can exist — only missing — so nothing
@@ -1638,17 +1640,19 @@ resumption, and the real fix is a signed key-advertisement frame, handed forward
 a length-prefixed JSON header plus the message's **raw UTF-8** — and its own narrowed cap
 (`16 × SessionMessageStore.maxTextLength` + a 1 KiB text header allowance + the seal's overhead =
 9 065 B), because the product's 500-`Character` limit is unbounded in bytes: a grapheme cluster is.
-It has a **fourth** hostile framing shape the photo body does not, and it is the one a copy-paste
-gets wrong — `String(decoding:as:)` cannot fail, it substitutes U+FFFD, and U+FFFD survives the
-message sanitizer, so invalid UTF-8 is refused with a failable decoder rather than repaired. The
-header carries a display-name CLAIM exactly as the photo header does, deliberately: the admission
-ledger holds no name at all, so the identity is bound by the signature and the ledger while the name
-is display copy the store re-moderates.
+It has **two** hostile shapes the photo body does not. The fourth is the one a copy-paste gets
+wrong — `String(decoding:as:)` cannot fail, it substitutes U+FFFD, and U+FFFD survives the message
+sanitizer, so invalid UTF-8 is refused with a failable decoder rather than repaired. The fifth is a
+decoded `senderName` above `MeshRoutedTextBody.maxSenderNameUTF8ByteCount` (128 B), refused on the
+WIRE and not only bounded at the sender, because the header allowance's whole arithmetic is over
+that bound. The header carries a display-name CLAIM exactly as the photo header does, deliberately:
+the admission ledger holds no name at all, so the identity is bound by the signature and the ledger
+while the name is display copy the store re-moderates.
 
 Three things about text are not the photo row's rules. `sendTempMessage(_:)` **returns**
 ``MeshTextSendOutcome`` and publishes nothing — `routedShareRefusal`'s one consumer is an alert on
 the view the chat panel covers, and its copy is photo-worded — so the panel shows a non-staged
-outcome inline and keeps the draft. `.noDestinations` therefore **speaks** for text where it is
+outcome inline at the top of the compose bar — above the text field — and keeps the draft. `.noDestinations` therefore **speaks** for text where it is
 silent for photos: the founding window is real, destinations are frozen at the mint, and there is no
 offline queue, so a message that reached nobody can never acquire a recipient later. And the local
 echo is appended only on `.staged`, because a row in a transcript is a claim that it was sent and the
@@ -1664,6 +1668,21 @@ mesh AND the item's own transcript generation. The third leg exists because the 
 Only the first is retryable; a mesh left and a generation moved are monotone, so those items leave
 the retry list — which is ``MeshRoutedProjectionVerdict``'s job, and the reason the projected mark
 now means "handed on, **or** refused for a reason that cannot change".
+
+Two more facts about the transcript came out of item 4's own fix review. **A row's identity is
+`(author, id)`, never the id alone** (``MeshContentKey``): a routed item's id is chosen freely by
+its origin, the routed index's key is `(originFingerprint, itemID)`, and the signed manifest
+publishing that id reaches the whole roster-at-creation **in the clear** before the content does —
+so an id-only dedup let an admitted member mint a same-id text, win the race to a partitioned third
+device, and have the genuine message land `alreadyHeld` → marked final → gone for the session, while
+its sender saw `.staged`. The key is local (no wire field, no golden, no persisted surface) and
+§10.3's order did not move, because it already ranked `senderFingerprint` above the id. And **the
+whole projection refuses, for both arms, while the app's delete-all funnel is running**
+(``MeshNetworkManager/privacyWipeInProgress``): the funnel drops the live transcript at its top and
+destroys the routed ciphertext near its end, so a rising access edge in between used to re-project
+items whose bytes the user had just asked to have destroyed. That refusal is above the offer,
+retryable and charged to no item — a wipe is the gate's own answer for every item, never a fact
+about one of them.
 
 The RECEIVER is unchanged down to and including the recipient receipt — the photo stage is final on
 durable ciphertext — and the plaintext is a later, separate pass over already-final bytes:
@@ -1768,6 +1787,7 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshDeliveryOutcome``
 - ``MeshDeliveryRestoreRefusal``
 - ``MeshDeliveryRestoreOutcome``
+- ``MeshContentKey``
 - ``MeshRoutedManifestFormat``
 - ``MeshRecipientKeyWrap``
 - ``MeshRoutedManifest``
