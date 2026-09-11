@@ -372,6 +372,34 @@ why the set is its own type rather than a `MeshMembershipRecordSet`: the record 
 earliest-wins and silently keeps one of two rows, which for a key means wrapping a content key to a
 device that may not hold it.
 
+**Where the advertisement travels, and what it converts** (P6 item 1 pass B). It rides its own
+additive frame, `MeshKeyAgreementPayload` / `PayloadType.meshKeyAgreement`, carrying the sender's
+whole verified set (at most sixteen rows) rather than one row: relaying the set is what lets A's key
+reach C through B, so two members that never link can still address each other. The frame is
+**unsigned and unsealed** — every element is signed by its own subject and re-verified at the
+receiver against the receiver's own admissions, so a relay can add nothing, and unlike the inventory
+digest this frame spends no budget of the receiver's. It goes out only to **named, committed**
+recipients: `broadcastMembershipFrame`'s nil-recipient path writes every slot, uncommitted ones
+included, and a frame that enumerates the roster's fingerprints and public keys must never reach an
+unauthenticated peer in range. Six doors, all of them link-opens: the three ask doors
+(`beginMergeExchange`, `askOneReconnectedPeer`, `handleAdmissionGrant`), the two non-ask membership
+doors (`readvertiseMergeProof`, which is the one door that fires exactly when records crossed and is
+therefore what makes a merged-in member addressable, and `attemptLedgerAdoption`), and the
+admitter's `grantAdmission`, which exists because an admission is deliberately not a reconnect —
+without it a fresh pair's joiner could never address the member that let it in. The send is bounded
+**once per (peer, set version)**: not spent-forever like the record re-gossip, which would stop a
+peer passing on a key it learned in between, and not unbounded like the late-reconnect ask. The
+receive door sits in the membership dispatch family, outside the routed refusal budget and the
+replay window (it is a statement about state, not a delivery), with its own per-sender frame bound —
+it is the first frame in that family whose per-frame cost can be sixteen signature verifications.
+On restore the persisted rows are **re-proved** against the ledger adoption just proved and dropped
+by name if they no longer verify. What all of that converts, stated exactly: of the three refusals
+D-13.22 named, the **resumption** becomes a delivery, while the **star** and the **over-cap roster**
+become a successful mint whose delivery waits for a link or a departure hand-off — a destination
+never forwards an item it holds, because `relayInFlight` is increment 2's. The mint's own precedence
+is present-tense-first, and two verified sources that disagree refuse by name (`keyMismatch`) rather
+than choosing.
+
 **An epoch is a value, not a number** (plan §8.4, P3 item 4). `MeshEpochRef` is a Lamport counter
 (cap 4096, and a counter *at* the cap refuses to mint a successor rather than trapping — a mesh that
 cannot rotate must end rather than keep serving a key it cannot retire), an `epochID`, and the

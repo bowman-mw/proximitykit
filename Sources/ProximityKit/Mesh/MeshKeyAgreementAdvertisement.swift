@@ -114,6 +114,122 @@ nonisolated struct SignedKeyAgreementAdvertisement: Codable, Equatable, Sendable
     }
 }
 
+// MARK: - MeshKeyAgreementPayload
+
+/// The wire frame that carries a batch of advertisements (`fernlet.mesh.key-agreement.v1`).
+///
+/// **A batch, and deliberately not one frame per row.** Relaying the whole verified set is the star
+/// fix: A's own advertisement reaches C through B because B folded it and re-states it, so a member
+/// two devices never link can still be addressed. Sixteen frames per link-open would be sixteen
+/// times the envelope overhead for identical bytes.
+///
+/// **The frame is not signed, and that is a decision.** Every element is signed by its own subject
+/// under its admitted key and re-verified at the receiver against the receiver's OWN
+/// `ledger.admissions`, so a relay can add nothing: a forged envelope carrying genuine rows is
+/// exactly a genuine relay, and a forged envelope carrying forged rows is sixteen refusals. Compare
+/// `MeshInventoryDigestPayload`, which IS signed precisely because it spends the receiver's
+/// re-gossip budget — this frame spends no budget of the receiver's beyond the per-sender bound the
+/// receive door charges it. ``senderFingerprint`` is therefore **audit-only and never trusted**; the
+/// authenticated sender is the committed slot's fingerprint.
+nonisolated struct MeshKeyAgreementPayload: Codable, Equatable, Sendable {
+
+    /// The mesh the batch belongs to. A batch for another mesh is refused before any element is
+    /// verified, and every element carries its own `meshID` inside its signed bytes besides.
+    let meshID: UUID
+
+    /// The advertisements, clamped to ``MeshKeyAgreementAdvertisementSet/capacity`` on the
+    /// memberwise initializer **and** on decode — the sender's whole set fits by construction, so
+    /// anything longer is a peer growing this device's work.
+    let advertisements: [SignedKeyAgreementAdvertisement]
+
+    /// Who says it sent the batch. Audit only: the authority is the committed slot's fingerprint,
+    /// and nothing in the fold reads this field.
+    let senderFingerprint: String
+
+    /// Builds a frame, clamping the batch to the set's own capacity.
+    ///
+    /// The clamp is here rather than only at the decoder so both doors share it, the
+    /// ``MeshEpochHeadsPayload`` idiom (Power of 10 rules 2/3).
+    ///
+    /// - Parameters:
+    ///   - meshID: The mesh the batch belongs to.
+    ///   - advertisements: The rows to relay.
+    ///   - senderFingerprint: The sender, for the audit line only.
+    init(meshID: UUID, advertisements: [SignedKeyAgreementAdvertisement], senderFingerprint: String) {
+        self.meshID = meshID
+        self.advertisements = Array(advertisements.prefix(MeshKeyAgreementAdvertisementSet.capacity))
+        self.senderFingerprint = senderFingerprint
+    }
+
+    /// Decodes with the same clamp the memberwise initializer applies — the batch arrives from a
+    /// peer, so bounded growth is a property of the wire format and not only of the writer.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            meshID: try container.decode(UUID.self, forKey: .meshID),
+            advertisements: try container.decode(
+                [SignedKeyAgreementAdvertisement].self, forKey: .advertisements
+            ),
+            senderFingerprint: try container.decode(String.self, forKey: .senderFingerprint)
+        )
+    }
+
+    /// Whether the frame's own fields have the widths the format fixes. Checked on untrusted bytes
+    /// before any element is verified; each element checks its own widths in turn.
+    var isWellFormed: Bool {
+        !advertisements.isEmpty
+            && advertisements.count <= MeshKeyAgreementAdvertisementSet.capacity
+            && !senderFingerprint.isEmpty
+            && senderFingerprint.utf8.count <= MeshMembershipEventFormat.maxFingerprintLength
+    }
+}
+
+// MARK: - MeshKeyAdvertisementReceiveBounds
+
+/// What one sender may make this device do with key advertisements in one session.
+///
+/// The membership-event family has **no receive-side rate limit at all** — the digest and the
+/// epoch-heads doors accept unbounded frames per session, and only their *send* sides are
+/// once-per-peer. This frame is the first one in that family whose per-frame cost can be sixteen
+/// Ed25519 verifications rather than one, so it carries its own bound rather than inheriting the
+/// family's absence of one.
+///
+/// It is **not** the routed refusal budget (`MeshRoutedRefusalBudget`): that budget is charged
+/// through `refuseRoutedFrameBeforeStore` against a `RoutedIngestContext`, and an advertisement
+/// never enters the routed dispatch at all — it is digest-family traffic (D-5.12/D-6.10), a
+/// statement about state rather than a delivery.
+nonisolated enum MeshKeyAdvertisementReceiveBounds {
+
+    /// Frames one sender may have accepted per session.
+    ///
+    /// Derived, not chosen: an honest sender re-states its set only when the set CHANGED, and a
+    /// grow-only set of at most ``MeshKeyAgreementAdvertisementSet/capacity`` rows can change at
+    /// most twice per member — once when the row is folded, once if that member is later marked
+    /// conflicted. Twice the capacity is therefore the honest ceiling on distinct versions a peer
+    /// can have to tell this device about; past it the frames carry nothing new, and they are
+    /// refused by name rather than dropped.
+    static let framesPerSenderPerSession = MeshKeyAgreementAdvertisementSet.capacity * 2
+}
+
+// MARK: - MeshKeyAdvertisementSendBounds
+
+/// What the send side may spend on this device's own row.
+///
+/// The self row is minted once, at the moment a ledger that admits this device is armed. The
+/// sender's re-assertion exists because that one moment can fail — a save the store refused, a crash
+/// between the arm and the first save — and every other durable membership fact in this module has a
+/// repair path. But the repair must be **bounded**, and the reason is measured, not theoretical: an
+/// unbounded one mints an Ed25519 signature and attempts a sealed context write on **every
+/// link-open, for the life of a session whose store cannot be written**, which is per-reconnect work
+/// on a device that is by definition already in trouble (a locked store, a corrupt file). A handful
+/// of attempts is the difference between "repairs a refused save" and "re-tries a broken disk
+/// forever".
+nonisolated enum MeshKeyAdvertisementSendBounds {
+
+    /// How many times the sender may re-attempt the self-mint in one session.
+    static let selfMintAttemptsPerSession = 3
+}
+
 // MARK: - MeshKeyAgreementAdvertisementSet
 
 /// The bounded, grow-only, **conflict-refusing** set of verified key advertisements one device
@@ -173,10 +289,13 @@ nonisolated struct MeshKeyAgreementAdvertisementSet: Codable, Equatable, Sendabl
 
     /// Builds a set from advertisements in any order, deduplicating by member, sorting and capping.
     ///
-    /// **The at-rest door.** Every row in a blob this build wrote came through
-    /// ``MeshKeyAdvertisementFold``; this initializer exists so the sealed context can be decoded
-    /// and so tests can state a starting position. It is not a verification seam and never was —
-    /// like ``MeshMembershipRecordSet``, "a value in a set is not a verified value".
+    /// **The at-rest door, and the only caller that may be shipping code is the decoder below.**
+    /// Every row in a blob this build wrote came through ``MeshKeyAdvertisementFold``; this
+    /// initializer exists so the sealed context can be decoded and so tests can state a starting
+    /// position. It is not a verification seam and never was — like ``MeshMembershipRecordSet``,
+    /// "a value in a set is not a verified value" — so a receive door that reached for it would be
+    /// making conflict decisions on unverified bytes. `theAdvertisementSetNamesNoSilentMergeDoor`
+    /// is the wall: no shipping file outside this one may name this initializer.
     ///
     /// Two rows for one member with **different** keys mark that member conflicted here too, so a
     /// hand-built or decoded set cannot be more trusting than the fold.
@@ -288,12 +407,22 @@ nonisolated struct MeshKeyAgreementAdvertisementSet: Codable, Equatable, Sendabl
 
     /// Deduplicates by member (earliest wins), marks any member that arrived with two different
     /// keys, sorts by the total order and keeps the first ``capacity``.
+    ///
+    /// **The two fields are capped by ONE rule, the surviving rows** (pass A review, finding 1).
+    /// Capping them separately — rows by instant, marks alphabetically — could drop the
+    /// alphabetically-last mark while its row survived the row cap, which would make a conflicted
+    /// member addressable again: fail-open, in the one direction this type forbids. Deriving the
+    /// marks from the survivors is bounded for free (at most ``capacity`` of them), and a mark for
+    /// a member with no row is dropped harmlessly, because ``keyAgreementPublicKey(for:)`` already
+    /// answers nil for a member the set holds nothing for.
     private static func normalized(
         _ advertisements: [SignedKeyAgreementAdvertisement],
         _ conflictedFingerprints: [String]
     ) -> (ordered: [SignedKeyAgreementAdvertisement], conflicted: [String]) {
         var earliest: [String: SignedKeyAgreementAdvertisement] = [:]
-        var conflicts = Set(conflictedFingerprints)
+        // R2: bounded by `maxInputAdvertisements` — the marks arrive from the at-rest blob exactly
+        // as the rows do, so the input bound is the same one.
+        var conflicts = Set(conflictedFingerprints.prefix(maxInputAdvertisements))
         // R2: bounded by `maxInputAdvertisements`.
         for advertisement in advertisements.prefix(maxInputAdvertisements) {
             guard let held = earliest[advertisement.memberFingerprint] else {
@@ -308,7 +437,9 @@ nonisolated struct MeshKeyAgreementAdvertisementSet: Codable, Equatable, Sendabl
             }
         }
         let sorted = earliest.values.sorted(by: precedes)
-        return (Array(sorted.prefix(capacity)), Array(conflicts.sorted().prefix(capacity)))
+        let kept = Array(sorted.prefix(capacity))
+        let surviving = Set(kept.map(\.memberFingerprint))
+        return (kept, conflicts.filter { surviving.contains($0) }.sorted())
     }
 
     /// The total order the set sorts and truncates by: earliest instant, then member, then the key
@@ -370,6 +501,18 @@ nonisolated enum MeshKeyAdvertisementFoldOutcome: Equatable, Sendable {
         case .conflicted: return "mesh.keyAgreement.conflicted"
         case .refusedSetFull: return "mesh.keyAgreement.setFull"
         case .refused: return "mesh.keyAgreement.rejected"
+        }
+    }
+
+    /// The audit context for this outcome: the verifier's own frozen diagnostic for a refusal, and
+    /// nothing at all for the rest.
+    ///
+    /// **Counts only, never a fingerprint** — the module's audit rule. The member each decision is
+    /// about is carried in the value for the caller's own use, and deliberately not into the log.
+    var auditContext: [String: String] {
+        switch self {
+        case .folded, .alreadyHeld, .conflicted, .refusedSetFull: return [:]
+        case .refused(let rejection): return ["reason": rejection.diagnosticDescription]
         }
     }
 
@@ -447,6 +590,51 @@ nonisolated enum MeshKeyAdvertisementFold {
         )
     }
 
+    /// Re-proves a set read back from disk against the ledger this device holds NOW, keeping only
+    /// the rows that still verify.
+    ///
+    /// **Why a restore is not a load.** The rows come out of a sealed file, so the file seal proves
+    /// they were written by this install — and nothing more. `MeshLedgerAdoption.adopt` re-verifies
+    /// the whole ledger from the self-admitted root and can **narrow** the admission set beneath a
+    /// set that was folded against a wider one; a departure or a removal in the same blob narrows
+    /// the derived roster the verifier's membership check reads. So a persisted row can be a row
+    /// this device could no longer prove, and "a durable membership fact is re-proved on restore,
+    /// never trusted from the file" is the module's rule. At most sixteen Ed25519 verifications,
+    /// once per launch.
+    ///
+    /// A row that fails is **dropped and named** (`mesh.keyAgreement.rejected`), never kept: a key
+    /// this device cannot prove is a key it must not wrap content to. The conflict marks ride along
+    /// for the rows that survive — normalization drops a mark whose row is gone, which is exactly
+    /// right, because an absent row is unaddressable anyway.
+    ///
+    /// - Parameters:
+    ///   - persisted: The set decoded from the sealed session context.
+    ///   - verifier: The ledger this device holds after adoption.
+    /// - Returns: The re-proved set, one outcome per persisted row, and whether anything was lost.
+    static func restoring(
+        _ persisted: MeshKeyAgreementAdvertisementSet,
+        verifiedBy verifier: MeshMembershipRecordVerifier
+    ) -> MeshKeyAdvertisementFoldResult {
+        var kept: [SignedKeyAgreementAdvertisement] = []
+        var outcomes: [MeshKeyAdvertisementFoldOutcome] = []
+        // R2: bounded by the set's own capacity.
+        for advertisement in persisted.all {
+            switch verifier.verify(advertisement) {
+            case .verified:
+                kept.append(advertisement)
+                outcomes.append(.folded(advertisement.memberFingerprint))
+            case .refused(let rejection):
+                outcomes.append(.refused(rejection))
+            }
+        }
+        let set = MeshKeyAgreementAdvertisementSet(
+            advertisements: kept, conflictedFingerprints: persisted.conflictedFingerprints
+        )
+        return MeshKeyAdvertisementFoldResult(
+            set: set, outcomes: outcomes, changed: set != persisted
+        )
+    }
+
     /// Folds one advertisement: the pre-filter, then verification, then the decision.
     private static func folding(
         _ advertisement: SignedKeyAgreementAdvertisement,
@@ -454,11 +642,13 @@ nonisolated enum MeshKeyAdvertisementFold {
         verifiedBy verifier: MeshMembershipRecordVerifier
     ) -> MeshKeyAdvertisementFoldOutcome {
         let fingerprint = advertisement.memberFingerprint
-        if let held = set.advertisement(for: fingerprint),
-           held.keyAgreementPublicKey == advertisement.keyAgreementPublicKey,
-           held.advertisedAt == advertisement.advertisedAt {
-            // Identical to a row this device already verified: skipped before spending a
-            // verification, which is what bounds the cost of a replayed batch.
+        if set.advertisement(for: fingerprint) == advertisement {
+            // Identical to a row this device already verified — every field, the mesh id and the
+            // signature bytes included: skipped before spending a verification, which is what
+            // bounds the cost of a replayed batch. Comparing a SUBSET of the fields (pass A review,
+            // finding 3) would report a foreign-mesh row, or one carrying junk where a signature
+            // belongs, as `alreadyHeld`: unaudited, uncharged and indistinguishable from an honest
+            // replay, which is exactly the work a per-sender bound exists to charge for.
             return .alreadyHeld(fingerprint)
         }
         switch verifier.verify(advertisement) {

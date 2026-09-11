@@ -1638,6 +1638,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         membershipVerifier = nil
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
+        clearKeyAdvertisementState()
         routedSweptFingerprints.removeAll()
         routedSweepsDeferredFingerprints.removeAll()
         clearRoutedDrainState()
@@ -1927,6 +1928,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if let slot = slots.first(where: { $0.fingerprint == request.requesterFingerprint }) {
             await sendEnvelope(.meshAdmissionGrant, encodable: grant, via: slot)
         }
+        // P6 item 1: the ADMITTER's own addressing, to the one peer it just admitted, AFTER the
+        // grant — the joiner has no ledger until it handles that grant, and a frame that arrives
+        // first is dropped `mesh.membershipEvent.droppedNoLedger`.
+        //
+        // This door exists because none of the five link-open doors fires on the admitter's side of
+        // a first grant: `handleAdmissionGrant(` is the JOINER's door, and
+        // `openBlipMergeIfReconnected(_:from:peer:)` deliberately opens no merge exchange for a
+        // peer that was not already on the roster ("admission ≠ reconnect"). So on a fresh pair the
+        // joiner's set reached the admitter and the admitter's set reached nobody, and the joiner
+        // stayed unable to address the member that admitted it until some later reconnect — which a
+        // two-device session may never have. Bounded by the same once-per-(peer, set version) rule,
+        // and to a NAMED recipient, so an uncommitted slot in radio range is never written to.
+        await sendKeyAdvertisements(to: [request.requesterFingerprint])
         broadcastMeshDescriptor()
     }
 
@@ -2016,7 +2030,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshEncryptedMetadata, .meshCoordinatorBeacon, .meshRotationSync, .meshKeyRotation, .meshKeyAck:
             dispatchGroupKeyPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
         case .meshMemberAdmission, .meshMemberDeparture, .meshMemberRemoval, .meshTerminated,
-             .meshInventoryDigest, .meshEpochHeads:
+             .meshInventoryDigest, .meshEpochHeads, .meshKeyAgreement:
             dispatchMembershipEventPayload(payloadType, plaintext: plaintext, decoder: decoder, slot: slot)
         case .meshRoutedManifest, .meshRoutedChunk, .meshCustodyReceipt, .meshRecipientReceipt,
              .meshRoutedInventoryDigest, .meshRoutedDrainAnswer:
@@ -2109,6 +2123,52 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// spend this device's bytes by re-sending digests. Cleared with the session, bounded by the
     /// roster cap (plan §10.5).
     @ObservationIgnored private var reGossipedToFingerprints: Set<String> = []
+
+    // MARK: Key advertisements (network migration P6 item 1, plan §11.3 item 13(ii))
+
+    /// The verified key advertisements this device holds — the mint resolver's durable third
+    /// source, and the value that rides the sealed session context.
+    ///
+    /// Every row in here has been through ``MeshKeyAdvertisementFold``, which verifies against
+    /// `membershipVerifier`'s own admission set before any fold decision; rows read back from disk
+    /// are **re-proved** against the adopted ledger at restore, because
+    /// `MeshLedgerAdoption.adopt` can narrow the admission set beneath a set that was folded
+    /// against a wider one. Grow-only and capped at
+    /// ``MeshKeyAgreementAdvertisementSet/capacity``; cleared at the same three session resets the
+    /// re-gossip budget is.
+    @ObservationIgnored private(set) var keyAdvertisements: MeshKeyAgreementAdvertisementSet = .empty
+
+    /// How many times this session's advertisement set has CHANGED — the send's bound.
+    ///
+    /// The send is once per (peer, version): a peer is told the set once, and told it again only
+    /// once the set has actually grown or gained a conflict mark. That is deliberately **not**
+    /// ``reGossipedToFingerprints``' spent-forever rule (D-7.30), whose residual is that a second
+    /// heal of the same pair inside one session exchanges nothing — for addressing that would mean
+    /// a peer that learned a third member's key in between could never pass it on. Nor is it
+    /// `askOneReconnectedPeer`'s absence of a bound, which would let a flapping link re-spend this
+    /// device's bytes on identical rows. Bounded by the set's own growth: a grow-only set of at
+    /// most sixteen rows can change at most twice per member.
+    @ObservationIgnored private var keyAdvertisementVersion = 0
+
+    /// The set version each peer has already been told, so an unchanged set is never re-sent.
+    /// Bounded by the roster cap (R3), cleared with the session.
+    @ObservationIgnored private var keyAdvertisementsSentVersion: [String: Int] = [:]
+
+    /// How many times the SENDER has re-attempted this device's own row this session, capped at
+    /// ``MeshKeyAdvertisementSendBounds/selfMintAttemptsPerSession``.
+    ///
+    /// The arm is the normal path and does not spend this. Bounding the repair is what stops a
+    /// session whose store cannot be written from minting a signature and attempting a sealed write
+    /// at every link-open — measured, not theoretical: unbounded, it tripled a full test run.
+    @ObservationIgnored private var keyAdvertisementSelfMintAttempts = 0
+
+    /// How many advertisement frames each sender has spent this session —
+    /// ``MeshKeyAdvertisementReceiveBounds/framesPerSenderPerSession``.
+    ///
+    /// The membership-event family has no receive-side rate limit at all, and this is the first
+    /// frame in it whose per-frame cost can be sixteen Ed25519 verifications rather than one, so it
+    /// carries its own bound. Bounded by the roster cap (R3), cleared with the session.
+    @ObservationIgnored private var keyAdvertisementFramesBySender: [String: Int] = [:]
 
     // MARK: Routed drain state (network migration P5 item 6, plan §11, §10.3)
 
@@ -2292,6 +2352,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
+        // Addressing is mesh-scoped exactly as the records are. The local row is minted at the
+        // founder's `seedFounderAdmission(meshID:)`, NOT here: this arms an EMPTY ledger, so a
+        // self-mint at this instant would be refused `signerNotAdmitted` by its own verifier.
+        clearKeyAdvertisementState()
         routedSweptFingerprints.removeAll()
         routedSweepsDeferredFingerprints.removeAll()
         clearRoutedDrainState()
@@ -3068,6 +3132,289 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         requestMergeRotationForDivergentHeads()
     }
 
+    // MARK: - Key advertisements (network migration P6 item 1, plan §11.3 item 13(ii))
+
+    /// Forgets this session's addressing: the set, the send bound and the per-sender receive bound.
+    ///
+    /// Called at the same three session resets the re-gossip budget is cleared at — a key
+    /// advertisement is scoped to one mesh exactly as a membership record is, and carrying one
+    /// across meshes would let a statement about member X in mesh A address X in mesh B.
+    private func clearKeyAdvertisementState() {
+        adoptKeyAdvertisements(.empty)
+        keyAdvertisementsSentVersion.removeAll()
+        keyAdvertisementFramesBySender.removeAll()
+        keyAdvertisementSelfMintAttempts = 0
+    }
+
+    /// The ONE place ``keyAdvertisements`` is assigned, so the set and its version cannot drift.
+    ///
+    /// A version that failed to move would leave a peer permanently un-told about a row this device
+    /// folded after it last spoke to that peer — which is the whole defect the version exists to
+    /// close.
+    ///
+    /// - Parameter set: The new set.
+    private func adoptKeyAdvertisements(_ set: MeshKeyAgreementAdvertisementSet) {
+        guard set != keyAdvertisements else { return }
+        keyAdvertisements = set
+        keyAdvertisementVersion += 1
+    }
+
+    /// Audits a fold's outcomes and keeps its set only once the bytes are on disk.
+    ///
+    /// **Durable before it counts** (plan §3.6): a set the store refused is rolled back out of
+    /// memory, so "verified" and "remembered" stay the same set — `writeSessionContext`'s own table,
+    /// one row lower. The set and its conflict marks are one value, so a rollback rolls both back
+    /// together and they cannot diverge. A fold that changed nothing spends no seal, which is what
+    /// keeps a replayed frame free.
+    ///
+    /// - Parameter result: What the fold decided.
+    /// - Returns: `true` only when the set changed AND the change is durable.
+    @discardableResult
+    private func commitKeyAdvertisementFold(_ result: MeshKeyAdvertisementFoldResult) -> Bool {
+        auditKeyAdvertisementOutcomes(result.outcomes)
+        guard result.changed else { return false }
+        let rollback = keyAdvertisements
+        adoptKeyAdvertisements(result.set)
+        guard persistSessionContext(addingEpochHead: nil) else {
+            adoptKeyAdvertisements(rollback)
+            FernletAuditLog.log("mesh.keyAgreement.notDurable")
+            return false
+        }
+        return true
+    }
+
+    /// Writes one audit line per outcome that has one.
+    ///
+    /// - Parameter outcomes: The outcomes to name. `alreadyHeld` deliberately has no token, which
+    ///   is what keeps an honest replay silent.
+    private func auditKeyAdvertisementOutcomes(_ outcomes: [MeshKeyAdvertisementFoldOutcome]) {
+        // R2: bounded by the frame's own clamp (`MeshKeyAgreementAdvertisementSet.capacity`).
+        for outcome in outcomes {
+            guard let token = outcome.auditToken else { continue }
+            FernletAuditLog.log(token, context: outcome.auditContext)
+        }
+    }
+
+    /// Mints and folds this device's OWN advertisement, once a ledger that admits it is armed.
+    ///
+    /// **After the admission, never beside it.** The self row goes through the same verifier as any
+    /// other — there is no privileged insert — so before the local admission is in
+    /// `ledger.admissions` it is refused `signerNotAdmitted`. That is why this is called from the
+    /// founder's `seedFounderAdmission(meshID:)` success path rather than from
+    /// `prepareMembershipLedger(meshID:founderSigningPublicKey:now:)`, which arms an EMPTY ledger,
+    /// and from `armJoinerLedger(_:now:)`'s adopted arm, where the bootstrap admission is already
+    /// filed.
+    ///
+    /// **Idempotent, and re-asserted by the sender.** Every other durable membership fact in this
+    /// module has a repair path; "once, and never again" would give this one none — a crash between
+    /// the arm and the first save, or a save the store refused, would leave the device permanently
+    /// unadvertised and therefore unaddressable to every member it is not linked to.
+    ///
+    /// - Parameters:
+    ///   - now: The signing instant, bound into the signature and read only by the set's order.
+    ///   - persisting: Whether to seal the new set here. The JOINER passes `false`: its next
+    ///     statement is `recordVerifiedAdmissionDurably()`, the one write that acknowledges the
+    ///     join, and `writeSessionContext` folds this value into it — sealing twice would put the
+    ///     joined ledger on disk *before* the call whose `false` is supposed to mean "the join did
+    ///     not happen", which is P3 item 6's rule. Its rollback unwinds the set with the ledger.
+    /// - Returns: `true` when a row was minted and folded.
+    @discardableResult
+    private func armOwnKeyAdvertisement(now: Date = Date(), persisting: Bool = true) -> Bool {
+        guard let verifier = membershipVerifier else { return false }
+        guard keyAdvertisements.advertisement(for: identity.localFingerprint) == nil else {
+            return false
+        }
+        do {
+            let mine = try SignedKeyAgreementAdvertisement.signed(
+                meshID: verifier.meshID, identity: identity, advertisedAt: now
+            )
+            let result = MeshKeyAdvertisementFold.folding(
+                [mine], into: keyAdvertisements, verifiedBy: verifier
+            )
+            guard persisting else {
+                auditKeyAdvertisementOutcomes(result.outcomes)
+                adoptKeyAdvertisements(result.set)
+                return result.changed
+            }
+            return commitKeyAdvertisementFold(result)
+        } catch {
+            // An advertisement this device could not SIGN is never folded, and never silent (R7).
+            FernletAuditLog.log(
+                "mesh.membershipEvent.signFailed",
+                context: ["type": PayloadType.meshKeyAgreement.rawValue,
+                          "error": String(describing: error)]
+            )
+            return false
+        }
+    }
+
+    /// Re-proves the persisted advertisement set against the ledger a restore just adopted.
+    ///
+    /// The file seal proves the rows were written by this install and nothing more, and
+    /// `MeshLedgerAdoption.adopt` can NARROW the admission set beneath a set that was folded
+    /// against a wider one — so a row that no longer verifies is dropped and named rather than
+    /// trusted. Deliberately does not write: a launch restore must not write the file it is still
+    /// reading, and the narrowed set reaches the disk at the restore's own next save point, because
+    /// `writeSessionContext` folds this value in on every save.
+    ///
+    /// - Parameters:
+    ///   - context: The restored context.
+    ///   - verifier: The ledger adoption proved.
+    private func restoreKeyAdvertisements(
+        from context: MeshSessionContext, verifiedBy verifier: MeshMembershipRecordVerifier
+    ) {
+        let result = MeshKeyAdvertisementFold.restoring(
+            context.keyAdvertisements, verifiedBy: verifier
+        )
+        // Refusals only: a launch that names every surviving row would write eight lines saying
+        // nothing happened, and the summary below already carries the counts.
+        auditKeyAdvertisementOutcomes(result.outcomes.filter { $0.isRefusal })
+        adoptKeyAdvertisements(result.set)
+        FernletAuditLog.log(
+            "mesh.sessionRestore.keyAdvertisementsRestored",
+            context: ["count": String(result.set.count), "dropped": String(
+                result.outcomes.filter { $0.isRefusal }.count
+            )]
+        )
+    }
+
+    /// Relays this device's whole verified advertisement set to named, COMMITTED peers — the
+    /// addressing half of plan §10.3's link-open exchange (P6 item 1).
+    ///
+    /// It is the fix for D-13.22's three mint refusals: destinations come from the DERIVED ROSTER,
+    /// which is durable, while the wrap keys came only from live slots and the memory-only session
+    /// roster, so a star topology, a roster above the slot cap and any resumption left the mint
+    /// unable to address a member it was not linked to at that instant.
+    ///
+    /// **It relays the whole set, not only the local row.** That is the star fix: A's own
+    /// advertisement reaches C through B, because B folded it and re-states it. Safe to relay
+    /// because every element is signed by its own subject and re-verified at C against C's own
+    /// `ledger.admissions` — a relay can add nothing. It signs nothing itself, so unlike
+    /// ``sendEpochHeads(to:)`` it has no `signFailed` arm.
+    ///
+    /// **`recipients` is not optional, and that is a security property**, not a style choice:
+    /// `broadcastMembershipFrame(_:_:to:)` writes to EVERY slot when it is nil, uncommitted slots
+    /// included, and this frame is unsealed by design and enumerates the whole roster's fingerprints
+    /// and public keys. A named set excludes every uncommitted slot by construction.
+    ///
+    /// **Bounded once per (peer, set version).** See ``keyAdvertisementVersion``.
+    ///
+    /// - Parameter recipients: The committed peers to tell.
+    func sendKeyAdvertisements(to recipients: Set<String>) async {
+        guard let mesh = currentMesh, let roster = membershipVerifier?.roster,
+              !recipients.isEmpty else { return }
+        repairOwnKeyAdvertisementIfMissing()
+        // Members only, which is two things at once: a committed slot is not necessarily an
+        // ADMITTED member (`beginMergeExchange` builds its set from `activeSlots`), and this frame
+        // enumerates the roster's fingerprints and public keys — so a peer the ledger does not name
+        // is told nothing. It is also what bounds the map below by the roster cap (R3) rather than
+        // by however many distinct peers a long session commits.
+        let members = recipients.filter { roster.contains(fingerprint: $0) }
+        let owed = members.filter { keyAdvertisementsSentVersion[$0] != keyAdvertisementVersion }
+        let batch = keyAdvertisements.all
+        guard !owed.isEmpty, !batch.isEmpty else { return }
+        let payload = MeshKeyAgreementPayload(
+            meshID: mesh.meshID, advertisements: batch,
+            senderFingerprint: identity.localFingerprint
+        )
+        // R3: bounded map — one entry per recipient, bounded by the roster cap.
+        for peer in owed { keyAdvertisementsSentVersion[peer] = keyAdvertisementVersion }
+        await broadcastMembershipFrame(.meshKeyAgreement, payload, to: owed)
+    }
+
+    /// The BOUNDED repair path for the self row (design check A6c).
+    ///
+    /// A device whose arm-time save was refused would otherwise be unadvertised for the life of the
+    /// mesh — and therefore unaddressable to every member it is not linked to, which is the whole
+    /// outage this family exists to close. But the repair cannot be free: minting is a signature and
+    /// a sealed write, and a store that refused once will refuse again, so an unbounded re-try
+    /// spends both on every link-open forever. Capped per session and named when spent.
+    private func repairOwnKeyAdvertisementIfMissing() {
+        guard keyAdvertisements.advertisement(for: identity.localFingerprint) == nil else { return }
+        guard keyAdvertisementSelfMintAttempts
+                < MeshKeyAdvertisementSendBounds.selfMintAttemptsPerSession else {
+            return
+        }
+        keyAdvertisementSelfMintAttempts += 1
+        guard armOwnKeyAdvertisement() else {
+            FernletAuditLog.log(
+                "mesh.keyAgreement.selfMintUnavailable",
+                context: ["attempt": String(keyAdvertisementSelfMintAttempts)]
+            )
+            return
+        }
+    }
+
+    /// Folds a peer's relayed advertisement batch (P6 item 1).
+    ///
+    /// **Outside the routed refusal budget, deliberately.** `refuseRoutedFrameBeforeStore` charges
+    /// `MeshRoutedRefusalBudget` against a `RoutedIngestContext`, and this frame never enters the
+    /// routed dispatch at all: it carries no content, no destination set, no type token and no item
+    /// id, it rides the MEMBERSHIP dispatch family and the membership verifier, and it is a
+    /// statement about state rather than a delivery — the three grounds D-5.12/D-6.10 keep the two
+    /// digest doors outside that budget on. The replay window is untouched for the same reason.
+    /// What it does NOT inherit is the membership family's absence of any receive-side limit: this
+    /// is the first frame there whose per-frame cost can be sixteen Ed25519 verifications, so it
+    /// carries its own per-sender bound.
+    ///
+    /// A refused row never aborts the batch: a relayed set legitimately holds rows this device
+    /// refuses — a member it has not yet been told was admitted, or one that has departed.
+    ///
+    /// - Parameters:
+    ///   - payload: The decoded batch, already clamped to the set's capacity.
+    ///   - senderFingerprint: The AUTHENTICATED sender — the committed slot's fingerprint, never
+    ///     the frame's own audit-only `senderFingerprint`.
+    private func receiveKeyAdvertisements(
+        _ payload: MeshKeyAgreementPayload, from senderFingerprint: String
+    ) {
+        guard let verifier = membershipVerifier, let mesh = currentMesh else { return }
+        guard payload.meshID == mesh.meshID else {
+            refuseKeyAdvertisementFrame(.foreignMesh)
+            return
+        }
+        guard payload.isWellFormed else {
+            refuseKeyAdvertisementFrame(.malformedRecord)
+            return
+        }
+        guard chargeKeyAdvertisementFrame(to: senderFingerprint) else { return }
+        commitKeyAdvertisementFold(MeshKeyAdvertisementFold.folding(
+            payload.advertisements, into: keyAdvertisements, verifiedBy: verifier
+        ))
+    }
+
+    /// Names a whole-frame refusal, under the same token one refused row gets.
+    ///
+    /// - Parameter rejection: Why the frame was refused.
+    private func refuseKeyAdvertisementFrame(_ rejection: MeshMembershipRecordRejection) {
+        FernletAuditLog.log(
+            "mesh.keyAgreement.rejected", context: ["reason": rejection.diagnosticDescription]
+        )
+    }
+
+    /// Charges one advertisement frame to its authenticated sender.
+    ///
+    /// Two bounds in one guard: the frames one sender may spend
+    /// (``MeshKeyAdvertisementReceiveBounds/framesPerSenderPerSession``) and the size of the map
+    /// itself, which a stream of distinct committed peers must not be able to grow past the roster
+    /// cap (R3) — the `reGossipedToFingerprints` idiom.
+    ///
+    /// - Parameter senderFingerprint: The committed slot's fingerprint.
+    /// - Returns: `false` when the sender's budget, or the map's own bound, is spent.
+    private func chargeKeyAdvertisementFrame(to senderFingerprint: String) -> Bool {
+        let spent = keyAdvertisementFramesBySender[senderFingerprint]
+        guard spent != nil || keyAdvertisementFramesBySender.count < MeshMembershipBounds.maxRosterMembers
+        else {
+            FernletAuditLog.log("mesh.keyAgreement.senderBudgetSpent")
+            return false
+        }
+        guard (spent ?? 0) < MeshKeyAdvertisementReceiveBounds.framesPerSenderPerSession else {
+            FernletAuditLog.log("mesh.keyAgreement.senderBudgetSpent")
+            return false
+        }
+        keyAdvertisementFramesBySender[senderFingerprint] = (spent ?? 0) + 1
+        return true
+    }
+
     /// Asks every committed peer what it holds — the **ask half** of plan §10.3's union exchange.
     ///
     /// No new frame: `fernlet.mesh.inventory-digest.v1` is the ask that already exists, and a
@@ -3101,6 +3448,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // The ROUTED half of the same exchange (§10.3, §22.1, item 6). Separate `Task`, like the
         // epoch half: a store that cannot say what it holds must not stop the membership ask.
         spawnHostPinned { [weak self] in await self?.sendRoutedInventory(to: recipients) }
+        // The ADDRESSING half (§11.3 item 13(ii), item 1). The resumption case is the whole
+        // reason: this door is the one a `.processRestart` merge always opens, and after a restart
+        // the ledger is back while the handshake-verified keys are not. `recipients` is
+        // `activeSlots` — a UWB distance rank capped at three — so on a roster larger than that
+        // this door reaches a SUBSET, and the rest are told at their own commit through
+        // `askOneReconnectedPeer(_:)`. A named residual, not a silent one.
+        spawnHostPinned { [weak self] in await self?.sendKeyAdvertisements(to: recipients) }
     }
 
     /// Ends the merge now in flight **iff** every peer it is still waiting on has matched.
@@ -3219,6 +3573,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard !peers.isEmpty, let verifier = membershipVerifier else { return }
         mergeWindow = mergeWindow?.advertised(verifier.localInventoryDigest)
         spawnHostPinned { [weak self] in await self?.sendInventoryDigest(to: peers) }
+        // The addressing half of the same occasion (item 1), and the one door that makes a MERGED
+        // member addressable: this fires exactly when records crossed, so the peer's ledger has
+        // just grown, and rows it refused as `signerNotAdmitted` minutes ago now verify there.
+        // Still no routed twin — bulk on a door sized for three asks is what the paragraph above
+        // refuses, and an advertisement carries no bulk.
+        spawnHostPinned { [weak self] in await self?.sendKeyAdvertisements(to: peers) }
         FernletAuditLog.log(
             "mesh.merge.proofReadvertised", context: ["peers": String(peers.count)]
         )
@@ -3270,7 +3630,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             let rejection = membershipVerifier?.insert(SignedAdmissionRecord(token: token))
             recordRejection(rejection, type: .meshMemberAdmission)
-            return rejection == nil
+            guard rejection == nil else { return false }
+            // P6 item 1: the founder is now on its own derived roster, which is the first instant
+            // its own key advertisement can verify. Both founder doors (`startNewMesh(name:)` and
+            // the harness arm) come through here, so the self row has one site rather than two.
+            armOwnKeyAdvertisement()
+            return true
         } catch {
             FernletAuditLog.log(
                 "mesh.membershipEvent.signFailed",
@@ -3308,6 +3673,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             membershipVerifier = verifier
             peerInventoryDigests.removeAll()
             reGossipedToFingerprints.removeAll()
+            clearKeyAdvertisementState()
             routedSweptFingerprints.removeAll()
             routedSweepsDeferredFingerprints.removeAll()
             clearRoutedDrainState()
@@ -3316,6 +3682,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             clearRoutedDeliveryHold()
             sweepRoutedExpiry(now: now)
             pendingAdoptionLedger = .empty
+            // P6 item 1: the bootstrap admission is filed, so this device can prove its own
+            // membership and its own key-agreement key — and it does so BEFORE
+            // `recordVerifiedAdmissionDurably()`, so the one save that acknowledges the join
+            // carries the addressing too. `handleAdmissionGrant`'s rollback unwinds both.
+            armOwnKeyAdvertisement(now: now, persisting: false)
             FernletAuditLog.log("mesh.membershipLedger.bootstrapped")
             return true
         case .refused(let refusal):
@@ -4808,8 +5179,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             contentID: itemID, roster: roster, selfFingerprint: identity.localFingerprint
         )
         guard target.destinationCount > 0 else { return .skipped(.noDestinations) }
-        guard let recipientKeys = routedDestinationKeys(for: target.destinations) else {
-            return .refused(.destinationNotAddressable)
+        let recipientKeys: [String: Data]
+        switch routedDestinationKeys(for: target.destinations) {
+        case .resolved(let keys): recipientKeys = keys
+        case .notAddressable: return .refused(.destinationNotAddressable)
+        case .mismatched: return .refused(.keyMismatch)
         }
         do {
             let minted = try mintOwnRoutedItem(
@@ -4828,39 +5202,133 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// The handshake-verified X25519 key for every destination, or nil when one is not addressable.
+    /// What the mint's key lookup answered.
     ///
-    /// **Verified sources only** (D-13.1): a live slot's `verifiedKeyAgreementPublicKey`, and the
-    /// session roster entry `recordSessionParticipant` wrote from that same verified value. Refused
-    /// by name: `MeshMember.keyAgreementPublicKey` from descriptor gossip, and the peer-relayed
-    /// claimed key a grant wrap uses — for a CONTENT wrap either would let an admitter substitute
-    /// its own key and read another member's photo.
+    /// Three cases rather than an optional, because a nil cannot tell "nobody has stated what key
+    /// that member holds" from "two verified sources state different ones" — and those reach the
+    /// user as two different refusals.
+    private enum RoutedDestinationKeys: Equatable {
+        /// Every destination resolved to exactly one verified key.
+        case resolved([String: Data])
+        /// A destination has no verified key at all → `destinationNotAddressable`.
+        case notAddressable
+        /// A destination has two verified keys that disagree, or is marked conflicted →
+        /// `keyMismatch`.
+        case mismatched
+    }
+
+    /// The verified X25519 key for every destination, or the named reason one could not be had.
     ///
-    /// Nil refuses the whole mint rather than minting to the addressable subset: destinations are
-    /// the full roster at creation by construction, and a subset target is P6's. The stated outage
-    /// that buys (D-13.22): a star topology, a roster above the slot cap, and any resumption — a
-    /// restart, an idle-lapse resume or a rejoin restores the ledger but not the memory-only
-    /// session roster.
-    private func routedDestinationKeys(for destinations: [String]) -> [String: Data]? {
-        var verified: [String: Data] = [:]
+    /// **Verified sources only** (D-13.1), now of TWO kinds:
+    ///
+    /// - **Tier A, present-tense:** a live slot's `verifiedKeyAgreementPublicKey`, and the session
+    ///   roster entry `recordSessionParticipant` wrote from that same handshake-verified value.
+    /// - **Tier B, durable (amended by P6 item 1, which closes D-13.22's resumption case):** a
+    ///   verified `fernlet.mesh.key-agreement.v1` advertisement — a member's own durable X25519
+    ///   key, signed under its admitted Ed25519 key, checked against `ledger.admissions` (the
+    ///   ledger's own trust root) and folded into a grow-only set on the sealed session context, so
+    ///   it survives the restart, idle-lapse resume or rejoin that restores the ledger and not the
+    ///   memory-only session roster. Read only for a fingerprint the CURRENT ledger still names.
+    ///
+    /// **Precedence is tier A**, because a handshake happening now is present-tense evidence.
+    /// **Both present and unequal is a refusal, never a choice** (`keyMismatch`): a durable key that
+    /// disagrees with the handshake is a substitution or a re-provisioned identity, and
+    /// `IdentityService.ensureProvisioned()` mints the signing and key-agreement pair together in
+    /// all four of its cases, so "same fingerprint, different X25519 key" is reachable by no
+    /// legitimate path. A member marked **conflicted** — two different keys, both verified — is the
+    /// same refusal for the same reason. Two tier-A sources that disagree refuse too; that is
+    /// unreachable by the same argument (`recordSessionParticipant` cannot update a key field), and
+    /// it is closed fail-closed rather than left to the last writer.
+    ///
+    /// Refused by name, unchanged: `MeshMember.keyAgreementPublicKey` from descriptor gossip, and
+    /// the peer-relayed claimed key a grant wrap uses — for a CONTENT wrap either would let an
+    /// admitter substitute its own key and read another member's photo.
+    ///
+    /// Still refuses the WHOLE mint rather than minting to the addressable subset: destinations are
+    /// the full roster at creation by construction, and a subset target arrives with item 6's
+    /// `.singleRecipient` flip. The outage that remains after item 1 (D-13.22, narrowed): a star
+    /// topology and a roster above the slot cap no longer refuse — they mint, and the unlinked
+    /// destinations' copies are custodied until a link forms or the origin departs — while a
+    /// resumption is now a delivery.
+    ///
+    /// - Parameter destinations: The mint's destination set.
+    /// - Returns: The resolved keys, or the named reason.
+    private func routedDestinationKeys(for destinations: [String]) -> RoutedDestinationKeys {
+        let handshake = handshakeVerifiedKeyAgreementKeys()
+        var resolved: [String: Data] = [:]
+        // R2: bounded by the destination cap.
+        for destination in destinations {
+            guard !keyAdvertisements.isConflicted(destination),
+                  !handshake.disagreeing.contains(destination) else {
+                FernletAuditLog.log("mesh.routedShare.keyMismatch")
+                return .mismatched
+            }
+            let advertised = advertisedKeyAgreementKey(for: destination)
+            if let live = handshake.keys[destination] {
+                guard advertised == nil || advertised == live else {
+                    FernletAuditLog.log("mesh.routedShare.keyMismatch")
+                    return .mismatched
+                }
+                resolved[destination] = live
+                continue
+            }
+            guard let advertised else {
+                FernletAuditLog.log("mesh.routedShare.destinationNotAddressable")
+                return .notAddressable
+            }
+            resolved[destination] = advertised
+        }
+        return .resolved(resolved)
+    }
+
+    /// Tier A: what a handshake verified THIS session, and every member its two sources disagree
+    /// about.
+    private struct HandshakeVerifiedKeyAgreementKeys {
+        /// The key each fingerprint's handshake proved.
+        var keys: [String: Data] = [:]
+        /// Fingerprints whose slot key and session-roster entry state different keys.
+        var disagreeing: Set<String> = []
+    }
+
+    /// Collects tier A from its two sources, keeping the slot's value and naming a disagreement
+    /// rather than letting the later writer win.
+    ///
+    /// - Returns: The handshake-verified keys and the fingerprints they disagree about.
+    private func handshakeVerifiedKeyAgreementKeys() -> HandshakeVerifiedKeyAgreementKeys {
+        var tierA = HandshakeVerifiedKeyAgreementKeys()
         // R2: bounded by the slot cap.
         for slot in slots {
             guard let fingerprint = slot.fingerprint,
                   let key = slot.verifiedKeyAgreementPublicKey else { continue }
-            verified[fingerprint] = key
+            tierA.keys[fingerprint] = key
         }
         // R2: bounded by the session roster cap.
-        for entry in sessionRoster { verified[entry.fingerprint] = entry.keyAgreementPublicKey }
-        var resolved: [String: Data] = [:]
-        // R2: bounded by the destination cap.
-        for destination in destinations {
-            guard let key = verified[destination] else {
-                FernletAuditLog.log("mesh.routedShare.destinationNotAddressable")
-                return nil
+        for entry in sessionRoster {
+            guard let held = tierA.keys[entry.fingerprint] else {
+                tierA.keys[entry.fingerprint] = entry.keyAgreementPublicKey
+                continue
             }
-            resolved[destination] = key
+            if held != entry.keyAgreementPublicKey { tierA.disagreeing.insert(entry.fingerprint) }
         }
-        return resolved
+        return tierA
+    }
+
+    /// Tier B: the verified, durable advertisement for one destination.
+    ///
+    /// Nil for a member with no row, for one marked conflicted (the set answers nil for those
+    /// itself, and the caller refuses them by name before asking), and for one the CURRENT ledger
+    /// no longer names. That last check is the fence over the fact that the set is grow-only while
+    /// a roster is not: a row folded before a departure or a removal stays in the set, and a
+    /// narrowed ledger must narrow what the mint will address. It is belt-and-braces today, because
+    /// destinations ARE the derived roster; it stops being so with item 6's subset target.
+    ///
+    /// - Parameter fingerprint: The destination to resolve.
+    /// - Returns: The advertised key, or nil.
+    private func advertisedKeyAgreementKey(for fingerprint: String) -> Data? {
+        guard membershipVerifier?.roster.contains(fingerprint: fingerprint) == true else {
+            return nil
+        }
+        return keyAdvertisements.keyAgreementPublicKey(for: fingerprint)
     }
 
     /// Seals the body under a fresh single-use content key, hashes the blob, signs the manifest and
@@ -6415,6 +6883,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             hardDeadline: meshIdentity.hardDeadline
         )
         if let ledger = membershipVerifier?.ledger { context.ledger = ledger }
+        // P6 item 1: the addressing rides the same value as the ledger it is scoped to. No new
+        // writer and no new save cadence — every save point carries whatever the fold has proved.
+        context.keyAdvertisements = keyAdvertisements
         // The fold and the count are ONE step, here, because here is where the cap can bite: the
         // set being written is the only set it applies to (plan §21.3).
         var droppedHeads = 0
@@ -6695,6 +7166,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             await self?.sendInventoryDigest(to: [peer])
             await self?.sendEpochHeads(to: [peer])
             await self?.sendRoutedInventory(to: [peer])
+            // Unbounded per peer per session on its own — which is why the addressing send is
+            // bounded by the SET's version rather than by this door: a peer that has already been
+            // told this exact set is not told it again, and a peer that learned a third member's
+            // key in between is (the D-7.30 residual, closed for addressing only).
+            await self?.sendKeyAdvertisements(to: [peer])
         }
     }
 
@@ -7113,6 +7589,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         ) {
         case .adopted(let verifier):
             membershipVerifier = verifier
+            // P6 item 1: the addressing comes back with the ledger, re-proved against the ledger
+            // adoption just proved — never trusted from the file seal alone.
+            restoreKeyAdvertisements(from: context, verifiedBy: verifier)
             // Armed here, spent by the first `beginMerge`: whichever door the user's resume uses,
             // the ledger being merged FROM came off the disk.
             pendingMergeEntry = .processRestart
@@ -7208,6 +7687,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case digest(MeshInventoryDigestPayload)
         /// A peer's signed statement of the epoch branch head(s) it is on (P4 item 3).
         case epochHeads(MeshEpochHeadsPayload)
+        /// A batch of members' own signed key-agreement keys — ADDRESSING, not membership
+        /// (P6 item 1). Every element is signed by its subject; the frame is not.
+        case keyAdvertisements(MeshKeyAgreementPayload)
     }
 
     /// The membership-event family of the dispatch switch (R4: one function per case family) —
@@ -7243,6 +7725,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // A head set is not a record and cannot move a roster, so it never reaches the ledger path.
         if case .epochHeads(let payload) = decoded {
             receiveEpochHeads(payload)
+            return
+        }
+        // Neither is a key advertisement: it is addressing for a member the ledger has ALREADY
+        // admitted, and it can never create, end or revoke a membership. It returns before
+        // `bufferedForAdoption` and before the `awaitingResumeMerge` merge path, because it is not
+        // a `MeshMergeOffer` and `mergeOffer(for:)` must keep answering nil for it.
+        if case .keyAdvertisements(let payload) = decoded {
+            receiveKeyAdvertisements(payload, from: senderFingerprint)
             return
         }
         if bufferedForAdoption(decoded, from: senderFingerprint) { return }
@@ -7292,6 +7782,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshEpochHeads:
             return (try? decoder.decode(MeshEpochHeadsPayload.self, from: plaintext))
                 .map { .epochHeads($0) }
+        case .meshKeyAgreement:
+            return (try? decoder.decode(MeshKeyAgreementPayload.self, from: plaintext))
+                .map { .keyAdvertisements($0) }
         default:
             return nil
         }
@@ -7312,7 +7805,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .departure(let record): ledger.departures = ledger.departures.inserting(record)
         case .removal(let record): ledger.removals = ledger.removals.inserting(record)
         case .termination(let record): ledger.terminations = ledger.terminations.inserting(record)
-        case .digest, .epochHeads: return nil
+        case .digest, .epochHeads, .keyAdvertisements: return nil
         }
         return MeshMergeOffer(ledger: ledger)
     }
@@ -7333,7 +7826,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .departure(let record): rejection = membershipVerifier?.insert(record)
         case .removal(let record): rejection = membershipVerifier?.insert(record)
         case .termination(let record): rejection = membershipVerifier?.insert(record)
-        case .digest, .epochHeads: return nil
+        case .digest, .epochHeads, .keyAdvertisements: return nil
         }
         recordRejection(rejection, type: type)
         // A DEBUG-only console echo, for the same reason P2 item 0 gave the transport's inbound
@@ -7438,7 +7931,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .departure(let record): pendingAdoptionLedger.departures = pendingAdoptionLedger.departures.inserting(record)
         case .removal(let record): pendingAdoptionLedger.removals = pendingAdoptionLedger.removals.inserting(record)
         case .termination(let record): pendingAdoptionLedger.terminations = pendingAdoptionLedger.terminations.inserting(record)
-        case .digest, .epochHeads: return false
+        case .digest, .epochHeads, .keyAdvertisements: return false
         }
         attemptLedgerAdoption(ownAdmission: ownAdmission, meshID: verifier.meshID)
         return true
@@ -7477,6 +7970,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         applyAdoptedRosterVerdict(adopted.roster)
         let admitter = ownAdmission.token.admitterFingerprint
         spawnHostPinned { [weak self] in await self?.sendInventoryDigest(to: [admitter]) }
+        // The addressing half (item 1). A joiner's set at `armJoinerLedger(_:now:)` was its own row
+        // alone — its bootstrap root is the admitter, so every relayed row for any other member was
+        // refused `signerNotAdmitted`. This is the first instant its ledger names the whole
+        // admission set, so it is the first instant its set is worth re-stating.
+        spawnHostPinned { [weak self] in await self?.sendKeyAdvertisements(to: [admitter]) }
     }
 
     /// What a freshly adopted roster says about THIS device.
@@ -9105,12 +9603,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // with it. Until item 7 a joiner held no ledger at all and refused every membership record
         // it was sent as `signerNotAdmitted`; from here it is a member of its own roster.
         let ledgerBeforeJoin = membershipVerifier
+        // P6 item 1: the arm folds this device's own key advertisement, so the rollback below
+        // unwinds the addressing with the ledger — one value, so the conflict marks ride with it.
+        let addressingBeforeJoin = keyAdvertisements
         guard armJoinerLedger(grant) else { return }
         // P3 item 6, plan §3.6: the admission is verified, so the context is written BEFORE this
         // device adopts the epoch, unwraps the key or starts a beacon — before, in other words,
         // anything tells the user or the peers that it has joined.
         guard recordVerifiedAdmissionDurably() else {
             membershipVerifier = ledgerBeforeJoin
+            adoptKeyAdvertisements(addressingBeforeJoin)
             return
         }
 
@@ -9148,6 +9650,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 // A joiner's routed store is `.absent`, and saying so is what lets the admitter
                 // offer it anything at all — the drain is push-only (item 6).
                 await self?.sendRoutedInventory(to: [fingerprint])
+                // And its own key advertisement, which is what makes a brand-new member
+                // addressable at all: the admitter folds it and relays it onward at the next
+                // link-open (item 1).
+                await self?.sendKeyAdvertisements(to: [fingerprint])
             }
         }
     }
@@ -10563,6 +11069,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// (`deferredCustodyCommits`) — the named deferral, made observable so "retried at the next
     /// evaluation" is a measured claim rather than a comment.
     var deferredCustodyCommitCountForTesting: Int { deferredCustodyCommits.count }
+
+    /// Drives the PRODUCTION self-mint door for this device's own key advertisement.
+    ///
+    /// A seam rather than a seeded set, deliberately (the design's own verification demand): it
+    /// mints a real signature, folds it through the real verifier and seals the real context, so a
+    /// cell built on it is proving the wire and not a dictionary. It exists because the tier-1 rigs
+    /// arm their ledgers through `seedMembershipLedgerForTesting(meshID:founderSigningPublicKey:ledger:)`,
+    /// which bypasses both arming doors — the founder's `seedFounderAdmission(meshID:)` and the
+    /// joiner's `armJoinerLedger(_:now:)` — and therefore mints nothing.
+    ///
+    /// - Parameter now: The signing instant; anchored to the rig's fixture clock, never the wall.
+    /// - Returns: `true` when a row was minted and folded.
+    @discardableResult
+    func armOwnKeyAdvertisementForTesting(now: Date) -> Bool {
+        armOwnKeyAdvertisement(now: now)
+    }
 
     /// The peers whose one capacity sweep has already been spent this session (D-9.15's budget).
     ///

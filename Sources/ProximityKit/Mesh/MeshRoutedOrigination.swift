@@ -43,10 +43,20 @@ public nonisolated enum MeshRoutedShareRefusal: String, CaseIterable, Equatable,
     /// "these bytes never became a sealed blob": the framing is a pure encode of the origin's own
     /// values, so a caller can act on neither differently.
     case sealFailed
-    /// A destination has no handshake-verified X25519 key on this device, so the whole mint is
-    /// refused rather than minted to a subset (D-13.1, D-13.22). The stated outage: a star
-    /// topology, a roster above the slot cap, and any resumption that restored the ledger but not
-    /// the memory-only session roster.
+    /// A destination has no verified X25519 key on this device — neither a handshake-verified one
+    /// (a live slot, or the session-roster entry written from that same value) nor a verified,
+    /// durable `fernlet.mesh.key-agreement.v1` advertisement — so the whole mint is refused rather
+    /// than minted to a subset (D-13.1, D-13.22).
+    ///
+    /// **Amended by P6 item 1.** The stated outage used to be three cases; the advertisement closed
+    /// the third and converted the other two. A **resumption** (a restart, an idle-lapse resume or a
+    /// rejoin) restores the ledger and, now, the addressing with it, so it mints and delivers. A
+    /// **star topology** and a **roster above the slot cap** now mint too: the unlinked
+    /// destinations' copies are sealed, wrapped and custodied by the origin until a link forms or
+    /// the origin departs and hands custody over — `relayInFlight` is increment 2's, so a
+    /// destination that holds an item never forwards it. What still lands here is a member no
+    /// device has ever advertised a key for to this one: a brand-new joiner before its admitter has
+    /// relayed the set on, and a member whose advertisement this device could not prove.
     case destinationNotAddressable
     /// The manifest or chunk mint threw — a signing failure, or a shape the mint's own guard chain
     /// refused by name.
@@ -57,6 +67,17 @@ public nonisolated enum MeshRoutedShareRefusal: String, CaseIterable, Equatable,
     /// The routed store could not say what it holds: deferred protected data, a refused seal, or a
     /// corrupt index. Nothing was written and nothing is known.
     case storeUnavailable
+    /// A destination's two verified sources of its X25519 key disagree (P6 item 1): a live
+    /// handshake-verified key against a signed, durable advertisement, two handshake-verified
+    /// values against each other, or a member the advertisement set has marked **conflicted**
+    /// because two different keys arrived under one fingerprint, both verified.
+    ///
+    /// Refused rather than resolved, and never "pick the present-tense one": both are verified
+    /// sources, and choosing would mean either wrapping a content key to a key the peer no longer
+    /// holds or accepting a substitution. `IdentityService.ensureProvisioned()` mints the signing
+    /// and key-agreement pair together in every one of its four cases, so a member cannot
+    /// legitimately hold two — which makes this a signal, not a race. Fail closed.
+    case keyMismatch
 }
 
 // MARK: - MeshRoutedOriginationOutcome
