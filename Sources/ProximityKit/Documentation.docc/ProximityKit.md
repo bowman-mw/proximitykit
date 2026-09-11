@@ -58,7 +58,13 @@ Group Activities (``ProximityActivityManager``, whose authorization is a host-si
 invitee-key-bound token rather than the shared handshake). Feature payloads dispatch through a
 registry whose committed-slot gate is the security boundary; the session end promotes the roster
 into the keep-as-friend review (``FriendMintingReview``, ``KeepFriendsPromptSheet``,
-``FriendPhotoReviewSheet``). Photo-library save failures surface through one shared mapping —
+``FriendPhotoReviewSheet``). **"The session end" is `hasCommittedPeer` going false, not
+`isInSession`** (P6 item 2): a proximity-join pair now FOUNDS a mesh — descriptor, membership
+ledger, founder admission, ceiling, state machine — at its FIRST commit, so `currentMesh != nil`
+outlives every link and the two predicates answer different questions. `isInSession` is the UI half
+(is a session surface up), `hasCommittedPeer` the lifecycle half (has this session ended), and the
+three hooks, the review sheet and the app's discovery lifecycle all read the second.
+Photo-library save failures surface through one shared mapping —
 ``FriendPhotoLibrarySaver``'s `userFacingFailure(for:photoCount:)` producing a
 ``PhotoSaveFailure`` rendered by the `photoSaveFailureAlert(_:failure:)` view modifier — so every
 save surface (review sheets and the album carousel) shows identical wording.
@@ -1054,7 +1060,9 @@ derived roster's own refusal — so the hook survives only where a *real* quorum
 (⌊2/2⌋ + 1 = 2 votes with the target excluded leaves one eligible voter), which takes three nodes. With **no** ledger the answer falls back to the gossiped
 descriptor's members and logs `mesh.introductionAuthority.legacyRosterFallback` once — reachable
 only in tests and in interop with a build predating these records, because a founder files its own
-admission at `startNewMesh(name:)` and a joiner files its granted one at `armJoinerLedger(_:)`.
+admission at `foundMesh(_:now:)` — the shipping founder door since P6 item 2 is the proximity-join
+promotion, with `startNewMesh(name:)` calling the same function — and a joiner files its granted one
+at `armJoinerLedger(_:)`.
 
 **A joiner adopts a ledger; it does not merge into one** (plan §8.3, §10.5, P3 item 7). A founder
 bootstraps from its own signing key, but a joiner does not know the founder's — it knows only the
