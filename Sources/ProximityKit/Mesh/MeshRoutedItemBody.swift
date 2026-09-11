@@ -47,13 +47,20 @@ nonisolated enum MeshRoutedItemBodyFormat {
     /// bound + this + the seal's overhead — rather than a literal, so the number the manifest door
     /// checks and the number the sealer can produce are the same number by construction.
     ///
-    /// 64 KiB is ~8× the largest well-formed ``MeshRoutedPhotoHeader``: a UUID, a date, a display
-    /// name and up to `FriendPhotoLimits.maxParticipants` (32) participants, each a fingerprint and
-    /// a name bounded by `ItemNameModeration.maxNameLength`. `theHeaderAllowanceCoversAMaximalHeader`
-    /// is that claim, measured rather than asserted. A header that somehow ran past the allowance is
-    /// not admitted under a looser rule — it eats into the payload's room and the sealer refuses the
-    /// whole plaintext **by name** (``MeshRoutedItemSealError/plaintextTooLarge``), which is the
-    /// fail-closed direction.
+    /// The largest well-formed ``MeshRoutedPhotoHeader`` — a UUID, a date, a display name and up to
+    /// `FriendPhotoLimits.maxParticipants` (32) participants, each a fingerprint and a name bounded
+    /// by `ItemNameModeration.maxNameLength` — **measures ~4.2 KB**, so 64 KiB is ~15× it.
+    /// `theHeaderAllowanceCoversAMaximalHeader` is that claim, measured rather than asserted, and it
+    /// pins an 8× floor rather than the measured multiple so an honest header can grow without a
+    /// test edit.
+    ///
+    /// **The allowance is an HONEST-SENDER figure.** Nothing bounds a header on receive: the framing
+    /// carries no header bound, and a gossiped participant name has no wire length bound of its own,
+    /// so a header wider than this allowance is representable. It is not admitted under a looser
+    /// rule — it eats into the payload's room, and the receive side is bounded fail-closed twice
+    /// over: the manifest door refuses any blob above the type's ciphertext cap
+    /// (``MeshRoutedManifestRejection/sizeExceedsTypeCap``), and the sealer refuses the whole
+    /// plaintext **by name** (``MeshRoutedItemSealError/plaintextTooLarge``) at either end.
     static let maxHeaderJSONByteCount = 64 * 1024
 
     /// The framed header's allowance: the u64 length prefix plus ``maxHeaderJSONByteCount``.

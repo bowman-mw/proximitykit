@@ -132,6 +132,14 @@ nonisolated enum MeshRoutedCanonicalStore: String, CaseIterable, Equatable, Send
 /// over `PrivateMediaStore.maxIncomingPhotoBytes`, so the manifest door's per-type check and the
 /// delivery projection's resident-blob guard are one number by construction. A row that narrows
 /// below what its own sender can seal would have that sender mint items every receiver refuses.
+///
+/// **What the cap bounds, precisely: the origin-signed manifest at the manifest door — never the
+/// bytes resident for an item.** A **parked** chunk set has no type at all (a chunk carries no
+/// token, and none is invented for a set whose manifest has not arrived), so its growth is bounded
+/// by the store's own chunk caps — `MeshChunkFormat.maxChunkCount` × `maxChunkPayloadBytes`, i.e.
+/// 1024 × 256 KiB — and by ``MeshRoutedCapacity``, never by this row. That state is reachable on
+/// purpose: a cap refusal **keeps** the parked bytes (the non-dropping arm), so an over-cap item's
+/// chunks stay held for a build that loosens the cap, and expiry collects them if none does.
 nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 
     /// The frozen wire spelling this row declares for — the registry's key, from

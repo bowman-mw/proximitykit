@@ -890,7 +890,12 @@ from one source and cannot drift, which is the failure item 4's forward-compat n
   ``MeshRoutedItemSealFormat/maxResidentBlobByteCount`` — so the door's cap and the delivery
   projection's resident-blob guard are one number and cannot drift. The unit caveat is the whole
   reason for the formula: `manifest.size` is the complete sealed *ciphertext* blob, while a store's
-  byte and pixel bounds are *plaintext* bounds enforced at reassembly. The mint still does **not**
+  byte and pixel bounds are *plaintext* bounds enforced at reassembly. **What the row bounds is the
+  origin-signed manifest at the manifest door, not the bytes resident for an item:** a *parked*
+  chunk set has no type at all (a chunk carries no token), so its growth is bounded by the store's
+  own chunk caps — 1024 × 256 KiB — and by `MeshRoutedCapacity`, never by the row; that state is
+  reachable on purpose, because the non-dropping arm KEEPS an over-cap item's parked bytes for a
+  build that loosens the cap, and expiry collects them if none does. The mint still does **not**
   refuse an unregistered token: acceptance is a receiver-side statement, so an unregistered item
   mints under the shared bounds and is refused at every receiver door — loud, and documented as an
   asymmetry rather than left to be discovered.
@@ -1490,7 +1495,8 @@ declines to open — and the photo stage is final on durable *ciphertext*, so th
 minted when the open refuses. Since **P6 item 3** that resident bound is itself a formula —
 `PrivateMediaStore.maxIncomingPhotoBytes` + ``MeshRoutedItemBodyFormat/maxFramedHeaderByteCount`` +
 `overheadByteCount` — and is the photo row's registry cap verbatim, so the seam bound, the registry
-cap and the projection's guard are one expression rather than three numbers that agree today. The sealer is pure — no actor, clock, I/O or identity — which is what keeps it
+cap and the projection's guard are one expression rather than three numbers that agree today.
+The sealer is pure — no actor, clock, I/O or identity — which is what keeps it
 outside every locked-device wall: the predicate is consulted by the delivery door that calls it.
 
 ``MeshRoutedPhotoBody`` is the plaintext for the first routed type, framed as a length-prefixed JSON
