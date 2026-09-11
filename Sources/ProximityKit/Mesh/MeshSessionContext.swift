@@ -22,8 +22,10 @@ import Foundation
 /// other version is refused as corrupt rather than partially decoded, because a partially decoded
 /// membership ledger is a roster that silently lost members.
 ///
-/// **Bumping it is a deliberate act.** Adding a field with a default is compatible and needs no
-/// bump; changing the MEANING of a field, or narrowing one, does.
+/// **Bumping it is a deliberate act.** Adding a field with a default is *usually* compatible and
+/// needs no bump; changing the MEANING of a field, or narrowing one, always does. The third
+/// trigger, which version 3 is: a field whose **absence** would be read as a meaningful answer
+/// rather than as "not written yet" — see the version-3 discussion below.
 ///
 /// ## Version 2 (P3 item 4) — and why a v1 file is corrupt, not migrated
 ///
@@ -35,11 +37,27 @@ import Foundation
 /// ever run on a device, so a v1 file on disk is not an old user's data — it is a file this build
 /// cannot account for, and `corrupt` is exactly the state that refuses to overwrite such a thing.
 /// If a v1 file could ever have held a real roster, this would have to be a migration instead.
+///
+/// ## Version 3 (P6 item 1) — an additive field that bumps anyway, and why
+///
+/// v3 adds ``MeshSessionContext/keyAdvertisements`` and retires the dead
+/// `routingInventoryDigest`. The addition is decode-compatible on its face, so by the rule above it
+/// would not have owed a bump — and it takes one, as a recorded policy act, because the field's
+/// **absence is semantically load-bearing** in a way `localTermination`'s was not. A device that
+/// restored a v2 context would come back with an empty advertisement set and then silently refuse
+/// every mint to a member it was not linked to at that instant: the exact D-13.22 outage this field
+/// exists to close, re-created by a stale file and invisible. Treating a v2 blob as `corrupt` makes
+/// that loud, and `corrupt` refuses to overwrite rather than destroying anything.
+///
+/// The refusal is **exact equality in both directions** (``MeshSessionContext/init(from:)``), so a
+/// v3 blob read by a v2 build is also `corrupt`. That is part of the same act: only the owner's own
+/// device has ever written one of these files and it holds test data only, so the rollback direction
+/// costs nothing a migration would have had to buy.
 nonisolated enum MeshSessionContextSchema {
 
     /// The schema version this build writes and the only one it reads. See the type's discussion
-    /// for what v2 changed and why v1 is refused rather than migrated.
-    static let current = 2
+    /// for what v2 and v3 changed, and why an older file is refused rather than migrated.
+    static let current = 3
 
     /// The frozen token naming this at-rest shape. English forever — it is a persisted format
     /// name, never display copy.
@@ -156,6 +174,11 @@ nonisolated struct MeshSessionLocalTermination: Codable, Equatable, Sendable {
 ///   `admitted − departed − removed`, derived per read via ``MeshMembershipLedger/derivedRoster``
 ///   and never stored, so reload-after-process-death and merge-after-partition are literally the
 ///   same code path (plan §10.3).
+/// - **The key advertisements** (``keyAdvertisements``) are *addressing* for the members the ledger
+///   already admitted — each member's own signed key-agreement public key, verified against the
+///   ledger's admissions and folded into a grow-only, conflict-refusing set (P6 item 1). They are
+///   public keys of admitted members, which is why they belong in the same sealed file as the
+///   roster rather than in a sidecar of their own.
 /// - **The group control key is NOT here** and never will be. `MeshGroupKey` stays memory-only:
 ///   after a process death the session resumes by reconnecting and rotating (plan §8.3), and
 ///   content never depends on the control key (invariant 3). That doc guard is load-bearing
@@ -219,18 +242,30 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
     /// never be re-entered, which is why the flag is durable rather than derived from live state.
     var developedLocally: Bool
 
-    /// P5's routing-inventory digest (plan §11), carried as an opaque token so the schema does not
-    /// have to move when routing lands. Nil until P5 writes one; never a display string.
-    var routingInventoryDigest: String?
+    /// Every admitted member's own signed key-agreement public key, as far as this device has been
+    /// told (P6 item 1). The durable third source the mint's resolver accepts.
+    ///
+    /// **Addressing, not membership.** A row here can never create, end or revoke a membership: it
+    /// is verified *against* ``ledger``'s admissions, and a fingerprint with no admission has no
+    /// row. It lives beside the ledger rather than inside it because it is not union-mergeable the
+    /// way a record set is — two different keys under one fingerprint is a conflict a merge must
+    /// refuse rather than resolve, which is why
+    /// ``MeshKeyAgreementAdvertisementSet`` is its own type with its own fold.
+    ///
+    /// This is the field that makes a **resumption** addressable: a restart, an idle-lapse resume or
+    /// a rejoin restores the ledger and not the memory-only session roster, and without this the
+    /// mint refused every destination that was not live at that instant.
+    var keyAdvertisements: MeshKeyAgreementAdvertisementSet
 
     /// The durable ending mark (P3 item 6, plan §8.2). Nil while this device is still a member.
     ///
-    /// **Additive, so the schema stays at 2.** The at-rest shape does not move: a context written
-    /// before this field existed decodes with a nil mark (``init(from:)`` uses `decodeIfPresent`),
-    /// and a context written with one is refused by no reader that ever shipped, because no build
-    /// with the old shape has ever run on a device (see ``MeshSessionContextSchema``). A bump would
-    /// be owed only if the field NARROWED an existing one, which is precisely what took epochHeads
-    /// from 1 to 2.
+    /// **Additive, and it did not bump the schema** (it landed at 2 and stayed there). The at-rest
+    /// shape does not move: a context written before this field existed decodes with a nil mark
+    /// (``init(from:)`` uses `decodeIfPresent`), and a nil mark is honestly "this device has not
+    /// ended" — the absence says the same thing the value would. Contrast
+    /// ``keyAdvertisements``, whose absence would be read as "nobody is addressable" and which
+    /// therefore took version 3 (see ``MeshSessionContextSchema``); and contrast `epochHeads`, whose
+    /// v2 bump was a NARROWING.
     ///
     /// The ledger cannot carry this on its own: an ending recorded here is often one this device
     /// signed for itself (its own departure, the ceiling), and the verifier is fail-closed against
@@ -250,7 +285,7 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
     ///   - epochHeads: Epoch branch heads; clamped to the cap.
     ///   - lastExternalHeartbeat: Last authenticated heartbeat, if any.
     ///   - developedLocally: Whether this device has developed the mesh.
-    ///   - routingInventoryDigest: P5's inventory digest, if any.
+    ///   - keyAdvertisements: The verified key advertisements folded so far; defaults to empty.
     ///   - localTermination: The durable ending mark, if this device's participation has ended.
     init(
         meshID: UUID,
@@ -261,7 +296,7 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         epochHeads: [MeshEpochRef] = [],
         lastExternalHeartbeat: Date? = nil,
         developedLocally: Bool = false,
-        routingInventoryDigest: String? = nil,
+        keyAdvertisements: MeshKeyAgreementAdvertisementSet = .empty,
         localTermination: MeshSessionLocalTermination? = nil
     ) {
         self.schemaVersion = MeshSessionContextSchema.current
@@ -273,7 +308,7 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         self.epochHeads = Array(epochHeads.prefix(MeshSessionContextSchema.maxEpochHeads))
         self.lastExternalHeartbeat = lastExternalHeartbeat
         self.developedLocally = developedLocally
-        self.routingInventoryDigest = routingInventoryDigest
+        self.keyAdvertisements = keyAdvertisements
         self.localTermination = localTermination
     }
 
@@ -318,7 +353,9 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         epochHeads = Array(heads.prefix(MeshSessionContextSchema.maxEpochHeads))
         lastExternalHeartbeat = try container.decodeIfPresent(Date.self, forKey: .lastExternalHeartbeat)
         developedLocally = try container.decodeIfPresent(Bool.self, forKey: .developedLocally) ?? false
-        routingInventoryDigest = try container.decodeIfPresent(String.self, forKey: .routingInventoryDigest)
+        keyAdvertisements = try container.decodeIfPresent(
+            MeshKeyAgreementAdvertisementSet.self, forKey: .keyAdvertisements
+        ) ?? .empty
         localTermination = try container.decodeIfPresent(
             MeshSessionLocalTermination.self, forKey: .localTermination
         )

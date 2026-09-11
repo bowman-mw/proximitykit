@@ -7090,8 +7090,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// being handed a peer's ledger. A file that does not prove that is left unadopted — the honest
     /// answer for bytes that no longer describe a mesh this device is in.
     ///
-    /// Schema stays at **2**: nothing new is written, this only reads what
-    /// ``MeshSessionContext/ledger`` has carried since P3 item 4.
+    /// The at-rest schema is **3** as of P6 item 1, and this function still writes nothing: it only
+    /// reads what ``MeshSessionContext/ledger`` has carried since P3 item 4.
+    ///
+    /// **Owed here, and deliberately not taken in item 1's first pass:**
+    /// ``MeshSessionContext/keyAdvertisements`` comes off the disk inside the same sealed value and
+    /// is not yet restored into the manager. It belongs **inside** the `.adopted` arm — so the set
+    /// can never exist without a verifier — and every restored row must be re-proved against the
+    /// *adopted* ledger before it counts, because `MeshLedgerAdoption.adopt` re-verifies the whole
+    /// ledger from the self-admitted root and can NARROW the admission set beneath a set that was
+    /// folded against a wider one. "A durable membership fact is re-proved on restore, never trusted
+    /// from the file" is the module's rule; the file seal does not substitute for it.
     ///
     /// - Parameter context: The restored context.
     private func restoreMembershipLedger(from context: MeshSessionContext) {

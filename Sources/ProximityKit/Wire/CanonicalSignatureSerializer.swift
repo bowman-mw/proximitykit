@@ -180,6 +180,12 @@ private nonisolated let canonicalMeshInventoryDigestHashDomain =
     FernletCryptoPurpose.Hash.meshInventoryDigestV1.data
 private nonisolated let canonicalMeshEpochHeadsDomain =
     FernletCryptoPurpose.Signature.meshEpochHeadsV1.data
+// Key advertisement (network migration P6 item 1). Its own domain, and the one it must be distinct
+// from is the DEPARTURE's: both are self-signed statements over (mesh, fingerprint, instant), so
+// only the domain stops "here is my key" from being replayable as "I have left" — a permanent,
+// grow-only eviction.
+private nonisolated let canonicalMeshKeyAgreementDomain =
+    FernletCryptoPurpose.Signature.meshKeyAgreementV1.data
 // Quorum under partition (network migration P4 item 5, plan §10.4). Two more domains, distinct from
 // each other and from the completed removal's: a proposal binds `proposalID → (mesh, target,
 // proposer)` and a vote agrees with one, while `meshMemberRemovalV1` signs the permanent record. If
@@ -532,6 +538,25 @@ nonisolated func canonicalBytes(for payload: MeshEpochHeadsPayload) -> Data {
     for head in payload.heads {
         writer.appendString(head.canonicalString)
     }
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``SignedKeyAgreementAdvertisement`` (P6 item 1, plan §11.3 item
+/// 13(ii)).
+///
+/// `meshID` is bound first so a valid advertisement for another mesh is not a valid transcript
+/// here; the fingerprint comes before the key so the pair can never be transposed; the key is bound
+/// as **opaque length-prefixed bytes**, never as a string, so a 32-byte blob can never be read as a
+/// count; and `advertisedAt` is bound because it is the set's dedup and order input — an unbound
+/// stamp could be re-dated by a relay.
+nonisolated func canonicalBytes(for advertisement: SignedKeyAgreementAdvertisement) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(canonicalMeshKeyAgreementDomain)
+    writer.appendUUID(advertisement.meshID)
+    writer.appendString(advertisement.memberFingerprint)
+    writer.appendLengthPrefixed(advertisement.keyAgreementPublicKey)
+    writer.appendDate(advertisement.advertisedAt)
     // signature: deliberately excluded.
     return writer.bytes
 }

@@ -37,6 +37,14 @@ nonisolated enum MeshMembershipEventFormat {
     /// SHA-256 digest length — the width of ``MeshInventoryDigest/recordsHash``.
     static let digestByteCount = 32
 
+    /// Raw key-agreement public-key length — the width of
+    /// ``SignedKeyAgreementAdvertisement/keyAgreementPublicKey`` (P6 item 1).
+    ///
+    /// Its own constant rather than borrowed from ``MeshChannelIntroductionFormat/signingKeyByteCount``:
+    /// the two are the same number today and describe different key types, and a future change to
+    /// one must not silently narrow the other.
+    static let keyAgreementByteCount = 32
+
     /// Cap on a fingerprint's UTF-8 length. `IdentityService.fingerprint(of:)` returns sixteen
     /// characters; the allowance is generous so a longer future spelling is a format decision
     /// rather than a silent refusal, and small enough that a hostile string cannot be a payload.

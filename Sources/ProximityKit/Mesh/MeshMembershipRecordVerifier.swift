@@ -341,6 +341,53 @@ nonisolated struct MeshMembershipRecordVerifier {
         return nil
     }
 
+    // MARK: - Key advertisement (P6 item 1)
+
+    /// Verifies one member's signed key advertisement (plan §11.3 item 13(ii)).
+    ///
+    /// The **same five checks** the inventory digest and the head set get, in the same order and
+    /// with no new rejection case — and the trust root is the one the ledger already uses:
+    /// ``admittedSigningKey(for:)``, i.e. the `signingPublicKey` this ledger's own admission bound
+    /// to that fingerprint. The advertisement carries no key that could authorize itself.
+    ///
+    /// Subject == author, so checks 3/4/5 all bind one fingerprint: there is no separate author
+    /// check to make, which is ``SignedDepartureRecord``'s property.
+    ///
+    /// **A departed or removed member is refused** (`signerNotAMember`), and that is not a
+    /// principle — it is what the destination set already does. A mint's destinations are derived
+    /// from the roster at mint time and ``MeshDerivedRoster`` subtracts departures and removals, so
+    /// no code path ever needs a departed member's key, and accepting one would spend a slot of a
+    /// 16-row durable set on a row nothing can use. D-12.12's rule runs the other way and is
+    /// untouched: a departed member's own advertisement, folded **before** it departed, stays in the
+    /// grow-only set, so a custodian delivering a departed origin's item still holds every
+    /// destination's key.
+    ///
+    /// Returns a value rather than an optional rejection: the verified case carries a
+    /// ``MeshVerifiedKeyAgreementAdvertisement``, and that type is the compile fence under
+    /// ``MeshKeyAdvertisementFold``'s rule that nothing unverified may reach a conflict decision.
+    ///
+    /// - Parameter advertisement: The untrusted advertisement.
+    /// - Returns: The verified value, or the named refusal.
+    func verify(_ advertisement: SignedKeyAgreementAdvertisement) -> MeshKeyAgreementVerification {
+        guard advertisement.meshID == meshID else { return .refused(.foreignMesh) }
+        guard advertisement.isWellFormed else { return .refused(.malformedRecord) }
+        guard let key = admittedSigningKey(for: advertisement.memberFingerprint) else {
+            return .refused(.signerNotAdmitted)
+        }
+        guard roster.contains(fingerprint: advertisement.memberFingerprint) else {
+            return .refused(.signerNotAMember)
+        }
+        guard IdentityService.verify(
+            advertisement.signature,
+            of: canonicalBytes(for: advertisement),
+            by: key,
+            purpose: FernletCryptoPurpose.Signature.meshKeyAgreementV1
+        ) else {
+            return .refused(.signatureInvalid)
+        }
+        return .verified(MeshVerifiedKeyAgreementAdvertisement(advertisement))
+    }
+
     // MARK: - Removal quorum (P4 item 5)
 
     /// Verifies a proposer's signed removal proposal (plan §10.4).
@@ -433,6 +480,52 @@ nonisolated struct MeshMembershipRecordVerifier {
             && token.joinerFingerprint.utf8.count <= MeshMembershipEventFormat.maxFingerprintLength
             && token.joinerSigningPublicKey.count == MeshChannelIntroductionFormat.signingKeyByteCount
             && token.admitterSigningPublicKey.count == MeshChannelIntroductionFormat.signingKeyByteCount
+    }
+}
+
+// MARK: - MeshVerifiedKeyAgreementAdvertisement
+
+/// A key advertisement whose signature has verified against its signer's **admitted** key
+/// (P6 item 1).
+///
+/// The initializer is `fileprivate` on purpose, and it is the most load-bearing access modifier in
+/// the family: ``MeshKeyAgreementAdvertisementSet``'s two mutating doors take this type, so the
+/// compiler — not a reviewer, not a code comment — enforces that verification happens **before** any
+/// fold decision. An unverified advertisement that could mark a fingerprint conflicted would let any
+/// peer in radio range permanently un-address any member with a few forged bytes.
+///
+/// Not `Codable` and never persisted: "verified" is a statement about a check this device ran, not a
+/// property of bytes on a disk. A restored set is re-proved against the adopted ledger, never
+/// trusted because it once carried this wrapper.
+nonisolated struct MeshVerifiedKeyAgreementAdvertisement: Equatable, Sendable {
+
+    /// The advertisement that verified.
+    let advertisement: SignedKeyAgreementAdvertisement
+
+    fileprivate init(_ advertisement: SignedKeyAgreementAdvertisement) {
+        self.advertisement = advertisement
+    }
+}
+
+// MARK: - MeshKeyAgreementVerification
+
+/// What ``MeshMembershipRecordVerifier/verify(_:)-(SignedKeyAgreementAdvertisement)`` answers.
+///
+/// A two-case value rather than an optional rejection, because the accepting case has to hand back
+/// something the fold can use and nothing else may mint: see
+/// ``MeshVerifiedKeyAgreementAdvertisement``.
+nonisolated enum MeshKeyAgreementVerification: Equatable, Sendable {
+
+    /// The advertisement verified; the payload is the only value the set will fold.
+    case verified(MeshVerifiedKeyAgreementAdvertisement)
+
+    /// The advertisement was refused, by name.
+    case refused(MeshMembershipRecordRejection)
+
+    /// The named refusal, or nil when it verified.
+    var rejection: MeshMembershipRecordRejection? {
+        guard case .refused(let rejection) = self else { return nil }
+        return rejection
     }
 }
 

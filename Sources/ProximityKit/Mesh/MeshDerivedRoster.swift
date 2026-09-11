@@ -121,9 +121,10 @@ nonisolated struct MeshMembershipRecordSet<Record: MeshMembershipRecord>: Codabl
 /// Everything a device knows about who belongs to one mesh: the four record sets, and nothing else.
 ///
 /// This is the union-mergeable half of plan §8.1's `MeshSessionContext` — deliberately separated
-/// from it, because the context also carries a clock (`createdAt`, `hardDeadline`), a routing digest
-/// and a persistence story, none of which union-merge. The ledger is pure value data with a pure
-/// merge, so the convergence property tests need no store and no transport.
+/// from it, because the context also carries a clock (`createdAt`, `hardDeadline`), the key
+/// advertisements (which refuse a conflict rather than merging it) and a persistence story, none of
+/// which union-merge. The ledger is pure value data with a pure merge, so the convergence property
+/// tests need no store and no transport.
 ///
 /// **Merging is the only way two views combine.** There is no "apply a record to a roster" path:
 /// records go into sets, sets union, the roster is re-derived. That is what makes reconnect, merge

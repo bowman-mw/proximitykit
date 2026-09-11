@@ -345,6 +345,33 @@ purpose *before* they reach a ledger a roster is derived from. `MeshMembershipBo
 plan §9 caps in one place, and reuses `MeshIntroductionRoster`'s own constants rather than
 restating them: roster 8, sixteen records per kind, one termination.
 
+**A key advertisement is ADDRESSING, not membership** (P6 item 1, plan §11.3 item 13(ii)). A mint
+wraps one content key per destination, and until P6 the only sources it accepted were present-tense:
+a live slot's handshake-verified key-agreement key and the session-roster entry written from that
+same value. Both are memory-only, so a restart, an idle-lapse resume or a rejoin restored the ledger
+and not the keys, and the mint refused every destination it was not linked to at that instant.
+`SignedKeyAgreementAdvertisement` is the durable third source: a member signs its **own**
+key-agreement public key (self-signed, subject == author, with `meshID` bound into the transcript),
+`MeshMembershipRecordVerifier` checks it against `ledger.admissions` — the ledger's own trust root,
+so a fingerprint with no admission has no row — and `MeshKeyAdvertisementFold` folds it into a
+`MeshKeyAgreementAdvertisementSet` on the sealed session context. It can never create, end or revoke
+a membership; it only says which key an already-admitted member holds, and a departed or removed
+signer is refused by name because the mint's destinations come from the derived roster, which
+subtracts both. It is deliberately **not** a fifth `MeshMembershipRecordKind`: the inventory digest
+enumerates records by kind with four positional counts and a kind-tagged hash, and
+`maxProofs == maxReGossipFrames == 49` is pinned by assertion against `maxRecordsPerKind * 3 +
+maxTerminationRecords` — so a fifth kind would move two goldens and a budget P4's 80 and P5's 40
+cells were measured under. Because the advertisement is not a `MeshMembershipRecord` at all,
+`MeshRecordIdentity` cannot be built from one, which makes "the digest cannot move" a type-system
+fact. Two rules carry the rest: **verification happens before any conflict decision** (an unverified
+advertisement that could mark a fingerprint conflicted would let any peer in radio range permanently
+un-address any member — the compile fence is `MeshVerifiedKeyAgreementAdvertisement`'s `fileprivate`
+initializer, which the set's only two mutating doors demand), and **a second, different verified key
+for one fingerprint is refused rather than resolved**, marking that member unaddressable. That is
+why the set is its own type rather than a `MeshMembershipRecordSet`: the record set's merge is
+earliest-wins and silently keeps one of two rows, which for a key means wrapping a content key to a
+device that may not hold it.
+
 **An epoch is a value, not a number** (plan §8.4, P3 item 4). `MeshEpochRef` is a Lamport counter
 (cap 4096, and a counter *at* the cap refuses to mint a successor rather than trapping — a mesh that
 cannot rotate must end rather than keep serving a key it cannot retire), an `epochID`, and the
@@ -530,7 +557,11 @@ from (plan §8.1): `MeshMembershipRecordKind`, `MeshMembershipRecord`, `MeshMemb
 `MeshMembershipRecordOrder`, `SignedAdmissionRecord`, `SignedDepartureRecord`,
 `SignedRemovalRecord`, `SignedTerminationRecord`, `MeshCustodyHandoffSummary`,
 `MeshMembershipRecordSet`, `MeshMembershipLedger`, `MeshDerivedRoster`, `MeshRosterMember`,
-`MeshRosterStatus`. The sealed store's own internal vocabulary is `MeshSessionContext`,
+`MeshRosterStatus`. P6 item 1 added the addressing beside them — `SignedKeyAgreementAdvertisement`,
+`MeshKeyAgreementAdvertisementSet`, `MeshKeyAdvertisementFold`, `MeshKeyAdvertisementFoldOutcome`,
+`MeshKeyAdvertisementFoldResult`, `MeshVerifiedKeyAgreementAdvertisement` and
+`MeshKeyAgreementVerification` — which verify *against* the admission set and are deliberately not a
+fifth record kind. The sealed store's own internal vocabulary is `MeshSessionContext`,
 `MeshSessionContextSchema`, `MeshSessionContextDecodingError`, `MeshSessionLoad`,
 `MeshSessionSealRefusal`, `MeshSessionDeferral`, `MeshSessionCorruption`, `MeshSessionSaveError`,
 `MeshSessionSealKey` and `MeshSessionSealKeyOutcome`. P3 item 3 added the membership events that
@@ -1044,15 +1075,21 @@ a comment. `save` also honours durable-before-acknowledged (plan §3.6): it thro
 returning success, so no membership record, custody receipt or "joined" is acknowledged over bytes
 that never reached the disk.
 
-**The at-rest schema is 2, and a v1 file is `corrupt` rather than migrated.** P3 item 4 narrowed
-`epochHeads` from an opaque `[String]` placeholder to `[MeshEpochRef]` — the same JSON shape, a
-strictly narrower meaning — and bumped `MeshSessionContextSchema.current`. There is no migration,
-which is defensible only because of *when* it happened: the store shipped in this same phase, so no
-build that wrote a v1 file has ever run on a device, and `corrupt` is exactly the state that refuses
-to overwrite a file this build cannot account for. The sealing token stays `…session-context.v1`
-because it names the **crypto domain**, which did not change; `current` is what carries the shape.
-Item 6 added one field, `localTermination`, and did **not** bump: an additive optional whose absence
-decodes to nil changes no at-rest shape, and the bump rule is about narrowing, not growing.
+**The at-rest schema is 3, and an older file is `corrupt` rather than migrated.** P3 item 4 took it
+to 2 by narrowing `epochHeads` from an opaque `[String]` placeholder to `[MeshEpochRef]` — the same
+JSON shape, a strictly narrower meaning. There is no migration, which is defensible only because of
+*when* it happened: the store shipped in this same phase, so no build that wrote a v1 file has ever
+run on a device, and `corrupt` is exactly the state that refuses to overwrite a file this build
+cannot account for. The sealing token stays `…session-context.v1` because it names the **crypto
+domain**, which did not change; `current` is what carries the shape. Item 6 added one field,
+`localTermination`, and did **not** bump: an additive optional whose absence decodes to nil changes
+no at-rest shape, and the bump rule is about narrowing, not growing. **P6 item 1 took it to 3** and
+retired the dead `routingInventoryDigest` in the same act — an addition that *would* have been
+compatible on its face, bumped anyway because the absence of `keyAdvertisements` is semantically
+load-bearing: a device restoring a v2 context would resume addressable to nobody and then silently
+refuse every mint it was not linked for, which is the exact outage the field closes. The version
+guard is exact equality, so the refusal runs in both directions; only the owner's own device has
+ever written one of these files and it holds test data only.
 
 **The lifecycle is a value, and it is total** (P3 item 6, plan §8.2). ``MeshSessionState`` has ten
 states and ``MeshSessionStateMachine/transition(from:on:)`` is a pure function over (state, event):
@@ -1097,8 +1134,8 @@ apart from ``MeshMembershipLedger``, which is what it can *prove*. Unreachable m
 ``MeshMemberPresence/temporarilyDisconnected``, and the derived roster, the quorum threshold and the
 final-pair test are **copied onto the branch view unchanged**, so a 2/2 split of a roster of four
 leaves both branches deriving four members, a quorum of three, and `isFinalPair == false` (§10.4,
-§10.6). None of it is `Codable`: presence is never sealed, and `MeshSessionContextSchema.current`
-stays at 2. ``MeshPartitionDetector`` is the pure edge-detector — only *entering* a partition raises
+§10.6). None of it is `Codable`: presence is never sealed, so P4 item 1 moved no schema version
+(`MeshSessionContextSchema.current` was 2 then, and is 3 since P6 item 1). ``MeshPartitionDetector`` is the pure edge-detector — only *entering* a partition raises
 `linksLost` and only a *full* heal raises `linksRestored`; a partial heal keeps the branch a branch
 and lets the returning peer take `peerCommitted` into the merge path.
 
