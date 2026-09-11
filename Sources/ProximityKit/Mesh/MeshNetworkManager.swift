@@ -4052,6 +4052,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// A peer's manifest: verified, gated to increment 1, admitted.
     ///
+    /// Three statements in order: the verifier's (mesh, shape, token, key, signature, expiry), the
+    /// registry row's per-type **ciphertext** cap (P6 item 3 — ``routedTypeCapRejection(for:)``),
+    /// and the admission gate below. Each refuses through the one charging door.
+    ///
     /// The gate is `self ∈ destinations || sender == origin` — an item addressed to this device, or a
     /// departing origin's hand-off. A third party's manifest is refused: without the clause any
     /// admitted member could fill this device's caps with content nobody asked it to hold, and §6.1
@@ -4096,6 +4100,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             dropParkedSetIfTerminal(rejection, manifest: manifest, in: context)
             return
         }
+        if let capRejection = routedTypeCapRejection(for: manifest) {
+            refuseRoutedFrameBeforeStore(
+                ["type": PayloadType.meshRoutedManifest.rawValue, "reason": capRejection.rawValue],
+                in: context
+            )
+            return
+        }
         guard manifest.destinations.contains(identity.localFingerprint)
                 || context.sender == manifest.originFingerprint else {
             refuseRoutedFrameBeforeStore(["reason": "notADestinationOrHandoff"], in: context)
@@ -4116,6 +4127,41 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             settled = finishLocalRungs(for: key, from: context.sender, now: context.now)
         }
         noteRoutedFrame(outcome, frame, settled: settled, in: context)
+    }
+
+    /// The manifest door's per-type size check — P6 item 3, D-11.4 — or nil when the manifest is
+    /// within the cap its own registry row declares.
+    ///
+    /// The compared number is the origin-signed ``MeshRoutedManifest/size``: the complete sealed
+    /// **ciphertext** blob, marker and tag included. The row's ``MeshRoutedTypeEntry/maxItemByteCount``
+    /// is a ciphertext cap for the same reason, which is why the photo row is defined as the seal
+    /// format's resident bound rather than as the photo wall's plaintext bound — the two differ by
+    /// the framing, and comparing a ciphertext size against a plaintext bound would refuse items
+    /// that are perfectly in bounds.
+    ///
+    /// Runs **after** the verifier, so it is a statement about what the origin signed rather than
+    /// about what a relay changed, and **before** the destination/hand-off gate, so a custodian's
+    /// copy and a destination's copy of an over-cap item are refused identically. Cheap by
+    /// construction: one dictionary lookup and one comparison, no I/O, no crypto.
+    ///
+    /// `entry(for:) == nil` answers ``MeshRoutedManifestRejection/unknownTypeToken`` — the same
+    /// answer the verifier's accepted-token set gives, because the set is a projection of these
+    /// rows, so this arm is unreachable in one build and is here so the door has no default.
+    ///
+    /// **No parked-set drop hangs off either answer.** `dropParkedSetIfTerminal` keeps its single
+    /// call site in the verifier-rejection branch (`theDropHasOneCallSiteAndItIsTheVerifierBranch`
+    /// is that claim): a cap refusal keeps the parked bytes, so routing it through the drop rule
+    /// would only ask an exhaustive switch to answer nil, and the unreachable arm above cannot
+    /// widen the drop clause it does not reach.
+    ///
+    /// - Parameter manifest: The verified manifest.
+    /// - Returns: the named rejection, or nil.
+    private func routedTypeCapRejection(
+        for manifest: MeshRoutedManifest
+    ) -> MeshRoutedManifestRejection? {
+        guard let entry = routedTypes.entry(for: manifest.typeToken) else { return .unknownTypeToken }
+        guard manifest.size <= entry.maxItemByteCount else { return .sizeExceedsTypeCap }
+        return nil
     }
 
     /// A peer's chunk: the manifest it belongs to (nil means "not seen yet", which is admissible and

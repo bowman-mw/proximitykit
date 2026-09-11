@@ -39,6 +39,29 @@ nonisolated enum MeshRoutedItemBodyFormat {
     /// Width of the header's big-endian length prefix — `CanonicalByteWriter`'s own u64.
     static let headerLengthPrefixByteCount = 8
 
+    /// What the header JSON is allowed inside a routed type's ciphertext cap — 64 KiB.
+    ///
+    /// **An allowance, not a second refusal** (P6 item 3). Nothing enforces it: the framing is
+    /// frozen and carries no header bound, and adding one would be a new refusal on a field the
+    /// origin already signs. What it does is make a type's ciphertext cap a *formula* — payload
+    /// bound + this + the seal's overhead — rather than a literal, so the number the manifest door
+    /// checks and the number the sealer can produce are the same number by construction.
+    ///
+    /// 64 KiB is ~8× the largest well-formed ``MeshRoutedPhotoHeader``: a UUID, a date, a display
+    /// name and up to `FriendPhotoLimits.maxParticipants` (32) participants, each a fingerprint and
+    /// a name bounded by `ItemNameModeration.maxNameLength`. `theHeaderAllowanceCoversAMaximalHeader`
+    /// is that claim, measured rather than asserted. A header that somehow ran past the allowance is
+    /// not admitted under a looser rule — it eats into the payload's room and the sealer refuses the
+    /// whole plaintext **by name** (``MeshRoutedItemSealError/plaintextTooLarge``), which is the
+    /// fail-closed direction.
+    static let maxHeaderJSONByteCount = 64 * 1024
+
+    /// The framed header's allowance: the u64 length prefix plus ``maxHeaderJSONByteCount``.
+    ///
+    /// Derived, never written twice — a type's cap formula reserves exactly the bytes
+    /// ``MeshRoutedPhotoBody/encoded()`` prepends to the raw payload.
+    static let maxFramedHeaderByteCount = headerLengthPrefixByteCount + maxHeaderJSONByteCount
+
     /// The frozen header encoder.
     static func headerEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()

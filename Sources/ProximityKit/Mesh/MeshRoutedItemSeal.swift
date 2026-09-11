@@ -18,11 +18,14 @@
 // Not here: any key agreement (item 1's wrapper owns the private-key half), any store, clock,
 // actor, envelope or identity. The sealer is a pure function of the bytes handed to it, which is
 // what keeps it outside every locked-device gate wall — the predicate is consulted by the delivery
-// door that CALLS this, never by the primitive.
+// door that CALLS this, never by the primitive. The one `PrivateMediaStore` import is P6 item 3's
+// and reaches a single Int — `maxIncomingPhotoBytes`, the payload bound the resident-blob formula
+// is built from — never the store type, its key provider or a byte of its data.
 
 import CryptoKit
 import FernletCrypto
 import Foundation
+import PrivateMediaStore
 
 // MARK: - MeshRoutedItemSealFormat
 
@@ -64,15 +67,34 @@ nonisolated enum MeshRoutedItemSealFormat {
     /// byte caps count the **blob**, not the payload.
     static let overheadByteCount = markerByteCount + nonceByteCount + tagByteCount
 
-    /// The largest blob this device will open, and the number both bounds derive from: 10 MiB, the
-    /// value `PrivateMediaStore` enforces on an incoming photo (it is `private` there, so the
-    /// constant is restated rather than imported across the S3 wall).
+    /// The largest blob this device will produce or open, the number both seal bounds derive from,
+    /// **and** the photo row's registry cap — one number, stated as a FORMULA rather than a literal
+    /// (P6 item 3, D-11.4):
     ///
-    /// **A local seam bound, not a registry cap.** P6 owns the narrowed per-type cap (D-11.4);
-    /// when it lands, this constant is deleted in favour of the registry row and **both** ends move
-    /// together — narrowing only the receiver's check would re-create the mint-it/never-open-it
-    /// asymmetry this pair closes.
-    static let maxResidentBlobByteCount = 10 * 1024 * 1024
+    /// ```
+    /// maxResidentBlobByteCount
+    ///   = PrivateMediaStore.maxIncomingPhotoBytes            // the PLAINTEXT payload bound
+    ///   + MeshRoutedItemBodyFormat.maxFramedHeaderByteCount  // the body's framed header allowance
+    ///   + overheadByteCount                                  // marker + nonce + tag
+    /// ```
+    ///
+    /// Every term is read from the type that owns it, so nothing here restates the 10 MB the photo
+    /// wall enforces (that bound was `private` and restated until P6 item 3 widened it) and nothing
+    /// can drift from it. The formula is what makes the number honest in both directions: the
+    /// **plaintext** bound is a payload bound (the photo wall's), the **ciphertext** cap is what a
+    /// seal of that payload can measure, and the two differ by exactly the framing this file and
+    /// ``MeshRoutedItemBodyFormat`` add.
+    ///
+    /// **Seam bound and registry cap are now the same value, deliberately.**
+    /// `MeshRoutedTypeRegistry.increment1`'s photo row is defined as this constant, so the manifest
+    /// door's per-type check and the projection's resident-blob guard cannot disagree. Narrowing
+    /// only one of them would re-create the mint-it/never-open-it asymmetry D-13.19 closes: the
+    /// photo stage is final on durable **ciphertext**, so a receipt is already minted by the time an
+    /// open refuses. A type whose payload is smaller (P6's text and hearts) narrows its own row
+    /// below this; nothing narrows below it here, because this is the widest registered payload.
+    static let maxResidentBlobByteCount = PrivateMediaStore.maxIncomingPhotoBytes
+        + MeshRoutedItemBodyFormat.maxFramedHeaderByteCount
+        + overheadByteCount
 
     /// The largest plaintext ``MeshRoutedItemSealer/seal(_:contentKey:binding:typeToken:)`` will
     /// take: `maxResidentBlobByteCount − overheadByteCount`. Derived, never written twice.

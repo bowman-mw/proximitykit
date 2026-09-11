@@ -841,14 +841,28 @@ from one source and cannot drift, which is the failure item 4's forward-compat n
   all**: a manifest carries its destination set on the wire and the verifier binds wraps ≡
   destinations from those bytes, so a registered row cannot fall through to increment-1 behaviour on
   receive, and P6 keeps the row to flip when `MeshDeliveryTarget`'s withheld subset initializer lands.
-- **The per-type size cap is a MINT guard, and since P5 item 13 the mint has a shipping caller.** Every
-  increment-1 cap equals the wire bound, so the guard cannot fire today; a receiver-side check would
-  add a `MeshRoutedManifestRejection` case that `MeshRoutedParkedDrop` switches over exhaustively,
-  i.e. it would force D-9.3's drop rule to be re-decided for a condition no row can produce. That
-  check, its rejection case and its **non-dropping** drop arm are P6's, in the same commit as its
-  first narrowed cap. The mint also does **not** refuse an unregistered token: acceptance is a
-  receiver-side statement, so an unregistered item mints under the shared bounds and is refused at
-  every receiver door — loud, and documented as an asymmetry rather than left to be discovered.
+- **The per-type size cap is now a guard at BOTH ends, and P6 item 3 is what made it reachable.**
+  Through P5 every row's cap equalled the wire bound, so neither the mint's
+  ``MeshRoutedManifestMintError/sizeExceedsTypeCap`` nor any receiver check could fire — which is
+  precisely why the receiver-side case was not added earlier: it would have forced
+  ``MeshRoutedParkedDrop``'s exhaustive switch to re-decide D-9.3's origin-bound drop rule for a
+  condition no row could produce. P6 item 3 lands the three together in one commit: the check at the
+  manifest door (`routedTypeCapRejection(for:)`, between the verifier and the admission gate, exiting
+  through the one charging door like every pre-store refusal), the
+  ``MeshRoutedManifestRejection/sizeExceedsTypeCap`` case, and that case's **non-dropping** arm —
+  an over-cap manifest KEEPS its parked bytes, because a cap is a number one build chose and a later
+  build may loosen it, while a dropped parked set cannot be recovered. The first narrowed cap is the
+  photo row's, written as a **formula** rather than a literal:
+  `PrivateMediaStore.maxIncomingPhotoBytes` (the payload's *plaintext* bound, widened from `private`
+  in the same commit rather than restated) + ``MeshRoutedItemBodyFormat/maxFramedHeaderByteCount`` +
+  ``MeshRoutedItemSealFormat/overheadByteCount``, which is exactly
+  ``MeshRoutedItemSealFormat/maxResidentBlobByteCount`` — so the door's cap and the delivery
+  projection's resident-blob guard are one number and cannot drift. The unit caveat is the whole
+  reason for the formula: `manifest.size` is the complete sealed *ciphertext* blob, while a store's
+  byte and pixel bounds are *plaintext* bounds enforced at reassembly. The mint still does **not**
+  refuse an unregistered token: acceptance is a receiver-side statement, so an unregistered item
+  mints under the shared bounds and is refused at every receiver door — loud, and documented as an
+  asymmetry rather than left to be discovered.
 - **The registry is not a wire change, not persisted and not a gate.** No golden, purpose, framing
   case or `PayloadType` moves; nothing is stored (the index already holds the origin's manifest
   verbatim, and a persisted policy would outlive the build that wrote it); and the file names none of
@@ -1434,9 +1448,12 @@ pile; it is not in the authenticated data, because a routed blob is hash-committ
 manifest and a flipped marker fails `contentHash` at assembly before any key is unwrapped. The seal
 bound and the open bound are **one derived number** (`maxPlaintextByteCount = maxResidentBlobByteCount
 − overheadByteCount`): deriving the write bound from the 256 MiB wire cap while the open refused at
-10 MiB would let an origin mint an item every recipient custodies, receipts and then declines to
-open — and the photo stage is final on durable *ciphertext*, so that receipt is already minted when
-the open refuses. The sealer is pure — no actor, clock, I/O or identity — which is what keeps it
+the photo bound would let an origin mint an item every recipient custodies, receipts and then
+declines to open — and the photo stage is final on durable *ciphertext*, so that receipt is already
+minted when the open refuses. Since **P6 item 3** that resident bound is itself a formula —
+`PrivateMediaStore.maxIncomingPhotoBytes` + ``MeshRoutedItemBodyFormat/maxFramedHeaderByteCount`` +
+`overheadByteCount` — and is the photo row's registry cap verbatim, so the seam bound, the registry
+cap and the projection's guard are one expression rather than three numbers that agree today. The sealer is pure — no actor, clock, I/O or identity — which is what keeps it
 outside every locked-device wall: the predicate is consulted by the delivery door that calls it.
 
 ``MeshRoutedPhotoBody`` is the plaintext for the first routed type, framed as a length-prefixed JSON

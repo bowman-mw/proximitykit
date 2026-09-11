@@ -253,8 +253,9 @@ nonisolated struct MeshRoutedCapacityUsage: Equatable, Sendable {
 /// `foreignMesh` / `malformed` (unauthenticated, or a ledger view that can still converge);
 /// `destinationSetInvalid` / `wrapsDoNotMatchDestinations` / `expiryMismatch` (signature-valid shape
 /// refusals a corrected manifest for the same item id may follow); `originRemoved` (the mesh's
-/// moderation act, not the origin's retraction — expiry collects those bytes). And never on a
-/// capacity refusal, which would turn backpressure into data loss.
+/// moderation act, not the origin's retraction — expiry collects those bytes); and P6 item 3's
+/// `sizeExceedsTypeCap` (a cap is a number one build chose and a later build may loosen — see the
+/// arm). And never on a capacity refusal, which would turn backpressure into data loss.
 nonisolated enum MeshRoutedParkedDrop {
 
     /// Why a parked set was dropped. A frozen English audit token, logged verbatim, never localized
@@ -281,8 +282,19 @@ nonisolated enum MeshRoutedParkedDrop {
         switch rejection {
         case .unknownTypeToken:
             return .unknownTypeToken
+        // P6 item 3's cap refusal KEEPS the bytes, and the asymmetry with `unknownTypeToken` is the
+        // whole reason the case could not be added before its cap existed (D-11.4). An unknown token
+        // is terminal for the item under any build that does not register it; a cap is a NUMBER one
+        // build chose, and a later build may loosen it — so the same parked set that is dead weight
+        // under today's cap is deliverable under tomorrow's. A cap can be widened; a dropped parked
+        // set cannot be recovered, because the bytes only ever existed at the origin and in the
+        // chunks this device already holds. Dropping on a cap refusal would also hand the origin a
+        // remote delete lever it does not have anywhere else: one over-cap manifest for an item
+        // whose chunks are parked here, and the bytes are gone. Expiry collects them if the cap
+        // never moves.
         case .foreignMesh, .malformed, .originNotAdmitted, .originRemoved, .originKeyMismatch,
-             .signatureInvalid, .wrapsDoNotMatchDestinations, .destinationSetInvalid, .expiryMismatch:
+             .signatureInvalid, .wrapsDoNotMatchDestinations, .destinationSetInvalid, .expiryMismatch,
+             .sizeExceedsTypeCap:
             return nil
         }
     }

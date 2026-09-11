@@ -54,6 +54,21 @@ nonisolated enum MeshRoutedManifestRejection: String, CaseIterable, Equatable, S
     case destinationSetInvalid
     /// `expiresAt` is not this device's `hardDeadline + grace` (D6).
     case expiryMismatch
+    /// `size` — the complete sealed **ciphertext** blob — is above the cap the type's own registry
+    /// row declares (P6 item 3, D-11.4). Distinct from the ``malformed`` shape refusal, which
+    /// carries the wire bound every type shares: this one names a POLICY the registry set for one
+    /// type, so two builds can honestly disagree about it and a later build may loosen it.
+    ///
+    /// **Raised at the manifest door, not inside this verifier**, and that is the one case here
+    /// with a producer outside the door's own `verify(_:)`. The verifier is a pure value carrying
+    /// the accepted-token *set* — a projection of the registry's rows (D-11.1) — and a cap lives on
+    /// the row, not in the projection; widening the verifier to carry the rows would move a policy
+    /// read into a type whose whole job is "what did the origin sign". The door
+    /// (`MeshNetworkManager.ingestRoutedManifest`) asks the registry it already holds, immediately
+    /// after this verifier returns, and refuses through the one charging door. The rejection
+    /// vocabulary is shared because it is the audit surface for *a refused manifest*, whichever
+    /// half of the door refused it.
+    case sizeExceedsTypeCap
 
     /// Frozen English for the diagnostic surface. Never shown as user copy.
     var diagnosticDescription: String {
@@ -68,6 +83,8 @@ nonisolated enum MeshRoutedManifestRejection: String, CaseIterable, Equatable, S
         case .wrapsDoNotMatchDestinations: return "The key wraps do not line up with the destinations."
         case .destinationSetInvalid: return "The destination set repeats a member or names the origin."
         case .expiryMismatch: return "The manifest's expiry is not this mesh's hard deadline plus grace."
+        case .sizeExceedsTypeCap:
+            return "The manifest's size is above the declared cap for its routed type."
         }
     }
 }
@@ -112,6 +129,12 @@ nonisolated struct MeshRoutedManifestVerifier: Sendable {
     /// key/fingerprint agreement → signature → wrap/destination alignment → distinct set without
     /// the origin → expiry equality. Destinations are NOT looked up in the ledger (D12), and
     /// departures are never consulted.
+    ///
+    /// **Not checked here, and deliberately:** the type's per-type size cap. This verifier carries
+    /// the accepted-token set, a projection of the registry's rows; the cap is on the row, and the
+    /// door reads it from the registry it already holds the moment this returns nil
+    /// (``MeshRoutedManifestRejection/sizeExceedsTypeCap``). Nothing downstream of the door relies
+    /// on "the verifier said yes" meaning "within cap".
     ///
     /// `MeshNetworkManager.routedProjectionAuthor(for:)` resolves the same origin against the same
     /// set at the far end of the item's life (P5 item 13, D-13.33). The two must agree: a door that

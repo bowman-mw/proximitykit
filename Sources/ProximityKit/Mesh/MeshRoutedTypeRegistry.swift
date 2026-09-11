@@ -119,9 +119,19 @@ nonisolated enum MeshRoutedCanonicalStore: String, CaseIterable, Equatable, Send
 /// fleet is on the new build) and ``canonicalStore`` may be edited in place; ``expiry`` is not
 /// editable at all in increment 1.
 ///
-/// **Unit caveat for the cap**, which P6 must keep in view: `MeshRoutedManifest.size` is the
-/// complete sealed *ciphertext* blob, while a store's byte and pixel bounds are *plaintext* bounds
-/// enforced at reassembly. Two bounds, both live.
+/// **Unit caveat for the cap** — the one thing to get right when narrowing a row.
+/// ``maxItemByteCount`` is compared against `MeshRoutedManifest.size`, which is the complete sealed
+/// **ciphertext** blob (marker, nonce, ciphertext, tag), while a store's byte and pixel bounds are
+/// **plaintext** bounds enforced at reassembly. Two bounds, both live, and they are not the same
+/// number: a ciphertext cap set to a plaintext bound refuses items that are perfectly in bounds,
+/// and one set above what the seal can produce is no cap at all. So a narrowed row is written as a
+/// **formula**, never a literal — the payload's plaintext bound, plus
+/// ``MeshRoutedItemBodyFormat/maxFramedHeaderByteCount``, plus
+/// ``MeshRoutedItemSealFormat/overheadByteCount``. P6 item 3's photo row is the worked example: it
+/// is defined as ``MeshRoutedItemSealFormat/maxResidentBlobByteCount``, which is exactly that sum
+/// over `PrivateMediaStore.maxIncomingPhotoBytes`, so the manifest door's per-type check and the
+/// delivery projection's resident-blob guard are one number by construction. A row that narrows
+/// below what its own sender can seal would have that sender mint items every receiver refuses.
 nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 
     /// The frozen wire spelling this row declares for — the registry's key, from
@@ -214,11 +224,20 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 /// ``MeshRoutedTypeEntry/maxItemByteCount``, ``MeshRoutedTypeEntry/destinations`` and
 /// ``MeshRoutedTypeEntry/expiry`` are now read at a real mint, and
 /// ``MeshRoutedTypeEntry/canonicalStore`` is the dispatch key the delivery projection switches on
-/// (`.friendPhotoWall` is the worked example; the other two are P6's). What is still ahead of its
-/// reader is the NARROWED per-type cap: every row's `maxItemByteCount` is the shared wire bound, so
-/// `sizeExceedsTypeCap` remains structurally unreachable until P6 narrows one (D-11.4). Item 13
-/// bounded a routed photo's bytes at its own seam instead — ``MeshRoutedItemSealFormat`` — which is
-/// a local bound, not a registry cap, and is deleted in favour of the row when P6 lands it.
+/// (`.friendPhotoWall` is the worked example; the other two are P6's).
+///
+/// **The per-type cap has a RECEIVER since P6 item 3** (D-11.4). The photo row no longer sits at the
+/// shared wire bound: it is ``MeshRoutedItemSealFormat/maxResidentBlobByteCount``, the formula in the
+/// unit caveat above, which makes the manifest door's check reachable for the first time — an
+/// over-cap manifest is refused as ``MeshRoutedManifestRejection/sizeExceedsTypeCap`` at
+/// `MeshNetworkManager.ingestRoutedManifest`, charged to the envelope sender like every pre-store
+/// refusal, and its parked chunk bytes are **kept** (``MeshRoutedParkedDrop`` answers nil, because a
+/// cap is a number one build chose and a later build may loosen it). The mint's own
+/// ``MeshRoutedManifestMintError/sizeExceedsTypeCap`` became reachable in the same commit. The
+/// remaining column ahead of a discriminating test is ``MeshRoutedTypeEntry/expiry``, which still
+/// has one case (D-11.22). ``MeshRoutedItemSealFormat`` stays as the seam that bounds a seal and an
+/// open — it is now *defined as* the photo row's formula rather than restating a number, so the two
+/// ends the earlier note promised to move together are one expression.
 ///
 /// Shipping code names exactly one value, ``increment1``, constructs a registry in exactly one file,
 /// and branches on no routed type token anywhere — three source-scan walls in
@@ -261,9 +280,16 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
     /// ``MeshRoutedTypeToken/control`` is deliberately absent: registering a token nothing mints
     /// would open a door with no handler behind it.
     static let increment1 = MeshRoutedTypeRegistry(entries: [
+        // The photo row is the FIRST narrowed cap (P6 item 3, D-11.4), and it is narrowed to a
+        // formula rather than a number: `MeshRoutedItemSealFormat.maxResidentBlobByteCount` is
+        // `PrivateMediaStore.maxIncomingPhotoBytes` (the photo wall's PLAINTEXT bound) plus
+        // `MeshRoutedItemBodyFormat.maxFramedHeaderByteCount` plus the seal's own overhead — i.e.
+        // the widest CIPHERTEXT a routed photo can measure. Defined as that constant, not as a copy
+        // of it, so the manifest door's check and the projection's resident-blob guard are the same
+        // number and cannot drift; see the unit caveat on `MeshRoutedTypeEntry`.
         MeshRoutedTypeEntry(
             token: MeshRoutedTypeToken.photo,
-            maxItemByteCount: MeshRoutedManifestFormat.maxContentByteCount,
+            maxItemByteCount: UInt64(MeshRoutedItemSealFormat.maxResidentBlobByteCount),
             destinations: .fullRosterAtCreation,
             relayRetention: .originRetainsUntilDeparture,
             finalAck: .durableRecipientStorage,
