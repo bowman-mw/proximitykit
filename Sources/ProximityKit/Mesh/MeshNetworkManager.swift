@@ -2522,10 +2522,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `signerNotAdmitted` before it checks the signature and one frame carries sixteen rows.
     /// Within a share the rule is **first parked wins** — arrival order, *not* the set's
     /// `precedes` earliest-wins rule, which orders on an unverified row's own `advertisedAt` — and
-    /// a row that has already failed a widening yields its slot to a newcomer. Memory-only, never
+    /// a row that has already failed a roster move yields its slot to a newcomer. Memory-only, never
     /// persisted (no wipe row is owed); cleared with the rest of the addressing state at every
     /// session reset, which is one of the two other ends a row a ledger never names leaves by (the
-    /// first being ``MeshKeyAdvertisementParkBounds/failedWideningsPerRow``).
+    /// first being ``MeshKeyAdvertisementParkBounds/failedRosterMovesPerRow``).
     @ObservationIgnored
     private var parkedKeyAdvertisements: MeshKeyAdvertisementPark = .empty
 
@@ -3549,17 +3549,38 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         parkedKeyAdvertisements = .empty
     }
 
-    /// The ONE place ``keyAdvertisements`` is assigned, so the set and its version cannot drift.
+    /// The one place ``keyAdvertisements`` moves FORWARD, so the set and its version cannot drift.
     ///
     /// A version that failed to move would leave a peer permanently un-told about a row this device
     /// folded after it last spoke to that peer — which is the whole defect the version exists to
-    /// close.
+    /// close. The only other assignment is ``rollBackKeyAdvertisements(to:version:)``, which undoes
+    /// one of these and restores both fields together.
     ///
     /// - Parameter set: The new set.
     private func adoptKeyAdvertisements(_ set: MeshKeyAgreementAdvertisementSet) {
         guard set != keyAdvertisements else { return }
         keyAdvertisements = set
         keyAdvertisementVersion += 1
+    }
+
+    /// Undoes one adoption: the set **and** the version it bumped, together.
+    ///
+    /// Without the version half a refused seal cost **two** versions for no net change (third
+    /// review P3 5): `adoptKeyAdvertisements(_:)` bumps on every difference, and a rollback differs
+    /// from the value it is undoing, so the set ended byte-identical to what every peer had already
+    /// been told while every peer was owed it again — one unchanged frame each, charged against that
+    /// receiver's ``MeshKeyAdvertisementReceiveBounds/framesPerSenderPerSession``. Restoring the
+    /// version is correct by construction rather than a fudge: the peers were told the pre-fold set,
+    /// and that is exactly the set this puts back.
+    ///
+    /// - Parameters:
+    ///   - set: The set to put back — the one that is on disk.
+    ///   - version: The version that named it.
+    private func rollBackKeyAdvertisements(
+        to set: MeshKeyAgreementAdvertisementSet, version: Int
+    ) {
+        keyAdvertisements = set
+        keyAdvertisementVersion = version
     }
 
     /// Audits a fold's outcomes and keeps its set only once the bytes are on disk.
@@ -3570,6 +3591,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// together and they cannot diverge. A fold that changed nothing spends no seal, which is what
     /// keeps a replayed frame free.
     ///
+    /// **The rollback restores the VERSION too** (third review P3 5), through
+    /// ``rollBackKeyAdvertisements(to:version:)``: a refused seal that bumped the version twice left
+    /// every peer owed a frame carrying the set it had already been told, spending one frame of each
+    /// receiver's per-sender budget for nothing.
+    ///
     /// - Parameter result: What the fold decided.
     /// - Returns: `true` only when the set changed AND the change is durable.
     @discardableResult
@@ -3577,9 +3603,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         auditKeyAdvertisementOutcomes(result.outcomes)
         guard result.changed else { return false }
         let rollback = keyAdvertisements
+        let rollbackVersion = keyAdvertisementVersion
         adoptKeyAdvertisements(result.set)
         guard persistSessionContext(addingEpochHead: nil) else {
-            adoptKeyAdvertisements(rollback)
+            rollBackKeyAdvertisements(to: rollback, version: rollbackVersion)
             FernletAuditLog.log("mesh.keyAgreement.notDurable")
             return false
         }
@@ -3888,7 +3915,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// **The work is bounded three times over.** A share holds at most
     /// ``MeshKeyAdvertisementParkBounds/rowsPerSender`` rows and there are at most
     /// ``MeshKeyAdvertisementParkBounds/senders`` shares; each row is re-verified at most
-    /// ``MeshKeyAdvertisementParkBounds/failedWideningsPerRow`` times before it is dropped by name;
+    /// ``MeshKeyAdvertisementParkBounds/failedRosterMovesPerRow`` times before it is dropped by name;
     /// and this runs only where a *verified* record moved the roster or a ledger was adopted, on top
     /// of the per-sender frame bound the receive door charges.
     ///
@@ -3918,7 +3945,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Puts back every re-offered row the widening still could not prove, and drops the ones that
-    /// have failed ``MeshKeyAdvertisementParkBounds/failedWideningsPerRow`` widenings.
+    /// have failed ``MeshKeyAdvertisementParkBounds/failedRosterMovesPerRow`` verified roster moves.
     ///
     /// Only `signerNotAdmitted` goes back: every other refusal is about the bytes, which a wider
     /// ledger cannot fix, and a row that folded is in the set. The drop is what stops a row for a
@@ -12002,7 +12029,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// The raw row one sender has parked for one member, or nil.
     ///
-    /// Readable because the displacement rule — a row that has already failed a widening yields its
+    /// Readable because the displacement rule — a row that has already failed a roster move yields its
     /// slot to a newcomer — is otherwise only observable by waiting for the drop, which takes three
     /// verified roster moves to demonstrate. Which row holds the slot is the claim, so the cell
     /// reads it.
@@ -12021,8 +12048,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// The three shipping seams (`attemptLedgerAdoption`, the merge door's `if moved` arm and
     /// `applyRosterMove`) each need a *verified* roster move to fire, and the claims about the
-    /// park's own arithmetic — a row dropped after three failed widenings, a re-offer whose seal was
-    /// refused rolling both containers back — need three widenings and a refused seal at a moment a
+    /// park's own arithmetic — a row dropped after three failed roster moves, a re-offer whose seal was
+    /// refused rolling both containers back — need three roster moves and a refused seal at a moment a
     /// roster move cannot supply. This is the same door those three call, with no state seeded.
     func foldParkedKeyAdvertisementsForTesting() { foldParkedKeyAdvertisements() }
 

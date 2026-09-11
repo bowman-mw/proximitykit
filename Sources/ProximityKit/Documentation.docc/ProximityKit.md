@@ -435,18 +435,29 @@ relayed row was silently not parked at all. Each authenticated sender now has it
 `rowsPerSender` (a whole frame's worth — the joiner-bootstrap case needs exactly that, since it can
 prove *none* of what its admitter relays), the map itself is bounded by `senders`, a collision is
 named (`mesh.keyAgreement.parkCollision`) instead of hidden inside a refusal, a row that has already
-failed a widening yields its slot to a newcomer, and a row that has failed `failedWideningsPerRow`
-widenings is dropped by name (`mesh.keyAgreement.parkDropped`) rather than re-verified for the life
-of the mesh. Within a share the rule is **first parked wins** — arrival order, *not* the set's
-`precedes` earliest-wins rule, which orders on an unverified row's own attacker-chosen `advertisedAt`.
+failed a roster move yields its slot to a newcomer, and a row that has failed
+`failedRosterMovesPerRow` of them is dropped by name (`mesh.keyAgreement.parkDropped`) rather than
+re-verified for the life of the mesh. The bound counts verified roster **moves**, not widenings, and
+the name says so as of the third review: the re-offer fires on any move, so three narrowings — which
+could never prove a row — evict a genuine early one. It is audited rather than silent, and the
+sender re-states its whole set at the next link-open on which its own set version has moved. Within
+a share the rule is **first parked wins** — arrival order, *not* the set's `precedes` earliest-wins
+rule, which orders on an unverified row's own attacker-chosen `advertisedAt`.
 So the ends a never-named row leaves by are the share refusal (`mesh.keyAgreement.parkFull`), the
-failed-widening drop, and the session reset — of which there are **four**, one more than the
+roster-move drop, and the session reset — of which there are **four**, one more than the
 re-gossip budget's three since item 2's newborn yield. A re-offer whose seal the store refuses rolls
 the park back **with** the set (`mesh.keyAgreement.parkRolledBack`): a row in neither container is a
 row nothing re-sends, because the sender's latch is spent at that (peer, version). The same fix keys the receive door's per-sender bound
 to a **roster member** rather than to any committed slot — with the one exception the record path
 already makes for a joiner's own admitter — so a handful of committed non-members cannot spend the
 bound every real member needs, and the map's roster cap becomes true by construction.
+
+**The park's six audit tokens**, frozen English and counts only (third review P3 10 — two of them
+were in no index and on no page): `mesh.keyAgreement.parked` (a refused row took a slot in its
+sender's share), `…parkedReoffered` (a widening drained the park), `…parkCollision` (two different
+rows for one member in one share, `kept: newcomer` or `kept: held`), `…parkFull` (the share or the
+sender bound is spent), `…parkDropped` (the roster-move eviction above) and `…parkRolledBack` (a
+re-offer whose seal was refused). None of them carries a fingerprint.
 
 **An epoch is a value, not a number** (plan §8.4, P3 item 4). `MeshEpochRef` is a Lamport counter
 (cap 4096, and a counter *at* the cap refuses to mint a successor rather than trapping — a mesh that
