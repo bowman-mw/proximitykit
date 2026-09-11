@@ -405,6 +405,29 @@ nonisolated struct MeshKeyAgreementAdvertisementSet: Codable, Equatable, Sendabl
         )
     }
 
+    /// The set with conflict marks for members **outside** `members` dropped, keeping every row.
+    ///
+    /// The bounded relief for the blast radius ``MeshKeyAdvertisementFold`` names: a conflicted mark
+    /// refuses the whole mint and rides the sealed context for the life of the mesh, and its escape
+    /// is the one the mesh already has for a misbehaving member — a departure or a removal vote.
+    /// This makes that escape complete instead of leaving a mark that outlives the membership it
+    /// describes.
+    ///
+    /// **It takes no fence away, and it is not a wire-reachable lever.** The only caller passes the
+    /// fingerprints of the CURRENT derived roster, and a member the roster does not name is never a
+    /// mint destination, so the mark it drops could refuse nothing today. Rows are untouched: a row
+    /// for a departed member is dropped where it has always been dropped, by the restore fence
+    /// re-proving it against the narrowed ledger.
+    ///
+    /// - Parameter members: The fingerprints whose marks are kept — the derived roster's members.
+    /// - Returns: The new set, or an equal value when no mark was outside the roster.
+    func clearingConflicts(outside members: Set<String>) -> MeshKeyAgreementAdvertisementSet {
+        MeshKeyAgreementAdvertisementSet(
+            advertisements: ordered,
+            conflictedFingerprints: conflicted.filter { members.contains($0) }
+        )
+    }
+
     /// Deduplicates by member (earliest wins), marks any member that arrived with two different
     /// keys, sorts by the total order and keeps the first ``capacity``.
     ///
@@ -558,10 +581,30 @@ nonisolated struct MeshKeyAdvertisementFoldResult: Equatable, Sendable {
 /// runs before verification is safe for the same reason it is worth having: it only ever answers
 /// "identical to a row this device already verified", which changes nothing.
 ///
-/// **The residual worth naming:** a member can permanently un-address *itself* mesh-wide by signing
-/// two different keys and handing one to each of two peers. Self-griefing only — it cannot touch
-/// another fingerprint — permanent for the session, and the escape is the same one a departure has:
-/// rejoining means a new mesh.
+/// **The residual worth naming, at its true scope** (P6 item 1, pass B review finding 5 — the
+/// first wording of this paragraph understated it twice). A member that signs two different keys
+/// and hands one to each of two peers does not merely make *itself* unaddressable:
+///
+/// - **Whole-mint, not per-destination.** `MeshNetworkManager.routedDestinationKeys(for:)` returns
+///   `.mismatched` on the FIRST conflicted destination and its caller refuses the entire mint, so
+///   one conflicted member stops that origin sharing with **every** destination it can see. A
+///   subset target arrives with item 6's `.singleRecipient` flip; until then this is mesh-wide.
+/// - **Durable across restarts, not "permanent for the session".** The marks ride the sealed
+///   session context and ``MeshKeyAdvertisementFold/restoring(_:verifiedBy:)`` deliberately carries
+///   them forward for every surviving row, so a relaunch does not clear one. It is permanent for
+///   the life of the **mesh**.
+///
+/// It stays fail-closed: two verified keys under one fingerprint is a substitution signal, and
+/// picking either would mean wrapping a content key to a device that may not hold it. The **bounded
+/// relief** is the one the mesh already has for a misbehaving member, completed rather than
+/// widened: a mark is dropped once the derived roster no longer names its member
+/// (``MeshKeyAgreementAdvertisementSet/clearingConflicts(outside:)``, driven from the manager's
+/// roster-move seams), so a departure or a removal vote ends the outage instead of leaving a mark
+/// that outlives the membership it describes. A mark for a member that is off the roster could
+/// refuse nothing today — destinations *are* the derived roster — so clearing it takes no fence
+/// away; what it buys is that the escape is real at item 6's subset target and after a re-admission,
+/// and that the mark does not ride the sealed context for the rest of the mesh's life. Whether the
+/// user should also be able to clear one by hand is on the plan's §23.4 owner list.
 nonisolated enum MeshKeyAdvertisementFold {
 
     /// Folds a batch of advertisements into a set, verifying each one first.

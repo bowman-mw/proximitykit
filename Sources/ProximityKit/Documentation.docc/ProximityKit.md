@@ -350,7 +350,8 @@ wraps one content key per destination, and until P6 the only sources it accepted
 a live slot's handshake-verified key-agreement key and the session-roster entry written from that
 same value. Both are memory-only, so a restart, an idle-lapse resume or a rejoin restored the ledger
 and not the keys, and the mint refused every destination it was not linked to at that instant.
-`SignedKeyAgreementAdvertisement` is the durable third source: a member signs its **own**
+`SignedKeyAgreementAdvertisement` is the durable third source, on its own additive frame
+`fernlet.mesh.key-agreement.v1` (the table above): a member signs its **own**
 key-agreement public key (self-signed, subject == author, with `meshID` bound into the transcript),
 `MeshMembershipRecordVerifier` checks it against `ledger.admissions` — the ledger's own trust root,
 so a fingerprint with no admission has no row — and `MeshKeyAdvertisementFold` folds it into a
@@ -399,6 +400,26 @@ become a successful mint whose delivery waits for a link or a departure hand-off
 never forwards an item it holds, because `relayInFlight` is increment 2's. The mint's own precedence
 is present-tense-first, and two verified sources that disagree refuse by name (`keyMismatch`) rather
 than choosing.
+
+**The grant door needed a receiver-side half** (P6 item 1 fix, found by item 2's audit on the app's
+own proximity-join path). A row relayed at `grantAdmission` always arrives while the joiner's ledger
+is still the one-record bootstrap its admitter rooted — a ledger in which the admitter itself is not
+an admitted member — so the fold refused every one of them `signerNotAdmitted`, the send's
+once-per-(peer, version) bound never re-fired, and the sixth door closed nothing on the joiner side.
+The joiner now **parks** a row whose signer its ledger does not yet name (at most sixteen, one per
+fingerprint, earliest-wins, memory-only, cleared with the rest of the addressing state) and re-offers
+the park through the one fold door at each widening — `attemptLedgerAdoption`, the merge door and
+the live record insert. Every re-offer is **re-decided by that door**: a row that has become
+provable is folded, a row that now fails for any other reason is dropped and named, and one whose
+signer this device still cannot see waits for the next widening (a widening arrives in stages — a
+third device adopts the moment the chain to its *own* admission proves, which can be a two-member
+ledger). A parked row is raw bytes that have verified nothing and can mark nothing, and the work it
+can buy is bounded twice: the park's own capacity, and the ledger's record caps, which bound how
+many times a roster can move. The two ends a never-named row leaves by are the capacity refusal
+(`mesh.keyAgreement.parkFull`) and the session reset. The same fix keys the receive door's per-sender bound
+to a **roster member** rather than to any committed slot — with the one exception the record path
+already makes for a joiner's own admitter — so a handful of committed non-members cannot spend the
+bound every real member needs, and the map's roster cap becomes true by construction.
 
 **An epoch is a value, not a number** (plan §8.4, P3 item 4). `MeshEpochRef` is a Lamport counter
 (cap 4096, and a counter *at* the cap refuses to mint a successor rather than trapping — a mesh that
@@ -947,6 +968,7 @@ frozen English spelling, so one grep finds every layer that touches those bytes:
 | `fernlet.mesh.terminated.v1` | `SignedTerminationRecord` | a final-pair member | `Signature.meshTerminatedV1` |
 | `fernlet.mesh.inventory-digest.v1` | — (a message, not a record) — **membership records only**, never routed content | any member | `Signature.meshInventoryDigestV1` over a `Hash.meshInventoryDigestV1` digest |
 | `fernlet.mesh.epoch-heads.v1` | — (a message, not a record) | any member | `Signature.meshEpochHeadsV1` |
+| `fernlet.mesh.key-agreement.v1` | — (ADDRESSING, not a record): a batch of `SignedKeyAgreementAdvertisement`, each a member's own durable X25519 public key | **each member, about its own key** — the batch frame itself is unsigned, and a relay forwards every element verbatim, never re-signing | `Signature.meshKeyAgreementV1` |
 | `fernlet.mesh.removal-proposal.v1` | — (live state, not a record) | the proposer, whose proposal IS its vote | `Signature.meshRemovalProposalV1` |
 | `fernlet.mesh.removal-vote.v1` | — (live state, not a record) | any member except the target | `Signature.meshRemovalVoteV1` |
 | `fernlet.mesh.routed-manifest.v1` | `MeshRoutedManifest` (a content record, not a membership record) | the origin only — relays forward it verbatim, never re-sign | `Signature.meshRoutedManifestV1`; wraps under `KeyDerivation.meshRoutedContentKeyWrapV1` + `AEAD.meshRoutedContentKeyWrapV1` |
