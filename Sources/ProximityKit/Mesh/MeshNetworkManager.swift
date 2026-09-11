@@ -69,10 +69,13 @@ private struct FriendPhotoWallPreferences: Codable, Equatable {
 /// dispatches with a merely-pending identity and no state gate.
 ///
 /// Session lifecycle invariants: "session formation" is the FIRST slot commit (not search start,
-/// which fires on every Social-tab entry); the last-committed-slot-gone moment — ``hasCommittedPeer``
-/// going false, **never** `isInSession`, which a founded mesh keeps true across every link —
-/// promotes the roster into `pendingFriendReview`, opens the clothing-shop window, and clears the
-/// chat transcript. Phase-3 group crypto: a lowest-fingerprint coordinator election, a 20 s beacon,
+/// which fires on every Social-tab entry); the SESSION-END moment — ``isSessionLive`` going false,
+/// which since P6 item 2 means the **mesh** ending (End Session, a termination or completed
+/// departure, the five-minute discovery timeout with no peer, or slot loss while no mesh is held)
+/// and never a link blip — promotes the roster into `pendingFriendReview`, opens the clothing-shop
+/// window, and clears the chat transcript. `isInSession` is the surface question, ``hasCommittedPeer``
+/// the "is there a peer right now" question, and ``isSessionLive`` the lifecycle one; all three are
+/// read and they are not interchangeable. Phase-3 group crypto: a lowest-fingerprint coordinator election, a 20 s beacon,
 /// and a 15-minute key rotation distribute the ``MeshGroupKey`` pairwise-wrapped to
 /// handshake-verified KA keys; closed-mode metadata and epoch ≥ 1 photos ride AES-GCM under it.
 /// Photos persist metadata-only in the `PrivateMediaStore`-backed cache (bytes on disk,
@@ -279,8 +282,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Per-slot rate limit for `clothingCatalogRequest` responses (request-spam amplification guard:
     /// each response is a full catalog send). Pruned with `sentShopCatalogSlotIDs`.
     @ObservationIgnored private var shopCatalogRequestResponseAt: [UUID: Date] = [:]
-    /// True from the first slot COMMIT of a session (formation) until the session ends (no committed
-    /// slot — the same `!hasCommittedPeer` condition the review promotion keys on). Gates the
+    /// True from the first slot COMMIT of a session (formation) until the session ends (the same
+    /// `!isSessionLive` condition the review promotion keys on — so a link blip no longer ends the
+    /// formation, and the heal that follows it is not a new one). Gates the
     /// Phase-3a formation hook in `noteSlotCommittedForShop` so `clothingShop.beginNewSession()` fires
     /// exactly once per formation — later commits, ``announcePromotedMesh()``'s committed loop, and a
     /// re-handshake of the only committed slot must not re-fire it mid-session.
@@ -881,6 +885,47 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Controls auto-invite-all and 25 s uncommitted-channel TTL behaviour.
     public private(set) var isProximityJoin = false
 
+    /// Whether THIS session was entered through the proximity dwell path — the memory
+    /// ``isProximityJoin`` cannot keep, because `stopSearching()` clears it (P6 item 2 fix, review
+    /// finding P3-10).
+    ///
+    /// ``resumeSearchingForPartitionedMesh()`` used to set `isProximityJoin = true`
+    /// unconditionally, so a mesh restored at launch — which reaches the resume arm on the first
+    /// Friends visit, mesh present and no committed peer — was silently flipped into proximity-join
+    /// mode, and auto-invite, the dwell commit and the founding-pair auto-grant all read that flag.
+    /// The resume now restores the session's own entry mode instead of asserting one, which is what
+    /// its doc claims ("minus every reset", not "plus one set"). Set where `isProximityJoin` is
+    /// set true, cleared where a session ends; a fresh process starts false, so a launch-restored
+    /// mesh resumes in non-proximity mode.
+    @ObservationIgnored private(set) var sessionEnteredByProximityJoin = false
+
+    /// Whether THIS device's user closed this session — a sticky local policy no remote descriptor
+    /// can undo (P6 item 2 fix, review finding P2-3).
+    ///
+    /// The mode is gossiped and merged by last-write-wins on `modeSetAt`
+    /// (``mergeMeshDescriptor(_:incoming:)``), and an incoming stamp is clamped only from ABOVE
+    /// (`sanitizedDescriptor`, `Date() + 60`). A **monotonic local stamp is not enough**, and that
+    /// is the reason this is a flag rather than a better clock: a monotonic re-assert only
+    /// guarantees that *our* re-assert beats the stamp we just adopted. It cannot survive the
+    /// peer's NEXT descriptor, which is honestly stamped later still by the peer's own clock — so
+    /// one forward-skewed or simply later writer re-opens a mesh on the device whose user closed
+    /// it, with no local consent and no trace. The user's choice is a local policy, not a value in
+    /// a race, so it is re-applied after every merge instead of being bid into one.
+    ///
+    /// Consequence, deliberate and fail-closed: a mesh stays closed while any member's user has
+    /// closed it. Re-opening is that user's own tap (``setSessionOpen(_:)`` clears this).
+    @ObservationIgnored private(set) var userClosedThisSession = false
+
+    /// Set when a door declared the session over while its mesh is still held — today exactly one,
+    /// ``endSessionAfterDiscoveryTimeout()`` (P6 item 2 fix).
+    ///
+    /// Observable (not `@ObservationIgnored`) because ``isSessionLive`` is what the app's review
+    /// presentation guards on, and this is the one leg of it that no observable edge accompanies:
+    /// every terminal ``sessionState`` carries `.stopParticipation`, which empties `slots`, and the
+    /// promotion hook writes `pendingFriendReview` — both observed. Cleared by `startSearching()`,
+    /// so re-arming the radios over the same mesh un-ends it.
+    private var sessionSearchGaveUp = false
+
     /// Controls whether additional friends can join the active Friends session. Read at the
     /// founding (it picks the new mesh's `.open`/`.closed` mode) and at every seat and admission
     /// decision after it.
@@ -946,22 +991,60 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         currentMesh != nil || slots.contains(where: { $0.fingerprint != nil })
     }
 
-    /// Whether any peer's handshake is COMMITTED right now — the **lifecycle** half of
-    /// ``isInSession`` (P6 item 2).
+    /// Whether any peer's handshake is COMMITTED right now — "**is there a peer this instant**",
+    /// and nothing more (P6 item 2).
     ///
-    /// The three session-end hooks (``promoteRosterToPendingReviewIfSessionEnded()``,
-    /// ``openShopWindowIfSessionEnded()``, ``clearSessionMessagesIfSessionEnded()``), the review
-    /// sheet that presents the promoted batch, and the app's discovery lifecycle read this.
-    /// Before item 2 they read `isInSession` and were right by accident: a two-device session had
-    /// no mesh, so the last committed slot going away was the only leg either predicate had. A
-    /// promoted mesh made `isInSession` **sticky** — the keep-as-friend review never fired, the
-    /// clothing-shop window never opened and the chat transcript never cleared, which item 2 would
-    /// have turned from a latent defect (3+ devices only) into the default two-device behaviour.
+    /// Its readers are the ones that really mean a peer: the app's discovery lifecycle (the radios
+    /// come back for a mesh with no peer, they stand down when there is none, and the five-minute
+    /// timeout is judged on it) and `ConnectView`'s connection choreography, whose `!had && has`
+    /// edge is the heal. Before item 2 the session-end ceremony read it too, and was right by
+    /// accident: a two-device session had no mesh, so the last committed slot going away was the
+    /// only leg any of these predicates had. Item 2's founding made the two facts come apart —
+    /// which is what ``isSessionLive`` exists to say, and why the ceremony moved off this one.
     ///
-    /// Deliberately NOT a rename of `isInSession`: the two answer different questions and both are
-    /// read.
+    /// Deliberately NOT a rename of `isInSession`: the three answer different questions and all
+    /// three are read.
     public var hasCommittedPeer: Bool {
         slots.contains(where: { $0.fingerprint != nil })
+    }
+
+    /// Whether this session is still LIVE — the ONE predicate "has the session ended" is the
+    /// negation of, and the **only** thing the session-end ceremony may key on (P6 item 2 fix).
+    ///
+    /// **Session end means MESH end, never slot loss.** The three hooks
+    /// (``promoteRosterToPendingReviewIfSessionEnded()``, ``openShopWindowIfSessionEnded()``,
+    /// ``clearSessionMessagesIfSessionEnded()``) and the app's review presentation
+    /// (`ConnectView.presentDisconnectReviewIfNeeded()`) read this and nothing else, so the four
+    /// doors below are the whole list of ways a session can end:
+    ///
+    /// 1. **End Session / develop** — ``leaveMesh()`` nils the mesh, then `stopSearching()` runs
+    ///    the hooks with no mesh and no slots;
+    /// 2. **a termination or a completed departure** — every terminal edge of the machine
+    ///    (`departed` / `terminated` / `expired`, whether this device signed it or verified a
+    ///    peer's record) carries `.stopParticipation`, and `sessionState` is assigned BEFORE the
+    ///    effects run, so `stopSearching()` sees the ending;
+    /// 3. **the five-minute discovery timeout with no committed peer** —
+    ///    ``endSessionAfterDiscoveryTimeout()``;
+    /// 4. **slot loss, and only while there is no mesh** (`currentMesh == nil`) — the legacy
+    ///    pairwise session, which had no mesh to outlive its links and is still reachable by tests
+    ///    and by any session that never founded.
+    ///
+    /// What a **blip** must not do, and what reading `hasCommittedPeer` here made it do: present
+    /// the photo-review sheet — whose two actions both call
+    /// ``leaveSessionAfterNotifyingPeers()``, which for a pair signs a **termination** plus a
+    /// permanent rejoin bar on a mesh this commit deliberately keeps alive — clear the live chat
+    /// transcript, open the post-session shop window, or promote `pendingFriendReview`. A pair that
+    /// partitions can resume (``resumeSearchingForPartitionedMesh()``); that is the same fact from
+    /// the other side.
+    ///
+    /// **Distinct from ``hasCommittedPeer``** (is there a peer right now — the radio guards and the
+    /// resume arm keep that one) and from `isInSession` (is a session surface up — the layout swap
+    /// keeps that one). This is the liveness a projection keys on: P6 item 4's live-transcript
+    /// gate reads THIS, so a message that completes during a blip is neither dropped nor marked
+    /// final against a transcript that was never cleared.
+    public var isSessionLive: Bool {
+        guard currentMesh != nil else { return hasCommittedPeer }
+        return !sessionState.hasEnded && !sessionSearchGaveUp
     }
 
     /// Shots remaining for this session (10 minus sent count, clamped to ≥ 0).
@@ -1098,19 +1181,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         pendingFriendReview = nil
     }
 
-    /// Phase 2 ("Session-end review is model-state, not view-events"): when NO committed slot
-    /// remains (``hasCommittedPeer``) and the live roster is non-empty, move the roster into
+    /// Phase 2 ("Session-end review is model-state, not view-events"): when the session has ENDED
+    /// (``isSessionLive``) and the live roster is non-empty, move the roster into
     /// `pendingFriendReview`, merging by fingerprint into any existing unconsumed batch —
     /// candidates are never dropped. Idempotent and cheap; called after every slot-removal path
     /// (removeSlot, disconnectSlot — which the checkCoordinatorStates stale eviction funnels
     /// through) and on leaveSession/stopSearching teardown.
     ///
-    /// The predicate is ``hasCommittedPeer`` and **not** `isInSession` (P6 item 2, A13): a mesh
-    /// outlives its links, so once a pair founds one at its first commit `isInSession` never goes
-    /// false and this ceremony — the product's core loop, and item 6's tier-2 precondition — would
-    /// never fire again. It was already wrong for a promoted 3+ mesh; nothing observed it.
+    /// The predicate is ``isSessionLive`` — neither `isInSession` nor ``hasCommittedPeer``, and the
+    /// P6 item 2 fix is where the last of those three stopped being right. On `isInSession` this
+    /// ceremony (the product's core loop, and item 6's tier-2 precondition) would never fire again
+    /// once a pair founds a mesh at its first commit; on `hasCommittedPeer` a two-second link blip
+    /// promoted the batch mid-session and the sheet that presents it terminates the live mesh. The
+    /// call sites are unchanged: they are still every slot-removal path, and slot loss still ends
+    /// the session when there is no mesh to outlive it.
     private func promoteRosterToPendingReviewIfSessionEnded() {
-        guard !hasCommittedPeer, !sessionRoster.isEmpty else { return }
+        guard !isSessionLive, !sessionRoster.isEmpty else { return }
         if var batch = pendingFriendReview {
             for entry in sessionRoster {
                 if let index = batch.entries.firstIndex(where: { $0.fingerprint == entry.fingerprint }) {
@@ -1665,6 +1751,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // that string is the ONE surface saying why the founding was abandoned, written by
         // `persistSessionContext`'s refusal arms ("an abandoned founding is never silent",
         // P3 item 6). The diagnosis has to outlive the state it diagnoses, so it is carried across.
+        //
+        // The carry is UNCONDITIONAL, and on the YIELD path that means a yielder carries a
+        // diagnosis about the mesh it gave up into the mesh it adopted, until the next rotation or
+        // `clearGroupKeyState()` (review finding P3-6). Accepted rather than parameterised because
+        // the field is DIAGNOSTICS-ONLY: it is declared "read by tests and audit lines", has no app
+        // or UI reader anywhere in `App/` or `FernletKit/Sources/`, and nothing branches on it — so
+        // the cost is a wrong attribution in a developer-facing string, not a stale banner or a
+        // decision. The founding-failure path is the one that must not lose it.
         let blockReason = lastRotationBlockReason
         abandonUnpersistedSession()
         // Beyond `startNewMesh`'s footprint, and both load-bearing for the yield — see above.
@@ -1726,7 +1820,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// and gates commit on a 15 cm / 0.8 s dwell via ProximityCommitDetector.
     public func startJoin() {
         isProximityJoin = true
+        sessionEnteredByProximityJoin = true
         isSessionOpen = true
+        userClosedThisSession = false
         photosAddedThisSession = 0
         sessionQuotaMeshID = nil
         sessionPhotos.removeAll()
@@ -1770,10 +1866,53 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `currentMesh == nil`), leaving a session that can no longer expire. The mesh, the membership
     /// ledger, the ceiling, the advertisement set and the state machine are all kept exactly as they
     /// stand, so a link that re-forms MERGES into the same mesh instead of founding a second one.
+    ///
+    /// **What the resume actually resumes from is `stopSearching()`, not `startJoin()`** (review
+    /// finding P3-7): `stopJoin()` runs it, and it has already cleared the group key, the epoch
+    /// keyring, `localJoinedEpoch`, the rotation and beacon timers and the `epochLog`
+    /// (`clearGroupKeyState()`). So the resumed session holds **no group key** until the heal's
+    /// merge or the next rotation re-keys it — named here because the doc above enumerates
+    /// `startJoin`'s resets and this is the one loss the resume cannot avoid. What it no longer
+    /// loses is the ceremony: `stopSearching()`'s three session-end hooks are gated on
+    /// ``isSessionLive``, so standing the radios down over a live mesh no longer consumes the
+    /// friend batch, the shop window or the chat transcript (the P6 item 2 fix). Delivery is
+    /// unaffected either way — the routed path wraps per recipient off the key-advertisement set,
+    /// which `stopSearching` does not clear.
+    ///
+    /// `isProximityJoin` is **restored, not asserted** (review finding P3-10): a mesh restored at
+    /// launch reaches this arm on the first Friends visit and must not be flipped into
+    /// proximity-join mode by it — see ``sessionEnteredByProximityJoin``.
     public func resumeSearchingForPartitionedMesh() {
         guard currentMesh != nil, !isSearching else { return }
-        isProximityJoin = true
+        // A departed / terminated / expired session is never re-entered (the rejoin bar), and its
+        // mesh object outlives the ending until `leaveMesh()` runs — so the terminal states are
+        // refused here by name. `sessionSearchGaveUp` deliberately is NOT: the five-minute timeout
+        // is this device giving up on a search, not a record, and re-entering the tab may re-arm it.
+        guard !sessionState.hasEnded else { return }
+        isProximityJoin = sessionEnteredByProximityJoin
         startSearching()
+    }
+
+    /// The five-minute discovery timeout expired with no committed peer: this session is over
+    /// (P6 item 2 fix — door 3 of ``isSessionLive``).
+    ///
+    /// The app's timeout used to call ``stopJoin()``, which stands the radios down and leaves the
+    /// mesh — so after the fix moved the ceremony off slot loss, a pair whose peer never came back
+    /// would have sat on a mesh with no radios, no peer and no review, with End Session the only
+    /// way to keep the session's photos or friends. This door says the ending out loud instead: the
+    /// flag is raised BEFORE the teardown, so `stopSearching()`'s three hooks see an ended session
+    /// and fire exactly once.
+    ///
+    /// It does **not** tear the mesh down. The user's own review action does that
+    /// (``leaveSessionAfterNotifyingPeers()``), which is the same ceremony a pair has always had —
+    /// and the difference from the defect this fix closes is that by now the resume really has
+    /// failed for five minutes, rather than for two seconds. Re-arming the radios over the same
+    /// mesh un-ends it (`startSearching()` clears the flag).
+    public func endSessionAfterDiscoveryTimeout() {
+        guard !hasCommittedPeer else { return }
+        FernletAuditLog.log("mesh.session.endedByDiscoveryTimeout")
+        sessionSearchGaveUp = true
+        stopJoin()
     }
 
     public func leaveMesh() {
@@ -1792,6 +1931,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         routedShareRefusal = nil
         pendingAdoptionLedger = .empty
         isSessionOpen = true
+        // Both go with the session they describe (P6 item 2 fix): the next session's entry mode is
+        // its own, and the next session's user has not closed anything yet.
+        userClosedThisSession = false
+        sessionEnteredByProximityJoin = false
         pendingAdmissionRequests.removeAll()
         pendingRemovalProposals.removeAll()
         removedMemberFingerprints.removeAll()
@@ -1891,17 +2034,34 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         broadcastMeshDescriptor()
     }
 
+    /// Sets the mesh's open/closed mode and gossips it.
+    ///
+    /// The stamp is **monotonic in the descriptor it is replacing**, not a bare `Date()` (P6 item 2
+    /// fix, review finding P2-3): `mergeMeshDescriptor` resolves `mode` by last-write-wins on
+    /// `modeSetAt`, and an adopted descriptor's stamp comes from the PEER's clock (clamped only
+    /// from above, to `Date() + 60`). So a device whose peer's clock is merely ahead — by the tens
+    /// of milliseconds a yield takes, never mind a real skew — stamped its own mode change in the
+    /// past of the descriptor it was answering, and the change was silently discarded at every
+    /// other member's merge door. This makes a mode change we made always win the mesh we made it
+    /// on. It is **not** by itself enough to keep a closed session closed — the peer's next
+    /// descriptor is honestly later still — which is what ``userClosedThisSession`` and
+    /// ``reassertLocallyClosedMode()`` are for.
     public func setMeshMode(_ mode: MeshMode) {
         guard var mesh = currentMesh else { return }
-        let now = Date()
         isSessionOpen = mode == .open
         mesh.mode = mode
-        mesh.modeSetAt = now
+        mesh.modeSetAt = max(Date(), mesh.modeSetAt.addingTimeInterval(Self.modeStampEpsilon))
         mesh.modeSetBy = identity.localFingerprint
         currentMesh = mesh
         updateDiscoveryInfo()
         broadcastMeshDescriptor()
     }
+
+    /// The smallest gap that makes a mode change strictly later than the descriptor it replaces —
+    /// `mergeMeshDescriptor`'s comparison is `>`, so equal stamps lose. One millisecond, because
+    /// `Date` compares below that and a bigger step would push the stamp toward
+    /// `sanitizedDescriptor`'s `+ 60 s` clamp for no gain.
+    static let modeStampEpsilon: TimeInterval = 0.001
 
     /// The user's open/closed control over the live session.
     ///
@@ -1911,8 +2071,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// carries `meshID` / `meshName` / `memberCount`. That is open mode's stated product behaviour —
     /// it is what lets a third device find the pair — and it is named here as a newly reachable
     /// broadcast rather than changed.
+    ///
+    /// This is also the **one** writer of ``userClosedThisSession``, the sticky local policy that
+    /// stops a gossiped descriptor re-opening a mesh this user closed (P6 item 2 fix, review
+    /// finding P2-3). Closing sets it; re-opening — the same control, the same user — clears it.
     public func setSessionOpen(_ isOpen: Bool) {
         isSessionOpen = isOpen
+        userClosedThisSession = !isOpen
         if currentMesh != nil {
             setMeshMode(isOpen ? .open : .closed)
         }
@@ -8959,6 +9124,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func startSearching() {
         isSearching = true
+        // P6 item 2 fix: the radios coming back over the same mesh un-ends a session the
+        // five-minute timeout had given up on — otherwise a resumed pair would be permanently
+        // "ended" and its healed link would project into a transcript nothing would keep.
+        sessionSearchGaveUp = false
         // P5 item 9: the Friends tab — the banner's own screen — is one tap away, so a hold whose
         // condition has since expired is corrected before it is read. Guarded on the hold, so this
         // costs nothing at all (no load, no I/O) in the overwhelmingly common case.
@@ -9839,14 +10008,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return
         }
         let incoming = Self.sanitizedDescriptor(descriptor)
-        var closedBeforeYield = false
+        // What this device is ADVERTISING before the merge, so a mode (or meshID) that moved is
+        // re-published rather than left stale on the radio — review finding P2-2. Nothing on this
+        // door used to publish at all: `updateDiscoveryInfo()`'s only callers are `setMeshMode`,
+        // `foundMesh`/`promoteToMesh` and `broadcastMeshDescriptor`, so the side of a pair whose
+        // mode moved by MERGE kept advertising `meshID` / `meshName` / `memberCount` — exactly what
+        // closing opts out of — for the rest of the session, because a steady pair has no reason to
+        // broadcast a descriptor again.
+        let advertisedBeforeMerge = currentDiscoveryInfo()
         if let existing = currentMesh {
             if yieldsNewbornMesh(existing, to: incoming, from: senderFingerprint) {
                 FernletAuditLog.log(
                     "mesh.descriptor.yieldedNewbornMesh",
                     context: ["adopted": incoming.meshID.uuidString]
                 )
-                closedBeforeYield = existing.mode == .closed
                 unwindNewbornMesh()
                 currentMesh = incoming
             } else {
@@ -9856,40 +10031,56 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             currentMesh = incoming
         }
         isSessionOpen = currentMesh?.mode == .open
+        if currentDiscoveryInfo() != advertisedBeforeMerge { updateDiscoveryInfo() }
         let localFP = identity.localFingerprint
         if let mesh = currentMesh, !mesh.members.contains(where: { $0.fingerprint == localFP }) {
             sendAdmissionRequest(for: mesh)
         }
-        reassertClosedModeAfterYield(closedBeforeYield)
+        reassertLocallyClosedMode()
     }
 
-    /// Re-applies this device's own **closed** choice to the mesh it just adopted in a yield
-    /// (P6 item 2 pass B, review finding P2-5).
+    /// Re-applies this device's user's own **closed** choice after every descriptor — the yield it
+    /// was written for (P6 item 2 pass B, review finding P2-5) and every later merge as well
+    /// (its fix, review finding P2-3).
     ///
-    /// Without it the line above silently replaces the local user's open/closed choice with the
-    /// winner's: the yielder founded a `.closed` descriptor (``promoteToMesh()`` mints
+    /// Without it the line above silently replaces the local user's open/closed choice with
+    /// whatever arrived: the yielder founded a `.closed` descriptor (``promoteToMesh()`` mints
     /// `isSessionOpen ? .open : .closed`, and ``setSessionOpen(_:)`` moves it live), then adopts an
     /// `.open` one and `isSessionOpen = currentMesh?.mode == .open` reopens it — and an open mesh's
     /// TXT publishes `meshID` / `meshName` / `memberCount` (``currentDiscoveryInfo()``), which is
-    /// exactly what closing opts out of. Whether the choice survived was a coin flip on the
-    /// election.
+    /// exactly what closing opts out of.
     ///
-    /// Re-applying is the right half of the choice because **any member may close the mesh**:
-    /// ``setMeshMode(_:)`` is `public`, gates on nothing but holding a mesh, stamps
-    /// `modeSetBy: localFingerprint`, and ``mergeMeshDescriptor(_:incoming:)`` resolves `mode` by
-    /// last-write-wins on `modeSetAt` with no founder check anywhere. So the yielder is not claiming
-    /// a privilege it lacks — it is making the same call it could make one tap later. The rejected
-    /// alternative was refusing to yield to an OPEN mesh after closing, which leaves the pair split
-    /// across two one-member meshes with no content path: the outage item 2 exists to close.
+    /// **Keyed on ``userClosedThisSession``, not on the yield**, because the yield was only the
+    /// first of the ways a merge undoes the choice. `mode` merges by last-write-wins on
+    /// `modeSetAt`; the yielder adopts a stamp from the **winner's** clock (clamped only from
+    /// above, to `Date() + 60`) and then re-asserts with a stamp from its **own**, so a winner
+    /// whose clock is merely ahead by the yield latency both (a) discards the yielder's close and
+    /// (b) re-opens the yielder with its very next descriptor. A monotonic stamp would fix (a) and
+    /// not (b): the winner's next descriptor is honestly later still. See
+    /// ``userClosedThisSession`` for why the choice is therefore a local policy re-applied after
+    /// every merge rather than a bid in a clock race.
+    ///
+    /// Re-applying is a legitimate member act because **any committed SLOT may set the mode** —
+    /// which is wider than "any member", and is what the merge actually enforces:
+    /// ``setMeshMode(_:)`` is `public` and gates on nothing but holding a mesh,
+    /// ``mergeMeshDescriptor(_:incoming:)`` never checks `modeSetBy ∈ members`, and the descriptor
+    /// door accepts from any committed slot — so a dwelled-but-unadmitted peer can set the mode of
+    /// a mesh it has not joined (the yielder itself is the honest case of exactly that). So this
+    /// device is not claiming a privilege it lacks; it is making the same call it could make one
+    /// tap later. The rejected alternative was refusing to yield to an OPEN mesh after closing,
+    /// which leaves the pair split across two one-member meshes with no content path: the outage
+    /// item 2 exists to close.
     ///
     /// Called **after** ``sendAdmissionRequest(for:)`` deliberately: both sends are queued in order,
     /// so the request reaches the winner while its mesh is still open and its one auto-grant still
     /// applies, and the closed descriptor lands behind it. If the order inverts on the wire the
     /// winner simply prompts — one tap, never a broken join.
     ///
-    /// - Parameter closedBeforeYield: Whether the mesh this device gave up was closed.
-    private func reassertClosedModeAfterYield(_ closedBeforeYield: Bool) {
-        guard closedBeforeYield, currentMesh?.mode == .open else { return }
+    /// Terminates: the guard is `mode == .open`, so once the mesh is closed no further descriptor
+    /// of ours goes out, and a peer that re-opens is answered once per re-open.
+    private func reassertLocallyClosedMode() {
+        guard userClosedThisSession, currentMesh?.mode == .open else { return }
+        FernletAuditLog.log("mesh.mode.reassertedLocalClose")
         setMeshMode(.closed)
     }
 
@@ -10686,9 +10877,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `pendingFriendReview` — call sites mirror `promoteRosterToPendingReviewIfSessionEnded()` exactly.
     /// The same moment ends the formed-session epoch: the NEXT slot commit is a new formation.
     ///
-    /// ``hasCommittedPeer``, not `isInSession` — same reason as the review promotion (P6 item 2).
+    /// ``isSessionLive``, not `isInSession` and not ``hasCommittedPeer`` — same reason as the review
+    /// promotion (P6 item 2 and its fix). A blip must not open the post-session shop window over a
+    /// session that is still running.
     private func openShopWindowIfSessionEnded() {
-        guard !hasCommittedPeer else { return }
+        guard !isSessionLive else { return }
         hasFormedShopSession = false
         clothingShop.openWindowAtSessionEnd()
     }
@@ -10731,10 +10924,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// promotes `pendingFriendReview` / opens the shop window — but where the shop KEEPS catalogs through
     /// a 1-hour window, the transcript is dropped immediately. Nothing to retain, nothing to sync.
     ///
-    /// ``hasCommittedPeer``, not `isInSession` (P6 item 2): §12's privacy rule — the transcript
-    /// vanishes at session end — would otherwise silently stop holding for every founded pair.
+    /// ``isSessionLive`` (P6 item 2 and its fix): §12's privacy rule — the transcript vanishes at
+    /// session end — silently stopped holding for every founded pair on `isInSession`, and on
+    /// ``hasCommittedPeer`` it went the other way and deleted a live room's transcript on a
+    /// two-second link drop. Item 4's live-transcript projection reads the same predicate, so the
+    /// clear and the gate can never disagree.
     private func clearSessionMessagesIfSessionEnded() {
-        guard !hasCommittedPeer else { return }
+        guard !isSessionLive else { return }
         sessionMessages.clear()
         // TF b19 item 5: drop any lingering in-session heart feedback so a "Sending…" state can't
         // outlive the session that produced it.
@@ -11956,8 +12152,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Enters proximity-join mode WITHOUT starting the radios. `startJoin()` calls
     /// `startSearching()`, which starts real advertising and browsing — a unit test must never do
     /// that. Mirrors `ProximityRecipeShareManager.markRunningForTesting`.
+    ///
+    /// Sets ``sessionEnteredByProximityJoin`` alongside it, exactly as `startJoin()` does, so a rig
+    /// that stands the radios down and resumes gets the entry mode a real proximity session has.
     func markProximityJoinForTesting() {
         isProximityJoin = true
+        sessionEnteredByProximityJoin = true
     }
 
     /// Enters ``promoteToMesh()`` directly, so its own idempotence guard can be asserted rather than

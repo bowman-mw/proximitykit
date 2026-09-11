@@ -58,12 +58,18 @@ Group Activities (``ProximityActivityManager``, whose authorization is a host-si
 invitee-key-bound token rather than the shared handshake). Feature payloads dispatch through a
 registry whose committed-slot gate is the security boundary; the session end promotes the roster
 into the keep-as-friend review (``FriendMintingReview``, ``KeepFriendsPromptSheet``,
-``FriendPhotoReviewSheet``). **"The session end" is `hasCommittedPeer` going false, not
-`isInSession`** (P6 item 2): a proximity-join pair now FOUNDS a mesh — descriptor, membership
-ledger, founder admission, ceiling, state machine — at its FIRST commit, so `currentMesh != nil`
-outlives every link and the two predicates answer different questions. `isInSession` is the UI half
-(is a session surface up), `hasCommittedPeer` the lifecycle half (has this session ended), and the
-three hooks, the review sheet and the app's discovery lifecycle all read the second.
+``FriendPhotoReviewSheet``). **"The session end" is the MESH ending — ``MeshNetworkManager/isSessionLive``
+going false — and never a lost link** (P6 item 2 and its fix): a proximity-join pair now FOUNDS a
+mesh — descriptor, membership ledger, founder admission, ceiling, state machine — at its FIRST
+commit, so `currentMesh != nil` outlives every link and three predicates that used to agree now
+answer three questions. `isInSession` is the UI half (is a session surface up), `hasCommittedPeer`
+is "is there a peer this instant" (the app's discovery lifecycle and the connection choreography
+read it), and `isSessionLive` is the lifecycle half, read by the three hooks and by the review
+sheet. It has exactly four doors: End Session, a termination or completed departure (every terminal
+edge of the machine), the five-minute discovery timeout with no committed peer, and slot loss while
+no mesh is held (the legacy pairwise session). A link blip is none of them — it must not clear the
+transcript, promote the batch, open the shop window, or present a sheet whose primary action signs
+a termination on a mesh the pair can still resume.
 Photo-library save failures surface through one shared mapping —
 ``FriendPhotoLibrarySaver``'s `userFacingFailure(for:photoCount:)` producing a
 ``PhotoSaveFailure`` rendered by the `photoSaveFailureAlert(_:failure:)` view modifier — so every
@@ -615,6 +621,7 @@ Release build the environment-reading half is compiled out entirely.
 - ``CoachSessionContract``
 - ``CoachVerificationCeremony``
 - ``FriendMintingReview``
+- ``FriendsDiscoveryEntry``
 - ``ProximityVerifyQR``
 - ``ProximityVerifySignature``
 - ``VerifyChallengePayload``
