@@ -2666,6 +2666,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// owed no `Docs/PrivacyWipeCoverage.md` row.
     @ObservationIgnored private var routedProjectedItems: Set<MeshRoutedItemKey> = []
 
+    /// What each re-entry retry list has already attempted this session — item 5's half of D-13.32.
+    ///
+    /// Two rotations, one per ``MeshRoutedRetryList``, because the two lists are two populations of
+    /// work and an item job 4 has attempted has not thereby had its turn at job 5. Bounded on both
+    /// axes (two keys, ``MeshRoutedStoreFormat/maxItems`` entries each), memory-only, and cleared
+    /// with the rest of the drain state — ``MeshRoutedRetryRotation`` carries the honesty argument
+    /// for the memory-only half and for what a restart therefore costs.
+    @ObservationIgnored private var routedRetryRotations: [MeshRoutedRetryList: MeshRoutedRetryRotation] = [:]
+
     /// The incoming per-origin photo budget, keyed on the ITEM's mesh (D-13.23).
     ///
     /// The legacy counter keyed on `currentMesh?.meshID` and reset whenever the live mesh changed —
@@ -4597,6 +4606,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         routedReplayWindow = nil
         lastRoutedDrainRefusal = nil
         routedProjectedItems.removeAll()
+        // Both retry rotations go with the projected set, and for the same reason: every key in
+        // them names an item of the mesh being left. Dropping them re-arms the carried-over cut at
+        // the next pass, which is the correct answer for a list that is about to be a different
+        // list (item 5).
+        routedRetryRotations.removeAll()
         // Every item this described belongs to the mesh being left, and item 4's mesh leg answers
         // those from here on, so dropping the generation marks loses nothing and bounds the map.
         routedItemTranscriptGeneration.removeAll()
@@ -6355,6 +6369,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Incomplete items are skipped **without** a line: `committingDelivery` would answer
     /// `.unsatisfied` once per item per pass, which is noise for a state a peer's next chunk fixes.
+    /// Since item 5 they are skipped by ``ackableNow(_:in:)`` **before** the allowance is planned
+    /// rather than inside the loop, which is R-19's rule on this list: this list is ordered by
+    /// origin fingerprint, so sixteen items this pass cannot finish, sorted first by an origin that
+    /// ground for the position, would hold the whole allowance and strand this device's own
+    /// receipts. What the pass DOES attempt is chosen by
+    /// ``routedRetryAllowance(_:over:now:)`` — never-attempted work first, retries on a share.
     ///
     /// - Parameters:
     ///   - now: The injected instant.
@@ -6366,21 +6386,130 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let me = identity.localFingerprint
         var filed = 0
         var hearts = 0
+        let finishable = index.itemsAwaitingLocalAck(at: now, for: me)
+            .filter { ackableNow($0, in: index) }
         // R2: bounded by the per-answer item allowance, over a list bounded by the store's item cap.
-        for ref in index.itemsAwaitingLocalAck(at: now, for: me)
-            .prefix(MeshRoutedDrainBounds.increment1.maxItems) {
+        for ref in routedRetryAllowance(.localAck, over: finishable, now: now) {
             guard let record = index.record(for: ref.key), let manifest = record.manifest else {
                 continue
             }
-            if record.deliveredAt == nil {
-                guard let entry = routedTypes.entry(for: manifest.typeToken) else { continue }
-                guard !entry.requiresForegroundDecryptBeforeFinal else { hearts += 1; continue }
-                guard record.isComplete else { continue }
+            if record.deliveredAt == nil, let entry = routedTypes.entry(for: manifest.typeToken),
+               entry.requiresForegroundDecryptBeforeFinal {
+                hearts += 1
+                noteRoutedRetryDeferred(.localAck, ref.key)
+                continue
             }
-            if commitLocalDelivery(for: ref.key, manifest: manifest, now: now) != nil { filed += 1 }
+            if commitLocalDelivery(for: ref.key, manifest: manifest, now: now) != nil {
+                filed += 1
+                noteRoutedRetryFinal(.localAck, ref.key)
+            } else {
+                noteRoutedRetryDeferred(.localAck, ref.key)
+            }
         }
         reentryHeartStage(count: hearts)
         return (filed, hearts)
+    }
+
+    /// Whether this device can finish an ack for `ref` on THIS pass — R-19's rule on job 4's list,
+    /// applied before the allowance is spent (P6 item 5).
+    ///
+    /// A **stamped** record is always finishable: with `deliveredAt` written, re-committing asks no
+    /// store and no ledger anything, it re-mints the receipt 4a exists to file, and filtering it out
+    /// would strand exactly the state `mesh.routedDrain.receiptNotStored` names. Everything else
+    /// must be work this build and this device can actually do: a type with no registry row, and an
+    /// item whose bytes are not all here, can only spend a slot and refuse.
+    ///
+    /// **This is the seam item 6 adds the heart leg to.** A heart answers `true` here today, which
+    /// is what keeps `MeshRoutedReentryReport.heartsPending` meaning "heart-stage items this pass
+    /// could not judge"; item 6 replaces that line with its own predicate
+    /// (`mayCommitRoutedHeartLedgerJudgement`, `allowNearbyHearts`, a loaded ledger), and a filter
+    /// rather than a mark is deliberate there too — a settings flip re-enumerates for free.
+    ///
+    /// - Parameters:
+    ///   - ref: The item, from the list the pass already read.
+    ///   - index: The same index — never a second load.
+    /// - Returns: whether to spend an allowance slot on it.
+    private func ackableNow(_ ref: MeshRoutedItemRef, in index: MeshRoutedIndex) -> Bool {
+        guard let record = index.record(for: ref.key), let manifest = record.manifest else {
+            return false
+        }
+        guard record.deliveredAt == nil else { return true }
+        guard let entry = routedTypes.entry(for: manifest.typeToken) else { return false }
+        guard !entry.requiresForegroundDecryptBeforeFinal else { return true }
+        return record.isComplete
+    }
+
+    /// Which of an enumerated retry list's items this pass attempts — item 5's allowance discipline,
+    /// shared by both lists (D-13.32).
+    ///
+    /// Three things happen here, in this order, and each is load-bearing:
+    ///
+    /// 1. **The session's cut is armed** on the first pass, and every ref this device already held
+    ///    at that instant is placed in the retry share rather than in the reserved never-attempted
+    ///    half. That is the restart bound: the memory-only marks die with the process, so after a
+    ///    restart a backlog of already-refused items is re-derived once each — and it must not be
+    ///    re-derived out of the half a genuinely new item is entitled to.
+    /// 2. **The plan is computed** by ``MeshRoutedRetryPlan``, a pure value over keys, so the split
+    ///    is testable without a mesh and cannot acquire a per-type opinion.
+    /// 3. **A paced population is audited**, once per pass per list, and only when something was
+    ///    actually deferred — a quiet pass stays quiet.
+    ///
+    /// - Parameters:
+    ///   - list: Which list, for the rotation and the audit context.
+    ///   - refs: The enumerated list, already narrowed to what this pass could finish.
+    ///   - now: The pass's injected instant.
+    /// - Returns: the refs to attempt, never-attempted first.
+    private func routedRetryAllowance(
+        _ list: MeshRoutedRetryList, over refs: [MeshRoutedItemRef], now: Date
+    ) -> [MeshRoutedItemRef] {
+        var rotation = routedRetryRotations[list] ?? MeshRoutedRetryRotation()
+        let armedAt = rotation.armed(at: now)
+        // R2: bounded by the store's item cap.
+        for ref in refs where ref.firstSeenAt < armedAt {
+            guard rotation.noteCarriedOver(ref.key) else {
+                FernletAuditLog.log("mesh.routedRetry.setFull", context: ["list": list.rawValue])
+                break
+            }
+        }
+        let plan = rotation.plan(
+            for: refs.map(\.key), allowance: MeshRoutedDrainBounds.increment1.maxItems
+        )
+        routedRetryRotations[list] = rotation                         // R3: bounded, two keys
+        if plan.deferredRetryCount > 0 {
+            FernletAuditLog.log(
+                "mesh.routedRetry.deferred",
+                context: ["list": list.rawValue, "deferred": String(plan.deferredRetryCount),
+                          "new": String(plan.neverTriedCount), "retried": String(plan.retriedCount)]
+            )
+        }
+        let byKey = Dictionary(refs.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        // R2: bounded by the plan, itself bounded by the per-pass allowance.
+        return plan.keysToTry.compactMap { byKey[$0] }
+    }
+
+    /// Remembers that an attempted item still owes its list work, and rotates it to the back.
+    ///
+    /// - Parameters:
+    ///   - list: Which list.
+    ///   - key: The item the pass just attempted and did not finish.
+    private func noteRoutedRetryDeferred(_ list: MeshRoutedRetryList, _ key: MeshRoutedItemKey) {
+        var rotation = routedRetryRotations[list] ?? MeshRoutedRetryRotation()
+        if !rotation.noteRetryable(key) {
+            FernletAuditLog.log("mesh.routedRetry.setFull", context: ["list": list.rawValue])
+        }
+        routedRetryRotations[list] = rotation
+    }
+
+    /// Drops an item from a list's tried set **and** its rotation — the counterpart of item 4's
+    /// `routedProjectedItems` mark, for a key that is finished or refused for good.
+    ///
+    /// - Parameters:
+    ///   - list: Which list.
+    ///   - key: The item that leaves the retry list.
+    private func noteRoutedRetryFinal(_ list: MeshRoutedRetryList, _ key: MeshRoutedItemKey) {
+        guard var rotation = routedRetryRotations[list] else { return }
+        rotation.noteFinal(key)
+        routedRetryRotations[list] = rotation
     }
 
     /// Job 5 — the plaintext pass a locked window deferred (P5 item 13).
@@ -6427,7 +6556,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             at: now, for: identity.localFingerprint, types: projectableRoutedTypeTokens
         ).filter { !routedProjectedItems.contains($0.key) && isProjectableAtThisPass($0, in: index) }
         // R2: bounded by the per-answer item allowance, over a list bounded by the store's item cap.
-        for ref in pending.prefix(MeshRoutedDrainBounds.increment1.maxItems) {
+        for ref in routedRetryAllowance(.localProjection, over: pending, now: now) {
             guard let manifest = index.record(for: ref.key)?.manifest else { continue }
             // The count is "handed on", not "marked": since P6 item 4 the mark ALSO leaves on a
             // refusal that cannot change, so counting the mark would report every permanent
@@ -6924,7 +7053,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) -> MeshRoutedProjectionVerdict {
         noteRoutedItemOffered(key)
         let verdict = routedProjectionVerdict(key: key, manifest: manifest, seenAt: seenAt)
-        if verdict.leavesTheRetryList { noteRoutedItemProjected(key) }
+        // The ONE place both of item 5's marks are written, because this is the one place the
+        // verdict is known: `leavesTheRetryList` drops the key from the projected set's counterpart
+        // rotation as well as marking it, and a refusal that may not hold next pass rotates to the
+        // back of the retry share instead of holding its place at the head of it.
+        if verdict.leavesTheRetryList {
+            noteRoutedItemProjected(key)
+            noteRoutedRetryFinal(.localProjection, key)
+        } else if mayDecryptRoutedContent {
+            // A refusal made by the GATE ITSELF is not the item's attempt: it is the same answer
+            // for every item on the list, so charging one item a turn for it would let a
+            // lock/unlock cycle spend the rotation on nothing — and would put an item that arrived
+            // while the device was locked behind a backlog it never competed with. The predicate is
+            // read rather than the verdict, because `refusedForNow` cannot tell the two apart and
+            // `mayMutateCanonicalStoreWithRoutedContent` is the same strength as this one.
+            noteRoutedRetryDeferred(.localProjection, key)
+        }
         return verdict
     }
 
@@ -10972,15 +11116,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // it was sent as `signerNotAdmitted`; from here it is a member of its own roster.
         let ledgerBeforeJoin = membershipVerifier
         // P6 item 1: the arm folds this device's own key advertisement, so the rollback below
-        // unwinds the addressing with the ledger — one value, so the conflict marks ride with it.
+        // unwinds the addressing with the ledger — one value, so the conflict marks ride with it,
+        // and through `rollBackKeyAdvertisements(to:version:)` so the VERSION rides with it too
+        // (final review P3): an adopt-shaped rollback bumps the version, which owes every peer a
+        // frame carrying a set it has already been told.
         let addressingBeforeJoin = keyAdvertisements
+        let addressingVersionBeforeJoin = keyAdvertisementVersion
         guard armJoinerLedger(grant) else { return }
         // P3 item 6, plan §3.6: the admission is verified, so the context is written BEFORE this
         // device adopts the epoch, unwraps the key or starts a beacon — before, in other words,
         // anything tells the user or the peers that it has joined.
         guard recordVerifiedAdmissionDurably() else {
             membershipVerifier = ledgerBeforeJoin
-            adoptKeyAdvertisements(addressingBeforeJoin)
+            rollBackKeyAdvertisements(to: addressingBeforeJoin, version: addressingVersionBeforeJoin)
             return
         }
 

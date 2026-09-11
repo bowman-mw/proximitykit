@@ -912,6 +912,22 @@ with no path from any of them to a writer. What was missing was a way **back**.
   deferred, last because it is the only job that produces plaintext), and a re-derivation of the
   delivery hold. **It sends no frame**: receipts are filed durably and forwarded at the next
   exchange.
+- **Both retry lists spend their allowance on never-attempted work first** (P6 item 5, D-13.32).
+  Each pass takes 16 items from a list ordered by ORIGIN FINGERPRINT — a position whoever mints the
+  item chooses — so a population that refuses and is right to keep its place (a deferred store, a
+  blip-time liveness skip, and from item 6 a heart whose ledger judgement needs a foreground) would
+  otherwise hold every slot at every rising edge. ``MeshRoutedRetryPlan`` splits the allowance: at
+  most half to keys a previous pass attempted, the rest reserved for keys nothing has tried, unused
+  slots spilling either way, and the retry share taken in round-robin so its own tail cannot starve
+  either. ``MeshRoutedRetryRotation`` is the memory-only per-list state, bounded by the store's item
+  cap and audited at the bound; it is armed by the session's FIRST pass, and an item already held at
+  that instant competes for the retry share rather than the reserved half — which is what bounds a
+  restart's re-derivation of item 4's memory-only FINAL marks. A verdict that `leavesTheRetryList`
+  drops the key from both the tried set and the rotation, through the one caller that writes item 4's
+  mark; a refusal made by the GATE itself is charged to no item, because it is the same answer for
+  every item on the list. The filter-before-plan seam is the manager's own — `isProjectableAtThisPass`
+  on job 5's list and `ackableNow` on job 4's — and it is where a type this device cannot finish at
+  all leaves the list instead of pacing on it.
 - **A counted no-op was said plainly, and P5 item 13 cashed it.** Item 10 shipped the three
   predicates, the heart stage's enumeration and source walls that fail the moment a plaintext seam
   appears — a tripwire plus a predicate, never a claim that something was being blocked at the time.
