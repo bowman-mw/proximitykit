@@ -14,9 +14,15 @@ import FernletDomainModel
 // untrusted MCSession bytes under Swift 6. The receiver sanitizes + length-caps `text` (via
 // `SessionMessageStore`) before it is stored or rendered — never trust the wire.
 
-/// A single session-scoped chat message on the wire. Always delivered sealed to the recipient
-/// (`.tempMessage` is in `sealingRequiredTypes`). `id` drives receive-side dedup; `sentAt` is the
-/// sender's clock (display only — never trusted for ordering security).
+/// A single session-scoped chat message on the wire — **frozen and parked** (network migration P6
+/// item 4).
+///
+/// Still `Codable`, still sealed-only (`.tempMessage` is in `sealingRequiredTypes`), and no longer
+/// emitted or dispatched by anything: chat rides the routed store as a `MeshRoutedTextBody` inside
+/// a signed manifest's per-recipient wrap. This value stays so an older peer's frame parks by name
+/// rather than failing a session, and because it is the sealing-required CONTROL several wire suites
+/// make their claims against. `id` drove receive-side dedup; `sentAt` was the sender's clock
+/// (display only — never trusted for ordering security).
 public nonisolated struct TempMessagePayload: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var text: String

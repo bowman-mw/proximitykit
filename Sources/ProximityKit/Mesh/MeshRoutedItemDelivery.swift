@@ -97,7 +97,9 @@ nonisolated enum MeshRoutedItemDelivery {
     ///   - manifest: The origin's signed manifest — the binding, the wraps and the type token.
     ///   - identity: This device's identity, for the wrap's key agreement.
     ///   - mayDecryptRoutedContent: `MeshNetworkManager.mayDecryptRoutedContent`, passed in under
-    ///     that exact spelling and guarded on as the first line. Never defaulted.
+    ///     that exact spelling and guarded on as the first line of
+    ///     ``openPlaintext(_:manifest:identity:mayDecryptRoutedContent:)``, the one choke point both
+    ///     body families reach the ciphertext through. Never defaulted.
     /// - Returns: the decoded body.
     /// - Throws: ``MeshRoutedDeliveryError``, ``MeshRoutedKeyWrapError`` or
     ///   ``MeshRoutedItemSealError``. Never a trap.
@@ -108,6 +110,85 @@ nonisolated enum MeshRoutedItemDelivery {
         identity: IdentityService,
         mayDecryptRoutedContent: Bool
     ) throws -> MeshRoutedPhotoBody {
+        let plaintext = try openPlaintext(
+            blob, manifest: manifest, identity: identity,
+            mayDecryptRoutedContent: mayDecryptRoutedContent
+        )
+        let body = try MeshRoutedPhotoBody(decoding: plaintext)
+        guard body.header.id == manifest.itemID else {
+            throw MeshRoutedDeliveryError.bodyIdentityMismatch
+        }
+        return body
+    }
+
+    /// Opens one routed text item and returns its body (P6 item 4).
+    ///
+    /// The id guard is copied from the photo door, not omitted, because text's id **is** a key:
+    /// `SessionMessageStore` dedups on it and deliberately never forgets a dropped id, so a body
+    /// carrying another member's message id would consume that id's dedup slot for the session.
+    ///
+    /// - Parameters:
+    ///   - blob: The reassembled ciphertext, already re-hashed against `manifest.contentHash` by
+    ///     the store door that produced it.
+    ///   - manifest: The origin's signed manifest — the binding, the wraps and the type token.
+    ///   - identity: This device's identity, for the wrap's key agreement.
+    ///   - mayDecryptRoutedContent: `MeshNetworkManager.mayDecryptRoutedContent`, passed in under
+    ///     that exact spelling and guarded on inside ``openPlaintext(_:manifest:identity:mayDecryptRoutedContent:)``.
+    ///     Never defaulted.
+    /// - Returns: the decoded body.
+    /// - Throws: ``MeshRoutedDeliveryError``, ``MeshRoutedKeyWrapError`` or
+    ///   ``MeshRoutedItemSealError``. Never a trap.
+    @MainActor
+    static func openTextBody(
+        _ blob: Data,
+        manifest: MeshRoutedManifest,
+        identity: IdentityService,
+        mayDecryptRoutedContent: Bool
+    ) throws -> MeshRoutedTextBody {
+        let plaintext = try openPlaintext(
+            blob, manifest: manifest, identity: identity,
+            mayDecryptRoutedContent: mayDecryptRoutedContent
+        )
+        let body = try MeshRoutedTextBody(decoding: plaintext)
+        guard body.header.id == manifest.itemID else {
+            throw MeshRoutedDeliveryError.bodyIdentityMismatch
+        }
+        return body
+    }
+
+    /// The wrap, the open and nothing else — the ONE choke point both body families reach the
+    /// ciphertext through, and the one place the decrypt predicate is guarded (P6 item 4).
+    ///
+    /// **The structure is the enforcement here, and the wall cannot replace it.** W2's containment
+    /// half (`expectPlaintextSeamsNameTheirPredicate`) is a whole-**file** `contains`: it asks that
+    /// a file naming `MeshRoutedContentKeyWrapper.unwrap(` also contain the literal
+    /// `guard mayDecryptRoutedContent`, so a second entry point in *this* file that skipped the
+    /// guard would stay green on the substring the other one supplies. Extracting the unwrap into
+    /// one function that guards first is what makes a skipping entry point unwritable rather than
+    /// merely unwalled — and it is also what keeps W2's `unwrap(` / `open(` pins at 1 each as P6
+    /// adds callers.
+    ///
+    /// Every step is authenticated before the next runs: the wrap opens only for this device's
+    /// fingerprint and its own agreement key, and the blob's authenticated data binds the mesh, the
+    /// item, the origin and the routed type token, so a blob lifted into another triple fails its
+    /// tag even if its wrap travels with it. The body's own id guard is the CALLER's, because it is
+    /// the one step that differs per family.
+    ///
+    /// - Parameters:
+    ///   - blob: The reassembled ciphertext.
+    ///   - manifest: The origin's signed manifest.
+    ///   - identity: This device's identity.
+    ///   - mayDecryptRoutedContent: `MeshNetworkManager.mayDecryptRoutedContent`, the first guard.
+    /// - Returns: the sealed item's plaintext, un-decoded.
+    /// - Throws: ``MeshRoutedDeliveryError/notPermitted``, ``MeshRoutedDeliveryError/notAddressedToMe``,
+    ///   or whatever the wrap and the seal refuse by name.
+    @MainActor
+    private static func openPlaintext(
+        _ blob: Data,
+        manifest: MeshRoutedManifest,
+        identity: IdentityService,
+        mayDecryptRoutedContent: Bool
+    ) throws -> Data {
         guard mayDecryptRoutedContent else { throw MeshRoutedDeliveryError.notPermitted }
         let localFingerprint = identity.localFingerprint
         guard let wrap = manifest.keyWraps.first(where: {
@@ -124,13 +205,67 @@ nonisolated enum MeshRoutedItemDelivery {
             localKeyAgreementPublicKey: identity.localKeyAgreementPublicKey,
             staticAgreement: identity.heartDropStaticAgreement(withEphemeralPublicKey:)
         )
-        let plaintext = try MeshRoutedItemSealer.open(
+        return try MeshRoutedItemSealer.open(
             blob, contentKey: contentKey, binding: binding, typeToken: manifest.typeToken
         )
-        let body = try MeshRoutedPhotoBody(decoding: plaintext)
-        guard body.header.id == manifest.itemID else {
-            throw MeshRoutedDeliveryError.bodyIdentityMismatch
-        }
-        return body
     }
+}
+
+// MARK: - MeshRoutedProjectionVerdict
+
+/// What a canonical-store arm made of one routed item's plaintext — and therefore whether the item
+/// still owes the projection pass anything (P6 item 4; item 5's distinction, arriving early for the
+/// cases item 4 creates).
+///
+/// The projection's retry list is `MeshRoutedIndex.itemsAwaitingLocalProjection`, ordered by
+/// `MeshRoutedItemKey` — i.e. by origin fingerprint, a position an attacker chooses — and the
+/// per-pass allowance is 16. So sixteen permanently-refusing items sorted first occupy the whole
+/// pass at every rising access edge until expiry, for **both** arms, since they share one
+/// allowance. A malformed text item costs its origin ~600 bytes. Marking a refusal that can never
+/// change is therefore not bookkeeping, it is the only thing between ~10 KB and a permanent
+/// projection outage.
+///
+/// The mark itself is `MeshNetworkManager.routedProjectedItems` — memory-only, wiped on a mesh
+/// change — which is honest only because every `refusedForGood` verdict is **re-derivable from the
+/// bytes plus durable local state**: a malformed body and an id mismatch are facts about
+/// origin-signed bytes; a blocked or removed origin is the block list and the admission ledger,
+/// both durable; a spent quota and an already-held id re-derive to the same answer; and a session
+/// that ended re-derives as ended for as long as it stays ended.
+nonisolated enum MeshRoutedProjectionVerdict: String, Equatable, Sendable {
+
+    /// The canonical store was told. Frozen English token, never displayed.
+    case handedOn
+    /// Refused for a reason that **cannot change**, so the item leaves the retry list.
+    case refusedForGood
+    /// Refused for a reason that may not hold at the next pass — a deferred store, or a session
+    /// that is not live right now but whose mesh and transcript generation are still this one. The
+    /// item keeps its place in the retry list and its custody.
+    case refusedForNow
+
+    /// Whether the projection should stop offering this item.
+    var leavesTheRetryList: Bool { self != .refusedForNow }
+}
+
+// MARK: - MeshTranscriptLiveness
+
+/// Whether a routed text item may enter the transcript a device is showing — and if not, whether
+/// that can change (P6 item 4, plan §12).
+///
+/// Three states rather than a `Bool` because the two refusals are not the same fact. "This mesh is
+/// gone, or the transcript was cleared since this item arrived" is monotone: a mesh a device has
+/// left is never rejoined by a projection, and the generation counter never goes back, so the item
+/// leaves the retry list. "The session is not live *right now*, in this mesh and this generation" is
+/// reversible — `startSearching()` un-ends a session the five-minute give-up door ended — so
+/// marking it would lose a message from a transcript that was never cleared.
+///
+/// Frozen English tokens; they name audit lines, never user copy.
+nonisolated enum MeshTranscriptLiveness: String, Equatable, Sendable {
+
+    /// This mesh, this generation, and the session has not ended.
+    case live
+    /// Another mesh, or a transcript that has been cleared since the item was first offered.
+    case endedForGood
+    /// The right mesh and the right generation, but the session has ended by one of the doors that
+    /// can be un-ended.
+    case notLiveRightNow
 }

@@ -12,7 +12,12 @@ import Foundation
 ///
 /// Deliberately NOT a decision about the *mesh*: it answers only "which radio call", and every
 /// reason each answer is right lives with the manager seams it names.
-public nonisolated enum FriendsDiscoveryEntry: String, Equatable, Sendable, CaseIterable {
+///
+/// **No `String` rawValue and no `CaseIterable`** (fix review finding P3-9): nothing read either,
+/// and a `String` rawValue is a frozen-token obligation under the localization wall — a token
+/// nobody may ever rename — taken on for no reader. The table is pinned by its four explicit rows,
+/// which is stronger than an `allCases` sweep over three answers.
+public nonisolated enum FriendsDiscoveryEntry: Equatable, Sendable {
 
     /// No session at all ⇒ `MeshNetworkManager.startJoin()`, a fresh search cycle with every reset.
     case fresh
@@ -31,7 +36,16 @@ public nonisolated enum FriendsDiscoveryEntry: String, Equatable, Sendable, Case
     /// Whether this entry arms the five-minute "found nobody" timeout. Both entries that touch the
     /// radios do; the no-op does not, which is what stops a re-entry while a session is live from
     /// arming a second timeout behind the first.
-    public var armsDiscoveryTimeout: Bool { self != .none }
+    ///
+    /// An exhaustive `switch` rather than `self != .none` (fix review finding P3-9): on a `case
+    /// none`, the bare `.none` in a comparison re-resolves to `Optional.none` the day the value is
+    /// ever optional, and the answer would silently invert. A `switch` fails to compile instead.
+    public var armsDiscoveryTimeout: Bool {
+        switch self {
+        case .fresh, .resume: return true
+        case .none: return false
+        }
+    }
 
     /// The decision.
     ///

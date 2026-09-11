@@ -304,9 +304,17 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
             expiry: .meshHardDeadlinePlusGrace,
             canonicalStore: .friendPhotoWall
         ),
+        // The text row's cap is the SECOND narrowed one (P6 item 4), and narrowed the same way:
+        // `MeshRoutedTextBody.maxSealedBlobByteCount` is the sanitized maximum's own byte bound
+        // (16 × `SessionMessageStore.maxTextLength`, because the product's cap is 500 *Characters*
+        // and a grapheme cluster is unbounded in bytes) plus this body family's framed header
+        // allowance plus the seal's overhead — 9 065 B. Defined as that constant, never as a copy,
+        // so the mint's own refusal and the manifest door's `sizeExceedsTypeCap` are one number.
+        // `canonicalStore` and `maxItemByteCount` are the two columns the freezing rule leaves
+        // editable in place, so this needs no amendment to it.
         MeshRoutedTypeEntry(
             token: MeshRoutedTypeToken.tempMessage,
-            maxItemByteCount: MeshRoutedManifestFormat.maxContentByteCount,
+            maxItemByteCount: UInt64(MeshRoutedTextBody.maxSealedBlobByteCount),
             destinations: .fullRosterAtCreation,
             relayRetention: .originRetainsUntilDeparture,
             finalAck: .durableRecipientStorage,

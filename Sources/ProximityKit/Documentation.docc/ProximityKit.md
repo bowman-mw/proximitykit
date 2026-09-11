@@ -51,7 +51,8 @@ the audit trail.
 camera photos (quota-capped, cached metadata-only through `PrivateMediaStore`, optionally
 AES-GCM-encrypted under the rotating ``MeshGroupKey``), the in-person clothing shop
 (``MeshClothingShop``, with its 1-hour post-session browse window), vanish-at-session-end chat
-(``SessionMessageStore`` — deliberately not Codable so a message can never enter a snapshot),
+(``SessionMessageStore`` — deliberately not Codable so a message can never enter a snapshot, and
+since P6 item 4 a *projection* over routed ciphertext rather than the only copy),
 in-session hearts, the one-hop moderation relay (``ModerationReportRelay`` →
 ``ModerationLedger`` → ``ModerationBanStore``), fuzzy friend state (``FriendStateCache``), and
 Group Activities (``ProximityActivityManager``, whose authorization is a host-signed,
@@ -697,8 +698,10 @@ one read-only door on the heart ledger (`MeshHeartLedgerProof` + `commitProof(fo
 added the ITEM SEAL, the first routed body, the sender door's vocabulary and the one plaintext
 delivery seam — twelve types: `MeshRoutedItemSealFormat`, `MeshRoutedItemSealError`,
 `MeshRoutedItemSealer`, `MeshRoutedItemBodyFormat`, `MeshRoutedPhotoHeader`, `MeshRoutedPhotoBody`,
-`MeshRoutedShareSkip`, `MeshRoutedShareRefusal`, `MeshRoutedOriginationOutcome`,
-`MeshRoutedDeliveryError`, `MeshRoutedOriginQuotaKey` and `MeshRoutedItemDelivery`.
+`MeshRoutedTextHeader`, `MeshRoutedTextBody`, `MeshRoutedShareSkip`, `MeshRoutedShareRefusal`,
+`MeshRoutedOriginationOutcome`, `MeshTextSendOutcome`, `MeshRoutedDeliveryError`,
+`MeshRoutedOriginQuotaKey`, `MeshRoutedProjectionVerdict`, `MeshTranscriptLiveness` and
+`MeshRoutedItemDelivery`.
 
 P5 item 5 added the ROUTED CONTENT digest and its pure comparison — eleven types:
 `MeshRoutedInventoryFormat`, `MeshRoutedInventoryEntry`, `MeshRoutedInventory`,
@@ -1614,6 +1617,38 @@ session-roster entry written from that same value — so a destination with neit
 mint by name: the stated outage covers a star topology, a roster above the slot cap and any
 resumption, and the real fix is a signed key-advertisement frame, handed forward.
 
+**Temporary text moved onto the same store, and the legacy `.tempMessage` fan-out retired with it**
+(P6 item 4, plan §12). ``MeshRoutedTextBody`` is the second body family in the same frozen framing —
+a length-prefixed JSON header plus the message's **raw UTF-8** — and its own narrowed cap
+(`16 × SessionMessageStore.maxTextLength` + a 1 KiB text header allowance + the seal's overhead =
+9 065 B), because the product's 500-`Character` limit is unbounded in bytes: a grapheme cluster is.
+It has a **fourth** hostile framing shape the photo body does not, and it is the one a copy-paste
+gets wrong — `String(decoding:as:)` cannot fail, it substitutes U+FFFD, and U+FFFD survives the
+message sanitizer, so invalid UTF-8 is refused with a failable decoder rather than repaired. The
+header carries a display-name CLAIM exactly as the photo header does, deliberately: the admission
+ledger holds no name at all, so the identity is bound by the signature and the ledger while the name
+is display copy the store re-moderates.
+
+Three things about text are not the photo row's rules. `sendTempMessage(_:)` **returns**
+``MeshTextSendOutcome`` and publishes nothing — `routedShareRefusal`'s one consumer is an alert on
+the view the chat panel covers, and its copy is photo-worded — so the panel shows a non-staged
+outcome inline and keeps the draft. `.noDestinations` therefore **speaks** for text where it is
+silent for photos: the founding window is real, destinations are frozen at the mint, and there is no
+offline queue, so a message that reached nobody can never acquire a recipient later. And the local
+echo is appended only on `.staged`, because a row in a transcript is a claim that it was sent and the
+transcript has no failed-row state. What the routed path buys in exchange is the thing the legacy
+fan-out could not do at all: a message to an admitted member who is not linked at that instant is
+sealed, wrapped and custodied until a link forms.
+
+The text projection re-applies the 13+ gate before the unwrap (leg 4 of that gate) and then asks
+``MeshTranscriptLiveness``: `isSessionLive` — the one predicate `clearSessionMessagesIfSessionEnded`
+keys on, so the gate and the clear cannot disagree, and a blip leaves it true — AND the item's own
+mesh AND the item's own transcript generation. The third leg exists because the first is reversible
+(re-arming the radios un-ends a session the five-minute give-up door ended) while the clear is not.
+Only the first is retryable; a mesh left and a generation moved are monotone, so those items leave
+the retry list — which is ``MeshRoutedProjectionVerdict``'s job, and the reason the projected mark
+now means "handed on, **or** refused for a reason that cannot change".
+
 The RECEIVER is unchanged down to and including the recipient receipt — the photo stage is final on
 durable ciphertext — and the plaintext is a later, separate pass over already-final bytes:
 ``MeshRoutedItemDelivery/openPhotoBody(_:manifest:identity:mayDecryptRoutedContent:)`` behind
@@ -1733,11 +1768,16 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshRoutedItemBodyFormat``
 - ``MeshRoutedPhotoHeader``
 - ``MeshRoutedPhotoBody``
+- ``MeshRoutedTextHeader``
+- ``MeshRoutedTextBody``
 - ``MeshRoutedShareSkip``
 - ``MeshRoutedShareRefusal``
 - ``MeshRoutedOriginationOutcome``
+- ``MeshTextSendOutcome``
 - ``MeshRoutedDeliveryError``
 - ``MeshRoutedOriginQuotaKey``
+- ``MeshRoutedProjectionVerdict``
+- ``MeshTranscriptLiveness``
 - ``MeshRoutedItemDelivery``
 - ``MeshChunkFormat``
 - ``MeshRoutedContentDigest``
@@ -1892,6 +1932,11 @@ records rather than app-visible state.
 - ``ProximityClothingCatalog``
 
 ### Live-session chat
+
+Chat rides the **routed store** since P6 item 4: ``MeshRoutedTextBody`` sealed under a signed
+manifest with an immutable destination set. ``SessionMessageStore`` is the memory-only UI projection
+over it — a derivation in plan §10.3's total order, not an append log — and ``TempMessagePayload`` is
+the retired wire payload, **frozen and parked** (decoded, never dispatched, never emitted).
 
 - ``SessionMessageStore``
 - ``TempMessagePayload``

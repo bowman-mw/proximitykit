@@ -21,8 +21,15 @@ import Foundation
 
 /// Why an origination did nothing, with nothing to tell the user (P5 item 13, D-13.8).
 ///
-/// A skip is **silent**: the local echo is already on this device's own wall, and "send to nobody"
-/// is the shipped behaviour for a session that has no other members yet.
+/// A skip is silent **for a photo**: the local echo is already on this device's own wall, and
+/// "send to nobody" is the shipped behaviour for a session that has no other members yet.
+///
+/// **It is not silent for text** (P6 item 4). A message that reached nobody is not a copy the
+/// sender still has — destinations are frozen at the mint and there is no offline queue, so the
+/// item can never acquire one — and the founding window (commit → found → grant → adopt) is a real
+/// second or two on UWB and longer on the tap-to-tap fallback. `sendTempMessage(_:)` therefore
+/// RETURNS `MeshTextSendOutcome.noDestinations` and the chat panel says so inline. The token stays
+/// one token: the difference is what each caller does with it, not what happened.
 nonisolated enum MeshRoutedShareSkip: String, Equatable, Sendable {
     /// No mesh, no membership ledger, or a derived roster of just this device — there is no
     /// destination set to mint against. Frozen English token.
@@ -103,4 +110,37 @@ nonisolated enum MeshRoutedOriginationOutcome: Equatable, Sendable {
     case skipped(MeshRoutedShareSkip)
     /// A mint was attempted and failed. Visible.
     case refused(MeshRoutedShareRefusal)
+}
+
+// MARK: - MeshTextSendOutcome
+
+/// What `MeshNetworkManager.sendTempMessage(_:)` did with one typed message (P6 item 4, plan §12).
+///
+/// **Returned, never published.** `routedShareRefusal` is the photo path's observable and has
+/// exactly one consumer — a session `.alert` on `DisposableCameraView`, the view the chat panel is
+/// presented *over*, so publishing a chat refusal there fires an alert on a covered presenter and
+/// one of the two presentations is dropped. Its copy is photo-worded in every arm as well. The
+/// panel reads this value instead and shows the non-staged cases inline beneath the compose bar,
+/// keeping the draft so "send again" is the retry.
+///
+/// Deliberately **not** `@discardableResult`: an unread outcome here is a message the user believes
+/// was sent (R7, `sendEnvelope(_:encodable:via:sealed:)`'s own precedent). The five cases are
+/// frozen and each reaches a different sentence or none; `staged` and `empty` are the two the panel
+/// says nothing about, the first because the echo in the transcript IS the feedback and the second
+/// because the send control is already disabled for it.
+public nonisolated enum MeshTextSendOutcome: Equatable, Sendable {
+
+    /// The item is in this device's routed store, complete, and pushed once to every committed
+    /// slot. The local echo is in the transcript — appended **only** here.
+    case staged
+    /// The derived roster names nobody else yet: the founding window, or a genuinely solo session.
+    /// Visible, because destinations are frozen at the mint and there is no offline queue.
+    case noDestinations
+    /// A mint was attempted and failed, with the routed path's own frozen cause.
+    case refused(MeshRoutedShareRefusal)
+    /// The 13+ chat gate refused. Unreachable from a gated UI, and enforced anyway.
+    case ageGated
+    /// Nothing survived the sanitizer and the wire byte bound — including the case the bound
+    /// creates, a single grapheme cluster wider than the whole allowance.
+    case empty
 }
