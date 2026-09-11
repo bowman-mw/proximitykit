@@ -51,7 +51,9 @@ private struct FriendPhotoWallPreferences: Codable, Equatable {
 // MARK: - MeshNetworkManager
 
 /// The friend-mesh session manager — the largest orchestrator in the subsystem. Runs the
-/// `fernlet-friend` radio, forms UWB dwell-committed sessions (pairwise → mesh at two commits),
+/// `fernlet-friend` radio, forms UWB dwell-committed sessions (a mesh is **founded at the first
+/// commit**: descriptor, membership ledger, founder admission, ceiling and state machine, on both
+/// halves of a pair — see ``foundMesh(_:now:)`` and ``yieldsNewbornMesh(_:to:from:)``),
 /// and hosts every feature that rides the mesh: disposable-camera photos, the clothing shop,
 /// live-session chat, in-session hearts, moderation relay, fuzzy friend state, Group Activities,
 /// the QR verification ceremony, and the post-session keep-as-friend review.
@@ -67,9 +69,10 @@ private struct FriendPhotoWallPreferences: Codable, Equatable {
 /// dispatches with a merely-pending identity and no state gate.
 ///
 /// Session lifecycle invariants: "session formation" is the FIRST slot commit (not search start,
-/// which fires on every Social-tab entry); the last-committed-slot-gone moment promotes the
-/// roster into `pendingFriendReview`, opens the clothing-shop window, and clears the chat
-/// transcript. Phase-3 group crypto: a lowest-fingerprint coordinator election, a 20 s beacon,
+/// which fires on every Social-tab entry); the last-committed-slot-gone moment — ``hasCommittedPeer``
+/// going false, **never** `isInSession`, which a founded mesh keeps true across every link —
+/// promotes the roster into `pendingFriendReview`, opens the clothing-shop window, and clears the
+/// chat transcript. Phase-3 group crypto: a lowest-fingerprint coordinator election, a 20 s beacon,
 /// and a 15-minute key rotation distribute the ``MeshGroupKey`` pairwise-wrapped to
 /// handshake-verified KA keys; closed-mode metadata and epoch ≥ 1 photos ride AES-GCM under it.
 /// Photos persist metadata-only in the `PrivateMediaStore`-backed cache (bytes on disk,
@@ -277,10 +280,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// each response is a full catalog send). Pruned with `sentShopCatalogSlotIDs`.
     @ObservationIgnored private var shopCatalogRequestResponseAt: [UUID: Date] = [:]
     /// True from the first slot COMMIT of a session (formation) until the session ends (no committed
-    /// slot and no mesh — the same `!isInSession` condition the review promotion keys on). Gates the
+    /// slot — the same `!hasCommittedPeer` condition the review promotion keys on). Gates the
     /// Phase-3a formation hook in `noteSlotCommittedForShop` so `clothingShop.beginNewSession()` fires
-    /// exactly once per formation — later commits, promoteToMesh's committed loop, and a re-handshake
-    /// of the only committed slot must not re-fire it mid-session.
+    /// exactly once per formation — later commits, ``announcePromotedMesh()``'s committed loop, and a
+    /// re-handshake of the only committed slot must not re-fire it mid-session.
     @ObservationIgnored private var hasFormedShopSession = false
     /// Test seam: fires with the slot ID whenever a shop-catalog send is initiated (commit offer or
     /// request response) and the provider produced a catalog — unit tests can't observe the real
@@ -878,8 +881,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Controls auto-invite-all and 25 s uncommitted-channel TTL behaviour.
     public private(set) var isProximityJoin = false
 
-    /// Controls whether additional friends can join the active Friends session.
-    /// This applies before pairwise sessions are promoted to a mesh descriptor.
+    /// Controls whether additional friends can join the active Friends session. Read at the
+    /// founding (it picks the new mesh's `.open`/`.closed` mode) and at every seat and admission
+    /// decision after it.
     public private(set) var isSessionOpen = true
 
     /// Whether this device may open or accept a *link* to a discovered peer right now.
@@ -932,8 +936,32 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// True when at least one peer is committed (pairwise) or a mesh exists.
+    ///
+    /// **The UI half.** It stays true across a blip — a mesh whose links are all down is still a
+    /// session the camera sheet must stay up for (`ConnectView`'s swap) — which is exactly why it
+    /// is the wrong predicate for "has the session ENDED". That question is
+    /// ``hasCommittedPeer``'s, and P6 item 2 is the commit where the two stopped agreeing: once a
+    /// pair founds a mesh at its first commit, `currentMesh != nil` outlives every link.
     public var isInSession: Bool {
         currentMesh != nil || slots.contains(where: { $0.fingerprint != nil })
+    }
+
+    /// Whether any peer's handshake is COMMITTED right now — the **lifecycle** half of
+    /// ``isInSession`` (P6 item 2).
+    ///
+    /// The three session-end hooks (``promoteRosterToPendingReviewIfSessionEnded()``,
+    /// ``openShopWindowIfSessionEnded()``, ``clearSessionMessagesIfSessionEnded()``), the review
+    /// sheet that presents the promoted batch, and the app's discovery lifecycle read this.
+    /// Before item 2 they read `isInSession` and were right by accident: a two-device session had
+    /// no mesh, so the last committed slot going away was the only leg either predicate had. A
+    /// promoted mesh made `isInSession` **sticky** — the keep-as-friend review never fired, the
+    /// clothing-shop window never opened and the chat transcript never cleared, which item 2 would
+    /// have turned from a latent defect (3+ devices only) into the default two-device behaviour.
+    ///
+    /// Deliberately NOT a rename of `isInSession`: the two answer different questions and both are
+    /// read.
+    public var hasCommittedPeer: Bool {
+        slots.contains(where: { $0.fingerprint != nil })
     }
 
     /// Shots remaining for this session (10 minus sent count, clamped to ≥ 0).
@@ -946,6 +974,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// re-verification surface — needs the same value `handleVerifyResponse` verifies against.
     public var localKeyAgreementPublicKey: Data { identity.localKeyAgreementPublicKey }
 
+    /// Everyone this device counts as in the session: the local user, every descriptor member, and
+    /// every COMMITTED slot — a **union**, not a choice between the two (P6 item 2, A10).
+    ///
+    /// The union is what item 2 needs and what fixed a pre-existing gap in the same line. A mesh
+    /// founded at the first commit holds exactly ONE member (this device) until the admission grant
+    /// appends the peer, so the `if let mesh` branch alone made the committed peer **vanish** from
+    /// the participant list for the whole admission round trip — and with it
+    /// ``proposeRemoval(of:)``'s pairwise shortcut, which fires only when there is exactly one other
+    /// participant. The same branch already hid a committed-but-not-yet-admitted third device on
+    /// any mesh, promoted or not.
+    ///
+    /// Descriptor members are listed first, so the dedup below keeps the IDENTITY display name over
+    /// the slot's transport hint for a peer that is both; the slot branch moderates the hint
+    /// (`MCPeerID` display names have no other ingest point, R5) and members were moderated at
+    /// `sanitizedDescriptor` / `allowAdmission`, so every name here has been through the same
+    /// coercion.
     public var sessionParticipants: [MeshSessionParticipant] {
         var participants = [
             MeshSessionParticipant(
@@ -954,27 +998,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 isLocal: true
             )
         ]
-        if let mesh = currentMesh {
-            participants += mesh.members
-                .filter { $0.fingerprint != identity.localFingerprint }
-                .map {
-                    MeshSessionParticipant(
-                        fingerprint: $0.fingerprint,
-                        displayName: $0.displayName,
-                        isLocal: false
-                    )
-                }
-        } else {
-            participants += slots.compactMap { slot in
-                guard let fingerprint = slot.fingerprint else { return nil }
-                return MeshSessionParticipant(
-                    fingerprint: fingerprint,
-                    // MCPeerID display names have no other entry point, so this is the ingest
-                    // equivalent for the transport name (R5).
-                    displayName: ItemNameModeration.moderatedPeerDisplayName(slot.peer.displayHint),
+        participants += (currentMesh?.members ?? [])
+            .filter { $0.fingerprint != identity.localFingerprint }
+            .map {
+                MeshSessionParticipant(
+                    fingerprint: $0.fingerprint,
+                    displayName: $0.displayName,
                     isLocal: false
                 )
             }
+        participants += slots.compactMap { slot in
+            guard let fingerprint = slot.fingerprint,
+                  fingerprint != identity.localFingerprint else { return nil }
+            return MeshSessionParticipant(
+                fingerprint: fingerprint,
+                displayName: ItemNameModeration.moderatedPeerDisplayName(slot.peer.displayHint),
+                isLocal: false
+            )
         }
         return participants
             .filter { !removedMemberFingerprints.contains($0.fingerprint) }
@@ -1000,7 +1040,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // re-recorded, so it can never be offered by the keep-as-friend prompt.
         guard !removedMemberFingerprints.contains(fingerprint) else { return }
         // Single ingest for the roster, so BOTH callers (the verified PeerIdentity path and
-        // promoteToMesh's raw `slot.peer.displayHint`) are covered by one coercion. Nothing keys
+        // `announcePromotedMesh`'s raw `slot.peer.displayHint`) are covered by one coercion. Nothing keys
         // off the roster display name — lookups and removal key on fingerprint — so rewriting an
         // existing entry to the sanitized form is safe.
         let name = ItemNameModeration.moderatedPeerDisplayName(displayName)
@@ -1059,13 +1099,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Phase 2 ("Session-end review is model-state, not view-events"): when NO committed slot
-    /// remains (the same condition `isInSession` derives from) and the live roster is non-empty,
-    /// move the roster into `pendingFriendReview`, merging by fingerprint into any existing
-    /// unconsumed batch — candidates are never dropped. Idempotent and cheap; called after every
-    /// slot-removal path (removeSlot, disconnectSlot — which the checkCoordinatorStates stale
-    /// eviction funnels through) and on leaveSession/stopSearching teardown.
+    /// remains (``hasCommittedPeer``) and the live roster is non-empty, move the roster into
+    /// `pendingFriendReview`, merging by fingerprint into any existing unconsumed batch —
+    /// candidates are never dropped. Idempotent and cheap; called after every slot-removal path
+    /// (removeSlot, disconnectSlot — which the checkCoordinatorStates stale eviction funnels
+    /// through) and on leaveSession/stopSearching teardown.
+    ///
+    /// The predicate is ``hasCommittedPeer`` and **not** `isInSession` (P6 item 2, A13): a mesh
+    /// outlives its links, so once a pair founds one at its first commit `isInSession` never goes
+    /// false and this ceremony — the product's core loop, and item 6's tier-2 precondition — would
+    /// never fire again. It was already wrong for a promoted 3+ mesh; nothing observed it.
     private func promoteRosterToPendingReviewIfSessionEnded() {
-        guard !isInSession, !sessionRoster.isEmpty else { return }
+        guard !hasCommittedPeer, !sessionRoster.isEmpty else { return }
         if var batch = pendingFriendReview {
             for entry in sessionRoster {
                 if let index = batch.entries.firstIndex(where: { $0.fingerprint == entry.fingerprint }) {
@@ -1538,14 +1583,40 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             createdAt: now
         )
         currentMesh = created
+        guard foundMesh(created, now: now) else { return }
+        startSearching()
+    }
+
+    /// **The founding**, as both founder doors run it: the membership ledger, this device's own
+    /// admission, the session ceiling and the state machine — in that order, over a descriptor the
+    /// caller has already assigned to ``currentMesh``.
+    ///
+    /// Extracted at P6 item 2 so the proximity-join promotion (``promoteToMesh()``) founds through
+    /// **these** functions rather than a second copy of them. Before item 2 it was
+    /// ``startNewMesh(name:)``'s inline tail and the promotion did none of it: a promoted mesh had
+    /// a meshID, no ledger, no ceiling and a state machine still at `.idle` — so
+    /// ``originateRoutedItem(body:typeToken:itemID:now:)``'s first guard (which needs
+    /// `membershipVerifier?.roster`) skipped every capture, and `recordGrantedAdmission` granted
+    /// membership without filing it. `startNewMesh` has no shipping caller, so that made the app's
+    /// only session entry contentless at every roster size, not only for a pair (D-13.18).
+    ///
+    /// `seedFounderAdmission(meshID:)` also mints this device's own key advertisement (item 1), so
+    /// the addressing is armed by the same call that files the admission it is signed under.
+    ///
+    /// - Parameters:
+    ///   - created: The descriptor just assigned to ``currentMesh``.
+    ///   - now: The founding instant — the ceiling's `startedAt`.
+    /// - Returns: `false` when the founding could not be sealed, in which case it has already been
+    ///   unwound and `currentMesh` is nil.
+    private func foundMesh(_ created: MeshDescriptor, now: Date) -> Bool {
         // P3 item 3: this device founded the mesh, so its own signing key is the one key that can
         // authorize the bootstrap admission. P3 item 7: it files that admission here, so the
         // founder is on its OWN derived roster from the first instant — an empty ledger would
         // refuse every record this device signs, including the removals it tallies.
         prepareMembershipLedger(meshID: created.meshID, founderSigningPublicKey: identity.localSigningPublicKey)
         guard seedFounderAdmission(meshID: created.meshID) else {
-            abandonUnpersistedSession()
-            return
+            unwindNewbornMesh()
+            return false
         }
         // P3 item 6, plan §3.6: the context reaches the disk BEFORE the UI is shown a mesh. A mesh
         // this device could not write down is a mesh it would not remember founding after a
@@ -1557,14 +1628,45 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         applySessionEvent(.founded)
         guard lastSessionEffectFailure == nil else {
-            abandonUnpersistedSession()
-            return
+            unwindNewbornMesh()
+            return false
         }
-        startSearching()
+        return true
+    }
+
+    /// The COMPLETE unwind of a mesh this device founded and is giving up — a founding whose
+    /// context could not be sealed, or a newborn mesh yielded to another (P6 item 2, step 4b).
+    ///
+    /// ``abandonUnpersistedSession()`` alone is **not** enough for a yield, and the gap is a
+    /// permanent one: it leaves ``currentGroupKey`` and the epoch keyring standing, so a yielder
+    /// whose 15-minute rotation had already fired would carry `localJoinedEpoch >= 1` into the
+    /// winner's mesh — where the winner's keyless grant carries epoch 0 and
+    /// ``handleAdmissionGrant(_:slot:senderSigningPublicKey:)``'s monotonicity guard drops it
+    /// `droppedStaleEpoch`. The device could then never join anything, for the rest of the session.
+    /// The advertisement set goes for the same reason a ledger does: a row signed under mesh A's
+    /// admission chain addresses nobody in mesh B.
+    ///
+    /// Nothing routed is dropped here, and nothing needs to be: the yield's own conditions refuse to
+    /// fire unless this device's routed index is provably EMPTY, and a roster of one can never have
+    /// staged an item of its own (`originateRoutedItem` answers `.noDestinations` first).
+    private func unwindNewbornMesh() {
+        abandonUnpersistedSession()
+        // Beyond `startNewMesh`'s footprint, and both load-bearing for the yield — see above.
+        clearGroupKeyState()
+        clearKeyAdvertisementState()
     }
 
     /// Undoes a session start whose context could not be sealed (plan §3.6). Deliberately narrow —
     /// it unwinds exactly what ``startNewMesh(name:)`` had set, and never touches the rejoin bar.
+    ///
+    /// **It does not undo the sealed context itself**, and since P6 item 2 there is a caller for
+    /// which that matters: a newborn mesh yielded by ``unwindNewbornMesh()`` has already written one
+    /// (`applySessionEvent(.founded)`'s `persistContext`). `MeshSessionContext` is a single sealed
+    /// blob naming one meshID, so the abandoned mesh stays on disk until the next save — and a
+    /// force-quit inside that window relaunches into `restoreMembershipLedger`'s `.adopted` arm on a
+    /// one-member mesh nobody else is in. The escape is the same as for any such mesh: it has no
+    /// destinations, it holds nothing, and End Session retires it. Named rather than closed;
+    /// closing it wants a context writer that can delete, which is a schema question.
     private func abandonUnpersistedSession() {
         FernletAuditLog.log("mesh.session.abandonedNotDurable")
         currentMesh = nil
@@ -1758,6 +1860,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         broadcastMeshDescriptor()
     }
 
+    /// The user's open/closed control over the live session.
+    ///
+    /// Since P6 item 2 the `currentMesh != nil` leg is reachable for a **pair**, where before it
+    /// only ever fired for a promoted 3+ mesh: toggling the control now re-publishes the discovery
+    /// TXT and broadcasts a descriptor on the default two-device path, and an OPEN mesh's TXT
+    /// carries `meshID` / `meshName` / `memberCount`. That is open mode's stated product behaviour —
+    /// it is what lets a third device find the pair — and it is named here as a newly reachable
+    /// broadcast rather than changed.
     public func setSessionOpen(_ isOpen: Bool) {
         isSessionOpen = isOpen
         if currentMesh != nil {
@@ -2064,7 +2174,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // COMMITTED slot. `peer` is the coordinator's connected-OR-PENDING identity, so a
             // merely-pending peer would otherwise reach `handleMeshDescriptor` with a fingerprint.
             // A descriptor dropped in a commit-timing race is re-sent: `onSlotConnected` sends one
-            // post-commit and `promoteToMesh` re-broadcasts.
+            // post-commit and `announcePromotedMesh` re-broadcasts.
             guard slot?.fingerprint != nil else {
                 FernletAuditLog.log("mesh.meshDescriptor.droppedUncommittedSlot")
                 return
@@ -5161,8 +5271,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// An origin stages, offers, and acknowledges nothing to itself.
     ///
     /// Three answers, and only the third reaches the user: a **skip** when there is no destination
-    /// set at all (a solo member, or the pairwise phase before promotion), a **staged** key, or a
-    /// named **refusal** for a mint that was attempted and failed.
+    /// set at all — a derived roster of exactly ONE: a solo host, and the founder's window between
+    /// the founding and the first admission grant (since P6 item 2 the proximity-join pair founds
+    /// with a ledger at its first commit, so "the pairwise phase" is no longer an instance of this)
+    /// — a **staged** key, or a named **refusal** for a mint that was attempted and failed.
     ///
     /// - Parameters:
     ///   - body: The framed plaintext — for photos, ``MeshRoutedPhotoBody/encoded()``.
@@ -8819,30 +8931,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // below so every commit path (pairwise, promote-to-mesh, joiner) runs it.
         noteSlotCommittedForShop(slot: slot, identity: peerIdentity)
 
-        // Proximity-join shape decision: pairwise (1 committed) → mesh (≥ 2 committed).
-        // `slot.fingerprint` was set by checkCoordinatorStates before calling here, so
-        // connectedCount already includes this slot.
-        if isProximityJoin && currentMesh == nil {
-            let connectedCount = slots.filter { $0.fingerprint != nil }.count
-            if connectedCount >= 2 {
-                // Promote to mesh: create descriptor and broadcast to all committed slots.
-                promoteToMesh()
-                return  // promoteToMesh handles descriptor + manifest sync for all slots
-            }
-            // First committed peer — pairwise. The photo-manifest sync retired with the pull
-            // protocol (P5 item 13): a pairwise pair has no meshID and no membership ledger, so it
-            // has no routed destination set either. A capture there is cached on the user's own
-            // wall and reaches NOBODY — nothing re-shares it when the session promotes, and no
-            // notice says so. Named outage, D-13.18; the fix (a mesh identity for the pairwise
-            // phase) is plan §23.4's, and `startJoin()` is the app's only session entry, so this is
-            // the default two-device path. (The P5 review's finding 2.)
-            spawnHostPinned { [weak self] in
-                guard let self else { return }
-                await self.sendVouchList(to: slot)
-            }
+        // P6 item 2 (D-13.18): a proximity-join session FOUNDS its mesh — descriptor, membership
+        // ledger, founder admission, ceiling and state machine — at the FIRST commit. P5 made the
+        // routed store the only content path and its first guard needs a derived roster, so a
+        // session with no ledger is a session with no content: before this, the app's only entry
+        // left every roster size contentless (see ``foundMesh(_:now:)``).
+        //
+        // Both halves of a pair may found; nobody waits for the other. An asymmetric commit is
+        // ordinary — the non-UWB fallback needs a tap on each phone — so gating the founding on
+        // ``foundsPairwiseMesh(local:peer:)`` would mean a pair whose higher fingerprint taps
+        // first never gets a mesh at all. The double mint is repaired instead, at
+        // ``yieldsNewbornMesh(_:to:from:)``, where the same order decides which one survives.
+        if isProximityJoin, currentMesh == nil, promoteToMesh() {
+            announcePromotedMesh()   // descriptor + vouch list, to every committed slot
+            noteCommitIntoMesh(peer: peerIdentity.fingerprint)
             return
         }
-
+        // Falling through with no mesh is either a non-join commit or a founding the store refused:
+        // no descriptor to send and no session event to raise, but the vouch exchange is owed.
         if currentMesh != nil {
             spawnHostPinned { [weak self] in
                 guard let self else { return }
@@ -8851,30 +8957,74 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         // Exchange vouch lists after every successful identity verification
         spawnHostPinned { [weak self] in await self?.sendVouchList(to: slot) }
+        noteCommitIntoMesh(peer: peerIdentity.fingerprint)
+    }
 
+    /// The tail every commit into an existing mesh shares: the session event, and the group-crypto
+    /// timers. Split out at P6 item 2 so the founding path runs exactly the same one — before it,
+    /// the promotion returned early and a promoted mesh therefore sat at `.idle` with **no
+    /// ceiling** and raised no `.peerCommitted` for the peer that had just committed (A17: a latent
+    /// defect, not a new behaviour).
+    ///
+    /// - Parameter fingerprint: The committing peer's handshake-verified fingerprint.
+    private func noteCommitIntoMesh(peer fingerprint: String) {
+        guard currentMesh != nil else { return }
         // P3 item 6: the first committed peer makes a joining session active (plan §8.2). P4 item 2
         // hangs the blip and the partial heal off the same event inside ``applySessionEvent(_:)``,
         // so every reconnect entry is one call rather than a rule this site has to remember. The
         // fingerprint is passed because only a peer that was ALREADY a member is reconnecting — a
         // new admission keeps its own `.membership` rotation.
-        if currentMesh != nil {
-            applySessionEvent(.peerCommitted, committedPeer: peerIdentity.fingerprint)
-        }
-
+        applySessionEvent(.peerCommitted, committedPeer: fingerprint)
         // Phase 3: start the beacon loop and, if we are the coordinator, schedule the first rotation.
-        if currentMesh != nil && beaconTimer == nil {
-            startBeaconLoop()
-            if isLocalCoordinator() && rotationTimer == nil {
-                let nextAt = Date().addingTimeInterval(Self.rotationInterval)
-                lastKnownNextRotationAt = nextAt
-                scheduleRotationTimer(fireAt: nextAt)
-            }
-        }
+        guard beaconTimer == nil else { return }
+        startBeaconLoop()
+        guard isLocalCoordinator(), rotationTimer == nil else { return }
+        let nextAt = Date().addingTimeInterval(Self.rotationInterval)
+        lastKnownNextRotationAt = nextAt
+        scheduleRotationTimer(fireAt: nextAt)
     }
 
-    /// Creates a MeshDescriptor in-place and broadcasts it to all committed slots
-    /// without restarting search. Called on the 2nd proximity commit.
-    private func promoteToMesh() {
+    /// Which half of a freshly dwell-committed pair keeps the mesh when **both** founded one.
+    ///
+    /// An **order, never a gate.** It is not consulted at the founding — see `onSlotConnected` for
+    /// why gating there strands a pair — only at ``yieldsNewbornMesh(_:to:from:)``, where two
+    /// contentless one-member meshes have met and exactly one must go.
+    ///
+    /// Static and pure for the same reason ``shouldInitiateInvite(localSessionID:peerSessionID:)``
+    /// is: the instance form can only ever be evaluated with THIS device's fingerprint on the left,
+    /// so only this form can assert "exactly one of the two sides keeps its mesh" across a chosen
+    /// ordering.
+    ///
+    /// Fingerprints are 16 lowercase hex characters, so `<` is a strict total order over any two
+    /// distinct devices and the tie is unreachable: equality means one signing key, i.e. one device.
+    /// It coincides with ``isLocalCoordinator()``'s and `epochCoordinatorFingerprint`'s `min()`, so
+    /// for a pair the founder is also the rotation coordinator — one arrangement to reason about.
+    ///
+    /// **Not a security property.** `IdentityService.fingerprint(of:)` is a 64-bit SHA-256 prefix
+    /// over a durable keychain key, and that file's own doc names the weak-binding class: ~16
+    /// keypairs buy a lower fingerprint than any chosen peer. So founder — and therefore admitter,
+    /// and therefore the root of the joiner's bootstrap ledger — is *selectable* by a peer that
+    /// cares to, exactly as `meshID.uuidString` would be. What founding buys inside a session the
+    /// user has already consented to by holding two phones together is the question; the order
+    /// itself buys no authority it does not also hand the other side.
+    ///
+    /// - Parameters:
+    ///   - local: This device's fingerprint.
+    ///   - peer: The peer's handshake-verified fingerprint.
+    /// - Returns: `true` when this device's mesh is the one that survives.
+    nonisolated static func foundsPairwiseMesh(local: String, peer: String) -> Bool {
+        local < peer
+    }
+
+    /// Mints this device's own mesh descriptor in place and **founds** it (P6 item 2).
+    ///
+    /// Called on the FIRST proximity commit, from `onSlotConnected`'s only caller of it. Announcing
+    /// it is ``announcePromotedMesh()``'s job, and the split is not cosmetic: nothing may be told
+    /// about a mesh whose context the store refused, and the 60-line rule leaves no room for both.
+    ///
+    /// - Returns: `false` when the founding could not be sealed — ``currentMesh`` is nil again and
+    ///   the caller must not announce anything.
+    private func promoteToMesh() -> Bool {
         // A mesh we CREATE starts at epoch 0 by definition. Any key state surviving from the
         // pre-mesh pairwise phase is, by construction, not this mesh's key — clearing it here
         // removes the key-survival leg of the admission-grant attack independently of the
@@ -8892,7 +9042,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             keyAgreementPublicKey: identity.localKeyAgreementPublicKey,
             joinedAt: now
         )
-        currentMesh = MeshDescriptor(
+        let created = MeshDescriptor(
             meshID: UUID(),
             name: MeshNameGenerator.generate(),
             mode: isSessionOpen ? .open : .closed,
@@ -8903,10 +9053,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             modeSetBy: localFP,
             createdAt: now
         )
+        currentMesh = created
         // Keep the quota counter across pairwise→mesh promotion: pin the new meshID so
         // the addPhoto reset guard doesn't fire and grant a free extra 27 shots.
-        sessionQuotaMeshID = currentMesh?.meshID
+        sessionQuotaMeshID = created.meshID
+        guard foundMesh(created, now: now) else { return false }
         updateDiscoveryInfo()
+        return true
+    }
+
+    /// Tells every committed slot about the mesh this device just founded, and back-fills the
+    /// session roster for any slot that committed before it.
+    ///
+    /// **Never called for a founding that failed**, which is the whole reason it is separate from
+    /// ``promoteToMesh()``: plan §3.6's rule is that the context reaches the disk before anybody is
+    /// told there is a mesh.
+    ///
+    /// `startSearching()` is deliberately NOT called here (``startNewMesh(name:)`` does call it):
+    /// the radios are already up — this runs inside a commit callback — and re-minting the Bonjour
+    /// name mid-session drops the very link that just committed.
+    private func announcePromotedMesh() {
         let committed = slots.filter { $0.fingerprint != nil }
         // Phase 2 belt-and-braces: every committed slot already passed through onSlotConnected
         // (which recorded its verified identity), so this is insert-only — `slot.peer.displayHint`
@@ -8928,14 +9094,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             for slot in committed {
                 await self.sendMeshDescriptor(to: slot)
                 await self.sendVouchList(to: slot)
-            }
-        }
-        if beaconTimer == nil {
-            startBeaconLoop()
-            if isLocalCoordinator() && rotationTimer == nil {
-                let nextAt = Date().addingTimeInterval(Self.rotationInterval)
-                lastKnownNextRotationAt = nextAt
-                scheduleRotationTimer(fireAt: nextAt)
             }
         }
     }
@@ -9298,7 +9456,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let incoming = Self.sanitizedDescriptor(descriptor)
         if let existing = currentMesh {
-            mergeMeshDescriptor(existing, incoming: incoming)
+            if yieldsNewbornMesh(existing, to: incoming, from: senderFingerprint) {
+                FernletAuditLog.log(
+                    "mesh.descriptor.yieldedNewbornMesh",
+                    context: ["adopted": incoming.meshID.uuidString]
+                )
+                unwindNewbornMesh()
+                currentMesh = incoming
+            } else {
+                mergeMeshDescriptor(existing, incoming: incoming)
+            }
         } else {
             currentMesh = incoming
         }
@@ -9335,8 +9502,86 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
     }
 
+    /// Whether this device should ABANDON the mesh it just founded and adopt `incoming` instead —
+    /// P6 item 2's repair for the double mint that founding at one commit makes reachable.
+    ///
+    /// Two shapes reach here. A symmetric pair: both halves commit, both found, each drops the
+    /// other's descriptor at ``mergeMeshDescriptor(_:incoming:)``'s meshID guard, each sits alone in
+    /// its own mesh, and neither asks to be admitted (`handleMeshDescriptor` asks only when the
+    /// local fingerprint is NOT in the members list, and each device is its own only member). And a
+    /// third device whose first commit lands on an existing member: it founds its own mesh before
+    /// that member's descriptor arrives, and then drops it — a join that works today.
+    ///
+    /// Every condition is a refusal, and two of them carry the whole safety argument:
+    ///
+    /// 1. a different mesh (the merge door's own test);
+    /// 2. **the local mesh is one this device founded and is ALONE in** — one descriptor member,
+    ///    itself, and a derived roster of at most itself. This is what stops a stranger's descriptor
+    ///    displacing a mesh someone has actually joined. A roster of 1 alone is not enough: a fresh
+    ///    JOINER's bootstrap ledger also derives exactly `{itself}`, and its descriptor is the one
+    ///    thing that distinguishes the two;
+    /// 3. this device's routed index is provably EMPTY — belt-and-braces, since a roster of one can
+    ///    never have staged an item of its own, and fail-closed, since a store that cannot be read
+    ///    cannot prove it holds nothing;
+    /// 4. **the sender is this device's only committed peer** — so a third committed device cannot
+    ///    force this device off the mesh it shares with the second;
+    /// 5. for two newborn one-member meshes, ``foundsPairwiseMesh(local:peer:)``'s total order, so
+    ///    exactly one side yields and the exchange terminates. An `incoming` mesh with more than one
+    ///    member is already established and wins outright.
+    ///
+    /// A mesh of one with nothing staged is a mesh in which nobody can have lost anything, so a
+    /// hostile descriptor costs at most a denial of founding — which the same peer achieves by not
+    /// connecting at all.
+    ///
+    /// - Parameters:
+    ///   - local: The mesh this device currently holds.
+    ///   - incoming: The sanitized descriptor that just arrived.
+    ///   - senderFingerprint: The authenticated sender of the envelope that carried it.
+    /// - Returns: `true` when the local mesh should be unwound and `incoming` adopted in its place.
+    private func yieldsNewbornMesh(
+        _ local: MeshDescriptor, to incoming: MeshDescriptor, from senderFingerprint: String?
+    ) -> Bool {
+        guard incoming.meshID != local.meshID else { return false }
+        guard local.members.count == 1,
+              local.members.first?.fingerprint == identity.localFingerprint,
+              (membershipVerifier?.roster.memberCount ?? 0) <= 1 else { return false }
+        guard let sender = senderFingerprint else { return false }
+        guard slots.allSatisfy({ $0.fingerprint == nil || $0.fingerprint == sender }) else {
+            return false
+        }
+        guard holdsNoRoutedItem() else {
+            FernletAuditLog.log("mesh.descriptor.yieldRefusedRoutedContent")
+            return false
+        }
+        if incoming.members.count > 1 { return true }
+        return !Self.foundsPairwiseMesh(local: identity.localFingerprint, peer: sender)
+    }
+
+    /// Whether this device's routed store provably holds nothing — the yield's condition 3.
+    ///
+    /// Fail-closed on every non-`loaded` state except `.absent`: a deferred, corrupt or
+    /// seal-refused store cannot prove it is empty, and "cannot prove" must not read as "empty"
+    /// (D-9.4's direction). `.absent` is the fresh-device state and is genuinely empty.
+    private func holdsNoRoutedItem() -> Bool {
+        switch routedStore().load() {
+        case .loaded(let index, _): return index.items.isEmpty
+        case .absent: return true
+        case .deferred, .corrupt, .refused: return false
+        }
+    }
+
     private func mergeMeshDescriptor(_ existing: MeshDescriptor, incoming: MeshDescriptor) {
-        guard existing.meshID == incoming.meshID else { return }
+        // R7: the one refusal on this door that used to be silent. It is newly reachable since P6
+        // item 2 — two devices founding at the same commit, or a third device that founded its own
+        // mesh before an existing member's descriptor arrived — and a device that has reached it
+        // will drop every later descriptor for that mesh, so it must be visible.
+        guard existing.meshID == incoming.meshID else {
+            FernletAuditLog.log(
+                "mesh.descriptor.droppedForeignMesh",
+                context: ["held": existing.meshID.uuidString, "offered": incoming.meshID.uuidString]
+            )
+            return
+        }
         var merged = existing
         if incoming.nameSetAt > existing.nameSetAt {
             merged.name = incoming.name
@@ -9517,20 +9762,64 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             $0.requesterSigningPublicKey == request.requesterSigningPublicKey
                 || $0.requesterFingerprint == request.requesterFingerprint
         }
-        if !isKnown {
-            // Wire boundary: `requesterDisplayName` is peer-supplied and reaches the ADMISSION
-            // PROMPT — the one screen where the user decides to admit a stranger. Sanitize HERE
-            // (control/zero-width/bidi scalars out, 24-char cap) so neither the prompt nor the
-            // admitter's roster can be spoofed by a homoglyph or reversed by an RLO override.
-            // Safe to rebuild the payload: `allowAdmission`/`declineAdmission` match on
-            // `requesterSigningPublicKey`, never on the name, so dedup and removal are unaffected.
-            pendingAdmissionRequests.append(MeshAdmissionRequestPayload(
-                meshID: request.meshID,
-                requesterFingerprint: request.requesterFingerprint,
-                requesterDisplayName: ItemNameModeration.moderatedPeerDisplayName(request.requesterDisplayName),
-                requesterSigningPublicKey: request.requesterSigningPublicKey,
-                requesterKeyAgreementPublicKey: request.requesterKeyAgreementPublicKey
-            ))
+        guard !isKnown else { return }
+        // Wire boundary: `requesterDisplayName` is peer-supplied and reaches the ADMISSION
+        // PROMPT — the one screen where the user decides to admit a stranger. Sanitize HERE
+        // (control/zero-width/bidi scalars out, 24-char cap) so neither the prompt nor the
+        // admitter's roster can be spoofed by a homoglyph or reversed by an RLO override.
+        // Safe to rebuild the payload: `allowAdmission`/`declineAdmission` match on
+        // `requesterSigningPublicKey`, never on the name, so dedup and removal are unaffected.
+        let queued = MeshAdmissionRequestPayload(
+            meshID: request.meshID,
+            requesterFingerprint: request.requesterFingerprint,
+            requesterDisplayName: ItemNameModeration.moderatedPeerDisplayName(request.requesterDisplayName),
+            requesterSigningPublicKey: request.requesterSigningPublicKey,
+            requesterKeyAgreementPublicKey: request.requesterKeyAgreementPublicKey
+        )
+        pendingAdmissionRequests.append(queued)
+        // P6 item 2: the founding pair's ONE admission needs no tap. Everything else still prompts.
+        guard autoGrantsFoundingAdmission(queued) else { return }
+        FernletAuditLog.log("mesh.admissionRequest.autoGrantedFoundingPair")
+        allowAdmission(queued)
+    }
+
+    /// Whether this admission request is the founding pair's one admission, which is granted
+    /// without a prompt (P6 item 2, step 3 — **a policy act**, reported as one).
+    ///
+    /// The prompt's job is admitting a *stranger to an established mesh*. That is precisely the
+    /// case a derived roster of one excludes: in a `startJoin` session `isSessionOpen` is true and
+    /// the mesh mode is `.open`, so ``maySeatVerifiedPeer(signingPublicKey:)`` already seats anyone
+    /// who completes the identity introduction, and the **15 cm / 0.8 s dwell** that committed the
+    /// slot is the user's consent (`ProximityCommitDetector`: "turns physical closeness into session
+    /// consent"). A closed session, a non-proximity-join session, and every third and later device
+    /// keep the prompt exactly as before.
+    ///
+    /// **A latch, not an observation.** `currentMesh.members.count == 1` is the load-bearing half:
+    /// `allowAdmission(_:)` appends the new member **synchronously** and only spawns the grant, so
+    /// the derived roster does not move until `recordGrantedAdmission` runs inside that task — two
+    /// requests arriving while the roster is 1 would both pass a roster-only gate.
+    ///
+    /// It grants no authority the caller did not already have, and it bypasses no gate, because the
+    /// requester must already hold a **committed slot whose handshake-verified signing key is the
+    /// one in the request**. A blocked peer never gets that far:
+    /// `ProximityCoordinator.isRejectedByTrustPolicy` drops every envelope from a revoked signing
+    /// key, so it never reaches `.connected` and never commits. (That is a stronger argument than
+    /// "not barred or removed", which reads only THIS mesh's departures and removals and is empty
+    /// for a mesh minted seconds ago.) The 13+ chat gate is untouched — it is applied at
+    /// advertisement, send and receive off `chatAllowedProvider` and never reads the mesh.
+    ///
+    /// - Parameter request: The queued, sanitized request.
+    /// - Returns: `true` when it may be granted without asking.
+    private func autoGrantsFoundingAdmission(_ request: MeshAdmissionRequestPayload) -> Bool {
+        guard isProximityJoin, isSessionOpen else { return false }
+        guard let mesh = currentMesh, mesh.meshID == request.meshID, mesh.mode == .open,
+              mesh.members.count == 1 else { return false }
+        guard membershipVerifier?.roster.memberCount == 1 else { return false }
+        guard rejoinRefusal(for: mesh.meshID) == nil else { return false }
+        guard !removedMemberFingerprints.contains(request.requesterFingerprint) else { return false }
+        return slots.contains {
+            $0.fingerprint == request.requesterFingerprint
+                && $0.verifiedSigningPublicKey == request.requesterSigningPublicKey
         }
     }
 
@@ -9887,7 +10176,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///    the FIRST commit after a no-session state is when the previous post-session window closes
     ///    and its catalogs drop — startJoin/startNewMesh must never do this (they fire on every
     ///    Social-tab entry / scene dip). `hasFormedShopSession` makes the reset once-per-formation:
-    ///    later commits (including promoteToMesh's, which re-enter via onSlotConnected's fingerprint
+    ///    later commits (including the founding's own, which re-enter via onSlotConnected's fingerprint
     ///    transition) and a mid-session re-handshake of the sole committed slot can't wipe catalogs.
     ///    This also covers the transient-drop case: last slot lost mid-outing opens the window; a
     ///    re-commit lands here, closes it, clears catalogs, and the exchange re-runs.
@@ -9979,8 +10268,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Phase 3a: the shop window opens at the same last-committed-slot-gone moment that promotes
     /// `pendingFriendReview` — call sites mirror `promoteRosterToPendingReviewIfSessionEnded()` exactly.
     /// The same moment ends the formed-session epoch: the NEXT slot commit is a new formation.
+    ///
+    /// ``hasCommittedPeer``, not `isInSession` — same reason as the review promotion (P6 item 2).
     private func openShopWindowIfSessionEnded() {
-        guard !isInSession else { return }
+        guard !hasCommittedPeer else { return }
         hasFormedShopSession = false
         clothingShop.openWindowAtSessionEnd()
     }
@@ -10022,8 +10313,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Phase 5: messages VANISH at session end. Called at the same last-committed-slot-gone moment that
     /// promotes `pendingFriendReview` / opens the shop window — but where the shop KEEPS catalogs through
     /// a 1-hour window, the transcript is dropped immediately. Nothing to retain, nothing to sync.
+    ///
+    /// ``hasCommittedPeer``, not `isInSession` (P6 item 2): §12's privacy rule — the transcript
+    /// vanishes at session end — would otherwise silently stop holding for every founded pair.
     private func clearSessionMessagesIfSessionEnded() {
-        guard !isInSession else { return }
+        guard !hasCommittedPeer else { return }
         sessionMessages.clear()
         // TF b19 item 5: drop any lingering in-session heart feedback so a "Sending…" state can't
         // outlive the session that produced it.
@@ -11201,6 +11495,50 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// that. Mirrors `ProximityRecipeShareManager.markRunningForTesting`.
     func markProximityJoinForTesting() {
         isProximityJoin = true
+    }
+
+    /// Drives the REAL dwell-commit path for one seated slot: the three handshake-verified fields
+    /// `checkCoordinatorStates` writes, and then `onSlotConnected(at:identity:)` (P6 item 2).
+    ///
+    /// **Not a door.** It is the missing test entry to an existing private one.
+    /// `onSlotConnected(at:identity:)` has exactly one caller — `checkCoordinatorStates`, driven by
+    /// the observation loop off a live `ProximityCoordinator` state a unit test cannot reach — so
+    /// before this seam the commit path had no test entry at all: `addSlotForTesting` appends a slot
+    /// carrying a fingerprint *without* ever calling it, and the tier-1 rigs fake a commit with
+    /// `applySessionEvent(.peerCommitted, committedPeer:)`. A cell that hand-called `promoteToMesh`
+    /// instead would prove the founding and never the TRIGGER, which is half of item 2.
+    ///
+    /// It writes the same three fields in the same order as production and derives the fingerprint
+    /// from the signing key through `IdentityService.fingerprint(of:)`, so a cell cannot commit a
+    /// slot whose fingerprint and key disagree — which is a state the real handshake cannot produce
+    /// and the auto-grant gate reads.
+    ///
+    /// - Parameters:
+    ///   - index: The slot's index in ``slots``.
+    ///   - peer: The peer's identity, whose signing and key-agreement keys stand in for the ones the
+    ///     identity introduction verified.
+    ///   - displayName: The display name the introduction carried.
+    ///   - capabilities: The capability tokens the peer advertised, or nil for a legacy peer.
+    func commitSlotForTesting(
+        at index: Int, peer: IdentityService, displayName: String = "Peer",
+        capabilities: [String]? = nil
+    ) {
+        guard slots.indices.contains(index) else { return }
+        let fingerprint = IdentityService.fingerprint(of: peer.localSigningPublicKey)
+        slots[index].fingerprint = fingerprint
+        slots[index].verifiedSigningPublicKey = peer.localSigningPublicKey
+        slots[index].verifiedKeyAgreementPublicKey = peer.localKeyAgreementPublicKey
+        slots[index].peerCapabilities = capabilities
+        onSlotConnected(at: index, identity: ProximityCoordinator.PeerIdentity(
+            id: slots[index].id,
+            displayName: displayName,
+            signingPublicKey: peer.localSigningPublicKey,
+            keyAgreementPublicKey: peer.localKeyAgreementPublicKey,
+            fingerprint: fingerprint,
+            rangingMode: .rssi,
+            firstSeenAt: Date(),
+            capabilities: capabilities
+        ))
     }
 
     /// How many DISTINCT devices currently hold a re-invite budget.
