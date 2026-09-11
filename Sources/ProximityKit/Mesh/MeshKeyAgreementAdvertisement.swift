@@ -200,15 +200,33 @@ nonisolated struct MeshKeyAgreementPayload: Codable, Equatable, Sendable {
 /// statement about state rather than a delivery.
 nonisolated enum MeshKeyAdvertisementReceiveBounds {
 
+    /// Transitions ONE member's row can put a sender's set through in the life of a mesh.
+    ///
+    /// Exactly three, and they are enumerable because ``MeshKeyAdvertisementFold/deciding(_:into:)``
+    /// is the only decision and `MeshKeyAgreementAdvertisementSet` is the only value: the row is
+    /// **folded** (`inserting`), that member is later **marked conflicted** (`markingConflicted`),
+    /// and the mark is later **released** when the derived roster stops naming it
+    /// (`clearingConflicts(outside:)`). Nothing else moves a row: a second row for a member whose
+    /// key agrees is `alreadyHeld`, and a departure or removal is permanent
+    /// (`MeshMembershipRecords`: "a fingerprint that has departed can never be re-admitted into the
+    /// same mesh"), so the release happens at most once per member. The third transition arrived
+    /// with the mark relief (P6 item 1, second fix review) and the ceiling below was derived before
+    /// it existed.
+    static let transitionsPerMember = 3
+
     /// Frames one sender may have accepted per session.
     ///
-    /// Derived, not chosen: an honest sender re-states its set only when the set CHANGED, and a
-    /// grow-only set of at most ``MeshKeyAgreementAdvertisementSet/capacity`` rows can change at
-    /// most twice per member — once when the row is folded, once if that member is later marked
-    /// conflicted. Twice the capacity is therefore the honest ceiling on distinct versions a peer
-    /// can have to tell this device about; past it the frames carry nothing new, and they are
-    /// refused by name rather than dropped.
-    static let framesPerSenderPerSession = MeshKeyAgreementAdvertisementSet.capacity * 2
+    /// Derived, not chosen — `capacity × transitionsPerMember`: an honest sender re-states its set
+    /// only when the set CHANGED, and a grow-only set of at most
+    /// ``MeshKeyAgreementAdvertisementSet/capacity`` rows can change at most
+    /// ``transitionsPerMember`` times per member. The product is therefore the honest ceiling on
+    /// distinct versions a peer can have to tell this device about; past it the frames carry
+    /// nothing new, and they are refused by name rather than dropped. Under the old two-transition
+    /// derivation the ceiling (32) sat *below* the reachable number of versions (48), so an honest
+    /// sender's late folds could be refused `senderBudgetSpent` — rows folded late would never be
+    /// learned.
+    static let framesPerSenderPerSession =
+        MeshKeyAgreementAdvertisementSet.capacity * transitionsPerMember
 }
 
 // MARK: - MeshKeyAdvertisementSendBounds
@@ -228,6 +246,253 @@ nonisolated enum MeshKeyAdvertisementSendBounds {
 
     /// How many times the sender may re-attempt the self-mint in one session.
     static let selfMintAttemptsPerSession = 3
+}
+
+// MARK: - MeshKeyAdvertisementParkBounds
+
+/// What the park — the side container for rows this device's ledger cannot yet prove — may hold.
+///
+/// **Per SENDER, not in total** (P6 item 1, second fix review). A single flat container keyed by
+/// member fingerprint was squattable by one misbehaving *member*: the verifier answers
+/// `signerNotAdmitted` **before** it checks the signature, so a parked row is attacker-chosen bytes
+/// under an attacker-chosen fingerprint, and one frame carries sixteen of them — enough to fill a
+/// flat container of ``MeshKeyAgreementAdvertisementSet/capacity`` and leave every other peer's
+/// genuine relay refused for the session.
+///
+/// The share is a whole frame's worth rather than a fraction of one, because that is exactly what
+/// the shape the park exists for needs: a joiner on the bootstrap ledger its admitter rooted can
+/// prove **none** of the rows that admitter relays, so the honest case is one sender parking a full
+/// set at once. What makes the larger container safe is ``failedWideningsPerRow``: a row costs at
+/// most that many verifications in its whole lifetime, so the work one sender can buy stays bounded
+/// by its own frame budget (``MeshKeyAdvertisementReceiveBounds/framesPerSenderPerSession``) rather
+/// than by how long the session lasts.
+nonisolated enum MeshKeyAdvertisementParkBounds {
+
+    /// Rows ONE authenticated sender may hold parked at a time — a whole frame's worth.
+    static let rowsPerSender = MeshKeyAgreementAdvertisementSet.capacity
+
+    /// Distinct senders the park keys at once (R3).
+    ///
+    /// The receive door already refuses a sender the derived roster does not name, plus the one
+    /// bootstrap-admitter exception, so this is true by construction; it is asserted anyway, the
+    /// `reGossipedToFingerprints` idiom, so a future door cannot grow the map past the roster.
+    static let senders = MeshMembershipBounds.maxRosterMembers
+
+    /// Widenings one parked row may FAIL before it is dropped by name.
+    ///
+    /// Not one: a widening arrives in stages, and that was measured rather than reasoned — a third
+    /// device adopts the moment the chain to its own admission proves, which can be a two-member
+    /// ledger, with the record naming the third member arriving through the live insert afterwards.
+    /// Three is the same small handful ``MeshKeyAdvertisementSendBounds/selfMintAttemptsPerSession``
+    /// uses, and a row that three separate *verified* roster moves have failed to prove is junk
+    /// rather than early. Without a drop at all, a row for a fingerprint no admission will ever name
+    /// is immortal: it is re-verified at every widening for the life of the mesh and its slot is
+    /// never freed.
+    static let failedWideningsPerRow = 3
+}
+
+// MARK: - MeshParkedKeyAdvertisement
+
+/// One parked row and how many widenings have already failed to prove it.
+///
+/// The count is what turns the park from a container that only ever grows into one that empties:
+/// see ``MeshKeyAdvertisementParkBounds/failedWideningsPerRow``.
+struct MeshParkedKeyAdvertisement: Equatable {
+
+    /// The raw, **unverified** bytes. It has proved nothing and can mark nothing.
+    let advertisement: SignedKeyAgreementAdvertisement
+
+    /// How many re-offers have re-decided this row as `signerNotAdmitted`.
+    var failedWidenings: Int
+}
+
+// MARK: - MeshParkedKeyAdvertisementOffer
+
+/// One drained parked row, carrying the sender whose share held it.
+///
+/// The sender travels with the row because a re-park has to go back into the share it came from —
+/// a row that could land in any share would hand one sender the other shares' capacity, which is
+/// the whole squat the per-sender bound exists to stop.
+struct MeshParkedKeyAdvertisementOffer: Equatable {
+
+    /// The authenticated sender whose share held the row.
+    let sender: String
+
+    /// The row and its failure count.
+    let parked: MeshParkedKeyAdvertisement
+}
+
+// MARK: - MeshKeyAdvertisementParkOutcome
+
+/// What ``MeshKeyAdvertisementPark/parking(_:from:)`` did with one offered row.
+enum MeshKeyAdvertisementParkOutcome: Equatable {
+
+    /// A fresh row took a free slot in the sender's share.
+    case parked
+
+    /// The row displaced one that has already failed a widening.
+    case replacedAFailedRow
+
+    /// The sender already holds a DIFFERENT row for this member, and that row has failed nothing
+    /// yet — earliest arrival keeps the slot.
+    case refusedCollision
+
+    /// The sender's share, or the park's own sender bound, is spent.
+    case refusedShareFull
+
+    /// Byte-identical to a row this sender already parked — a replay, and silent.
+    case alreadyParked
+
+    /// The audit token for this outcome, or nil for the one shape that is an honest replay.
+    var auditToken: String? {
+        switch self {
+        case .parked: return "mesh.keyAgreement.parked"
+        case .replacedAFailedRow, .refusedCollision: return "mesh.keyAgreement.parkCollision"
+        case .refusedShareFull: return "mesh.keyAgreement.parkFull"
+        case .alreadyParked: return nil
+        }
+    }
+
+    /// Which row a collision kept — the only thing an operator cannot infer from the token.
+    var auditContext: [String: String] {
+        switch self {
+        case .replacedAFailedRow: return ["kept": "newcomer"]
+        case .refusedCollision: return ["kept": "held"]
+        case .parked, .refusedShareFull, .alreadyParked: return [:]
+        }
+    }
+}
+
+// MARK: - MeshKeyAdvertisementPark
+
+/// The bounded, per-sender side container for advertisements refused **`signerNotAdmitted`**.
+///
+/// The grant door's whole purpose is to make the admitter addressable to the member it just let in,
+/// and without this it could not: the frame arrives while the joiner's ledger is still the
+/// one-record bootstrap its admitter rooted, in which the admitter itself is not an admitted member,
+/// so every row was refused and the sender's version latch then never re-sent them. A row held here
+/// is re-offered to ``MeshKeyAdvertisementFold`` the moment a widening installs a ledger that can
+/// prove it.
+///
+/// **Nothing in here is verified, and nothing in here can mark anything.** It holds raw bytes: the
+/// only path into ``MeshKeyAgreementAdvertisementSet`` is the fold door, which verifies before it
+/// decides, and the set's two mutating doors take a value only the verifier can mint. The keying is
+/// **arrival order within one sender's share** — not the set's `precedes` earliest-wins rule, which
+/// orders on `advertisedAt`, a field an unverified row's author chooses freely. A row that has
+/// already failed a widening yields its slot to a newcomer, which is what stops one relayed junk row
+/// from holding a genuine row's slot for the life of the mesh.
+///
+/// Bounded on three axes, every one by a named constant in ``MeshKeyAdvertisementParkBounds``: rows
+/// per sender, senders, and failed widenings per row. Memory-only and never persisted, so it owes no
+/// wipe row; cleared with the rest of the addressing state at every session reset.
+struct MeshKeyAdvertisementPark: Equatable {
+
+    /// Sender fingerprint → (member fingerprint → the parked row).
+    private var shares: [String: [String: MeshParkedKeyAdvertisement]] = [:]
+
+    /// An empty park.
+    static var empty: MeshKeyAdvertisementPark { MeshKeyAdvertisementPark() }
+
+    /// Whether any sender holds anything.
+    var isEmpty: Bool { shares.values.allSatisfy(\.isEmpty) }
+
+    /// How many rows are parked across every sender's share.
+    var count: Int { shares.values.reduce(0) { $0 + $1.count } }
+
+    /// One sender's parked row for one member, or nil.
+    ///
+    /// - Parameters:
+    ///   - sender: The authenticated sender whose share to read.
+    ///   - member: The member fingerprint the row claims.
+    /// - Returns: The raw parked row, or nil when that share holds none.
+    func row(from sender: String, for member: String) -> SignedKeyAgreementAdvertisement? {
+        shares[sender]?[member]?.advertisement
+    }
+
+    /// Parks one refused row in its sender's share.
+    ///
+    /// - Parameters:
+    ///   - advertisement: The refused, unverified row.
+    ///   - sender: The authenticated sender — the committed slot's fingerprint, never the frame's
+    ///     own audit-only field.
+    /// - Returns: What happened, for the caller to audit.
+    mutating func parking(
+        _ advertisement: SignedKeyAgreementAdvertisement, from sender: String
+    ) -> MeshKeyAdvertisementParkOutcome {
+        let member = advertisement.memberFingerprint
+        if let held = shares[sender]?[member] {
+            if held.advertisement == advertisement { return .alreadyParked }
+            guard held.failedWidenings > 0 else { return .refusedCollision }
+            shares[sender]?[member] = MeshParkedKeyAdvertisement(
+                advertisement: advertisement, failedWidenings: 0
+            )
+            return .replacedAFailedRow
+        }
+        guard let share = shares[sender] else {
+            guard shares.count < MeshKeyAdvertisementParkBounds.senders else {
+                return .refusedShareFull
+            }
+            shares[sender] = [member: MeshParkedKeyAdvertisement(
+                advertisement: advertisement, failedWidenings: 0
+            )]
+            return .parked
+        }
+        guard share.count < MeshKeyAdvertisementParkBounds.rowsPerSender else {
+            return .refusedShareFull
+        }
+        shares[sender]?[member] = MeshParkedKeyAdvertisement(
+            advertisement: advertisement, failedWidenings: 0
+        )
+        return .parked
+    }
+
+    /// Empties the park and returns everything it held, in a total order.
+    ///
+    /// Sorted by sender then member so a re-offer's fold order — and therefore its audit
+    /// transcript — is the same on every device and every run.
+    ///
+    /// - Returns: Every parked row with the share it came from.
+    mutating func drain() -> [MeshParkedKeyAdvertisementOffer] {
+        var offers: [MeshParkedKeyAdvertisementOffer] = []
+        // R2: bounded by `senders`.
+        for sender in shares.keys.sorted() {
+            // R2: bounded by `rowsPerSender`.
+            for member in (shares[sender] ?? [:]).keys.sorted() {
+                guard let parked = shares[sender]?[member] else { continue }
+                offers.append(MeshParkedKeyAdvertisementOffer(sender: sender, parked: parked))
+            }
+        }
+        shares = [:]
+        return offers
+    }
+
+    /// Puts back every row a re-offer could still not prove, one failure heavier, and drops the ones
+    /// that have run out of widenings.
+    ///
+    /// - Parameter offers: The drained rows the fold re-decided as `signerNotAdmitted`.
+    /// - Returns: How many rows were dropped rather than re-parked.
+    mutating func reparkFailed(_ offers: [MeshParkedKeyAdvertisementOffer]) -> Int {
+        var dropped = 0
+        // R2: bounded by the drained park's own size.
+        for offer in offers {
+            let failures = offer.parked.failedWidenings + 1
+            guard failures < MeshKeyAdvertisementParkBounds.failedWideningsPerRow else {
+                dropped += 1
+                continue
+            }
+            // Straight back into the share it came from, deliberately NOT through
+            // ``parking(_:from:)``: the drain took this row out of a share that already satisfied
+            // both bounds and nothing has been added since, so going through the offered door would
+            // mean discarding an outcome that cannot happen — and a discarded `refusedShareFull`
+            // here would be a row lost with no audit line, which is the one thing R7 forbids.
+            var share = shares[offer.sender] ?? [:]
+            share[offer.parked.advertisement.memberFingerprint] = MeshParkedKeyAdvertisement(
+                advertisement: offer.parked.advertisement, failedWidenings: failures
+            )
+            shares[offer.sender] = share
+        }
+        return dropped
+    }
 }
 
 // MARK: - MeshKeyAgreementAdvertisementSet
@@ -602,9 +867,14 @@ nonisolated struct MeshKeyAdvertisementFoldResult: Equatable, Sendable {
 /// roster-move seams), so a departure or a removal vote ends the outage instead of leaving a mark
 /// that outlives the membership it describes. A mark for a member that is off the roster could
 /// refuse nothing today — destinations *are* the derived roster — so clearing it takes no fence
-/// away; what it buys is that the escape is real at item 6's subset target and after a re-admission,
-/// and that the mark does not ride the sealed context for the rest of the mesh's life. Whether the
-/// user should also be able to clear one by hand is on the plan's §23.4 owner list.
+/// away. What it buys is narrower than the first wording claimed (P6 item 1, second fix review):
+/// **not** that a re-admitted member is addressable again — re-admission into the same mesh is
+/// impossible by construction, since `MeshDerivedRoster` subtracts departures ∪ removals
+/// unconditionally and both sets are grow-only and permanent — but that the escape is real at item
+/// 6's subset target, where a per-recipient mint must not be refused by a mark about somebody else,
+/// and that a mark about a membership that has ended does not ride the sealed context for the rest
+/// of the mesh's life. Whether the user should also be able to clear one by hand is on the plan's
+/// §23.4 owner list.
 nonisolated enum MeshKeyAdvertisementFold {
 
     /// Folds a batch of advertisements into a set, verifying each one first.

@@ -412,17 +412,32 @@ own proximity-join path). A row relayed at `grantAdmission` always arrives while
 is still the one-record bootstrap its admitter rooted — a ledger in which the admitter itself is not
 an admitted member — so the fold refused every one of them `signerNotAdmitted`, the send's
 once-per-(peer, version) bound never re-fired, and the sixth door closed nothing on the joiner side.
-The joiner now **parks** a row whose signer its ledger does not yet name (at most sixteen, one per
-fingerprint, earliest-wins, memory-only, cleared with the rest of the addressing state) and re-offers
+The joiner now **parks** a row whose signer its ledger does not yet name and re-offers
 the park through the one fold door at each widening — `attemptLedgerAdoption`, the merge door and
 the live record insert. Every re-offer is **re-decided by that door**: a row that has become
 provable is folded, a row that now fails for any other reason is dropped and named, and one whose
 signer this device still cannot see waits for the next widening (a widening arrives in stages — a
 third device adopts the moment the chain to its *own* admission proves, which can be a two-member
-ledger). A parked row is raw bytes that have verified nothing and can mark nothing, and the work it
-can buy is bounded twice: the park's own capacity, and the ledger's record caps, which bound how
-many times a roster can move. The two ends a never-named row leaves by are the capacity refusal
-(`mesh.keyAgreement.parkFull`) and the session reset. The same fix keys the receive door's per-sender bound
+ledger). A parked row is raw bytes that have verified nothing and can mark nothing.
+
+**The park's share is per SENDER, and rows expire** (`MeshKeyAdvertisementPark`, second fix review).
+The first shape was one flat map keyed by member fingerprint, first-arrival wins, capped at the set's
+sixteen — and it was squattable by a single misbehaving *member*, because the verifier answers
+`signerNotAdmitted` **before** it checks the signature and one frame carries sixteen rows: one frame
+disabled the park for the session, and a junk row sitting in member M's slot meant M's genuine
+relayed row was silently not parked at all. Each authenticated sender now has its own share of
+`rowsPerSender` (a whole frame's worth — the joiner-bootstrap case needs exactly that, since it can
+prove *none* of what its admitter relays), the map itself is bounded by `senders`, a collision is
+named (`mesh.keyAgreement.parkCollision`) instead of hidden inside a refusal, a row that has already
+failed a widening yields its slot to a newcomer, and a row that has failed `failedWideningsPerRow`
+widenings is dropped by name (`mesh.keyAgreement.parkDropped`) rather than re-verified for the life
+of the mesh. Within a share the rule is **first parked wins** — arrival order, *not* the set's
+`precedes` earliest-wins rule, which orders on an unverified row's own attacker-chosen `advertisedAt`.
+So the ends a never-named row leaves by are the share refusal (`mesh.keyAgreement.parkFull`), the
+failed-widening drop, and the session reset — of which there are **four**, one more than the
+re-gossip budget's three since item 2's newborn yield. A re-offer whose seal the store refuses rolls
+the park back **with** the set (`mesh.keyAgreement.parkRolledBack`): a row in neither container is a
+row nothing re-sends, because the sender's latch is spent at that (peer, version). The same fix keys the receive door's per-sender bound
 to a **roster member** rather than to any committed slot — with the one exception the record path
 already makes for a joiner's own admitter — so a handful of committed non-members cannot spend the
 bound every real member needs, and the map's roster cap becomes true by construction.
@@ -614,9 +629,11 @@ from (plan §8.1): `MeshMembershipRecordKind`, `MeshMembershipRecord`, `MeshMemb
 `MeshMembershipRecordSet`, `MeshMembershipLedger`, `MeshDerivedRoster`, `MeshRosterMember`,
 `MeshRosterStatus`. P6 item 1 added the addressing beside them — `SignedKeyAgreementAdvertisement`,
 `MeshKeyAgreementAdvertisementSet`, `MeshKeyAdvertisementFold`, `MeshKeyAdvertisementFoldOutcome`,
-`MeshKeyAdvertisementFoldResult`, `MeshVerifiedKeyAgreementAdvertisement` and
-`MeshKeyAgreementVerification` — which verify *against* the admission set and are deliberately not a
-fifth record kind. The sealed store's own internal vocabulary is `MeshSessionContext`,
+`MeshKeyAdvertisementFoldResult`, `MeshVerifiedKeyAgreementAdvertisement`,
+`MeshKeyAgreementVerification` and the park's own four (`MeshKeyAdvertisementPark`,
+`MeshParkedKeyAdvertisement`, `MeshParkedKeyAdvertisementOffer`,
+`MeshKeyAdvertisementParkOutcome`, bounded by `MeshKeyAdvertisementParkBounds`) — which verify
+*against* the admission set and are deliberately not a fifth record kind. The sealed store's own internal vocabulary is `MeshSessionContext`,
 `MeshSessionContextSchema`, `MeshSessionContextDecodingError`, `MeshSessionLoad`,
 `MeshSessionSealRefusal`, `MeshSessionDeferral`, `MeshSessionCorruption`, `MeshSessionSaveError`,
 `MeshSessionSealKey` and `MeshSessionSealKeyOutcome`. P3 item 3 added the membership events that
