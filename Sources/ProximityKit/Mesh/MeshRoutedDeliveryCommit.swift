@@ -136,14 +136,21 @@ nonisolated extension MeshRoutedStore {
     ///   - stages: The type → final-ack table. Item 11 passes the registry's; shipping code names
     ///     only ``MeshRoutedAckStageTable/increment1``.
     ///   - evidence: What the caller offers for the stage. `.none` for every stage whose condition
-    ///     the store reads for itself.
+    ///     the store reads for itself. **`@autoclosure`, and that is load-bearing** (P6 item 6 fix
+    ///     review, P2-3): the heart stage's evidence is a ledger JUDGEMENT — an unwrap, a durable
+    ///     write to the user's own closeness state and a non-idempotent hook — so resolving it as an
+    ///     eager argument ran the whole ceremony before this door had looked at the index, the
+    ///     manifest, the expiry, the destination set, the type token or the delivery target, and
+    ///     before the stage's own held-ciphertext clauses. Deferred to the one line that needs it,
+    ///     the ordering is structural rather than a call-site promise. Callers pass a plain value
+    ///     (`evidence: .none`) exactly as before.
     ///   - now: The injected instant — the value stamped on a first acknowledgement.
     /// - Returns: the witness, the named shortfall, a door refusal, or the store's unavailability.
     func committingDelivery(
         item: MeshRoutedItemKey,
         recipient: String,
         stages: MeshRoutedAckStageTable,
-        evidence: MeshRoutedAckEvidence,
+        evidence: @autoclosure () -> MeshRoutedAckEvidence,
         now: Date
     ) -> MeshRoutedOutcome<MeshRoutedDeliveryCommitOutcome> {
         var index: MeshRoutedIndex
@@ -163,7 +170,9 @@ nonisolated extension MeshRoutedStore {
             return .unavailable(.corrupt(MeshRoutedCorruption(detail: .undecodableJSON("deliveryRestore"))))
         }
         if record.deliveredAt == nil,
-           let shortfall = Self.stageShortfall(record, stage: stage, evidence: evidence, item: item) {
+           let shortfall = Self.stageShortfall(
+               record, stage: stage, evidence: evidence, item: item
+           ) {
             return .completed(.unsatisfied(shortfall))
         }
         return acknowledged(record, recipient: recipient, stage: stage,
@@ -207,10 +216,16 @@ nonisolated extension MeshRoutedStore {
     /// plan §11's words: gift ids also reach `ProximityHeartLedger` from the live and dead-drop heart
     /// paths, so custody is the only leg binding a ledger judgement to **this** signed item's
     /// hash-verified bytes.
+    ///
+    /// `evidence` is a CLOSURE for the same reason the door's own parameter is an `@autoclosure`
+    /// (P6 item 6 fix review, P2-3): the three clauses above it are cheap reads on a record this
+    /// device already holds, while the judgement behind it is a durable act on the user's own
+    /// closeness state. It is called on the ONE line that needs it, so an item that is incomplete,
+    /// uncustodied, or on a stage that asks nothing of the content never reaches the ledger at all.
     private static func stageShortfall(
         _ record: MeshRoutedItemRecord,
         stage: MeshRoutedAckStage,
-        evidence: MeshRoutedAckEvidence,
+        evidence: () -> MeshRoutedAckEvidence,
         item: MeshRoutedItemKey
     ) -> MeshRoutedAckShortfall? {
         guard stage != .immediate else { return nil }
@@ -219,7 +234,7 @@ nonisolated extension MeshRoutedStore {
         }
         guard record.isCustodied else { return .custodyNotCommitted }
         guard stage == .foregroundDecryptAndLedgerCommit else { return nil }
-        guard case .heartLedgerCommit(let ack) = evidence else { return .ledgerJudgementMissing }
+        guard case .heartLedgerCommit(let ack) = evidence() else { return .ledgerJudgementMissing }
         guard ack.giftID == item.itemID else { return .evidenceForAnotherItem }
         return nil
     }

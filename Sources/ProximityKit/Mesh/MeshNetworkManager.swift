@@ -212,10 +212,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         /// The body would not frame, the registry named no token, the seal refused, or the mint's
         /// own guard chain refused the shape.
         case couldNotSend
-        /// The routed store refused the manifest or a chunk — it is holding all it can.
-        case storageUnreachable
         /// The routed store could not say what it holds: deferred protected data, a refused seal,
-        /// or a corrupt index.
+        /// or a corrupt index. Reached from `.refused(.storeUnavailable)`, and its sentence says the
+        /// storage could not be reached — the two docs were swapped until the item 6 fix review.
+        case storageUnreachable
+        /// The routed store refused the manifest or a chunk — it is holding all it can. Reached from
+        /// `.refused(.storeRefused)`, and its sentence says so.
         case holdingAllItCan
     }
 
@@ -811,7 +813,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `canSendHeart(to:)` is fail-closed and answers false for an UNLOADED ledger as well as for a
     /// live cooldown, and the cooldown sentence is a lie there — nothing was sent.
     /// `DisposableCameraView` already distinguished the two for its accessibility label; the send
-    /// did not.
+    /// did not. Since the item 6 fix review an **absent** ledger is refused the same way, rather
+    /// than optional-chained past into a send with no cooldown (P3-5).
     ///
     /// **New:** the delivery is the three lines every routed sender uses — frame a body, ask the
     /// registry for the token, call the one origination door — with the audience stated as a single
@@ -827,8 +830,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Active record only — never send to a blocked or revoked (unfriended) peer. Silent: the
         // affordance is not drawn for such a record at all, so reaching here is a caller bug.
         guard friend.blockedAt == nil, friend.revokedAt == nil else { return }
-        guard heartLedger?.isLoaded != false else { return failSessionHeart(.ledgerUnavailable, friend) }
-        guard heartLedger?.canSendHeart(to: friend.fingerprint) ?? true else {
+        // Both ledger gates are fail-CLOSED on a nil ledger since the item 6 fix review (P3-5).
+        // `heartLedger?.isLoaded != false` and `?? true` both passed a manager with no ledger wired,
+        // so it staged a heart with no cooldown at all — and this function's own doc claims every
+        // gate the legacy sealed send had is kept. Production always wires one (`init`), so this is
+        // not a live defect; it is the guard that makes the doc true and that fails safely if a
+        // future entry point forgets.
+        guard let heartLedger, heartLedger.isLoaded else {
+            return failSessionHeart(.ledgerUnavailable, friend)
+        }
+        guard heartLedger.canSendHeart(to: friend.fingerprint) else {
             return failSessionHeart(.cooldown, friend)
         }
         // The in-flight claim, kept as a FENCE. The window it closes is empty while the mint is
@@ -6205,6 +6216,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             ) {
             case .updated(let target): return .captured(target)
             case .refused(.recipientNotInRoster): return .answered(.skipped(.noDestinations))
+            // `recipientIsSelf` is a CALLER bug, not an audience-vs-column mismatch, and it has its
+            // own frozen token so the two stay distinguishable in the log (fix review P3-4). The
+            // user-facing refusal is the same `.mintFailed` — nothing they can act on differs —
+            // which is why this widens the audit vocabulary and not `MeshRoutedShareRefusal`.
+            case .refused(.recipientIsSelf):
+                FernletAuditLog.log(
+                    "mesh.routedShare.recipientIsSelf", context: ["type": typeToken]
+                )
+                return .answered(.refused(.mintFailed))
             case .refused: return .answered(semanticsMismatch(typeToken))
             }
         }
@@ -6700,9 +6720,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         /// Spend an allowance slot on it.
         case finishable
         /// Filter it out. There is nothing this build and this device can do with it at all — no
-        /// registry row, or its bytes are not all here — so a slot could only refuse.
+        /// registry row, its bytes are not all here, or (since the item 6 fix review) it is a heart
+        /// already marked FINAL in ``routedHeartRefusedKeys`` — so a slot could only refuse.
         case unfinishable
-        /// Filter it out **and count it**: a heart-stage item whose judgement this pass cannot make.
+        /// Filter it out **and count it**: a heart-stage item whose judgement this pass cannot make
+        /// *yet*. Every leg behind it is reversible, which is what makes the count a backlog rather
+        /// than a tally of refusals.
         case heartDeferred
     }
 
@@ -6746,7 +6769,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// **The heart leg is a FILTER, not a mark** (P6 item 6), and that is deliberate on both halves:
     /// an `allowNearbyHearts` flip on, a foreground return or a ledger that finishes loading
     /// re-enumerates the whole population for free, with nothing to un-mark. What IS marked is the
-    /// other kind of refusal — ``routedHeartRefusedKeys``, for a judgement that cannot change.
+    /// other kind of refusal — ``routedHeartRefusedKeys``, for a judgement that cannot change — and
+    /// a marked key answers `.unfinishable`, never `.heartDeferred`: it is filtered either way, but
+    /// only the first answer keeps `heartsPending` meaning "waiting" (fix review P3-3).
     ///
     /// - Parameters:
     ///   - ref: The item, from the list the pass already read.
@@ -6764,7 +6789,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard entry.requiresForegroundDecryptBeforeFinal else {
             return record.isComplete ? .finishable : .unfinishable
         }
-        guard judgement, !routedHeartRefusedKeys.contains(ref.key) else { return .heartDeferred }
+        // A key already marked FINAL is UNFINISHABLE, not deferred (fix review P3-3). Both answers
+        // filter it out of the allowance, so R-19's bound is the same either way — but only one of
+        // them is honest about `heartsPending`, which is reported to the app and which item 9 writes
+        // invariants over: a blocked origin's sixteen hearts are refused for good, and counting them
+        // as "waiting" would leave the number climbing for a session that will never move it.
+        guard !routedHeartRefusedKeys.contains(ref.key) else { return .unfinishable }
+        guard judgement else { return .heartDeferred }
         return record.isComplete ? .finishable : .heartDeferred
     }
 
@@ -6946,9 +6977,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Job 4c — says whether the heart stage is evaluable right now, and counts what is waiting.
     ///
-    /// **A documented, counted no-op until P6**, said plainly rather than dressed up as enforcement:
-    /// item 10 wires the predicate and the enumeration, and P6 replaces this with unwrap → ledger
-    /// commit → `MeshRoutedAckEvidence.heartLedgerCommit`, behind the same predicate.
+    /// **A counter, and it stays one** (the doc said "until P6" until the item 6 fix review, which
+    /// was then false). P6 item 6 did not move the ceremony here: the unwrap → ledger commit →
+    /// ``MeshRoutedAckEvidence/heartLedgerCommit`` runs at `commitLocalDelivery`, the ONE ack door,
+    /// so this site judges nothing and only names what the pass could not judge. The count it is
+    /// handed excludes hearts already marked FINAL in ``routedHeartRefusedKeys`` — see
+    /// ``ackableNow(_:in:judgement:)`` — so "pending" means pending, not "refused for good".
     ///
     /// - Parameter count: How many unstamped heart-stage items the retry list named.
     private func reentryHeartStage(count: Int) {
@@ -7324,9 +7358,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// would wait for the next rising access-gate edge, which the app pushes on scene-phase and
     /// lock changes and which may be minutes away.
     ///
-    /// Ordering is load-bearing and was got wrong once in design: the evidence is resolved
-    /// **after** this door's own two guards (destination membership, and the store being reachable)
-    /// and the unwrap/ledger-write/closeness-hook only ever run behind them.
+    /// Ordering is load-bearing and was got wrong once in design, then reported applied on a claim
+    /// the code did not support (fix review P2-3). What is true now: `evidence:` is an
+    /// **`@autoclosure`** (`MeshRoutedStore.committingDelivery(item:recipient:stages:evidence:now:)`),
+    /// so the unwrap, the ledger write and the closeness hook are resolved on the single line inside
+    /// `stageShortfall` that needs them — after this door's destination-membership guard AND after
+    /// every one of `committingDelivery`'s own (a writable index, a known item, a manifest, an
+    /// unexpired record, the signed destination set, a registered type token, a decodable delivery
+    /// target) AND after the stage's held-ciphertext clauses. `routedStore()` is a factory, not a
+    /// reachability guard: reachability is decided inside the door, which is precisely why the
+    /// ordering is now structural rather than a promise made at this call site.
     private func commitLocalDelivery(
         for key: MeshRoutedItemKey, manifest: MeshRoutedManifest, now: Date
     ) -> MeshRecipientReceipt? {
@@ -7406,6 +7447,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// precondition, and re-running the ceremony would re-stream the blob and re-ask the ledger on
     /// every pass. The guard mirrors the store's own condition exactly, so the two cannot drift.
     ///
+    /// Reached through `committingDelivery`'s `@autoclosure`, so it does not run at all for a
+    /// delivery that door refuses (fix review P2-3) — the guard here is the second belt, kept
+    /// because it is the one that survives if the door's parameter ever goes eager again.
+    ///
     /// - Parameters:
     ///   - key: The item.
     ///   - manifest: The origin's signed manifest.
@@ -7478,18 +7523,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 .record(for: key)?.firstSeenAt ?? manifest.createdAt
         )
         let outcome = MeshHeartCommit.commit([merged], into: ledger)
+        // Closeness is fed on FIRST ACCEPTANCE only, never on every ack mint. `commitProof` answers
+        // non-nil for an already-stored gift, so a pass that re-reaches this ceremony (the store
+        // answered `.unavailable` after the row was written, say) re-mints the ack — and the hook
+        // behind this is `closenessLedger.recordHeartReceived`, which is not idempotent.
+        //
+        // **Above the ack guard, and that is the fix review's P2-1.** `recordReceivedHeart` answers
+        // true for an applied-but-UNPERSISTED mutation while `commitProof(for:)` answers nil for
+        // exactly that state (`ProximityHeartLedger`'s own docs on both), so a dirty sidecar makes
+        // this gift accepted and the ack nil in the same pass. Fed below the guard, the feed is not
+        // deferred to the flush — it is lost for good, because the re-judgement that follows finds
+        // the gift already stored and puts it in `refusedGiftIDs`, where `receivedGiftIDs.contains`
+        // is false forever. The R1 gate still holds: a second judgement of the same gift is a
+        // refusal, not a receipt, so this cannot double-feed.
+        if outcome.receivedGiftIDs.contains(manifest.itemID) {
+            onHeartReceived?(author.fingerprint)
+        }
         guard let ack = MeshRoutedHeartAck(
             outcome: outcome, giftID: manifest.itemID, ledger: ledger
         ) else {
             FernletAuditLog.log("mesh.routedHeart.noJudgement")
             return .none
-        }
-        // Closeness is fed on FIRST ACCEPTANCE only, never on every ack mint. `commitProof` answers
-        // non-nil for an already-stored gift, so a pass that re-reaches this ceremony (the store
-        // answered `.unavailable` after the row was written, say) re-mints the ack — and the hook
-        // behind this is `closenessLedger.recordHeartReceived`, which is not idempotent.
-        if outcome.receivedGiftIDs.contains(manifest.itemID) {
-            onHeartReceived?(author.fingerprint)
         }
         onHeartJudgedForTesting?(ack)
         return .heartLedgerCommit(ack)
@@ -9075,16 +9129,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// though it has joined — before it adopts an epoch, unwraps a group key, starts a beacon or
     /// lets the UI say "joined".
     ///
+    /// Since P6 item 6's fix review it also re-asserts the commit this device had already made
+    /// before it held the mesh it is now joining — see ``reassertCommitIntoAdoptedMesh()`` for why a
+    /// device can otherwise sit at ``MeshSessionState/joining`` for a whole session. The re-assert
+    /// runs only behind a durable save, so the ordering the rest of this doc claims is unchanged.
+    ///
     /// - Returns: `true` when the context is durable, or when there is nothing to write yet (a
     ///   grant that arrived before the mesh descriptor: the descriptor's own adoption writes it).
     @discardableResult
     func recordVerifiedAdmissionDurably() -> Bool {
         guard currentMesh != nil else { return true }
-        guard sessionState != .idle else { return joinDurably() }
+        guard sessionState != .idle else {
+            guard joinDurably() else { return false }
+            reassertCommitIntoAdoptedMesh()
+            return true
+        }
         guard persistSessionContext(addingEpochHead: nil) else {
             FernletAuditLog.log("mesh.admissionGrant.droppedNotDurable")
             return false
         }
+        reassertCommitIntoAdoptedMesh()
         return true
     }
 
@@ -9098,6 +9162,38 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return false
         }
         return true
+    }
+
+    /// Raises the commit a device joining somebody else's mesh had **already made** before it held
+    /// that mesh (P6 item 6 fix review, P1-1).
+    ///
+    /// ``noteCommitIntoMesh(peer:)`` is guarded on `currentMesh != nil`, and both routes onto an
+    /// existing mesh commit a slot BEFORE they have one:
+    ///
+    /// * the yielding half of a pairwise founding unwinds to `.idle` (``unwindNewbornMesh()``,
+    ///   which leaves `slots` alone) and re-enters at `.joining` through ``joinDurably()``;
+    /// * an ordinary joiner whose dwell commits before the descriptor arrives has that
+    ///   `.peerCommitted` dropped on the floor by the same guard.
+    ///
+    /// Either way the slot really is committed and the session really is live, but the machine never
+    /// hears it — and `.peerCommitted` is `.joining`'s **only** edge out
+    /// (``MeshSessionStateMachine``), so the device sits at `.joining` until some later commit. A
+    /// steady two-device session has no later commit, and the one routed predicate that reads the
+    /// session — the heart stage's ``mayCommitRoutedHeartLedgerJudgement`` — is therefore false for
+    /// the whole session: a heart addressed to that device expires custodied while its sender saw
+    /// "Sent" and spent five minutes of cooldown. Before this, the only thing that supplied the
+    /// missing commit was a test rig.
+    ///
+    /// **Exactly one raise, and only from `.joining`** — which is why this is not a loop over the
+    /// committed slots. The first raise leaves the machine at `.activeForeground`, where
+    /// `.peerCommitted` is a self-edge that ``openBlipMergeIfReconnected(_:from:peer:)`` reads as a
+    /// RECONNECT and answers with a merge window; re-raising for a second committed slot would open
+    /// a merge nobody asked for. The state is the whole point, and one commit moves it.
+    private func reassertCommitIntoAdoptedMesh() {
+        guard sessionState == .joining else { return }
+        guard let committed = slots.compactMap(\.fingerprint).first else { return }
+        FernletAuditLog.log("mesh.sessionState.reassertedAdoptedCommit")
+        noteCommitIntoMesh(peer: committed)
     }
 
     /// Keeps a just-verified record only if the context that now contains it reached the disk.

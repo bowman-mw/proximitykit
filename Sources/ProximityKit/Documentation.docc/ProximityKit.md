@@ -968,7 +968,11 @@ a projection.** Four things landed together.
   stays defined once and the live door judges an in-person heart in the same pass instead of waiting
   for a rising access edge. The heart stage's extra leg (`sessionState == .activeForeground`) is
   **not inert**: `.linksLost` moves the machine to `.partitioned`, so a link blip defers a heart —
-  retryably, which is right. FINAL refusals (not a friend, a removed or locally BLOCKED origin, a
+  retryably, which is right. It is also **reachable**, which it was not when item 6 shipped: a
+  device that adopts somebody else's mesh over a slot it had already committed re-enters at
+  `joining` and raises no further `peerCommitted`, so `recordVerifiedAdmissionDurably` re-asserts
+  that one commit (`reassertCommitIntoAdoptedMesh()`, fix review P1-1) — without it the yielding
+  half of every pairwise founding judged no heart for the whole session. FINAL refusals (not a friend, a removed or locally BLOCKED origin, a
   malformed body) are marked in a memory-only `routedHeartRefusedKeys`; the retryable ones (a closed
   predicate, hearts off, an unloaded ledger, the ledger's own five-minute receive cooldown) are not,
   so a flip or a foreground return heals for free.
@@ -1268,7 +1272,7 @@ The edges, as a list:
 | `idle` | `contextRestored(.resumable)` | `localIdleStop` | offer resume |
 | `idle` | `contextRestored(.terminated/.departed)` | `terminated` / `departed` | — |
 | `idle` | `contextRestored(.expired)` | `expired` | mark, persist |
-| `joining` | `peerCommitted` | `activeForeground` | persist, clear idle timer |
+| `joining` | `peerCommitted` | `activeForeground` | persist, clear idle timer — the ONLY edge out of `joining`, which is why an adopted mesh re-asserts its committed slot |
 | `joining` | `linksLost` | `joining` | — (nothing committed is not a partition) |
 | `activeForeground` | `backgrounded` | `continuingInBackground` | — |
 | `continuingInBackground` | `foregrounded` | `activeForeground` | — |
