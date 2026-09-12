@@ -749,16 +749,29 @@ digest arrives only from the three merge doors, so a refusal that suppressed the
 delivery this device custodies for a peer whose clock stepped backwards stalled until the step
 elapsed or the 6 h ceiling fell — silently, at both ends. Answering from the recorded view costs a
 stale delta and redundant offers, bounded by `sessionFramesPerPeer` and refused at the peer as
-duplicates, and an item minted since is still offered. The guard is on the door and not inside
-`recordPeerRoutedInventory` because one verdict decides two things there: whether the record is
-written, and whether the answer may re-stamp the quiescence halves from this digest's instant. An
+duplicates, and an item minted since is still offered. One delivery shape survives that sentence
+and is a residual rather than a defect (P6 item 10's SET A): if the peer's own HOLDINGS shrink — its
+delete-all, a store reset — while its stamp is still stale, we plan against the newer-stamped,
+content-older record, so an item it has just lost and still needs, whose leg here is outstanding
+because a receipt never came back, waits until its stamp passes the recorded one. Bounded by the
+step and by the 6 h ceiling, and strictly better than the suppression it replaced. The guard is on
+the door and not inside `recordPeerRoutedInventory` because one verdict decides two things there:
+whether the record is written, and whether the answer may re-stamp the quiescence halves from this
+digest's instant — and those halves are **audit state**, not a gate: `quiescentLocalAsOf` has no
+reader at all and `localQuiescent` has one, `routedConvergenceSummary(for:)`, which gates nothing
+(D-7.11). Skipping them keeps the summary from quoting a stale instant, and the wire still carries
+the planned quiescence bit, so on that path the peer records us quiescent while we record neither
+half. An
 EQUAL stamp is admitted silently — an idempotent replay re-records the same value, and auditing it
 would turn the commonest benign duplicate into a named refusal (its own cost is bounded, not free:
 an admitted digest runs the whole answer). The decision itself is the pure
 `MeshRoutedInventoryStampRule`, which the convergence battery's thirteenth invariant **calls**, so
 the door and the claim cannot drift. It is **not** charged to `MeshRoutedRefusalBudget`: D-5.12 and
-D-6.10 keep the two digest doors outside that budget, and its door count did not move — the
-budget's own wall now pins this fourth digest-door spelling too.
+D-6.10 keep the two digest doors outside that budget, and its door count did not move — and the
+budget's own wall now counts the audit lines inside the two doors' brace-matched bodies rather than
+listing their spellings, because the list was already one short (P6 item 10 SET A: the drain
+answer's binding guard `mesh.merge.routedQuiescentUnbound` is a fifth refusal exit that no
+spelling list held).
 
 The two store doors are deliberately asymmetric with the delivery family's. A record holds **other
 members'** custody receipts only, so `forwardableCustodyReceipts` never returns this device's own —
@@ -1862,7 +1875,15 @@ admitter. The door also answers its own durability now: the raise persists the c
 refused seal there is a refused grant — and, since item 9's review, one whose state move is
 **unwound** rather than merely reported: `applySessionEvent` assigns the state before it performs
 the effects, so a `false` returned over a standing `.activeForeground` would have left the device
-live and beaconing under `handleAdmissionGrant`'s restored pre-join ledger.
+live and beaconing under `handleAdmissionGrant`'s restored pre-join ledger. **The unwind goes back
+to the state the GRANT found, not to `joining`** (item 9's second fix review): on the ordinary
+joiner arm the grant finds `idle` and `joinDurably()` moves it to `joining` on a save that succeeds,
+so restoring `joining` left the device durably joining a mesh whose admission record the caller was
+rolling back — the same half-rolled-back grant one rung lower, at the one state whose only edge out
+is `.peerCommitted`. Its two timer rollbacks are independent rather than chained (a running beacon
+used to skip the rotation half), and door 3's give-up clock needs nothing put back because
+`evaluateSessionGiveUp(now:)` cancels a clock once a slot is committed — not because
+`armSessionGiveUpClock(now:)` refuses to arm, which bounds arming and not survival.
 
 **The phase's acceptance battery** (`Tests/FernletTests/MeshP6AcceptanceTests.swift`) is eight
 serialized suites, one per clause. Its property half is a **third pipeline** on the routed

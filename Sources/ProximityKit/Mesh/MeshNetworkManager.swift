@@ -1101,13 +1101,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// fix review, P3-7).
     ///
     /// A saturating depth alone was fail-**open** in its own small way: the ninth begin did not
-    /// increment but the ninth end still decremented, so the gate fell one `end` early and an audit
-    /// reader counting `mesh.privacyWipe.began` against `mesh.privacyWipe.ended` saw them stop
-    /// pairing. This counter takes the overflow instead: an end drains it **before** the depth, so
+    /// increment but the ninth end still decremented, so the gate fell one `end` early — the
+    /// routed projection ran again while an outer funnel still had leg 11's ciphertext purge ahead
+    /// of it. This counter takes the overflow instead: an end drains it **before** the depth, so
     /// `privacyWipeInProgress` stays true until the last paired end whatever the cap can represent.
-    /// It is itself capped — past `2 × maxPrivacyWipeDepth` overlapping funnels the pairing really
-    /// is lost, audited as `saturated` rather than silent, and unreachable with two `@MainActor`
-    /// entry points.
+    /// It is itself capped — past `2 × maxPrivacyWipeDepth` overlapping funnels the gate really
+    /// does fall early again, audited as `saturated` rather than silent, and unreachable with two
+    /// `@MainActor` entry points.
+    ///
+    /// **The audit lines were never a pair and this counter does not make them one** (P6 item 10
+    /// SET A, the item 7 fix review's P3-a). `mesh.privacyWipe.began` is written on every begin;
+    /// `mesh.privacyWipe.ended` is written only when the depth reaches zero, so N nested funnels
+    /// have always produced N begins and ONE end — and an end that drains the overflow returns
+    /// before writing anything at all. What the counter buys is the gate, not a transcript.
     @ObservationIgnored private(set) var privacyWipeOverflow = 0
 
     /// Most overlapping delete-all funnels the depth counter will count (R2).
@@ -5390,8 +5396,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// fix review, P2-2). The peer is still answered — the plan is planned from the RECORDED
     /// inventory, so what it offers is at worst a duplicate the peer refuses, and anything minted
     /// since is offered for the first time — but neither `localQuiescent` nor `quiescentLocalAsOf`
-    /// moves, because a stale instant in item 7's window rule is exactly what the refusal exists to
-    /// keep out. `advertisedAt` on the wire stays this digest's own `sentAt` even then: an answer
+    /// moves, because a stale instant is exactly what the refusal exists to keep out.
+    ///
+    /// **What the two quiescence halves actually are** (P6 item 10 SET A, the item 7 fix review's
+    /// P3-b, correcting five places that called this "item 7's window rule"): they are AUDIT state.
+    /// `quiescentLocalAsOf` has no reader anywhere in `FernletKit`, and `localQuiescent` has
+    /// exactly one — ``routedConvergenceSummary(for:)``, whose own doc says it gates nothing
+    /// (D-7.11: the membership digest closes the merge window, quiescence does not). So skipping
+    /// them keeps the summary from quoting a stale instant, and nothing more; the conservative
+    /// direction, deliberately, with one asymmetry worth naming rather than hiding — the wire still
+    /// carries `quiescent: planned.quiescent`, so on this path the peer records us quiescent while
+    /// we record neither half, and the summary can report a peer converged in the same pass we told
+    /// it we are not.
+    ///
+    /// `advertisedAt` on the wire stays this digest's own `sentAt` even then: an answer
     /// binds on `advertiserFingerprint` + `advertisedAt` at the peer
     /// (``receiveRoutedDrainAnswer(_:from:)``), so naming any other instant would have the peer drop
     /// the bit as unbound.
@@ -5429,8 +5447,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Records THIS device's own half of `converged(local:peerReportsQuiescent:)`, in the same pass
-    /// that minted the answer — so item 7's window rule is a pure read rather than a second
-    /// main-actor `load()` and comparison.
+    /// that minted the answer — so ``routedConvergenceSummary(for:)`` is a pure read rather than a
+    /// second main-actor `load()` and comparison. That summary is the half's only reader and it
+    /// gates nothing (D-7.11); the merge window is closed by the membership digest.
     private func recordLocalQuiescence(_ quiescent: Bool, for peer: String, asOf: Date) {
         guard var state = peerRoutedInventories[peer] else { return }
         state.localQuiescent = quiescent
@@ -9271,15 +9290,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @discardableResult
     func recordVerifiedAdmissionDurably(admittedBy admitter: String? = nil) -> Bool {
         guard currentMesh != nil else { return true }
+        // The state the GRANT found, captured before `joinDurably()` can move it. A refused
+        // re-assert unwinds to this, not to `.joining` (P6 item 9's second fix review, P2-A).
+        let stateBeforeGrant = sessionState
         guard sessionState != .idle else {
             guard joinDurably() else { return false }
-            return reassertCommitIntoAdoptedMesh(admittedBy: admitter)
+            return reassertCommitIntoAdoptedMesh(
+                admittedBy: admitter, restoringStateTo: stateBeforeGrant
+            )
         }
         guard persistSessionContext(addingEpochHead: nil) else {
             FernletAuditLog.log("mesh.admissionGrant.droppedNotDurable")
             return false
         }
-        return reassertCommitIntoAdoptedMesh(admittedBy: admitter)
+        return reassertCommitIntoAdoptedMesh(
+            admittedBy: admitter, restoringStateTo: stateBeforeGrant
+        )
     }
 
     /// The first admission on a device with no session yet: `idle → joining`, which saves. A save
@@ -9348,11 +9374,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// pre-join verifier underneath it — a half-rolled-back grant, which is a state no caller has
     /// ever been written against. See ``unwindRefusedReassert(beaconWasRunning:rotationWasScheduled:nextRotationAt:)``.
     ///
-    /// - Parameter admitter: The authenticated sender of the grant, when there is one.
+    /// - Parameters:
+    ///   - admitter: The authenticated sender of the grant, when there is one.
+    ///   - restoringStateTo: The state a refused save must put the machine back at — the state the
+    ///     GRANT found, not the one this door was entered at. They differ on exactly one path, and
+    ///     it is the ordinary one: ``recordVerifiedAdmissionDurably(admittedBy:)``'s `.idle` arm
+    ///     runs ``joinDurably()`` first, which moves `idle → joining` on a save that SUCCEEDS, so
+    ///     unwinding to `.joining` left a device durably joining a mesh whose admission record
+    ///     `handleAdmissionGrant` had just thrown away — at the one state whose only edge out is
+    ///     `.peerCommitted` (P6 item 9's second fix review, P2-A). Defaults to `.joining`, which is
+    ///     the only state the guard below admits and therefore the right answer for a caller with no
+    ///     grant of its own to unwind.
     /// - Returns: `false` only when the raise's own save was refused — the caller's answer, since
     ///   the grant it is acknowledging is then not durable either.
     @discardableResult
-    func reassertCommitIntoAdoptedMesh(admittedBy admitter: String? = nil) -> Bool {
+    func reassertCommitIntoAdoptedMesh(
+        admittedBy admitter: String? = nil, restoringStateTo previous: MeshSessionState = .joining
+    ) -> Bool {
         guard sessionState == .joining else { return true }
         guard let committed = committedSlot(admittedBy: admitter) else { return true }
         let beaconWasRunning = beaconTimer != nil
@@ -9362,6 +9400,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         noteCommitIntoMesh(peer: committed)
         guard lastSessionEffectFailure == nil else {
             unwindRefusedReassert(
+                restoringStateTo: previous,
                 beaconWasRunning: beaconWasRunning,
                 rotationWasScheduled: rotationWasScheduled,
                 nextRotationAt: nextRotationAt
@@ -9380,37 +9419,59 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// list, which is what makes durable-before-acknowledged mechanical for everything downstream of
     /// `.persistContext` — and what leaves the state move itself standing when that seal is refused.
     /// ``noteCommitIntoMesh(peer:)`` had by then also started the beacon loop and, for a
-    /// coordinator, the first rotation. So the machine goes back to `.joining` and the radio work
-    /// the raise started is stood down; the caller's `false` then describes a device that really is
-    /// where it was.
+    /// coordinator, the first rotation. So the machine goes back to where the GRANT found it and the
+    /// radio work the raise started is stood down; the caller's `false` then describes a device that
+    /// really is where it was.
     ///
-    /// **Only what this raise started.** A beacon or a rotation timer already running belongs to an
-    /// earlier life of this session — ``noteCommitIntoMesh(peer:)`` returns early on the first and
-    /// skips the second — so cancelling either here would tear down work this call never did.
+    /// **Back to the grant's state, not to `.joining`** (P6 item 9's second fix review, P2-A).
+    /// `.joining` is where this door is always ENTERED, but on
+    /// ``recordVerifiedAdmissionDurably(admittedBy:)``'s `.idle` arm it is a state ``joinDurably()``
+    /// created three lines earlier on a save that succeeded — so restoring it left the device
+    /// durably joining a mesh `handleAdmissionGrant` had just rolled the ledger and the addressing
+    /// back out of, at the one state whose only edge out is `.peerCommitted`. That is the same
+    /// half-rolled-back grant one rung lower.
     ///
-    /// **Door 3's clock needs nothing put back, and that is a property rather than an omission.**
-    /// ``armSessionGiveUpClock(now:)`` refuses to arm while any slot is committed, and this door
-    /// only runs when ``committedSlot(admittedBy:)`` found one, so the `cancelSessionGiveUpClock()`
-    /// inside the raise cannot have stood a running clock down.
+    /// **Only what this raise started, and the two rollbacks are INDEPENDENT** (the same review's
+    /// P3-1). A beacon or a rotation timer already running belongs to an earlier life of this
+    /// session — ``noteCommitIntoMesh(peer:)`` returns early on the first and skips the second — so
+    /// cancelling either here would tear down work this call never did. They were a `guard` chain
+    /// until this fix, which made the rotation rollback unreachable whenever the beacon was already
+    /// up: correct only because of `noteCommitIntoMesh`'s early return, a coupling between two
+    /// functions with no compile-time link. Two conditions, two `if`s.
+    ///
+    /// **Door 3's clock needs nothing put back, and the reason is `evaluateSessionGiveUp`, not the
+    /// arming guard** (the same review's P3-2). ``armSessionGiveUpClock(now:)`` refusing to arm
+    /// while a slot is committed bounds ARMING, not SURVIVAL — a clock armed earlier, while
+    /// `hasCommittedPeer` was still false, is a real shape. What makes it moot is that
+    /// ``evaluateSessionGiveUp(now:)`` cancels the clock at its next wake once a slot is committed,
+    /// and this door only runs when ``committedSlot(admittedBy:)`` found one: the
+    /// `cancelSessionGiveUpClock()` inside the raise therefore stands down at worst a clock that was
+    /// already condemned.
     ///
     /// `lastSessionEffectFailure` is deliberately left set, exactly as ``joinDurably()`` leaves it:
     /// the refusal is the caller's evidence, and the next `.moved` transition clears it.
     ///
     /// - Parameters:
+    ///   - previous: The state the grant found, which the machine is put back at.
     ///   - beaconWasRunning: Whether the beacon loop was already armed before the raise.
     ///   - rotationWasScheduled: Whether a rotation timer was already scheduled before the raise.
     ///   - nextRotationAt: ``lastKnownNextRotationAt`` as it stood before the raise.
     private func unwindRefusedReassert(
-        beaconWasRunning: Bool, rotationWasScheduled: Bool, nextRotationAt: Date?
+        restoringStateTo previous: MeshSessionState,
+        beaconWasRunning: Bool,
+        rotationWasScheduled: Bool,
+        nextRotationAt: Date?
     ) {
-        sessionState = .joining
-        guard !beaconWasRunning else { return }
-        beaconTimer?.cancel()
-        beaconTimer = nil
-        guard !rotationWasScheduled else { return }
-        rotationTimer?.cancel()
-        rotationTimer = nil
-        lastKnownNextRotationAt = nextRotationAt
+        sessionState = previous
+        if !beaconWasRunning {
+            beaconTimer?.cancel()
+            beaconTimer = nil
+        }
+        if !rotationWasScheduled {
+            rotationTimer?.cancel()
+            rotationTimer = nil
+            lastKnownNextRotationAt = nextRotationAt
+        }
     }
 
     /// The committed slot whose commit made this session live: the grant's own sender where one is
@@ -12092,10 +12153,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             admittedBy: senderSigningPublicKey.map(IdentityService.fingerprint(of:))
         ) else {
             // The session half of this rollback lives behind that door: a refused save inside the
-            // re-assert unwinds its own raise (item 9 review, P2-1), so the ledger and addressing
-            // restored here and the state the machine is left in name the same device — one that
-            // never joined. Before that, this rollback restored the pre-join verifier under a
-            // device that was already `.activeForeground` and beaconing.
+            // re-assert unwinds its own raise (item 9 review, P2-1) back to the state THIS GRANT
+            // FOUND (item 9's second fix review, P2-A), so the ledger and addressing restored here
+            // and the state the machine is left in name the same device — one this grant never
+            // moved. The pre-state matters because the ordinary joiner arrives at `.idle` and
+            // `joinDurably()` moves it to `.joining` on a save that succeeds: unwinding to
+            // `.joining` left a device durably joining the mesh these two lines are un-joining it
+            // from. Before either fix, this rollback restored the pre-join verifier under a device
+            // that was already `.activeForeground` and beaconing.
             membershipVerifier = ledgerBeforeJoin
             rollBackKeyAdvertisements(to: addressingBeforeJoin, version: addressingVersionBeforeJoin)
             return
@@ -12657,8 +12722,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// nothing else, so an outer funnel still holding the gate keeps holding it.
     ///
     /// An end drains ``privacyWipeOverflow`` **before** ``privacyWipeDepth``, which is what keeps
-    /// begins and ends paired past the cap: with nine overlapping funnels the ninth end is the one
-    /// that lowers the gate, not the eighth (P6 item 7 fix review, P3-7).
+    /// the gate up until the last paired end past the cap: with nine overlapping funnels the ninth
+    /// end is the one that lowers it, not the eighth (P6 item 7 fix review, P3-7). An end that
+    /// drains the overflow writes **no** audit line — it has not ended the window, and
+    /// `mesh.privacyWipe.ended` means the window closed (P6 item 10 SET A, P3-a).
     public func endPrivacyWipe() {
         if privacyWipeOverflow > 0 {
             privacyWipeOverflow -= 1
@@ -13863,6 +13930,29 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// visible edge of "this device behaves as though it has joined", so a rollback that left it
     /// running would be a rollback in name only.
     var isBeaconLoopRunningForTesting: Bool { beaconTimer != nil }
+
+    /// Test seam: whether a rotation timer is scheduled right now.
+    ///
+    /// The sibling `isBeaconLoopRunningForTesting` had no counterpart, so the rotation half of
+    /// ``unwindRefusedReassert(restoringStateTo:beaconWasRunning:rotationWasScheduled:nextRotationAt:)``
+    /// — and its SELECTIVITY, the part that must leave a pre-existing timer alone — could not be
+    /// asserted at all (P6 item 9's second fix review, P3-3). A probe deleting the rotation
+    /// rollback stayed green.
+    var isRotationTimerScheduledForTesting: Bool { rotationTimer != nil }
+
+    /// Test seam: the rotation instant the unwind restores. `private` on the stored property, and
+    /// the restore is the half a probe could delete unnoticed (P6 item 9's second fix review, P3-3).
+    var lastKnownNextRotationAtForTesting: Date? { lastKnownNextRotationAt }
+
+    /// Test seam: schedules a rotation timer the way a coordinator's own commit would, so a cell can
+    /// establish "a rotation was ALREADY scheduled before the raise" — the state the unwind must not
+    /// touch (P6 item 9's second fix review, P3-3).
+    ///
+    /// - Parameter nextRotationAt: The instant the timer is scheduled for.
+    func scheduleRotationForTesting(nextRotationAt: Date = Date().addingTimeInterval(900)) {
+        lastKnownNextRotationAt = nextRotationAt
+        scheduleRotationTimer(fireAt: nextRotationAt)
+    }
 
     /// Disarms whatever the debounce window is holding, and reports what it was.
     ///
