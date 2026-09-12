@@ -1189,11 +1189,45 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// A verified peer is heart-eligible only when the vault knows their signing key as an ACTIVE
     /// (still-trusted → not revoked), unblocked friend. `isTrustedProximityPeer` already excludes
     /// revoked records, so a revoked-only "Removed" peer (unfriended, Phase-2 lifecycle) fails here.
+    ///
+    /// A thin delegation to ``isHeartEligible(signingPublicKey:fingerprint:in:)`` since P6 item 6,
+    /// so the routed heart path — which has no `PeerIdentity` — reaches the same three legs rather
+    /// than re-implementing them.
     static func isHeartEligibleFriend(_ peerIdentity: ProximityCoordinator.PeerIdentity, in host: any ProximityHost) -> Bool {
+        isHeartEligible(
+            signingPublicKey: peerIdentity.signingPublicKey,
+            fingerprint: peerIdentity.fingerprint,
+            in: host
+        )
+    }
+
+    /// The heart-eligibility gate over its two inputs rather than over a live handshake (P6 item 6).
+    ///
+    /// One definition, two callers. The presence path passes a handshake-verified
+    /// `ProximityCoordinator.PeerIdentity`; the routed path has no handshake at all and passes the
+    /// **admission ledger's** own values (`MeshRosterMember.signingPublicKey` plus the origin's
+    /// signed fingerprint). That is the real improvement over the legacy transport, and it is not
+    /// that the input is "less of a claim" — the legacy input was handshake-verified too — but that
+    /// the ledger's key is durable, quorum-admitted, available with no live link, and not
+    /// substitutable by a re-provisioned identity.
+    ///
+    /// All three legs are preserved, and the block list is consulted with **both** inputs, so an
+    /// admitted-then-blocked member is refused here as well as at the projection's own hoisted
+    /// block check (blocking is local and does not remove a member from the derived roster, so this
+    /// is a live case rather than a hypothetical).
+    ///
+    /// - Parameters:
+    ///   - signingPublicKey: The peer's Ed25519 signing key.
+    ///   - fingerprint: The peer's fingerprint.
+    ///   - host: The host holding the trust vault and the block list.
+    /// - Returns: whether a heart from or to this peer may be recorded.
+    static func isHeartEligible(
+        signingPublicKey: Data, fingerprint: String, in host: any ProximityHost
+    ) -> Bool {
         let vault = host.proximityTrustVault
-        return vault.isTrustedProximityPeer(signingPublicKey: peerIdentity.signingPublicKey)
-            && !vault.isBlockedProximitySigningKey(peerIdentity.signingPublicKey)
-            && !host.isBlockedFingerprint(peerIdentity.fingerprint)
+        return vault.isTrustedProximityPeer(signingPublicKey: signingPublicKey)
+            && !vault.isBlockedProximitySigningKey(signingPublicKey)
+            && !host.isBlockedFingerprint(fingerprint)
     }
 
     // MARK: - Hearts: status helpers

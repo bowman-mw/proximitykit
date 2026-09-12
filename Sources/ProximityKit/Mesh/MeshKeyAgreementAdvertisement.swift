@@ -874,7 +874,8 @@ nonisolated struct MeshKeyAdvertisementFoldResult: Equatable, Sendable {
 /// - **Whole-mint, not per-destination.** `MeshNetworkManager.routedDestinationKeys(for:)` returns
 ///   `.mismatched` on the FIRST conflicted destination and its caller refuses the entire mint, so
 ///   one conflicted member stops that origin sharing with **every** destination it can see. A
-///   subset target arrives with item 6's `.singleRecipient` flip; until then this is mesh-wide.
+///   `.singleRecipient` item (a heart, since P6 item 6) stops only for that one destination,
+///   while a `.fullRosterAtCreation` item (a photo, a message) still stops mesh-wide.
 /// - **Durable across restarts, not "permanent for the session".** The marks ride the sealed
 ///   session context and ``MeshKeyAdvertisementFold/restoring(_:verifiedBy:)`` deliberately carries
 ///   them forward for every surviving row, so a relaunch does not clear one. It is permanent for

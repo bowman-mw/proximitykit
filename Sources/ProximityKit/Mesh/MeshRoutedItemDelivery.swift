@@ -156,7 +156,46 @@ nonisolated enum MeshRoutedItemDelivery {
         return body
     }
 
-    /// The wrap, the open and nothing else — the ONE choke point both body families reach the
+    /// Opens one routed heart item and returns its body (P6 item 6).
+    ///
+    /// The id guard is copied from the photo door for the strongest of the three reasons: a heart's
+    /// body id **is** the gift id `ProximityHeartLedger` dedups on and `MeshRoutedHeartAck` proves,
+    /// so a body carrying another member's gift id would offer the ledger a judgement about someone
+    /// else's heart under this origin's signature. It is the enforcement half of
+    /// ``MeshRoutedTypeToken/heart``'s frozen `itemID == giftID` contract.
+    ///
+    /// - Parameters:
+    ///   - blob: The reassembled ciphertext, already re-hashed against `manifest.contentHash` by
+    ///     the store door that produced it.
+    ///   - manifest: The origin's signed manifest — the binding, the wraps and the type token.
+    ///   - identity: This device's identity, for the wrap's key agreement.
+    ///   - mayDecryptRoutedContent: `MeshNetworkManager.mayDecryptRoutedContent`, passed in under
+    ///     that exact spelling and guarded on inside ``openPlaintext(_:manifest:identity:mayDecryptRoutedContent:)``.
+    ///     Never defaulted. The heart stage's own stronger predicate
+    ///     (`mayCommitRoutedHeartLedgerJudgement`) is the manager's and is consulted before this
+    ///     door is reached — a decrypt is not a ledger judgement.
+    /// - Returns: the decoded body.
+    /// - Throws: ``MeshRoutedDeliveryError``, ``MeshRoutedKeyWrapError`` or
+    ///   ``MeshRoutedItemSealError``. Never a trap.
+    @MainActor
+    static func openHeartBody(
+        _ blob: Data,
+        manifest: MeshRoutedManifest,
+        identity: IdentityService,
+        mayDecryptRoutedContent: Bool
+    ) throws -> MeshRoutedHeartBody {
+        let plaintext = try openPlaintext(
+            blob, manifest: manifest, identity: identity,
+            mayDecryptRoutedContent: mayDecryptRoutedContent
+        )
+        let body = try MeshRoutedHeartBody(decoding: plaintext)
+        guard body.header.id == manifest.itemID else {
+            throw MeshRoutedDeliveryError.bodyIdentityMismatch
+        }
+        return body
+    }
+
+    /// The wrap, the open and nothing else — the ONE choke point all three body families reach the
     /// ciphertext through, and the one place the decrypt predicate is guarded (P6 item 4).
     ///
     /// **The structure is the enforcement here, and the wall cannot replace it.** W2's containment

@@ -937,10 +937,53 @@ with no path from any of them to a writer. What was missing was a way **back**.
   each file to name its predicate: the manager defines all three predicates, so a containment-only
   wall could never fire in the one file where such a seam would most naturally be written. Moving a
   pin obliges the same file to name its predicate, and the custody-door wall exempts exactly those
-  files — an exemption item 13 is the first to exercise, and asserts it exercises. The heart stage
-  remains the counted no-op (P6 owns the unwrap), and its extra leg
-  (`sessionState == .activeForeground`) is documented **inert until P8**, when a CPT-continued mesh
-  will custody ciphertext and decrypt nothing.
+  files — an exemption item 13 is the first to exercise, and asserts it exercises.
+
+**P6 item 6 put HEARTS on the routed store, and the heart is the one row whose plaintext pass is not
+a projection.** Four things landed together.
+
+- **The registry row flipped in place** to ``MeshRoutedDestinationSemantics/singleRecipient``, with
+  its cap narrowed to a formula whose payload term is **zero** (a heart body is header-only:
+  ``MeshRoutedHeartBody/maxFramedHeaderByteCount`` + ``MeshRoutedItemSealFormat/overheadByteCount``
+  = 553 B, down from the shared 256 MiB wire bound). The flip is the one re-declaration
+  ``MeshRoutedTypeEntry``'s freezing rule allows a **never-minted** row — the rule's failure mode is
+  silent divergence between two builds that both mint the token, and no build had ever produced a
+  heart manifest — and the allowance is now **spent**: the next semantics change is a `…heart.v2`
+  token. The mint-side reader of the column is the **audience** `originateRoutedItem` takes from its
+  caller; `MeshRoutedManifest.validated` reads it as a shape check, which is one-directional
+  (vacuous on a pair, and blind to a full-roster row handed one recipient).
+  ``MeshDeliveryTarget/addressing(contentID:recipient:roster:selfFingerprint:)`` is the capture door,
+  and the recipient is a caller argument validated against the roster — never body-derived.
+- **The live-slot requirement went with the legacy transport.** A heart to an admitted member with no
+  live slot is now sealed, staged and custodied until a link forms or the origin departs and hands
+  custody on, and `canSendSessionHeart(toFingerprint:)` answers "is this a member this device can
+  address" rather than "are they linked". The app still prefers a live `.hearts` slot, then the
+  presence path while the friend is presence-reachable, and only then a routed custodied heart — a
+  delivered heart beats a custodied one in the one case presence was best at. Feedback is
+  **consume-on-stage**: the routed stage is durable-before-acknowledged, so `.staged` is "Sent", and
+  the two honest costs (`.staged` ≠ delivered; a recipient's refusal does not refund the cooldown)
+  are named rather than hidden.
+- **The ack ceremony has ONE call site**, resolved inside `commitLocalDelivery` — the single door
+  both the live path and re-entry job 4 already reach — so `mayCommitRoutedHeartLedgerJudgement`
+  stays defined once and the live door judges an in-person heart in the same pass instead of waiting
+  for a rising access edge. The heart stage's extra leg (`sessionState == .activeForeground`) is
+  **not inert**: `.linksLost` moves the machine to `.partitioned`, so a link blip defers a heart —
+  retryably, which is right. FINAL refusals (not a friend, a removed or locally BLOCKED origin, a
+  malformed body) are marked in a memory-only `routedHeartRefusedKeys`; the retryable ones (a closed
+  predicate, hearts off, an unloaded ledger, the ledger's own five-minute receive cooldown) are not,
+  so a flip or a foreground return heals for free.
+- **`.heartLedger` is deliberately NOT in `projectableRoutedTypeTokens`**, and that is the design
+  rather than an omission: a heart's canonical write IS its ack evidence, job 5's list does not
+  shrink as work is done, and adding the token would put every heart permanently in a 16-slot
+  allowance it could never leave. Job 4's list shrinks, which is why the heart belongs there — and
+  `ackableNow` filters a heart this device cannot judge out of that list before the allowance is
+  planned, so sixteen unjudgeable hearts from one ground fingerprint cannot strand this device's own
+  photo and text receipts.
+
+The legacy `.friendHeart` mesh transport is gone into a zero-list wall (three functions, one test
+seam, one payload spelling). `PayloadType.friendHeart` itself is **not parked**: the presence path
+still sends and receives it, so there is nothing to park, and the presence heart path is untouched
+(P9's).
 
 **P5 item 11 made "unknown" ONE answer: the type-token registry** (plan §11's last line). Plan §11
 says every future routed type declares its size cap, destination semantics, relay-retention,
@@ -977,10 +1020,11 @@ from one source and cannot drift, which is the failure item 4's forward-compat n
   `init(entries:)` drops such a row, so its token answers nil at every door and no hop plumbing is
   built ahead of plan §11's device-measurement gate — as is a row whose declared cap falls outside
   `1 … MeshRoutedManifestFormat.maxContentByteCount`. ``MeshRoutedDestinationSemantics/singleRecipient``
-  is instead *registerable but unmintable*, because that column has **no receiver-side reader at
+  was instead *registerable but unmintable*, because that column has **no receiver-side reader at
   all**: a manifest carries its destination set on the wire and the verifier binds wraps ≡
   destinations from those bytes, so a registered row cannot fall through to increment-1 behaviour on
-  receive, and P6 keeps the row to flip when `MeshDeliveryTarget`'s withheld subset initializer lands.
+  receive. **P6 item 6 flipped it and it is now minted by the heart row** — see the heart paragraph
+  below.
 - **The per-type size cap is now a guard at BOTH ends, and P6 item 3 is what made it reachable.**
   Through P5 every row's cap equalled the wire bound, so neither the mint's
   ``MeshRoutedManifestMintError/sizeExceedsTypeCap`` nor any receiver check could fire — which is

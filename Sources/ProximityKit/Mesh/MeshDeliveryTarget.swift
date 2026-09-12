@@ -200,9 +200,15 @@ nonisolated enum MeshDeliveryDisposition: Equatable, Sendable {
 
 /// Why a delivery-target operation was refused. Frozen English tokens, logged verbatim.
 ///
-/// Every one of these is a **bug at the caller**, not a knob: a target's destination set is
-/// immutable and its states only rise, so nothing here is an ordinary outcome to be retried.
+/// Every one of the first five is a **bug at the caller**, not a knob: a target's destination set is
+/// immutable and its states only rise, so nothing there is an ordinary outcome to be retried.
 /// Naming them is what stops a wrong advance or a mismatched merge being applied silently.
+///
+/// **P6 item 6's two capture refusals break that pattern in one direction, and it is stated rather
+/// than smoothed over.** ``recipientIsSelf`` is still a caller bug. ``recipientNotInRoster`` is an
+/// ordinary **race**: the friend departed between the moment the heart button was rendered and the
+/// moment it was tapped, and it reaches the user as copy ("they left the session") rather than as a
+/// diagnostic.
 nonisolated enum MeshDeliveryRefusal: String, Equatable, Sendable, CaseIterable {
 
     /// The fingerprint is not in this target's destination set. Adding one is impossible: the set
@@ -224,6 +230,16 @@ nonisolated enum MeshDeliveryRefusal: String, Equatable, Sendable, CaseIterable 
     /// built wrongly — the merge refuses rather than picking a union or an intersection, either of
     /// which would silently invent or drop a recipient.
     case destinationSetMismatch
+
+    /// A single-recipient capture named **this device**. A caller bug: an origin is never a
+    /// destination for its own content, and `MeshRoutedManifest`'s mint refuses it a second time
+    /// (`originIsADestination`).
+    case recipientIsSelf
+
+    /// A single-recipient capture named a fingerprint the derived roster at creation does not hold.
+    /// The one **ordinary** outcome in this vocabulary — the member departed, or was removed,
+    /// between the affordance being drawn and the tap.
+    case recipientNotInRoster
 }
 
 // MARK: - MeshDeliveryOutcome
@@ -343,7 +359,45 @@ nonisolated struct MeshDeliveryTarget: Equatable, Sendable {
         self.init(contentID: item.contentID, roster: roster, selfFingerprint: selfFingerprint)
     }
 
-    /// The private memberwise form, used only by operations that preserve the destination set.
+    /// Captures a **single-recipient** destination set from the derived roster at this instant
+    /// (P6 item 6, the `.singleRecipient` column's mint-side door).
+    ///
+    /// The roster is still the only source, and that is the whole point of the shape. The recipient
+    /// is a **caller argument** — never taken from the item's body, which is the origin's own bytes,
+    /// because a destination set derived from a body would let an origin address anyone it named —
+    /// and it is refused unless the roster-at-creation holds it and it is not this device. What P4
+    /// withheld (§22.1) was the *ability to name a subset*, not the roster as the authority; this
+    /// keeps the authority and adds the naming, so nothing here can be built from a connected set,
+    /// a `MeshBranchView` or a reachable-peer list.
+    ///
+    /// A **static factory rather than a second `init`**, so it can refuse by name: an `init` cannot,
+    /// and a failable one would collapse two different facts (a caller bug and an ordinary race)
+    /// into one `nil`.
+    ///
+    /// Fingerprints are compared **raw**, never through `IdentityService.fingerprintsMatch`. The
+    /// whole routed path compares them raw — `manifest.destinations.contains(me)`,
+    /// `MeshRoutedItemKey`, the wrap's `recipientFingerprint` — so the tolerant comparison at this
+    /// one door would be the inconsistency, not the fix.
+    ///
+    /// - Parameters:
+    ///   - contentID: The item this target is about.
+    ///   - recipient: The one member the item is for, stated by the caller.
+    ///   - roster: The **merged** derived roster, unmoved by any partition (plan §10.2).
+    ///   - selfFingerprint: This device, which is never a destination for its own content.
+    /// - Returns: the captured target, or the named refusal. Self is checked FIRST on purpose: a
+    ///   roster always contains this device, so the other order would report the wrong fact.
+    static func addressing(
+        contentID: UUID, recipient: String, roster: MeshDerivedRoster, selfFingerprint: String
+    ) -> MeshDeliveryOutcome {
+        guard recipient != selfFingerprint else { return .refused(.recipientIsSelf) }
+        guard roster.contains(fingerprint: recipient) else { return .refused(.recipientNotInRoster) }
+        return .updated(
+            MeshDeliveryTarget(contentID: contentID, destinationOrder: [recipient], progress: [:])
+        )
+    }
+
+    /// The private memberwise form, used by operations that preserve the destination set and by the
+    /// single-recipient capture door above.
     private init(contentID: UUID, destinationOrder: [String], progress: [String: MeshDeliveryState]) {
         self.contentID = contentID
         self.destinationOrder = destinationOrder

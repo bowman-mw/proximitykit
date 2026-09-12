@@ -343,9 +343,34 @@ nonisolated enum MeshRoutedManifestMintError: Error, Equatable, Sendable {
     /// registry set for one type, and in increment 1 no row can raise it because every row's cap
     /// equals the wire bound.
     case sizeExceedsTypeCap(token: String)
-    /// The type's registry row declares a destination semantics this build cannot mint — today only
-    /// ``MeshRoutedDestinationSemantics/singleRecipient``, which needs a `MeshDeliveryTarget`
-    /// initializer P4 deliberately withheld. Registerable, unmintable, refused by name.
+    /// The target's **shape** does not match the destination semantics the type's registry row
+    /// declares (narrowed by P6 item 6, which made `.singleRecipient` mintable).
+    ///
+    /// It used to mean "this build cannot mint this column", which stopped being true the moment
+    /// ``MeshDeliveryTarget/addressing(contentID:recipient:roster:selfFingerprint:)`` existed. What
+    /// it means now is the only check the mint can honestly make, because `validated` sees a
+    /// `MeshDeliveryTarget` and nothing else: a `.singleRecipient` row must arrive with exactly one
+    /// destination.
+    ///
+    /// **The fence is one-directional, and the other direction is the manager's.** Deleting the
+    /// guard is wrong and keeping the equality is wrong, so:
+    ///
+    /// | row | audience | refused where |
+    /// |---|---|---|
+    /// | `.singleRecipient` | full roster | here, on a roster of three or more — **and** at the manager's origination door |
+    /// | `.fullRosterAtCreation` | one recipient | the manager's origination door **only** |
+    ///
+    /// A full-roster target on a two-member mesh and a subset target are byte-identical (one
+    /// destination each), so this guard is vacuous on a pair, and a full-roster row handed a single
+    /// recipient falls straight through the `.fullRosterAtCreation` arm. The real enforcement is
+    /// therefore the **audience argument** `MeshNetworkManager.originateRoutedItem(…)` takes from
+    /// its caller and checks against this column; this is the belt.
+    ///
+    /// The rejected alternative, recorded so it is not re-derived: pass the audience into
+    /// `signed(…)` and compare it to the column here. Strictly stronger and fully meaningful — but
+    /// it churns every `MeshRoutedManifestFixtures` call site, and a defaulted parameter re-creates
+    /// the "a caller with no opinion silently acquires one" hazard the registry's own `types:` note
+    /// warns about.
     case unsupportedDestinationSemantics(token: String)
 
     /// Frozen English for the diagnostic surface. Never shown as user copy.
@@ -364,7 +389,7 @@ nonisolated enum MeshRoutedManifestMintError: Error, Equatable, Sendable {
         case .sizeExceedsTypeCap(let token):
             return "The content size is above the declared cap for routed type \(token)."
         case .unsupportedDestinationSemantics(let token):
-            return "Routed type \(token) declares a destination semantics this build cannot mint."
+            return "Routed type \(token) declares a destination semantics this target's shape does not match."
         }
     }
 }
@@ -485,8 +510,17 @@ extension MeshRoutedManifest {
             guard size <= entry.maxItemByteCount else {
                 throw MeshRoutedManifestMintError.sizeExceedsTypeCap(token: typeToken)
             }
-            guard entry.destinations == .fullRosterAtCreation else {
-                throw MeshRoutedManifestMintError.unsupportedDestinationSemantics(token: typeToken)
+            // P6 item 6: a SHAPE check, not a provenance one. See the case's own doc for which
+            // direction this catches and which only the manager's audience argument can.
+            switch entry.destinations {
+            case .fullRosterAtCreation:
+                break
+            case .singleRecipient:
+                guard target.destinationCount == 1 else {
+                    throw MeshRoutedManifestMintError.unsupportedDestinationSemantics(
+                        token: typeToken
+                    )
+                }
             }
         }
     }

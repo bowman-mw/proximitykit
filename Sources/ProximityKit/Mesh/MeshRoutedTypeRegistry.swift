@@ -34,9 +34,17 @@ nonisolated enum MeshRoutedDestinationSemantics: String, CaseIterable, Equatable
     /// The full derived roster at creation minus the origin, immutable thereafter (D7/D12) — every
     /// increment-1 type.
     case fullRosterAtCreation
-    /// One named recipient. **Registerable but unmintable in increment 1**: `MeshDeliveryTarget` has
-    /// no subset initializer (P4 withheld it on purpose, §22.1), so the mint refuses this row by
-    /// name until P6 lands one and flips the column.
+    /// One named recipient, chosen by the sender and validated against the derived roster at
+    /// creation (``MeshDeliveryTarget/addressing(contentID:recipient:roster:selfFingerprint:)``).
+    ///
+    /// **Minted by the heart row since P6 item 6.** Still no receiver-side reader: the manifest
+    /// carries its destination set explicitly and `MeshRoutedManifestVerifier` binds wraps ≡
+    /// destinations from those bytes, so a receiver never consults this column. What the mint can
+    /// check against it is only a **shape** — one destination — because a full-roster target on a
+    /// two-member mesh and a subset target are byte-identical; the real fence is the audience
+    /// argument at `MeshNetworkManager`'s one origination door
+    /// (``MeshRoutedManifestMintError/unsupportedDestinationSemantics``'s own doc says which door
+    /// catches which direction).
     case singleRecipient
 }
 
@@ -118,6 +126,18 @@ nonisolated enum MeshRoutedCanonicalStore: String, CaseIterable, Equatable, Send
 /// mints it. Only ``maxItemByteCount`` (loosening is safe in any order; tightening only once the
 /// fleet is on the new build) and ``canonicalStore`` may be edited in place; ``expiry`` is not
 /// editable at all in increment 1.
+///
+/// **A never-minted row may be re-declared once, and P6 item 6 spent that allowance.** The rule's
+/// failure mode is *silent divergence between two builds that both mint the token*, and
+/// `fernlet.mesh.routed-type.heart.v1` was registered by P5 item 11 and minted by nobody — no
+/// build has ever produced a heart manifest, so there was no second build to diverge from and no
+/// at-rest record whose semantics would change underneath it. Item 6 used that allowance to flip
+/// ``destinations`` from `.fullRosterAtCreation` to `.singleRecipient` in place (the column's own
+/// doc had promised the flip since increment 1). **It is now spent:** the heart row is frozen for
+/// real, and the next semantics change to it is a `…heart.v2` token registered beside it. The v2
+/// route was weighed at the time and is not actually cheaper — `token(forCanonicalStore:)` breaks
+/// its tie on the lowest token, which sorts `…heart.v1` ahead of `…heart.v2`, so that path needs a
+/// resolver change as well as a row.
 ///
 /// **Unit caveat for the cap** — the one thing to get right when narrowing a row.
 /// ``maxItemByteCount`` is compared against `MeshRoutedManifest.size`, which is the complete sealed
@@ -227,6 +247,14 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 /// the one place with no answer to give: a chunk carries no token, so item 9's origin-bound clause
 /// is what disposes of it.
 ///
+/// **Who reads `destinations`, exactly** (amended by P6 item 6, which made the column mean two
+/// different things at two doors). `MeshNetworkManager.originateRoutedItem(…)` reads it against the
+/// **audience its caller states** — that is the real fence, and the only one for a full-roster row
+/// handed a single recipient. `MeshRoutedManifest.validated(…)` reads it as a **shape** check —
+/// a `.singleRecipient` row must arrive with exactly one destination — which is non-vacuous on a
+/// roster of three or more and vacuous on a pair, because there a full-roster target and a subset
+/// target are byte-identical. No receiver reads it at all.
+///
 /// **Every column has a shipping reader since P5 item 13.** `MeshRoutedManifest.signed(…)` gained
 /// its first shipping caller — the routed sender door behind `addPhoto` — so
 /// ``MeshRoutedTypeEntry/maxItemByteCount``, ``MeshRoutedTypeEntry/destinations`` and
@@ -321,10 +349,15 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
             expiry: .meshHardDeadlinePlusGrace,
             canonicalStore: .sessionTranscript
         ),
+        // The heart row's cap is the THIRD narrowed one (P6 item 6), and its formula has a **zero**
+        // payload term: a heart body is header-only, so the widest ciphertext it can measure is
+        // this family's framed header allowance plus the seal's overhead. `destinations` is
+        // `.singleRecipient` since item 6 — the one re-declaration the freezing rule above allows a
+        // never-minted row, and it is spent.
         MeshRoutedTypeEntry(
             token: MeshRoutedTypeToken.heart,
-            maxItemByteCount: MeshRoutedManifestFormat.maxContentByteCount,
-            destinations: .fullRosterAtCreation,
+            maxItemByteCount: UInt64(MeshRoutedHeartBody.maxSealedBlobByteCount),
+            destinations: .singleRecipient,
             relayRetention: .originRetainsUntilDeparture,
             finalAck: .foregroundDecryptAndLedgerCommit,
             expiry: .meshHardDeadlinePlusGrace,

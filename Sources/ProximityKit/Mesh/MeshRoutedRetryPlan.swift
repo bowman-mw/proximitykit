@@ -193,12 +193,46 @@ nonisolated struct MeshRoutedRetryRotation: Equatable, Sendable {
     /// — a newcomer gets the benefit of the doubt, and a frozen-clock fixture needs the strict
     /// comparison to be able to express a new arrival at all.
     ///
-    /// - Parameter now: The pass's injected instant.
+    /// **The caller floors this instant to whole seconds, and must** (item 5 review, P1-1). The
+    /// other side of the comparison is `MeshRoutedItemRef.firstSeenAt`, which every admission door
+    /// writes through the record's one initializer as a *floored* value, so an unfloored cut
+    /// compares two different clocks: an item stamped `floor(t)` against a pass armed at
+    /// `t + 0.4` reads as carried-over, and "first seen in the same second as the first pass ⇒
+    /// new" holds only where the injected instant happens to land on an integral second. This type
+    /// cannot floor it itself — it is keys-only and `thePlannerNamesNoRoutedTypeNoRegistryAndNoStore`
+    /// forbids it the manifest's helper by name — so the flooring is one line at
+    /// `MeshNetworkManager.routedRetryAllowance(_:over:now:)` and this doc is the contract.
+    ///
+    /// - Parameter now: The pass's injected instant, **floored to whole seconds by the caller**.
     /// - Returns: the instant this session's first pass ran.
     mutating func armed(at now: Date) -> Date {
         if let armedAt { return armedAt }
         armedAt = now
         return now
+    }
+
+    /// Drops every remembered key that the list no longer enumerates — the prune that keeps the
+    /// bound about live work (item 5 review, P2-1 and P2-2).
+    ///
+    /// Two leaks made this necessary and it closes both at once, plus every future one of the same
+    /// shape. A key leaves its list without passing the pass's own `noteFinal` whenever some
+    /// **other** door finishes it (the live delivery door files a receipt job 4's loop never
+    /// attempted) or whenever the list's own enumeration narrows under it (a routed type dropping
+    /// out of `projectableRoutedTypeTokens` — the age gate flipping off, or item 6's heart token,
+    /// which is never on that list at all). Such a key costs no slot, because
+    /// ``MeshRoutedRetryPlan`` filters the share against what the pass enumerated — but it does
+    /// count toward ``isAtCapacity``, and at the bound ``noteRetryable(_:)`` refuses, every
+    /// genuinely retryable key reads never-attempted, and the pacing silently reverts to the
+    /// head-of-list prefix D-13.32 exists to stop.
+    ///
+    /// Keys-only, O(n) over a set bounded by the store's item cap, and idempotent.
+    ///
+    /// - Parameter live: The keys this pass enumerated.
+    mutating func retain(_ live: Set<MeshRoutedItemKey>) {
+        guard !attempted.isEmpty else { return }
+        attempted.formIntersection(live)
+        // R3: bounded by the store's item cap.
+        order.removeAll { !attempted.contains($0) }
     }
 
     /// Records that an attempted key still owes work, and moves it to the back of the queue.

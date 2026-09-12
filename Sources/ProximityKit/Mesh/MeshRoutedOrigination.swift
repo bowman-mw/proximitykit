@@ -86,12 +86,15 @@ public nonisolated enum MeshRoutedShareRefusal: String, CaseIterable, Equatable,
     /// legitimately hold two — which makes this a signal, not a race. Fail closed.
     ///
     /// **The blast radius, stated honestly** (P6 item 1 pass B review, finding 5): the resolver
-    /// answers on the FIRST bad destination and this refuses the **whole mint**, so one conflicted
-    /// member stops this origin sharing with every destination it can see — mesh-wide, and durable
-    /// across restarts, because the conflict marks ride the sealed session context. A subset target
-    /// arrives with item 6's `.singleRecipient` flip. The bounded relief until then is the mesh's
-    /// own: a departure or a removal vote takes the member off the derived roster, which both stops
-    /// it being a destination and drops its mark.
+    /// answers on the FIRST bad destination and this refuses the **whole mint**. For a
+    /// `.fullRosterAtCreation` type — a photo, a message — that is still mesh-wide, and durable
+    /// across restarts, because the conflict marks ride the sealed session context: one conflicted
+    /// member stops this origin sharing with every destination it can see. **P6 item 6 narrowed it
+    /// for `.singleRecipient` types only**: a heart has exactly one destination, so a conflicted
+    /// member stops hearts addressed to that member and no others. The asymmetry is deliberate and
+    /// is not a fix for the full-roster half; the bounded relief there is still the mesh's own — a
+    /// departure or a removal vote takes the member off the derived roster, which both stops it
+    /// being a destination and drops its mark.
     case keyMismatch
 }
 
