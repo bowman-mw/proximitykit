@@ -1846,6 +1846,9 @@ the manager's own `sessionRestoreAttempts` rather than the caller's. It **reconn
 `currentMesh` stays nil, no radio is armed, no transport starts. What it buys is addressability —
 the re-proved ledger, its derived roster, the restored key advertisements and the epoch heads a
 reconnect must merge against — so a custodied routed item can drain the moment a link forms.
+Protected-data availability is deliberately not a precondition of the call: a launch before first
+unlock must still attempt it, because the attempt is what produces the `retryAfterUnlock` outcome
+the re-entry's retry then finds pending.
 
 **P6 item 9 corrected the join-ack's own re-assert.**
 ``MeshNetworkManager/reassertCommitIntoAdoptedMesh(admittedBy:)`` names the **grant's own sender**,
@@ -1856,7 +1859,10 @@ guards on the far side of the raise. The derived roster is the fallback for a ca
 and deliberately not the rule — `armJoinerLedger` bootstraps the verifier from this device's own
 admission alone, so at the instant the grant is acknowledged the roster names the joiner and not the
 admitter. The door also answers its own durability now: the raise persists the context, and a
-refused seal there is a refused grant.
+refused seal there is a refused grant — and, since item 9's review, one whose state move is
+**unwound** rather than merely reported: `applySessionEvent` assigns the state before it performs
+the effects, so a `false` returned over a standing `.activeForeground` would have left the device
+live and beaconing under `handleAdmissionGrant`'s restored pre-join ledger.
 
 **The phase's acceptance battery** (`Tests/FernletTests/MeshP6AcceptanceTests.swift`) is eight
 serialized suites, one per clause. Its property half is a **third pipeline** on the routed
@@ -1870,9 +1876,6 @@ purpose) and the resolver then refuses every mint by name, while pipeline 1's ow
 because a text is `.fullRosterAtCreation` and a heart is `.singleRecipient` — and `routedDeliveryState`
 answers `.reclaimed` for "this device holds no record", so a roster-wide claim about a heart would
 pass at every non-recipient for the wrong reason.
-Protected-data availability is deliberately not a precondition of the call: a launch before first
-unlock must still attempt it, because the attempt is what produces the `retryAfterUnlock` outcome
-the re-entry's retry then finds pending.
 
 **The save cadence extends the one writer**, `persistSessionContext(addingEpochHead:terminating:)` —
 there is deliberately no second door over a five-state load. It saves on founding, on a verified

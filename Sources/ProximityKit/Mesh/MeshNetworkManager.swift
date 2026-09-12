@@ -9262,7 +9262,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   **False when the re-assert's own save is refused** (P6 item 6 fix review, P3-b): the
     ///   re-assert raises `.peerCommitted`, whose effect list persists the context, and answering
     ///   true over a refused seal would tell the caller a grant was recorded durably when the state
-    ///   change it produced was not.
+    ///   change it produced was not. Since item 9's review (P2-1) that state change is **unwound**
+    ///   before the `false` is returned, so the caller's rollback and this one agree on where the
+    ///   device is.
     /// - Parameter admitter: The fingerprint of the peer whose grant is being acknowledged, when
     ///   there is one. It is the commit the re-assert names; see
     ///   ``reassertCommitIntoAdoptedMesh(admittedBy:)``.
@@ -9339,6 +9341,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// nobody, nothing is raised, which is what stops a stranger's commit standing in for a
     /// member's.
     ///
+    /// **A refused save is UNWOUND, not merely reported** (P6 item 9 review, P2-1). `sessionState`
+    /// is assigned before the effect list runs, so by the time `.persistContext` is refused the
+    /// raise has already happened; answering `false` over that left the device at
+    /// `.activeForeground`, beaconing, with `handleAdmissionGrant`'s rollback having restored the
+    /// pre-join verifier underneath it — a half-rolled-back grant, which is a state no caller has
+    /// ever been written against. See ``unwindRefusedReassert(beaconWasRunning:rotationWasScheduled:nextRotationAt:)``.
+    ///
     /// - Parameter admitter: The authenticated sender of the grant, when there is one.
     /// - Returns: `false` only when the raise's own save was refused — the caller's answer, since
     ///   the grant it is acknowledging is then not durable either.
@@ -9346,13 +9355,62 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func reassertCommitIntoAdoptedMesh(admittedBy admitter: String? = nil) -> Bool {
         guard sessionState == .joining else { return true }
         guard let committed = committedSlot(admittedBy: admitter) else { return true }
+        let beaconWasRunning = beaconTimer != nil
+        let rotationWasScheduled = rotationTimer != nil
+        let nextRotationAt = lastKnownNextRotationAt
         FernletAuditLog.log("mesh.sessionState.reassertedAdoptedCommit")
         noteCommitIntoMesh(peer: committed)
         guard lastSessionEffectFailure == nil else {
+            unwindRefusedReassert(
+                beaconWasRunning: beaconWasRunning,
+                rotationWasScheduled: rotationWasScheduled,
+                nextRotationAt: nextRotationAt
+            )
             FernletAuditLog.log("mesh.admissionGrant.reassertNotDurable")
             return false
         }
         return true
+    }
+
+    /// Puts back exactly what a refused re-assert had already changed — ``joinDurably()``'s own
+    /// rollback, one door along: a half-joined state is not a state, and neither is a half-raised
+    /// commit.
+    ///
+    /// ``applySessionEvent(_:committedPeer:)`` assigns `sessionState` BEFORE it performs the effect
+    /// list, which is what makes durable-before-acknowledged mechanical for everything downstream of
+    /// `.persistContext` — and what leaves the state move itself standing when that seal is refused.
+    /// ``noteCommitIntoMesh(peer:)`` had by then also started the beacon loop and, for a
+    /// coordinator, the first rotation. So the machine goes back to `.joining` and the radio work
+    /// the raise started is stood down; the caller's `false` then describes a device that really is
+    /// where it was.
+    ///
+    /// **Only what this raise started.** A beacon or a rotation timer already running belongs to an
+    /// earlier life of this session — ``noteCommitIntoMesh(peer:)`` returns early on the first and
+    /// skips the second — so cancelling either here would tear down work this call never did.
+    ///
+    /// **Door 3's clock needs nothing put back, and that is a property rather than an omission.**
+    /// ``armSessionGiveUpClock(now:)`` refuses to arm while any slot is committed, and this door
+    /// only runs when ``committedSlot(admittedBy:)`` found one, so the `cancelSessionGiveUpClock()`
+    /// inside the raise cannot have stood a running clock down.
+    ///
+    /// `lastSessionEffectFailure` is deliberately left set, exactly as ``joinDurably()`` leaves it:
+    /// the refusal is the caller's evidence, and the next `.moved` transition clears it.
+    ///
+    /// - Parameters:
+    ///   - beaconWasRunning: Whether the beacon loop was already armed before the raise.
+    ///   - rotationWasScheduled: Whether a rotation timer was already scheduled before the raise.
+    ///   - nextRotationAt: ``lastKnownNextRotationAt`` as it stood before the raise.
+    private func unwindRefusedReassert(
+        beaconWasRunning: Bool, rotationWasScheduled: Bool, nextRotationAt: Date?
+    ) {
+        sessionState = .joining
+        guard !beaconWasRunning else { return }
+        beaconTimer?.cancel()
+        beaconTimer = nil
+        guard !rotationWasScheduled else { return }
+        rotationTimer?.cancel()
+        rotationTimer = nil
+        lastKnownNextRotationAt = nextRotationAt
     }
 
     /// The committed slot whose commit made this session live: the grant's own sender where one is
@@ -12033,6 +12091,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard recordVerifiedAdmissionDurably(
             admittedBy: senderSigningPublicKey.map(IdentityService.fingerprint(of:))
         ) else {
+            // The session half of this rollback lives behind that door: a refused save inside the
+            // re-assert unwinds its own raise (item 9 review, P2-1), so the ledger and addressing
+            // restored here and the state the machine is left in name the same device — one that
+            // never joined. Before that, this rollback restored the pre-join verifier under a
+            // device that was already `.activeForeground` and beaconing.
             membershipVerifier = ledgerBeforeJoin
             rollBackKeyAdvertisements(to: addressingBeforeJoin, version: addressingVersionBeforeJoin)
             return
@@ -13791,6 +13854,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func startBeaconLoopForTesting() {
         startBeaconLoop()
     }
+
+    /// Test seam: whether that loop is armed right now — the readable half of
+    /// ``startBeaconLoopForTesting()``.
+    ///
+    /// Read by the one cell that asserts a refused re-assert stands the beacon it started back down
+    /// (`aReAssertWhoseOwnSaveIsRefusedAnswersFalse`, P6 item 9 review P2-1). The loop is the
+    /// visible edge of "this device behaves as though it has joined", so a rollback that left it
+    /// running would be a rollback in name only.
+    var isBeaconLoopRunningForTesting: Bool { beaconTimer != nil }
 
     /// Disarms whatever the debounce window is holding, and reports what it was.
     ///
