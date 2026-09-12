@@ -741,16 +741,24 @@ clock instead of the drain.
 
 The advertisement door carries P6 item 7's **`sentAt` monotonicity guard** (D-12.12, closed). A
 peer's own digest whose signed `sentAt` is strictly BEFORE the one already recorded for it is
-refused by name (`mesh.routedInventory.staleSentAt`) and neither recorded nor answered, so
-`inventory`, `inventorySentAt` and the `quiescentLocalAsOf` stamp the answer re-writes all stand.
-The guard is on the door and not inside `recordPeerRoutedInventory` precisely because the ANSWER is
-the expensive half: a re-plan from a stale digest re-offers a delta the peer already holds and
-charges its own per-peer frame budget for it. An EQUAL stamp is admitted silently — an idempotent
-replay re-records the same value, and auditing it would turn the commonest benign duplicate into a
-named refusal. The decision itself is the pure `MeshRoutedInventoryStampRule`, which is also what
-the convergence battery's thirteenth invariant reads, so the door and the claim cannot drift. It is
-**not** charged to `MeshRoutedRefusalBudget`: D-5.12 and D-6.10 keep the two digest doors outside
-that budget, and its door count did not move.
+refused by name (`mesh.routedInventory.staleSentAt`) — refused as a **record**: `inventory`,
+`inventorySentAt` and the `quiescentLocalAsOf` stamp an admitted digest re-writes all stand. The
+peer is still **answered**, from the view already recorded (P6 item 7's fix review). That half is
+not a detail: `answerRoutedInventory` is the only caller that reaches `sendRoutedDrainBatch`, and a
+digest arrives only from the three merge doors, so a refusal that suppressed the answer left every
+delivery this device custodies for a peer whose clock stepped backwards stalled until the step
+elapsed or the 6 h ceiling fell — silently, at both ends. Answering from the recorded view costs a
+stale delta and redundant offers, bounded by `sessionFramesPerPeer` and refused at the peer as
+duplicates, and an item minted since is still offered. The guard is on the door and not inside
+`recordPeerRoutedInventory` because one verdict decides two things there: whether the record is
+written, and whether the answer may re-stamp the quiescence halves from this digest's instant. An
+EQUAL stamp is admitted silently — an idempotent replay re-records the same value, and auditing it
+would turn the commonest benign duplicate into a named refusal (its own cost is bounded, not free:
+an admitted digest runs the whole answer). The decision itself is the pure
+`MeshRoutedInventoryStampRule`, which the convergence battery's thirteenth invariant **calls**, so
+the door and the claim cannot drift. It is **not** charged to `MeshRoutedRefusalBudget`: D-5.12 and
+D-6.10 keep the two digest doors outside that budget, and its door count did not move — the
+budget's own wall now pins this fourth digest-door spelling too.
 
 The two store doors are deliberately asymmetric with the delivery family's. A record holds **other
 members'** custody receipts only, so `forwardableCustodyReceipts` never returns this device's own —

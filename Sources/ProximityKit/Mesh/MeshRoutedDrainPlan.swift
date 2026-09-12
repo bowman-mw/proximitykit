@@ -76,7 +76,8 @@ nonisolated struct MeshRoutedPeerInventory: Equatable, Sendable {
 ///
 /// A **pure** decision with no manager and no clock, for the same reason the rest of this file is
 /// pure: the property battery's I-13 (`inventorySentAt` never moves backwards at any member for any
-/// peer) reads the same rule the door applies, rather than a second, drifting copy of it.
+/// peer) **calls** ``verdict(inbound:recorded:)`` on each consecutive sample pair, rather than
+/// hand-spelling a second, drifting copy of it (P6 item 7 fix review, P2-1).
 ///
 /// `==` is ``Verdict/admit``, deliberately. A peer's own digest re-arriving byte-identical is an
 /// idempotent replay: re-recording the same inventory under the same stamp changes nothing, and
@@ -88,7 +89,9 @@ nonisolated enum MeshRoutedInventoryStampRule {
     enum Verdict: Equatable, Sendable, CaseIterable {
         /// At or after the recorded stamp (or nothing recorded yet): record it, then answer it.
         case admit
-        /// Strictly before the recorded stamp: record nothing and answer nothing.
+        /// Strictly before the recorded stamp: write no record — and answer the peer anyway, from
+        /// the view already recorded. The refusal is about this device's bookkeeping, never about
+        /// the peer's deliverability (P6 item 7 fix review, P2-2).
         case refuseStale
     }
 
@@ -315,4 +318,3 @@ nonisolated struct MeshRoutedDrainPlan: Equatable, Sendable {
         return sends
     }
 }
-

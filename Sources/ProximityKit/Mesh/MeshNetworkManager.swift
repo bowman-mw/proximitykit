@@ -1091,11 +1091,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// is strongest.
     ///
     /// Bounded at ``maxPrivacyWipeDepth`` and never negative: ``beginPrivacyWipe()`` saturates at
-    /// the cap with an audit line and ``endPrivacyWipe()`` is a no-op at zero. Saturating is the
-    /// honest failure — a ninth *concurrent* funnel would see the flag fall one `end` early — and it
-    /// is unreachable with two entry points on one actor; what the cap really refuses is an
-    /// unbounded counter, which Power of 10 rule 2 does not allow whatever the call graph says.
+    /// the cap with an audit line and ``endPrivacyWipe()`` is a no-op at zero. What the cap refuses
+    /// is an unbounded counter, which Power of 10 rule 2 does not allow whatever the call graph
+    /// says — and saturation is **not** allowed to cost the gate: ``privacyWipeOverflow`` counts the
+    /// begins past the cap so the ends still pair with them (P6 item 7's fix review, P3-7).
     @ObservationIgnored private(set) var privacyWipeDepth = 0
+
+    /// Delete-all funnels that began past ``maxPrivacyWipeDepth`` and have not yet ended (P6 item 7
+    /// fix review, P3-7).
+    ///
+    /// A saturating depth alone was fail-**open** in its own small way: the ninth begin did not
+    /// increment but the ninth end still decremented, so the gate fell one `end` early and an audit
+    /// reader counting `mesh.privacyWipe.began` against `mesh.privacyWipe.ended` saw them stop
+    /// pairing. This counter takes the overflow instead: an end drains it **before** the depth, so
+    /// `privacyWipeInProgress` stays true until the last paired end whatever the cap can represent.
+    /// It is itself capped — past `2 × maxPrivacyWipeDepth` overlapping funnels the pairing really
+    /// is lost, audited as `saturated` rather than silent, and unreachable with two `@MainActor`
+    /// entry points.
+    @ObservationIgnored private(set) var privacyWipeOverflow = 0
 
     /// Most overlapping delete-all funnels the depth counter will count (R2).
     static let maxPrivacyWipeDepth = 8
@@ -5252,14 +5265,28 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Those two bound the *cost*; they do not make a replayed advertisement inert, and the third
     /// effect is **closed here since P6 item 7** rather than named and left standing.
-    /// ``routedInventoryStampIsStale(_:from:)`` refuses a digest whose signed `sentAt` is strictly
-    /// **before** the one already recorded for that peer — one audit line
-    /// (`mesh.routedInventory.staleSentAt`), no record written and no answer planned, so `inventory`,
-    /// `inventorySentAt` and the `quiescentLocalAsOf` stamp
-    /// ``answerRoutedInventory(from:advertisedAt:now:)`` derives from it all stay as they were. An
-    /// **equal** stamp is admitted silently: a peer's own digest re-arriving byte-identical is an
-    /// idempotent replay that re-records the same value, and auditing it would make a named refusal
-    /// out of the commonest benign duplicate.
+    /// ``routedInventoryStampIsStale(_:from:)`` refuses the **record** a digest whose signed
+    /// `sentAt` is strictly **before** the one already recorded for that peer would write — one
+    /// audit line (`mesh.routedInventory.staleSentAt`), so `inventory`, `inventorySentAt` and the
+    /// `quiescentLocalAsOf` stamp
+    /// ``answerRoutedInventory(from:advertisedAt:now:recordsQuiescence:)`` derives from it all stay
+    /// as they were. An **equal** stamp is admitted silently: a peer's own digest re-arriving
+    /// byte-identical is an idempotent replay that re-records the same value, and auditing it would
+    /// make a named refusal out of the commonest benign duplicate.
+    ///
+    /// **The refusal stops the record and NOT the answer** (P6 item 7's fix review, P2-2). A peer
+    /// whose wall clock steps backwards — an NTP correction, a user time change, a relaunch on a
+    /// device that was ahead — signs every digest it mints for the next delta from the stepped-back
+    /// clock, and this door is the only thing that ever reaches `sendRoutedDrainBatch` (the digest
+    /// fires from the three merge doors and no timer). A refusal that suppressed the answer too
+    /// would therefore leave everything this device custodies for that peer undelivered until the
+    /// step elapsed, the session hit its 6 h ceiling or the process died — silently, at both ends.
+    /// So the answer runs from the view this device already holds: the plan is planned against the
+    /// RECORDED inventory, the quiescence halves are not re-stamped from the stale instant, and a
+    /// newly minted item is still offered on the peer's next digest whatever its clock says. The
+    /// cost is the one item 12 named — a stale delta and redundant offers, bounded by
+    /// ``MeshRoutedDrainBounds/sessionFramesPerPeer`` and refused at the peer as duplicates — never
+    /// a stalled delivery.
     ///
     /// The refusal is deliberately **not** charged to ``MeshRoutedRefusalBudget``: the digest family
     /// sits outside `refuseRoutedFrameBeforeStore(event:_:in:charge:)` by D-5.12/D-6.10, and the
@@ -5286,28 +5313,35 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.routedDrain.rejected", context: ["reason": "senderMismatch"])
             return
         }
-        guard !routedInventoryStampIsStale(payload, from: senderFingerprint) else { return }
-        recordPeerRoutedInventory(payload, from: senderFingerprint)
-        answerRoutedInventory(from: senderFingerprint, advertisedAt: payload.sentAt, now: now)
+        let stale = routedInventoryStampIsStale(payload, from: senderFingerprint)
+        if !stale {
+            recordPeerRoutedInventory(payload, from: senderFingerprint)
+        }
+        answerRoutedInventory(
+            from: senderFingerprint, advertisedAt: payload.sentAt, now: now,
+            recordsQuiescence: !stale
+        )
     }
 
     /// P6 item 7's monotonicity guard: whether this digest's own signed `sentAt` is **strictly
     /// before** the stamp already recorded for `peer`.
     ///
     /// Placed on ``receiveRoutedInventory(_:from:now:)`` rather than inside
-    /// ``recordPeerRoutedInventory(_:from:)`` because the refusal has to stop the **answer** too:
-    /// re-planning from a stale digest is what re-stamps `quiescentLocalAsOf` and re-offers a delta
-    /// the peer already holds, and a guard that only skipped the write would leave both.
+    /// ``recordPeerRoutedInventory(_:from:)`` because one verdict decides **two** things there:
+    /// whether the record is written at all, and whether the answer re-stamps the quiescence halves
+    /// from this digest's instant. A guard inside the record would leave the second half to a
+    /// second, drifting spelling — and what it must not do is stop the answer, which is the
+    /// deliverability half (P6 item 7's fix review, P2-2; see the door's own doc).
     ///
     /// The decision itself is ``MeshRoutedInventoryStampRule`` — pure, and the same rule the
-    /// property battery's I-13 reads, so the door and the claim cannot drift apart. The audit line
-    /// carries no fingerprint, in this family's idiom: which peer it was rides the manager's own
-    /// state, never the log.
+    /// property battery's I-13 calls, so the door and the claim cannot drift apart. The audit line
+    /// carries **no context at all**, in this family's idiom: which peer it was rides the manager's
+    /// own state, never the log.
     ///
     /// - Parameters:
     ///   - payload: The verified digest.
     ///   - peer: The advertiser, already bound to the envelope's sender by the caller.
-    /// - Returns: `true` when the digest regresses the record and must be dropped.
+    /// - Returns: `true` when the digest regresses the record, which is then not written.
     private func routedInventoryStampIsStale(
         _ payload: MeshRoutedInventoryPayload,
         from peer: String
@@ -5316,7 +5350,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             inbound: payload.sentAt, recorded: peerRoutedInventories[peer]?.inventorySentAt
         )
         guard verdict == .refuseStale else { return false }
-        FernletAuditLog.log("mesh.routedInventory.staleSentAt", context: ["peer": "redacted"])
+        FernletAuditLog.log("mesh.routedInventory.staleSentAt")
         return true
     }
 
@@ -5325,7 +5359,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// A last-writer-wins overwrite **behind** P6 item 7's monotonicity guard: the caller has
     /// already refused a strictly older `sentAt` through ``routedInventoryStampIsStale(_:from:)``,
     /// so what reaches here is at or after the recorded stamp and the record can only move forward.
-    /// An equal stamp re-writes the same value, which is what makes an idempotent replay free.
+    ///
+    /// An equal stamp re-writes the same value, so the RECORD is idempotent. The **replay** is not
+    /// free (P6 item 7's fix review, P3-3): an admitted digest runs the whole of
+    /// ``answerRoutedInventory(from:advertisedAt:now:recordsQuiescence:)`` — the hand-off claim, the
+    /// capacity sweep, a fresh plan, the quiescence write and a full answer plus batch on the wire.
+    /// Admitting `==` is still right, because a link-drop retransmission of the same frame is the
+    /// common benign case and must be answered; the word for its cost is **bounded** (by the
+    /// per-peer frame budget), not "free".
     private func recordPeerRoutedInventory(
         _ payload: MeshRoutedInventoryPayload,
         from senderFingerprint: String
@@ -5343,7 +5384,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// A store that cannot say what it holds vends no plan, so this sends **nothing at all** — not an
     /// empty answer, and certainly not a `quiescent: true` a deferred store cannot honestly claim.
-    private func answerRoutedInventory(from peer: String, advertisedAt: Date, now: Date) {
+    ///
+    /// `recordsQuiescence` is `false` on exactly one path, and that path is why this runs at all
+    /// there: the digest whose stamp ``routedInventoryStampIsStale(_:from:)`` refused (P6 item 7's
+    /// fix review, P2-2). The peer is still answered — the plan is planned from the RECORDED
+    /// inventory, so what it offers is at worst a duplicate the peer refuses, and anything minted
+    /// since is offered for the first time — but neither `localQuiescent` nor `quiescentLocalAsOf`
+    /// moves, because a stale instant in item 7's window rule is exactly what the refusal exists to
+    /// keep out. `advertisedAt` on the wire stays this digest's own `sentAt` even then: an answer
+    /// binds on `advertiserFingerprint` + `advertisedAt` at the peer
+    /// (``receiveRoutedDrainAnswer(_:from:)``), so naming any other instant would have the peer drop
+    /// the bit as unbound.
+    ///
+    /// - Parameters:
+    ///   - peer: The advertiser being answered.
+    ///   - advertisedAt: That advertisement's own signed `sentAt`.
+    ///   - now: The injected instant.
+    ///   - recordsQuiescence: Whether this device's own half of item 7's window may be re-stamped
+    ///     from `advertisedAt` — false for a digest whose record was refused as stale.
+    private func answerRoutedInventory(
+        from peer: String, advertisedAt: Date, now: Date, recordsQuiescence: Bool
+    ) {
         // P5 item 8's fourth claim door, and the only one that fires for an item that is ALREADY
         // complete under a record that is ALREADY folded. A custodian whose store answered
         // `deferred`, `corrupt` or seal-`refused` when the departure record landed is reachable by
@@ -5356,7 +5417,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // peer per session, so the cost is roster-bounded rather than per advertisement.
         sweepRoutedCapacity(for: peer, now: now)
         guard let planned = routedDrainPlan(for: peer, at: now) else { return }
-        recordLocalQuiescence(planned.quiescent, for: peer, asOf: advertisedAt)
+        if recordsQuiescence {
+            recordLocalQuiescence(planned.quiescent, for: peer, asOf: advertisedAt)
+        }
         spawnHostPinned { [weak self] in
             await self?.sendRoutedDrainAnswer(
                 to: peer, advertisedAt: advertisedAt, quiescent: planned.quiescent, now: now
@@ -12504,13 +12567,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// **Counts, it does not set** (P6 item 4 fix review P3-2, taken in item 7): see
     /// ``privacyWipeDepth`` for the two overlapping funnels a `Bool` was fail-open under. The
-    /// transcript clear runs on **every** begin, including one refused at the cap — a nested funnel
-    /// really is asking for the live transcript to go, whatever the counter can represent.
+    /// transcript clear runs on **every** begin, including one past the cap — a nested funnel really
+    /// is asking for the live transcript to go, whatever the counter can represent — and a begin the
+    /// depth cannot hold is counted in ``privacyWipeOverflow`` rather than dropped, so its own end
+    /// still has something to pair with (P6 item 7 fix review, P3-7).
     public func beginPrivacyWipe() {
         if privacyWipeDepth < Self.maxPrivacyWipeDepth {
             privacyWipeDepth += 1
         } else {
-            FernletAuditLog.log("mesh.privacyWipe.depthExceeded")
+            let saturated = privacyWipeOverflow >= Self.maxPrivacyWipeDepth
+            if !saturated {
+                privacyWipeOverflow += 1
+            }
+            FernletAuditLog.log(
+                "mesh.privacyWipe.depthExceeded",
+                context: ["overflow": String(privacyWipeOverflow),
+                          "saturated": String(saturated)]
+            )
         }
         FernletAuditLog.log("mesh.privacyWipe.began", context: ["depth": String(privacyWipeDepth)])
         clearSessionTranscript()
@@ -12519,7 +12592,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// One delete-all funnel has finished (completely or not). The routed projection may run again
     /// only when the **last** of them has: an inner funnel's `defer` lowers the depth by one and
     /// nothing else, so an outer funnel still holding the gate keeps holding it.
+    ///
+    /// An end drains ``privacyWipeOverflow`` **before** ``privacyWipeDepth``, which is what keeps
+    /// begins and ends paired past the cap: with nine overlapping funnels the ninth end is the one
+    /// that lowers the gate, not the eighth (P6 item 7 fix review, P3-7).
     public func endPrivacyWipe() {
+        if privacyWipeOverflow > 0 {
+            privacyWipeOverflow -= 1
+            return
+        }
         guard privacyWipeDepth > 0 else { return }
         privacyWipeDepth -= 1
         guard privacyWipeDepth == 0 else { return }
