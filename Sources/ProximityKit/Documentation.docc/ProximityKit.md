@@ -724,7 +724,8 @@ P5 item 6 wired the DRAIN onto that one merge path — six new types and two new
 `MeshRoutedDrainAnswerFormat`, `MeshRoutedDrainAnswer`, `MeshRoutedDrainAnswerPayload`,
 `MeshRoutedDrainAnswerMintError`, `MeshRoutedDrainAnswerRejection`,
 `MeshRoutedDrainAnswerVerifier`, plus the pure planning values `MeshRoutedPeerInventory`,
-`MeshRoutedDrainRefusalNote`, `MeshRoutedDrainBounds`, `MeshRoutedDrainChunkSend` and
+`MeshRoutedDrainRefusalNote`, `MeshRoutedDrainBounds`, `MeshRoutedDrainChunkSend`,
+`MeshRoutedInventoryStampRule` (P6 item 7's pure `sentAt` decision) and
 `MeshRoutedDrainPlan`, and `MeshRoutedCustodyEvidence` beside
 `MeshRoutedStore.recordingCustodyEvidence(item:receipt:now:)` /
 `forwardableCustodyReceipts(item:)`. The drain itself is a private section of
@@ -737,6 +738,19 @@ the drain's send door, its ingest door and its advertisement door, each taking a
 (D-6.12) because every admission, `isLive(at:)` check and `deliveredAt` stamp downstream reads that
 one instant. A battery that cannot reach them, or cannot supply the instant, is testing the wall
 clock instead of the drain.
+
+The advertisement door carries P6 item 7's **`sentAt` monotonicity guard** (D-12.12, closed). A
+peer's own digest whose signed `sentAt` is strictly BEFORE the one already recorded for it is
+refused by name (`mesh.routedInventory.staleSentAt`) and neither recorded nor answered, so
+`inventory`, `inventorySentAt` and the `quiescentLocalAsOf` stamp the answer re-writes all stand.
+The guard is on the door and not inside `recordPeerRoutedInventory` precisely because the ANSWER is
+the expensive half: a re-plan from a stale digest re-offers a delta the peer already holds and
+charges its own per-peer frame budget for it. An EQUAL stamp is admitted silently — an idempotent
+replay re-records the same value, and auditing it would turn the commonest benign duplicate into a
+named refusal. The decision itself is the pure `MeshRoutedInventoryStampRule`, which is also what
+the convergence battery's thirteenth invariant reads, so the door and the claim cannot drift. It is
+**not** charged to `MeshRoutedRefusalBudget`: D-5.12 and D-6.10 keep the two digest doors outside
+that budget, and its door count did not move.
 
 The two store doors are deliberately asymmetric with the delivery family's. A record holds **other
 members'** custody receipts only, so `forwardableCustodyReceipts` never returns this device's own —
@@ -1732,6 +1746,15 @@ items whose bytes the user had just asked to have destroyed. That refusal is abo
 retryable and charged to no item — a wipe is the gate's own answer for every item, never a fact
 about one of them.
 
+Since P6 item 7 that gate is a **depth counter** rather than a flag
+(``MeshNetworkManager/privacyWipeDepth``, with `privacyWipeInProgress` derived from it). Two wipe
+funnels are reachable at once — the delete-everything flow sets its own in-flight bit rather than
+checking it, and the duress purge hook fires the same funnel with no UI gate — and both run on the
+main actor, so a `Bool` was lowered by the inner funnel's `defer` while the outer one still had the
+routed-store purge ahead of it. Begin saturates at ``MeshNetworkManager/maxPrivacyWipeDepth`` with
+an audit line rather than growing without bound, end is a no-op at zero, and the projection comes
+back only when the LAST funnel has ended.
+
 The RECEIVER is unchanged down to and including the recipient receipt — the photo stage is final on
 durable ciphertext — and the plaintext is a later, separate pass over already-final bytes:
 ``MeshRoutedItemDelivery/openPhotoBody(_:manifest:identity:mayDecryptRoutedContent:)`` behind
@@ -1805,6 +1828,19 @@ ceiling restores as `localIdleStop` with a resume on offer (a relaunch never aut
 invariant 5), a live one past its ceiling expires *and writes the mark*, `absent` is no session, a
 deferral and a refusal are retried apart and bounded at `MeshSessionRestoreBounds.maxAttempts`, and a
 corrupt file is quarantined. The three token-less states start no session and run no writer.
+
+**P6 item 7 gave it a launch caller.** Until then the durable half had none at all — its only
+shipping driver was the routed re-entry's job 1, `retrySessionRestoreIfPending(now:)`, which answers
+nil until one attempt has been made — so on a shipping device a relaunched member held no ledger,
+no roster, no restored addressing and no rejoin bar. ``MeshNetworkManager/restoreSessionContextOncePerLaunch(now:)``
+is the public door the app's composition root calls once per process, and the per-process latch is
+the manager's own `sessionRestoreAttempts` rather than the caller's. It **reconnects nothing**:
+`currentMesh` stays nil, no radio is armed, no transport starts. What it buys is addressability —
+the re-proved ledger, its derived roster, the restored key advertisements and the epoch heads a
+reconnect must merge against — so a custodied routed item can drain the moment a link forms.
+Protected-data availability is deliberately not a precondition of the call: a launch before first
+unlock must still attempt it, because the attempt is what produces the `retryAfterUnlock` outcome
+the re-entry's retry then finds pending.
 
 **The save cadence extends the one writer**, `persistSessionContext(addingEpochHead:terminating:)` —
 there is deliberately no second door over a five-state load. It saves on founding, on a verified

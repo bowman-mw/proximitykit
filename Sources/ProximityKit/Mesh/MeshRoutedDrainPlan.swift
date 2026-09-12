@@ -69,6 +69,41 @@ nonisolated struct MeshRoutedPeerInventory: Equatable, Sendable {
     }
 }
 
+// MARK: - MeshRoutedInventoryStampRule
+
+/// Whether an inbound routed-inventory digest's own signed `sentAt` may replace the stamp already
+/// recorded for that peer (P6 item 7; plan §23.3, D-12.12 amended).
+///
+/// A **pure** decision with no manager and no clock, for the same reason the rest of this file is
+/// pure: the property battery's I-13 (`inventorySentAt` never moves backwards at any member for any
+/// peer) reads the same rule the door applies, rather than a second, drifting copy of it.
+///
+/// `==` is ``Verdict/admit``, deliberately. A peer's own digest re-arriving byte-identical is an
+/// idempotent replay: re-recording the same inventory under the same stamp changes nothing, and
+/// auditing it would turn the commonest benign duplicate into a named refusal. Only a **strictly**
+/// older stamp is a regression, and only that is refused.
+nonisolated enum MeshRoutedInventoryStampRule {
+
+    /// What one inbound stamp may do to the record it lands on.
+    enum Verdict: Equatable, Sendable, CaseIterable {
+        /// At or after the recorded stamp (or nothing recorded yet): record it, then answer it.
+        case admit
+        /// Strictly before the recorded stamp: record nothing and answer nothing.
+        case refuseStale
+    }
+
+    /// Judges one inbound stamp against the recorded one.
+    ///
+    /// - Parameters:
+    ///   - inbound: The digest's own signed `sentAt`, already floored by the payload.
+    ///   - recorded: What this device last recorded for that peer, or nil before its first digest.
+    /// - Returns: the verdict.
+    static func verdict(inbound: Date, recorded: Date?) -> Verdict {
+        guard let recorded else { return .admit }
+        return inbound < recorded ? .refuseStale : .admit
+    }
+}
+
 // MARK: - MeshRoutedDrainRefusalNote
 
 /// The last capacity refusal the drain took, kept so item 9 has a seam to surface it from.
@@ -280,3 +315,4 @@ nonisolated struct MeshRoutedDrainPlan: Equatable, Sendable {
         return sends
     }
 }
+

@@ -1071,7 +1071,34 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// an item final nor spend its turn in the retry rotation. Memory-only, and owed no
     /// `Docs/PrivacyWipeCoverage.md` row of its own (it is the wipe's own state, and it is lowered
     /// by the funnel that raised it).
-    @ObservationIgnored private(set) var privacyWipeInProgress = false
+    ///
+    /// **Derived from ``privacyWipeDepth``, not a `Bool`** (P6 item 4 fix review, P3-2): two wipe
+    /// funnels are reachable at once, and a flag would be lowered by the inner one's `defer` while
+    /// the outer still had the routed-store purge ahead of it.
+    var privacyWipeInProgress: Bool { privacyWipeDepth > 0 }
+
+    /// How many "delete everything" funnels have begun and not yet ended (P6 item 4 fix review,
+    /// P3-2 — taken in P6 item 7).
+    ///
+    /// A `Bool` was a fail-open under **overlapping** funnels, and two entry points reach
+    /// `FernletStore.deleteAllData(includingHealthKitSamples:)` with no in-flight guard between
+    /// them: `DeleteEverythingFlow.runWipe` *sets* `isDeleting` rather than checking it, and the
+    /// duress purge hook fires the same funnel from `installDuressPurgeHook` with no UI gate at all.
+    /// Both are `@MainActor`, so they interleave at the funnel's five `await`s — and the inner
+    /// funnel's `defer` lowered the flag while the outer one still had leg 11
+    /// (`rotateProximityIdentityAndPurgeDeadDrop`, the routed store's own wipe) ahead of it,
+    /// re-opening exactly the window the flag exists to close, on the path where the user's intent
+    /// is strongest.
+    ///
+    /// Bounded at ``maxPrivacyWipeDepth`` and never negative: ``beginPrivacyWipe()`` saturates at
+    /// the cap with an audit line and ``endPrivacyWipe()`` is a no-op at zero. Saturating is the
+    /// honest failure — a ninth *concurrent* funnel would see the flag fall one `end` early — and it
+    /// is unreachable with two entry points on one actor; what the cap really refuses is an
+    /// unbounded counter, which Power of 10 rule 2 does not allow whatever the call graph says.
+    @ObservationIgnored private(set) var privacyWipeDepth = 0
+
+    /// Most overlapping delete-all funnels the depth counter will count (R2).
+    static let maxPrivacyWipeDepth = 8
 
     /// Controls whether additional friends can join the active Friends session. Read at the
     /// founding (it picks the new mesh's `.open`/`.closed` mode) and at every seat and admission
@@ -5224,16 +5251,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// advertisement can drive.
     ///
     /// Those two bound the *cost*; they do not make a replayed advertisement inert, and the third
-    /// effect is named here rather than left to be rediscovered.
-    /// ``recordPeerRoutedInventory(_:from:)`` overwrites `inventory` and `inventorySentAt` with **no
-    /// `sentAt` monotonicity guard**, so a peer re-presenting its own older digest regresses this
-    /// device's recorded view of that peer's holdings, and ``answerRoutedInventory(from:advertisedAt:now:)``
-    /// then re-plans and re-stamps `quiescentLocalAsOf` from that stale instant. The cost is a stale
-    /// delta — offers the peer already holds, bounded by the same per-peer frame budget — never a
-    /// lost or double-counted delivery, and the replayer can only ever be the peer itself, which
-    /// could equally have sent the same stale digest first-hand. Pre-existing (items 5 and 6); item
-    /// 12 does not close it, and a `payload.sentAt >= state.inventorySentAt` guard is left named and
-    /// unbuilt rather than smuggled into a wiring item.
+    /// effect is **closed here since P6 item 7** rather than named and left standing.
+    /// ``routedInventoryStampIsStale(_:from:)`` refuses a digest whose signed `sentAt` is strictly
+    /// **before** the one already recorded for that peer — one audit line
+    /// (`mesh.routedInventory.staleSentAt`), no record written and no answer planned, so `inventory`,
+    /// `inventorySentAt` and the `quiescentLocalAsOf` stamp
+    /// ``answerRoutedInventory(from:advertisedAt:now:)`` derives from it all stay as they were. An
+    /// **equal** stamp is admitted silently: a peer's own digest re-arriving byte-identical is an
+    /// idempotent replay that re-records the same value, and auditing it would make a named refusal
+    /// out of the commonest benign duplicate.
+    ///
+    /// The refusal is deliberately **not** charged to ``MeshRoutedRefusalBudget``: the digest family
+    /// sits outside `refuseRoutedFrameBeforeStore(event:_:in:charge:)` by D-5.12/D-6.10, and the
+    /// budget's door count does not move for it. Nothing else about this door changes — a digest
+    /// arriving when the per-peer map is already at the roster cap is still answered, exactly as
+    /// before, because that is a fact about this device's bookkeeping and not about the digest.
     func receiveRoutedInventory(
         _ payload: MeshRoutedInventoryPayload,
         from senderFingerprint: String,
@@ -5254,18 +5286,46 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             FernletAuditLog.log("mesh.routedDrain.rejected", context: ["reason": "senderMismatch"])
             return
         }
+        guard !routedInventoryStampIsStale(payload, from: senderFingerprint) else { return }
         recordPeerRoutedInventory(payload, from: senderFingerprint)
         answerRoutedInventory(from: senderFingerprint, advertisedAt: payload.sentAt, now: now)
     }
 
+    /// P6 item 7's monotonicity guard: whether this digest's own signed `sentAt` is **strictly
+    /// before** the stamp already recorded for `peer`.
+    ///
+    /// Placed on ``receiveRoutedInventory(_:from:now:)`` rather than inside
+    /// ``recordPeerRoutedInventory(_:from:)`` because the refusal has to stop the **answer** too:
+    /// re-planning from a stale digest is what re-stamps `quiescentLocalAsOf` and re-offers a delta
+    /// the peer already holds, and a guard that only skipped the write would leave both.
+    ///
+    /// The decision itself is ``MeshRoutedInventoryStampRule`` — pure, and the same rule the
+    /// property battery's I-13 reads, so the door and the claim cannot drift apart. The audit line
+    /// carries no fingerprint, in this family's idiom: which peer it was rides the manager's own
+    /// state, never the log.
+    ///
+    /// - Parameters:
+    ///   - payload: The verified digest.
+    ///   - peer: The advertiser, already bound to the envelope's sender by the caller.
+    /// - Returns: `true` when the digest regresses the record and must be dropped.
+    private func routedInventoryStampIsStale(
+        _ payload: MeshRoutedInventoryPayload,
+        from peer: String
+    ) -> Bool {
+        let verdict = MeshRoutedInventoryStampRule.verdict(
+            inbound: payload.sentAt, recorded: peerRoutedInventories[peer]?.inventorySentAt
+        )
+        guard verdict == .refuseStale else { return false }
+        FernletAuditLog.log("mesh.routedInventory.staleSentAt", context: ["peer": "redacted"])
+        return true
+    }
+
     /// Stores the peer's verified holdings, bounded by the roster cap.
     ///
-    /// A last-writer-wins overwrite with **no `sentAt` monotonicity guard**: the peer's own replayed
-    /// older digest regresses this record (and, through
-    /// ``answerRoutedInventory(from:advertisedAt:now:)``, the `quiescentLocalAsOf` stamp derived
-    /// from it). Named on ``receiveRoutedInventory(_:from:now:)`` as the third fact about a replayed
-    /// advertisement — a stale delta, never a lost delivery — and deliberately not closed by P5
-    /// item 12.
+    /// A last-writer-wins overwrite **behind** P6 item 7's monotonicity guard: the caller has
+    /// already refused a strictly older `sentAt` through ``routedInventoryStampIsStale(_:from:)``,
+    /// so what reaches here is at or after the recorded stamp and the record can only move forward.
+    /// An equal stamp re-writes the same value, which is what makes an idempotent replay free.
     private func recordPeerRoutedInventory(
         _ payload: MeshRoutedInventoryPayload,
         from senderFingerprint: String
@@ -9402,6 +9462,42 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: Launch restore (the durable half)
 
+    /// The **app's** launch mount for the sealed session context, idempotent per process (P6 item 7).
+    ///
+    /// ``restoreSessionContextAtLaunch(now:)`` has existed since P3 item 6 with no launch caller at
+    /// all: its only shipping driver was the routed re-entry's job 1
+    /// (``retrySessionRestoreIfPending(now:)``), which returns nil until one attempt has been made —
+    /// so on a shipping device the durable half never ran, and a relaunched member held no ledger,
+    /// no roster, no restored addressing and no bar. This is the one door the composition root
+    /// calls. It answers a `Bool` rather than `MeshSessionRestoreOutcome` on purpose: the outcome
+    /// type is this module's, and the app has no business branching on it.
+    ///
+    /// **It reconnects nothing** (invariant 5). Even a perfectly live context lands in
+    /// ``MeshSessionState/localIdleStop`` with `currentMesh` still nil, no radio armed and no
+    /// transport started; arming radios from a restore is P7's run policy, not this. What it buys is
+    /// **addressability** — the re-proved membership ledger, its derived roster, the restored key
+    /// advertisements and the epoch heads a reconnect must merge against — so a custodied routed
+    /// item can drain the moment a link forms, and so a deferral has a pending outcome for the
+    /// re-entry's retry to retry.
+    ///
+    /// **Exactly once per process, decided HERE**: `sessionRestoreAttempts` is monotone and is reset
+    /// nowhere, so a re-fired launch mount is refused and audited at the manager rather than trusted
+    /// to a caller's own latch. A deferral or a refusal is re-attempted by the re-entry's bounded
+    /// retry, never by a second call to this.
+    ///
+    /// - Parameter now: The instant the ceiling is judged against.
+    /// - Returns: `true` when this call performed the launch's one restore attempt.
+    @discardableResult
+    public func restoreSessionContextOncePerLaunch(now: Date = Date()) -> Bool {
+        guard sessionRestoreAttempts == 0 else {
+            FernletAuditLog.log("mesh.sessionRestore.launchMountRepeated")
+            return false
+        }
+        FernletAuditLog.log("mesh.sessionRestore.launchMount")
+        restoreSessionContextAtLaunch(now: now)
+        return true
+    }
+
     /// Loads the sealed context at launch and maps all five load states onto what a launch may do.
     ///
     /// Nothing here reconnects: invariant 5 says a relaunch never auto-reconnects, so even a
@@ -9409,6 +9505,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The three states that carry no `LoadToken` start no session and run no writer — a deferral
     /// and a refusal are retried (bounded, and logged apart), and a corrupt file is quarantined
     /// rather than overwritten.
+    ///
+    /// Internal, and the app never calls it: the composition root's door is
+    /// ``restoreSessionContextOncePerLaunch(now:)``, which holds the per-process latch.
     ///
     /// - Parameter now: The instant the ceiling is judged against.
     /// - Returns: The outcome, also kept in ``lastSessionRestoreOutcome``.
@@ -12347,16 +12446,28 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// It is the transcript's clear, not the routed store's: the sealed store's own wipe
     /// (`MeshRoutedStore.wipeForDeleteAll`) stays where it is, later in the same funnel.
+    ///
+    /// **Counts, it does not set** (P6 item 4 fix review P3-2, taken in item 7): see
+    /// ``privacyWipeDepth`` for the two overlapping funnels a `Bool` was fail-open under. The
+    /// transcript clear runs on **every** begin, including one refused at the cap — a nested funnel
+    /// really is asking for the live transcript to go, whatever the counter can represent.
     public func beginPrivacyWipe() {
-        privacyWipeInProgress = true
-        FernletAuditLog.log("mesh.privacyWipe.began")
+        if privacyWipeDepth < Self.maxPrivacyWipeDepth {
+            privacyWipeDepth += 1
+        } else {
+            FernletAuditLog.log("mesh.privacyWipe.depthExceeded")
+        }
+        FernletAuditLog.log("mesh.privacyWipe.began", context: ["depth": String(privacyWipeDepth)])
         clearSessionTranscript()
     }
 
-    /// The delete-all funnel has finished (completely or not): the routed projection may run again.
+    /// One delete-all funnel has finished (completely or not). The routed projection may run again
+    /// only when the **last** of them has: an inner funnel's `defer` lowers the depth by one and
+    /// nothing else, so an outer funnel still holding the gate keeps holding it.
     public func endPrivacyWipe() {
-        guard privacyWipeInProgress else { return }
-        privacyWipeInProgress = false
+        guard privacyWipeDepth > 0 else { return }
+        privacyWipeDepth -= 1
+        guard privacyWipeDepth == 0 else { return }
         FernletAuditLog.log("mesh.privacyWipe.ended")
     }
 

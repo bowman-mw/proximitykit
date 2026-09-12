@@ -317,11 +317,18 @@ nonisolated struct MeshRoutedTextBody: Equatable, Sendable {
     /// what makes the allowance a statement about this family rather than a hope.
     ///
     /// **Enforced on the WIRE as well as at the sender** (P6 item 4 fix review, P3-1): a body whose
-    /// decoded name exceeds it is ``MeshRoutedItemSealError/malformed``. The allowance's whole claim
-    /// is arithmetic over *this* bound, so a receiver that accepted an 8 KB name would be holding a
-    /// header the formula says cannot exist — and the name is a peer's claim, not honest input this
-    /// device produced. It is the one place the family departs from its "an allowance, not a
-    /// refusal" doctrine, and it departs by refusing a shape no shipped sender can mint.
+    /// decoded name exceeds it is ``MeshRoutedItemSealError/malformed``. The name is a peer's claim
+    /// rather than honest input this device produced, and it is the only variable-length field a
+    /// shipped sender writes into the header — so refusing a wider one refuses a shape no shipped
+    /// sender can mint.
+    ///
+    /// **The bound measures the NAME, not the header** (P6 item 4 fix review P3-3, taken in item 7 —
+    /// the earlier wording over-claimed). Nothing compares the framed header against
+    /// ``MeshRoutedItemBodyFormat/maxFramedTextHeaderByteCount`` on receive: `JSONDecoder` ignores
+    /// unknown keys, so a header padded with a key nobody reads — or this same 128-byte name written
+    /// as `\u00nn` escapes, or spread with inter-token whitespace — still decodes, bounded only by
+    /// the seal's own ``maxSealedBlobByteCount``. The family's "an allowance, not a refusal"
+    /// doctrine therefore stands unbroken for the header; this is a refusal about one field.
     static let maxSenderNameUTF8ByteCount = 128
 
     /// The text row's registry cap: the widest CIPHERTEXT a routed text item can measure, stated as
@@ -399,8 +406,8 @@ nonisolated struct MeshRoutedTextBody: Equatable, Sendable {
     /// the prefix, a prefix past the remaining bytes, an in-bounds slice that is not the header's
     /// JSON, **payload bytes that are not valid UTF-8** — and a decoded ``MeshRoutedTextHeader``
     /// whose `senderName` exceeds ``maxSenderNameUTF8ByteCount`` (P6 item 4 fix review, P3-1: the
-    /// header allowance's arithmetic is over that bound, so accepting a wider name would admit a
-    /// header the formula says cannot exist). The fourth is text's
+    /// name is the header's only variable-length field a shipped sender writes — and only the name,
+    /// never the framed header itself, which stays an allowance). The fourth is text's
     /// own, and it is the one a copy of ``MeshRoutedPhotoBody/init(decoding:)`` gets wrong:
     /// `String(decoding:as:)` **cannot fail**, it substitutes U+FFFD, and U+FFFD is neither a
     /// control character nor in `SessionMessageStore.sanitize`'s invisible-scalar list — so the
