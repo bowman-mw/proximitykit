@@ -9196,20 +9196,25 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// - Returns: `true` when the context is durable, or when there is nothing to write yet (a
     ///   grant that arrived before the mesh descriptor: the descriptor's own adoption writes it).
+    ///   **False when the re-assert's own save is refused** (P6 item 6 fix review, P3-b): the
+    ///   re-assert raises `.peerCommitted`, whose effect list persists the context, and answering
+    ///   true over a refused seal would tell the caller a grant was recorded durably when the state
+    ///   change it produced was not.
+    /// - Parameter admitter: The fingerprint of the peer whose grant is being acknowledged, when
+    ///   there is one. It is the commit the re-assert names; see
+    ///   ``reassertCommitIntoAdoptedMesh(admittedBy:)``.
     @discardableResult
-    func recordVerifiedAdmissionDurably() -> Bool {
+    func recordVerifiedAdmissionDurably(admittedBy admitter: String? = nil) -> Bool {
         guard currentMesh != nil else { return true }
         guard sessionState != .idle else {
             guard joinDurably() else { return false }
-            reassertCommitIntoAdoptedMesh()
-            return true
+            return reassertCommitIntoAdoptedMesh(admittedBy: admitter)
         }
         guard persistSessionContext(addingEpochHead: nil) else {
             FernletAuditLog.log("mesh.admissionGrant.droppedNotDurable")
             return false
         }
-        reassertCommitIntoAdoptedMesh()
-        return true
+        return reassertCommitIntoAdoptedMesh(admittedBy: admitter)
     }
 
     /// The first admission on a device with no session yet: `idle → joining`, which saves. A save
@@ -9249,11 +9254,56 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `.peerCommitted` is a self-edge that ``openBlipMergeIfReconnected(_:from:peer:)`` reads as a
     /// RECONNECT and answers with a merge window; re-raising for a second committed slot would open
     /// a merge nobody asked for. The state is the whole point, and one commit moves it.
-    private func reassertCommitIntoAdoptedMesh() {
-        guard sessionState == .joining else { return }
-        guard let committed = slots.compactMap(\.fingerprint).first else { return }
+    ///
+    /// **The slot it names is the GRANT'S OWN SENDER** (P6 item 6 fix review, P3-a). Taking
+    /// `slots.compactMap(\.fingerprint).first` took an ARBITRARY committed slot, which on a
+    /// three-device shape can be a peer of *this* device that is not a member of the mesh being
+    /// adopted — a stranger's fingerprint handed to `noteCommitIntoMesh(peer:)` as the commit that
+    /// made this session live. It was inert only because `openBlipMergeIfReconnected` excludes
+    /// `previous == .joining` and re-checks the roster itself, i.e. because of guards on the OTHER
+    /// side of the raise, which is not a property this door may rely on.
+    ///
+    /// **Not the derived roster, and that is measured rather than reasoned.** `armJoinerLedger`
+    /// bootstraps the verifier from this device's OWN admission alone, so at the instant this runs
+    /// the derived roster names the joiner and not the admitter — a roster filter here left the
+    /// yielding half of a pairwise founding at `.joining` for its whole session, which is the exact
+    /// outage P1-1 fixed. The admitter is threaded down from
+    /// ``handleAdmissionGrant(_:from:senderSigningPublicKey:)``'s authenticated sender instead,
+    /// which is a stronger statement than roster membership: it is the peer whose grant this save
+    /// is acknowledging.
+    ///
+    /// The roster is still the fallback for a caller with no grant to name — and where it names
+    /// nobody, nothing is raised, which is what stops a stranger's commit standing in for a
+    /// member's.
+    ///
+    /// - Parameter admitter: The authenticated sender of the grant, when there is one.
+    /// - Returns: `false` only when the raise's own save was refused — the caller's answer, since
+    ///   the grant it is acknowledging is then not durable either.
+    @discardableResult
+    func reassertCommitIntoAdoptedMesh(admittedBy admitter: String? = nil) -> Bool {
+        guard sessionState == .joining else { return true }
+        guard let committed = committedSlot(admittedBy: admitter) else { return true }
         FernletAuditLog.log("mesh.sessionState.reassertedAdoptedCommit")
         noteCommitIntoMesh(peer: committed)
+        guard lastSessionEffectFailure == nil else {
+            FernletAuditLog.log("mesh.admissionGrant.reassertNotDurable")
+            return false
+        }
+        return true
+    }
+
+    /// The committed slot whose commit made this session live: the grant's own sender where one is
+    /// named and committed, else the first committed slot the derived roster knows.
+    ///
+    /// A device joining somebody else's mesh may hold slots facing peers that mesh has never
+    /// admitted; only a member's commit — or the admitter's — is the commit that counts.
+    private func committedSlot(admittedBy admitter: String?) -> String? {
+        // R2: bounded by the slot cap.
+        let committed = slots.compactMap(\.fingerprint)
+        if let admitter, committed.contains(admitter) { return admitter }
+        guard let roster = membershipVerifier?.roster else { return nil }
+        // R2: bounded by the slot cap.
+        return committed.first { roster.contains(fingerprint: $0) }
     }
 
     /// Keeps a just-verified record only if the context that now contains it reached the disk.
@@ -11914,7 +11964,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // P3 item 6, plan §3.6: the admission is verified, so the context is written BEFORE this
         // device adopts the epoch, unwraps the key or starts a beacon — before, in other words,
         // anything tells the user or the peers that it has joined.
-        guard recordVerifiedAdmissionDurably() else {
+        // The admitter is threaded down so the re-assert names the commit that made THIS session
+        // live rather than an arbitrary committed slot (P6 item 6 fix review, P3-a): at this instant
+        // the bootstrapped roster names only this device, so a roster filter would name nobody.
+        guard recordVerifiedAdmissionDurably(
+            admittedBy: senderSigningPublicKey.map(IdentityService.fingerprint(of:))
+        ) else {
             membershipVerifier = ledgerBeforeJoin
             rollBackKeyAdvertisements(to: addressingBeforeJoin, version: addressingVersionBeforeJoin)
             return

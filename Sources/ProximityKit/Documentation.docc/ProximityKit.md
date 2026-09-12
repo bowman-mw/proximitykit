@@ -1838,6 +1838,30 @@ the manager's own `sessionRestoreAttempts` rather than the caller's. It **reconn
 `currentMesh` stays nil, no radio is armed, no transport starts. What it buys is addressability —
 the re-proved ledger, its derived roster, the restored key advertisements and the epoch heads a
 reconnect must merge against — so a custodied routed item can drain the moment a link forms.
+
+**P6 item 9 corrected the join-ack's own re-assert.**
+``MeshNetworkManager/reassertCommitIntoAdoptedMesh(admittedBy:)`` names the **grant's own sender**,
+threaded down from `handleAdmissionGrant`'s authenticated sender, rather than the first committed
+slot it happens to hold: a device joining somebody else's mesh may hold slots facing peers that mesh
+never admitted, and handing one of those to `noteCommitIntoMesh(peer:)` was inert only because of
+guards on the far side of the raise. The derived roster is the fallback for a caller with no grant
+and deliberately not the rule — `armJoinerLedger` bootstraps the verifier from this device's own
+admission alone, so at the instant the grant is acknowledged the roster names the joiner and not the
+admitter. The door also answers its own durability now: the raise persists the context, and a
+refused seal there is a refused grant.
+
+**The phase's acceptance battery** (`Tests/FernletTests/MeshP6AcceptanceTests.swift`) is eight
+serialized suites, one per clause. Its property half is a **third pipeline** on the routed
+convergence rig: `MeshRoutedFeaturePipeline.featureRouting` converges the advertised-key set first
+and only then mints P6's two rows — a text through the real `sendTempMessage(_:)` and a heart through
+the real `sendSessionHeart(to:)` — inside a bounded two-round window whose interleaving is a seeded
+draw. The ordering is the reason it is a third pipeline rather than four more lines in the first:
+nothing converges the advertisement set before the heal (`linkBranches` raises no `.peerCommitted` on
+purpose) and the resolver then refuses every mint by name, while pipeline 1's own mint must come
+*before* the heal or its lock window is vacuous. The two rows are judged with different audiences,
+because a text is `.fullRosterAtCreation` and a heart is `.singleRecipient` — and `routedDeliveryState`
+answers `.reclaimed` for "this device holds no record", so a roster-wide claim about a heart would
+pass at every non-recipient for the wrong reason.
 Protected-data availability is deliberately not a precondition of the call: a launch before first
 unlock must still attempt it, because the attempt is what produces the `retryAfterUnlock` outcome
 the re-entry's retry then finds pending.
