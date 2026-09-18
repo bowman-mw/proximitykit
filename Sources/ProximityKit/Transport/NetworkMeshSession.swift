@@ -448,6 +448,10 @@ final class NetworkMeshSession {
     private var advertisedFields: [String: String] = [:]
     private var listenerIsReady = false
     private var listenerIsAdvertised = false
+    /// Whether ``pauseDiscovery()`` has stood the listener and browser down over a still-running
+    /// radio. Mirrors `MeshMultipeerSession.isDiscoveryPaused`, and for the same reason: a late
+    /// state callback must not bring browsing back up behind a hold.
+    private var isDiscoveryPaused = false
     /// When the re-propose sweep last ran. Nil until the first sweep, so the **first** poll tick
     /// after the radio starts sweeps immediately and the interval governs every tick after it.
     private var lastReproposedAt: Date?
@@ -497,19 +501,58 @@ final class NetworkMeshSession {
     }
 
     /// Republishes the TXT record. The listener is recreated rather than mutated, matching the
-    /// stop-and-recreate pattern the MC advertiser needs; a no-op while stopped.
+    /// stop-and-recreate pattern the MC advertiser needs; a no-op while stopped, and a **record
+    /// only** while ``pauseDiscovery()`` is holding.
+    ///
+    /// The fields are stored before either guard on purpose: ``resumeDiscovery()`` re-mints the
+    /// listener from `advertisedFields`, so what a held radio is told here is what it advertises
+    /// when it comes back (review findings F-3/F-5).
     func updateDiscoveryInfo(_ discoveryInfo: [String: String]) {
         advertisedFields = MeshLinkAdvertisement.publishedFields(from: discoveryInfo)
+        // Re-minting here would put the Bonjour registration and the accept path back up behind
+        // shut doors — the silent un-pause `MeshMultipeerSession` has always guarded against, and
+        // the reason a republish during a hold must only be remembered.
+        guard !isDiscoveryPaused else { return }
         guard isRunning else { return }
-        listenerTask?.cancel()
-        listenerTask = nil
-        listener = nil
-        listenerIsReady = false
-        listenerIsAdvertised = false
+        cancelListener()
         do {
             try startListener()
         } catch {
             report("The QUIC listener could not be republished: \(error)")
+        }
+    }
+
+    /// "Closes" the radio: stops browsing AND advertising while KEEPING every tunnel, the link
+    /// table, the heartbeat schedule and the TLS identity — the QUIC half of
+    /// ``MeshNetworkManager/holdCommittedLinks()``, and the counterpart of
+    /// `MeshMultipeerSession.pauseDiscovery()`.
+    ///
+    /// Standing the **listener** down is the only way to withdraw the Bonjour registration, and it
+    /// is the same teardown ``updateDiscoveryInfo(_:)`` already performs on a running radio with
+    /// live tunnels — so a republish and a pause disturb a tunnel equally, which is to say not at
+    /// all. An outbound tunnel is its own ``NetworkConnection`` and never went through the listener;
+    /// an inbound one is owned by its own task in `pendingInbound`/`tunnels`, not by the listener's.
+    /// What the pause does cost is the accept path: nothing new can dial in while it holds, which
+    /// is exactly the admission door the owner is closing.
+    ///
+    /// The poll keeps running: heartbeats are what hold a committed tunnel open.
+    func pauseDiscovery() {
+        guard isRunning, !isDiscoveryPaused else { return }
+        isDiscoveryPaused = true
+        cancelBrowser()
+        cancelListener()
+    }
+
+    /// Reopens a paused radio: the listener is re-minted under the same TLS identity and instance
+    /// name, and the browser follows it back up through `startBrowserWhenReady()` once the listener
+    /// is both ready and advertised. No-op unless ``pauseDiscovery()`` is holding.
+    func resumeDiscovery() {
+        guard isRunning, isDiscoveryPaused else { return }
+        isDiscoveryPaused = false
+        do {
+            try startListener()
+        } catch {
+            report("The QUIC listener could not be resumed: \(error)")
         }
     }
 
@@ -545,6 +588,7 @@ final class NetworkMeshSession {
         listenerIsAdvertised = false
         lastReproposedAt = nil
         lastBrowseSetCount = 0
+        isDiscoveryPaused = false
         isRunning = false
     }
 
@@ -656,6 +700,14 @@ final class NetworkMeshSession {
     /// How many inbound connections are mid-introduction, holding no roster slot.
     var pendingInboundCountForTesting: Int { pendingInbound.count }
 
+    /// Whether ``pauseDiscovery()`` is holding this radio. The read that lets a test assert a pause
+    /// is refused on a radio that never started, and cleared by ``stop()``.
+    var isDiscoveryPausedForTesting: Bool { isDiscoveryPaused }
+
+    /// The TXT fields this radio would advertise. The read that lets a test assert
+    /// ``updateDiscoveryInfo(_:)`` RECORDED what it was told on a radio it may not re-mint.
+    var advertisedFieldsForTesting: [String: String] { advertisedFields }
+
     /// Books a pending inbound connection behind a stub task, so the introduction deadline can be
     /// driven at tier 1. The sweep cancels the stub exactly as it would a real connection's task.
     func bookPendingInboundForTesting(_ key: MeshLinkKey, startedAt: Date) {
@@ -761,11 +813,30 @@ private extension NetworkMeshSession {
         }
     }
 
+    /// Stands the browser down and forgets it, keeping every tunnel. Shared by the pause and, by
+    /// name rather than by repetition, readable beside `cancelListener()`.
+    func cancelBrowser() {
+        browserTask?.cancel()
+        browserTask = nil
+        browser = nil
+        lastBrowseSetCount = 0
+    }
+
+    /// Stands the listener down and forgets it, keeping every tunnel. The five lines
+    /// ``updateDiscoveryInfo(_:)`` and ``pauseDiscovery()`` both need before a re-mint.
+    func cancelListener() {
+        listenerTask?.cancel()
+        listenerTask = nil
+        listener = nil
+        listenerIsReady = false
+        listenerIsAdvertised = false
+    }
+
     /// Starts browsing once the listener is both ready and advertised — browsing earlier finds
     /// peers this device cannot yet be found by, which is how one side of a pair ends up dialing
     /// into a service that is not registered.
     func startBrowser() {
-        guard isRunning, browser == nil else { return }
+        guard isRunning, !isDiscoveryPaused, browser == nil else { return }
         let browser = NetworkBrowser(
             for: .bonjour(Self.friendServiceType, includeTxtRecord: true),
             using: Self.connectionParameters().parameters
@@ -816,7 +887,7 @@ private extension NetworkMeshSession {
     }
 
     func startBrowserWhenReady() {
-        guard listenerIsReady, listenerIsAdvertised else { return }
+        guard listenerIsReady, listenerIsAdvertised, !isDiscoveryPaused else { return }
         startBrowser()
     }
 
@@ -882,7 +953,7 @@ private extension NetworkMeshSession {
     /// The local advertisement is filtered out by instance name — the same self-exclusion the
     /// presence radio does, and necessary because a device browses its own Bonjour registration.
     func observe(_ endpoints: [Bonjour.Endpoint]) {
-        guard isRunning else { return }
+        guard isRunning, !isDiscoveryPaused else { return }
         let now = Date()
         let bounded = endpoints.prefix(MeshSessionIdentityMap.maxTrackedEndpoints)
         var seen: Set<MeshLinkKey> = []
@@ -946,6 +1017,7 @@ private extension NetworkMeshSession {
     ///
     /// Bounded by ``browsedEndpoints``, itself bounded by ``MeshSessionIdentityMap/maxTrackedEndpoints``.
     func reproposeIdleBrowsedPeers(now: Date) {
+        guard !isDiscoveryPaused else { return }
         guard pendingInbound.isEmpty else { return }
         if let last = lastReproposedAt, now.timeIntervalSince(last) < Self.reproposeIntervalSeconds {
             return

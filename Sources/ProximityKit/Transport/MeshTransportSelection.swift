@@ -152,6 +152,21 @@ protocol MeshTransportSession: AnyObject {
     /// Frees one peer's link. Best-effort on both radios — the owner's record eviction is what
     /// actually drives teardown.
     func disconnectPeer(_ peer: PeerHandle)
+
+    /// Stops browsing and advertising while KEEPING the session and every live connection — the
+    /// radio half of ``MeshNetworkManager/holdCommittedLinks()``.
+    ///
+    /// Deliberately not ``stop()``: that one disconnects, drops every peer-keyed record and, on the
+    /// QUIC radio, discards the TLS identity. This one only goes quiet to peers that are not
+    /// already connected. Idempotent, and a no-op on a radio that never started.
+    func pauseDiscovery()
+
+    /// Reopens a paused radio, and nothing else. Idempotent, and a no-op unless
+    /// ``pauseDiscovery()`` ran.
+    ///
+    /// It is also what ``startRadios(discoveryInfo:)`` does to a radio that is already running, so
+    /// the owner's one re-arm funnel (`startSearching()`) undoes a hold without naming this verb.
+    func resumeDiscovery()
 }
 
 // MARK: - Conformances
@@ -201,6 +216,20 @@ extension NetworkMeshSession: MeshTransportSession {
     /// the owner's start path is the same on both radios, and the MC one cannot throw. The symptom
     /// a user sees — the discovery-failure banner — is identical either way.
     func startRadios(discoveryInfo: [String: String]) {
+        // A radio that is already running is, on this path, a PAUSED one: `start(discoveryInfo:)`
+        // guards `!isRunning`, so without this arm the hold's inverse would be a silent no-op and
+        // this radio would stay dark for the rest of the session. The MC radio self-heals inside
+        // its own `start(serviceType:discoveryInfo:)`, which clears the pause and recreates both.
+        guard !isRunning else {
+            // The caller's fields are not thrown away with the start (review finding F-5):
+            // `resumeDiscovery()` re-mints the listener from the STORED advertisement, so a resume
+            // that skipped this would republish whatever was advertised when the radio last
+            // started — the member count and mesh label of another moment. `updateDiscoveryInfo`
+            // only records them while the radio is paused, so the re-mint happens once, below.
+            updateDiscoveryInfo(discoveryInfo)
+            resumeDiscovery()
+            return
+        }
         do {
             try start(discoveryInfo: discoveryInfo)
         } catch {

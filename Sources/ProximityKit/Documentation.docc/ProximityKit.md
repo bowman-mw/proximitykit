@@ -30,6 +30,15 @@ list in the manifest is the truth.
 ``ProximityRecipeShareManager`` for recipe pairing, ``PresenceManager`` for presence hearts)
 runs one shared radio multiplexed into per-peer channels — a `MeshMultipeerSession` on every
 shipping path (the friend mesh *selects* its radio; see Transport below).
+The friend mesh has **three** discovery verbs, not two: ``MeshNetworkManager/startJoin()`` and
+``MeshNetworkManager/stopJoin()``, and — since P8 item 3 —
+``MeshNetworkManager/holdCommittedLinks()``, which stops browsing and closes the admission doors
+while KEEPING every committed slot, its coordinator and the group-key state. `stopJoin()` cannot do
+that (it funnels through `stopSearching()`, which cancels every coordinator and clears the group
+key), and a background continuation task holding a live session is exactly the caller that needs
+it. Its inverse is ``MeshNetworkManager/resumeSearchingForPartitionedMesh()``, and its radio half is
+`MeshTransportSession.pauseDiscovery()` / `resumeDiscovery()` — a pause that keeps the session and
+every live connection, which `stop()` does not.
 All three resolve the display name they advertise the same way
 (host preference, device name as fallback), and the peer-supplied names that reach chat, hearts,
 vouches, and the keep-as-friend rows pass one sanitize-or-"A friend" coercion; both live in

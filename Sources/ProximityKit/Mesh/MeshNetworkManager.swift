@@ -239,6 +239,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
     public private(set) var sessionHeartState: SessionHeartState = .idle
     public var isSearching = false
+
+    /// Whether the admission doors are open — the ONE flag ``holdCommittedLinks()`` closes, and the
+    /// only thing between a held background session and the next stranger to dial in.
+    ///
+    /// Read by all three doors and by nothing else: ``handlePeerDiscovered(_:)`` (the outbound
+    /// half), the `shouldAcceptInvitation` gate in ``makeTransportHandlers()`` — MC's invitation
+    /// gate *and* the QUIC radio's `invitationGate` — and ``channelAdmission(for:)``, the seat
+    /// decision a freshly connected channel enters through.
+    ///
+    /// It is deliberately **not** ``isSearching``. No door reads that flag, and `mayLinkToDiscoveredPeers`
+    /// is `isSessionOpen || currentMesh != nil` — true in exactly the state a hold runs in — so
+    /// lowering `isSearching` alone would stop this device browsing and still admit everybody who
+    /// browsed *it*.
+    ///
+    /// **A stale `false` cannot survive into a new session.** `startSearching()` is the one funnel
+    /// every start path goes through (``startJoin()`` and ``resumeSearchingForPartitionedMesh()``
+    /// both end in it) and it opens the door; `stopSearching()` opens it too, so even a teardown
+    /// leaves the flag in its default state for the next session on this manager.
+    @ObservationIgnored private var isAdmittingNewPeers = true
+
     public var meshError: String?
 
     /// A radio start-up failure (advertising or browsing failed to begin) during discovery, kept
@@ -2058,6 +2078,87 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         stopSearching()
     }
 
+    /// Stops browsing and admission while KEEPING every committed slot, its coordinator and the
+    /// group-key state — the one thing ``stopJoin()`` cannot do (P8 item 3).
+    ///
+    /// The policy's background row for a running continuation task is mesh `run`, discovery `stop`:
+    /// a live process that must stop browsing and admitting **and keep its links** (invariant 5).
+    /// `stopJoin()` funnels through `stopSearching()`, which cancels every slot coordinator, empties
+    /// `slots`, clears the group key and runs the three session-end hooks — a teardown, not a
+    /// stand-down — so until this verb existed the seam refused that row aloud rather than doing
+    /// the wrong thing quietly.
+    ///
+    /// It does **five** things and no more. It lowers ``isSearching`` (and clears the discovery
+    /// banner with it, for the same reason `stopSearching()` does: a failure is meaningful only
+    /// while a search is up). It closes the admission doors through `isAdmittingNewPeers`, which is
+    /// the half no existing flag did. It disconnects every slot that has **not** committed, because
+    /// closing the doors does nothing to a handshake already inside them: an uncommitted slot keeps
+    /// its live coordinator, and a dwell that finished behind shut doors would seat into the mesh
+    /// the doors had just refused (review finding F-2). It cancels door 3's give-up clock — see
+    /// below. And it stands the browser and advertiser down through the radio's own
+    /// `pauseDiscovery()`, which keeps the session and every live connection — unlike
+    /// `transport.stop()`, which disconnects and drops every peer-keyed record.
+    ///
+    /// What it deliberately leaves alone is the rest of `stopSearching()`'s list: the observation
+    /// loop (committed slots need it), the slot-scoped bookkeeping a held link still reads, the
+    /// committed slots and their coordinators, the epoch keyring and rotation timers, and the
+    /// session-end hooks.
+    ///
+    /// **The clock pauses with the radios** (review finding F-1). A committed link lost DURING a
+    /// hold used to arm `armSessionGiveUpClock(now:)` from the slot-loss doors, and five minutes
+    /// later door 3 ran `endSessionAfterDiscoveryTimeout()` → ``stopJoin()`` — tearing down exactly
+    /// what the hold exists to keep, on a fuse lit BECAUSE the radios went dark and uncancellable
+    /// by the re-link those dark radios made impossible. So the clock is cancelled here, refuses to
+    /// arm while the doors are shut, and is restarted by `startSearching()` on the way out. A hold
+    /// that arrives with the clock already running (the `.meshHeld` row: a mesh, no committed peer)
+    /// stands it down for the same reason.
+    ///
+    /// **What a held session cannot do** is heal a link that dropped all the way through
+    /// `handlePeerDisconnected`: that slot is gone, and with the listener and browser down the peer
+    /// cannot reach this device to re-dial anyway. The accepted cost is that such a link waits for
+    /// the foreground — a wait, not an ending, because of the clock rule above. What it CAN do is
+    /// answer a committed peer that re-asks over a link this device never saw die: doors 2 and 3
+    /// excuse a peer whose slot is committed, and only such a peer.
+    ///
+    /// The inverse is ``resumeSearchingForPartitionedMesh()``, whose `!isSearching` guard this verb
+    /// satisfies on purpose, and whose `startSearching()` re-opens the doors, the clock and the
+    /// radio. That inverse also guards `currentMesh != nil`, so it is a no-op for a pair that
+    /// committed without ever founding — unreachable since P6 item 2 founds a mesh at the first
+    /// commit, and named because it is the one shape a hold would be one-way in (finding F-8).
+    ///
+    /// **Idempotent by effect**, and safe over a session that was not searching: every line assigns
+    /// a known value or calls something that guards itself (`pauseDiscovery()` no-ops unless
+    /// discovery is up; the second sweep finds no uncommitted slot; the clock is already down). A
+    /// repeat call does re-emit the audit line, which is deliberate — that line records a call.
+    public func holdCommittedLinks() {
+        isSearching = false
+        isAdmittingNewPeers = false
+        discoveryError = nil
+        disconnectUncommittedSlotsForHold()
+        cancelSessionGiveUpClock()
+        transport.pauseDiscovery()
+        FernletAuditLog.log(
+            "mesh.session.linksHeld",
+            context: ["slots": "\(slots.count)", "committed": "\(hasCommittedPeer)"]
+        )
+    }
+
+    /// Disconnects every slot the hold is **not** keeping: the ones with no fingerprint, which is
+    /// this codebase's only spelling of "not committed".
+    ///
+    /// Reuses `disconnectSlot(_:)` rather than repeating its teardown, so an uncommitted slot dies
+    /// here exactly as it dies anywhere else — coordinator cancelled, link freed through
+    /// `kickEvictedPeer`, every per-slot record dropped with it. Called AFTER `isAdmittingNewPeers`
+    /// is lowered, so the `armSessionGiveUpClock(now:)` each disconnect ends with is refused rather
+    /// than lighting the fuse the hold is putting out.
+    private func disconnectUncommittedSlotsForHold() {
+        // R2: bounded by `slots`, itself capped at `maxSlotsDuringOverflowEvaluation`. The loop
+        // walks a value copy, so `disconnectSlot`'s removal from `slots` cannot disturb it.
+        for slot in slots where slot.fingerprint == nil {
+            disconnectSlot(slot)
+        }
+    }
+
     /// Re-arms the radios for a session whose **mesh outlived its links** — ``startJoin()`` minus
     /// every reset (P6 item 2).
     ///
@@ -2134,13 +2235,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// not a session end any more (item 2's fix), so something has to start counting or "a pair that
     /// never re-links eventually ends" is only true when the user happens to bounce the tab.
     ///
-    /// Refuses — and cancels any standing clock — for a session that has no mesh (the ledgerless
-    /// pairwise shape ends at slot loss, door 4), still has a peer, or has already ended by another
-    /// door. Idempotent: re-arming replaces the deadline rather than stacking a second task.
+    /// Refuses — and cancels any standing clock — for a session that is HELD (see below), has no
+    /// mesh (the ledgerless pairwise shape ends at slot loss, door 4), still has a peer, or has
+    /// already ended by another door. Idempotent: re-arming replaces the deadline rather than
+    /// stacking a second task.
+    ///
+    /// **The hold leg is load-bearing** (review finding F-1). `holdCommittedLinks()` takes the
+    /// radios down, so a link lost while it holds would otherwise light a five-minute fuse toward
+    /// ``stopJoin()`` that nothing could cancel: the re-link that cancels this clock is exactly what
+    /// the dark radios made impossible. There is no search to give up on while the doors are shut,
+    /// and `startSearching()` re-arms on the way back out.
     ///
     /// - Parameter now: The injected instant the deadline is measured from.
     private func armSessionGiveUpClock(now: Date) {
-        guard currentMesh != nil, !hasCommittedPeer, isSessionLive else {
+        guard isAdmittingNewPeers, currentMesh != nil, !hasCommittedPeer, isSessionLive else {
             cancelSessionGiveUpClock()
             return
         }
@@ -10732,6 +10840,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         handlers.shouldAcceptInvitation = { [weak self] peer in
             guard let self else { return false }
+            // Door 2. A held session admits nobody NEW on either radio — this closure is MC's
+            // invitation gate and the QUIC radio's `invitationGate` — but it excuses a peer whose
+            // slot is COMMITTED, so a committed link that re-asks across a hold is healed rather
+            // than refused (review finding F-4). An uncommitted slot is not excused: the hold
+            // disconnected it.
+            guard self.isAdmittingNewPeers || self.hasCommittedSlot(for: peer) else { return false }
             // Blocklist is enforced at identity-introduction time by the slot coordinator.
             // A closed *mesh* must still accept its own members' links — see
             // ``mayLinkToDiscoveredPeers``; this closure is the QUIC radio's `invitationGate`, and
@@ -10776,7 +10890,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // designated inviter (higher session id), retry up to maxPeerRetries times. Without this, a
         // transient socket failure permanently strands the session because the browser won't
         // re-fire onPeerDiscovered for a peer it already found.
-        guard isProximityJoin, mayLinkToDiscoveredPeers, !wasCommitted, !wasKickedLocally else { return }
+        // `isAdmittingNewPeers` first (review finding F-6): a held session schedules no retry at
+        // all, and the same flag is re-read inside the closure for the hold that begins during the
+        // two-second window. No committed-peer excuse is owed here — `!wasCommitted` above means
+        // this path only ever dials a peer the hold has no link with.
+        guard isAdmittingNewPeers, isProximityJoin, mayLinkToDiscoveredPeers,
+              !wasCommitted, !wasKickedLocally else { return }
         guard shouldInitiateInvite(to: peer) else { return }
         let retryCount = peerRetryCount[peer.endpoint, default: 0]
         guard retryCount < Self.maxPeerRetries else { return }
@@ -10788,7 +10907,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             } catch {
                 return
             }
-            guard let self, self.isProximityJoin, self.mayLinkToDiscoveredPeers,
+            // Door 1 again, on the one path that dials out from a detached task (review finding
+            // F-6): a held session re-invites nobody. No committed-peer excuse here, and none is
+            // owed — the retry fires only for a peer that had NOT committed.
+            guard let self, self.isAdmittingNewPeers, self.isProximityJoin,
+                  self.mayLinkToDiscoveredPeers,
                   self.slots.count < Self.maxTotalSlots,
                   !self.hasSlot(for: peer) else { return }
             self.transport.invite(peer)
@@ -10796,6 +10919,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     private func startSearching() {
+        // The hold's inverse, said once for every re-arm path: `startJoin()`, the founding resume
+        // and ``resumeSearchingForPartitionedMesh()`` all end here, so the door cannot be left shut
+        // by one of them. The audit line fires only when a hold is actually being undone.
+        let undoingAHold = !isAdmittingNewPeers
+        if undoingAHold {
+            FernletAuditLog.log(
+                "mesh.session.linksResumed",
+                context: ["slots": "\(slots.count)", "committed": "\(hasCommittedPeer)"]
+            )
+        }
+        isAdmittingNewPeers = true
         isSearching = true
         // P6 item 2 fix: the radios coming back over the same mesh un-ends a session the
         // five-minute timeout had given up on — otherwise a resumed pair would be permanently
@@ -10811,12 +10945,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         discoveryError = nil
         transport.startRadios(discoveryInfo: currentDiscoveryInfo())
         startObserving()
+        // Door 3's clock paused with the radios (`armSessionGiveUpClock(now:)` refuses while the
+        // doors are shut), so the way OUT of a hold is where it starts counting again — and only
+        // there: every other path through here either has no mesh yet or is already counted from
+        // the slot-loss doors. The call is self-refusing, so a resume that still holds a committed
+        // peer arms nothing at all.
+        if undoingAHold { armSessionGiveUpClock(now: Date()) }
     }
 
     private func stopSearching() {
         observationTask?.cancel()
         observationTask = nil
         isSearching = false
+        // Back to the default, so a teardown that follows a hold cannot leave the next session on
+        // this manager behind a door nothing would reopen.
+        isAdmittingNewPeers = true
         // A discovery failure is meaningful only while we are actively searching; leaving the tab
         // clears it so it never reappears stale on the next visit.
         discoveryError = nil
@@ -10952,7 +11095,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slot(for: peer) != nil
     }
 
+    /// True when `peer` holds a slot whose handshake has **committed** — `fingerprint != nil`, the
+    /// codebase's one spelling of "committed" (``hasCommittedPeer`` is the same test over every
+    /// slot). Distinct from ``hasSlot(for:)`` on purpose: this is the ONLY excuse the admission
+    /// doors make while `holdCommittedLinks()` is holding, and answering it with "holds a seat"
+    /// admits the uncommitted candidate the hold has just disconnected.
+    private func hasCommittedSlot(for peer: PeerHandle) -> Bool {
+        slot(for: peer)?.fingerprint != nil
+    }
+
     private func handlePeerDiscovered(_ peer: PeerHandle) {
+        // Door 1, and ABOVE the `isProximityJoin` branch on purpose: the open-mesh arm below is the
+        // `else` of that flag, so a restored, non-proximity mesh would reach it and dial out from
+        // behind a hold.
+        guard isAdmittingNewPeers else { return }
         // Proximity-join mode: auto-invite every peer silently; no browse list shown.
         if isProximityJoin {
             guard mayLinkToDiscoveredPeers else { return }
@@ -10998,6 +11154,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// as its control stream dying mid-frame (`MeshTransportError.invalidFrameLength`), re-dials,
     /// and is evicted again. A `localEviction` loop, not a transport defect.
     func channelAdmission(for peer: PeerHandle) -> ChannelAdmission {
+        // Door 3, first — but excused for a peer whose slot is COMMITTED, so a hold refuses the
+        // stranger and never kicks the link it exists to keep. An UNCOMMITTED slot is deliberately
+        // not excused (review finding F-2): the hold disconnects those, and letting one back
+        // through here is how a handshake completes behind shut doors. (The `.alreadySeated` answer
+        // itself is still made below, by the one spelling of that question.)
+        guard isAdmittingNewPeers || hasCommittedSlot(for: peer) else { return .kick }
         guard !isProximityJoin || mayLinkToDiscoveredPeers else { return .kick }
         guard slots.count < Self.maxSlotsDuringOverflowEvaluation else { return .kick }
         guard !hasSlot(for: peer) else { return .alreadySeated }
