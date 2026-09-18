@@ -11851,7 +11851,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return false
         }
         guard holdsNoRoutedItem(mintedIn: local.meshID) else {
-            FernletAuditLog.log("mesh.descriptor.yieldRefusedRoutedContent")
+            FernletAuditLog.log(
+                "mesh.descriptor.yieldRefusedRoutedContent", context: ["held": local.meshID.uuidString]
+            )
             return false
         }
         if incoming.members.count > 1 { return true }
