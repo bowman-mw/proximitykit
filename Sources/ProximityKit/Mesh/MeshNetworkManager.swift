@@ -9703,7 +9703,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// so on a shipping device the durable half never ran, and a relaunched member held no ledger,
     /// no roster, no restored addressing and no bar. This is the one door the composition root
     /// calls. It answers a `Bool` rather than `MeshSessionRestoreOutcome` on purpose: the outcome
-    /// type is this module's, and the app has no business branching on it.
+    /// type is this module's, and the app has no business branching on it — what the person is
+    /// told is ``sessionResumePresentation``'s fold (P7 item 5), decided here, once.
     ///
     /// **It reconnects nothing** (invariant 5). Even a perfectly live context lands in
     /// ``MeshSessionState/localIdleStop`` with `currentMesh` still nil, no radio armed and no

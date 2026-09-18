@@ -2031,6 +2031,8 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshSessionCeilingBound``
 - ``MeshSessionCeilingVerdict``
 - ``MeshSessionPollReport``
+- ``MeshSessionResumePresentation``
+- ``MeshSessionEndingPresentation``
 - ``MeshSessionRestore``
 - ``MeshSessionRestoreOutcome``
 - ``MeshSessionRestoredDisposition``
