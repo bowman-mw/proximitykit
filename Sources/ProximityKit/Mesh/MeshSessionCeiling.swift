@@ -74,10 +74,10 @@ nonisolated enum MeshSessionCeilingVerdict: Equatable, Sendable {
 /// A `nonisolated`, `Sendable` value with no clock inside it: both instants are arguments to
 /// ``verdict(now:monotonicElapsed:)``, so tests state time rather than wait for it, exactly like
 /// `MeshEpochKeyring` and `MeshRotationTriggerQueue`.
-nonisolated struct MeshSessionCeiling: Equatable, Sendable {
+public nonisolated struct MeshSessionCeiling: Equatable, Sendable {
 
     /// Plan §8.2's ceiling: six hours of membership, whatever any clock says.
-    static let ceilingSeconds: TimeInterval = 6 * 60 * 60
+    public static let ceilingSeconds: TimeInterval = 6 * 60 * 60
 
     /// Plan §8.2's ± 120 s tolerance on the signed absolute deadline, so two members whose clocks
     /// differ slightly do not end a session at visibly different moments.

@@ -31,7 +31,7 @@ import Foundation
 
 /// How a previous session ended, folded to what the person is told — four sentences for eight
 /// frozen reasons.
-public nonisolated enum MeshSessionEndingPresentation: Equatable, Sendable, CaseIterable {
+public nonisolated enum MeshSessionEndingPresentation: Hashable, Sendable, CaseIterable {
 
     /// The mesh ended for everyone: a verified termination, a final-pair termination, the counter
     /// cap, or this device developed it.
@@ -54,7 +54,7 @@ public nonisolated enum MeshSessionEndingPresentation: Equatable, Sendable, Case
 ///
 /// A value, so the whole table over `MeshSessionRestoreOutcome` is tier 1
 /// (`MeshSessionResumePresentationTests`), and the surface is a `switch` over four cases.
-public nonisolated enum MeshSessionResumePresentation: Equatable, Sendable {
+public nonisolated enum MeshSessionResumePresentation: Hashable, Sendable {
 
     /// Nothing to say: no restore attempted, a green field, a deferral or refusal the re-entry will
     /// retry, a resumable context whose offer has since been consumed, or a session surface already
@@ -100,7 +100,7 @@ public nonisolated enum MeshSessionResumePresentation: Equatable, Sendable {
     }
 }
 
-extension MeshSessionTerminationReason {
+nonisolated extension MeshSessionTerminationReason {
 
     /// The four-way fold of the eight frozen reasons, for the person.
     var presentation: MeshSessionEndingPresentation {

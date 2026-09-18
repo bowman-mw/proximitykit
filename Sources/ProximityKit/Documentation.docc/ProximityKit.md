@@ -1845,7 +1845,9 @@ ciphertext-only by construction (item 10). Nothing here gossips, asks, drains, r
 `hardDeadline` (± 120 s skew) *and* a local monotonic budget measured with `ContinuousClock`, clamped
 to six hours at construction. A wall clock set backwards cannot lengthen a session (the monotonic
 guard ends it anyway); one set forwards ends it only by the signed bound, and the recorded
-``MeshSessionTerminationReason`` names which bound did it.
+``MeshSessionTerminationReason`` names which bound did it. The struct itself is `public` for
+exactly one member — `ceilingSeconds` — which the app's `ProximitySessionPoller` reads for its
+loop bound; the guard's construction and verdict stay internal.
 
 **The launch restore maps the five load states onto seven outcomes**
 (``MeshSessionRestoreOutcome``): a terminated context restores terminated, a live one inside its
