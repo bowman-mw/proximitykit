@@ -1943,8 +1943,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// admission chain addresses nobody in mesh B.
     ///
     /// Nothing routed is dropped here, and nothing needs to be: the yield's own conditions refuse to
-    /// fire unless this device's routed index is provably EMPTY, and a roster of one can never have
-    /// staged an item of its own (`originateRoutedItem` answers `.noDestinations` first).
+    /// fire unless this device's routed index provably holds nothing minted in the newborn mesh,
+    /// and a roster of one can never have staged an item of its own (`originateRoutedItem`
+    /// answers `.noDestinations` first). Other meshes' custody stays exactly where it is.
     ///
     /// **A yielder ends with a mesh and no session ceiling — until it adopts one.** (P6 named this
     /// as a residual; P7 item 4 closed it.) `resetSessionStateMachine` nils `sessionCeiling`, and
@@ -11849,7 +11850,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard slots.allSatisfy({ $0.fingerprint == nil || $0.fingerprint == sender }) else {
             return false
         }
-        guard holdsNoRoutedItem() else {
+        guard holdsNoRoutedItem(mintedIn: local.meshID) else {
             FernletAuditLog.log("mesh.descriptor.yieldRefusedRoutedContent")
             return false
         }
@@ -11857,14 +11858,28 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return !Self.foundsPairwiseMesh(local: identity.localFingerprint, peer: sender)
     }
 
-    /// Whether this device's routed store provably holds nothing — the yield's condition 3.
+    /// Whether this device's routed store provably holds nothing minted in `meshID` — the yield's
+    /// condition 3.
     ///
     /// Fail-closed on every non-`loaded` state except `.absent`: a deferred, corrupt or
-    /// seal-refused store cannot prove it is empty, and "cannot prove" must not read as "empty"
+    /// seal-refused store cannot prove what it holds, and "cannot prove" must not read as "empty"
     /// (D-9.4's direction). `.absent` is the fresh-device state and is genuinely empty.
-    private func holdsNoRoutedItem() -> Bool {
+    ///
+    /// **This mesh's items, not the whole index** (P8 item 0, device finding (d)). The routed store
+    /// keeps custody of OTHER meshes' items until their hard deadline — that is what custody is —
+    /// so on any device that finished a session earlier the same day the index is never empty, and
+    /// reading the whole index refused every yield for up to six hours
+    /// (`mesh.descriptor.yieldRefusedRoutedContent`), in both tap orderings, because
+    /// ``reannounceToNewbornPeerIfNeeded(local:incoming:from:)`` can only ask the peer to yield.
+    /// The condition's job was never custody: it is the belt-and-braces for "a roster of one can
+    /// never have staged an item of its own", and ``unwindNewbornMesh()`` touches no routed item,
+    /// so another mesh's custody rides through the yield untouched. A PARKED record (chunks first,
+    /// no manifest yet) is a peer's item by construction, never this device's own mint, so it does
+    /// not count either.
+    private func holdsNoRoutedItem(mintedIn meshID: UUID) -> Bool {
         switch routedStore().load() {
-        case .loaded(let index, _): return index.items.isEmpty
+        case .loaded(let index, _):
+            return !index.items.contains { $0.manifest?.meshID == meshID }
         case .absent: return true
         case .deferred, .corrupt, .refused: return false
         }
