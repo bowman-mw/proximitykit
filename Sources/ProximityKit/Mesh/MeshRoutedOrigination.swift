@@ -4,9 +4,12 @@
 // Network migration P5 item 13 (plan §11, §22.1): what the SENDER door answers.
 //
 // The vocabulary is split three ways on purpose. "There was nobody to send to" is a **skip** and is
-// silent — a solo member capturing a photo has always cached it locally and sent it to nobody, and
-// turning that into an error would put a failure on the user's screen for the ordinary first
-// minute of every session. "The mint was attempted and failed" is a **refusal**, and it is visible:
+// not a failure — a solo member capturing a photo has always cached it locally and sent it to
+// nobody, and turning that into an error would put a failure on the user's screen for the ordinary
+// first minute of every session. It is not silent either, since P8 item 0 (c): the manager counts
+// it (`photosKeptOnThisPhone`) and audits it (`mesh.routedShare.skipped`), and the app says the
+// count once, because destinations are frozen at the mint and a photo that reached nobody never
+// will. "The mint was attempted and failed" is a **refusal**, and it is visible:
 // item 9's rule is refuse VISIBLY, never silently. And a staged item carries its key and chunk
 // count so the caller can say what it staged without re-reading the store.
 //
@@ -21,8 +24,11 @@ import Foundation
 
 /// Why an origination did nothing, with nothing to tell the user (P5 item 13, D-13.8).
 ///
-/// A skip is silent **for a photo**: the local echo is already on this device's own wall, and
-/// "send to nobody" is the shipped behaviour for a session that has no other members yet.
+/// A skip is not an error **for a photo**: the local echo is already on this device's own wall,
+/// and "send to nobody" is the shipped behaviour for a session that has no other members yet. It
+/// is **counted**, not silent (P8 item 0, device finding (c)): `photosKeptOnThisPhone` and one
+/// `mesh.routedShare.skipped` line per capture, so a session that ends with photos the user
+/// believed were shared is not a silent loss.
 ///
 /// **It is not silent for text** (P6 item 4). A message that reached nobody is not a copy the
 /// sender still has — destinations are frozen at the mint and there is no offline queue, so the

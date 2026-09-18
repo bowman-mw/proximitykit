@@ -1740,7 +1740,8 @@ Three things about text are not the photo row's rules. `sendTempMessage(_:)` **r
 ``MeshTextSendOutcome`` and publishes nothing — `routedShareRefusal`'s one consumer is an alert on
 the view the chat panel covers, and its copy is photo-worded — so the panel shows a non-staged
 outcome inline at the top of the compose bar — above the text field — and keeps the draft. `.noDestinations` therefore **speaks** for text where it is
-silent for photos: the founding window is real, destinations are frozen at the mint, and there is no
+**counted** for photos (`photosKeptOnThisPhone` — one sentence in the camera's info sheet and a
+glyph on the film counter, never an alert per shot; P8 item 0 (c)): the founding window is real, destinations are frozen at the mint, and there is no
 offline queue, so a message that reached nobody can never acquire a recipient later. And the local
 echo is appended only on `.staged`, because a row in a transcript is a claim that it was sent and the
 transcript has no failed-row state. What the routed path buys in exchange is the thing the legacy

@@ -318,6 +318,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var slotTrustPolicies: [UUID: FriendSessionTrustPolicy] = [:]
     @ObservationIgnored private var observationTask: Task<Void, Never>?
     public private(set) var photosAddedThisSession = 0
+
+    /// How many of this session's captures reached nobody: the routed door answered
+    /// `.skipped(.noDestinations)` — no mesh, no ledger, or a derived roster of just this device —
+    /// so the photo is on this device's own wall and nowhere else, and never will be anywhere
+    /// else: destinations are frozen at the mint and there is no offline queue (P8 item 0, device
+    /// finding (c)). A count rather than a refusal: the solo first minute of every session is
+    /// ordinary and an alert per shot would be hostile, but a session that ends with photos the
+    /// user believes were shared and were not is a silent loss. The app forks it into one sentence
+    /// (`RoutedShareRefusalCopy.photoKeptNotice(count:)`). Reset with ``photosAddedThisSession``.
+    public private(set) var photosKeptOnThisPhone = 0
     @ObservationIgnored private var sessionQuotaMeshID: UUID?
     @ObservationIgnored private var photoSessionStartedAt: Date?
     @ObservationIgnored private var activePhotoSessionID: UUID?
@@ -2024,6 +2034,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         isSessionOpen = true
         userClosedThisSession = false
         photosAddedThisSession = 0
+        photosKeptOnThisPhone = 0
         sessionQuotaMeshID = nil
         sessionPhotos.removeAll()
         // Live-roster reset only (new session). pendingFriendReview is deliberately untouched:
@@ -2202,6 +2213,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         approvedRemovalProposalIDs.removeAll()
         removalQuorum.removeAll()
         photosAddedThisSession = 0
+        photosKeptOnThisPhone = 0
         sessionQuotaMeshID = nil
         clearGroupKeyState()
         clearActiveVerifyQR()
@@ -2373,6 +2385,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if currentMesh?.meshID != sessionQuotaMeshID {
             sessionQuotaMeshID = currentMesh?.meshID
             photosAddedThisSession = 0
+            photosKeptOnThisPhone = 0
         }
         guard photosAddedThisSession < Self.maxPhotosPerSenderPerSession else {
             meshError = "You've shared the maximum of \(Self.maxPhotosPerSenderPerSession) photos in this mesh session."
@@ -2399,8 +2412,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Frames one captured photo as a routed item body and puts it through the routed sender door.
     ///
     /// The body carries **no identity claim**: who sent it is the manifest's signed
-    /// `originFingerprint`, and the signing key is the receiver's own admission ledger. Only a
-    /// refusal reaches the user, as a frozen token on ``routedShareRefusal``.
+    /// `originFingerprint`, and the signing key is the receiver's own admission ledger. A refusal
+    /// reaches the user as a frozen token on ``routedShareRefusal``; a skip — nobody to send to —
+    /// reaches them as a count on ``photosKeptOnThisPhone``; a staged item says nothing, because
+    /// the echo on the wall is the feedback.
     private func shareRoutedPhoto(
         itemID: UUID, addedAt: Date, imageData: Data, session: FriendPhotoSessionMetadata
     ) {
@@ -2421,8 +2436,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let outcome = originateRoutedItem(
             body: body, typeToken: typeToken, itemID: itemID, audience: .fullRoster, now: Date()
         )
-        guard case .refused(let refusal) = outcome else { return }
-        noteRoutedShareRefusal(refusal, error: nil)
+        switch outcome {
+        case .staged:
+            return
+        case .skipped(let skip):
+            noteRoutedPhotoSkip(skip)
+        case .refused(let refusal):
+            noteRoutedShareRefusal(refusal, error: nil)
+        }
+    }
+
+    /// The skip's one observable half (P8 item 0, device finding (c)): the capture is on this
+    /// device's wall and on no other, and never will be, so it is counted on
+    /// ``photosKeptOnThisPhone`` — which the app says as one sentence — and audited once, on the
+    /// same terms as a refusal but under its own token, because nothing failed.
+    private func noteRoutedPhotoSkip(_ skip: MeshRoutedShareSkip) {
+        // Bounded by the session quota: every skip is one of at most `maxPhotosPerSenderPerSession`
+        // captures, and the count leaves with the session.
+        photosKeptOnThisPhone += 1
+        FernletAuditLog.log(
+            "mesh.routedShare.skipped", context: ["reason": skip.rawValue, "type": "friendPhoto"]
+        )
     }
 
     /// The one user-visible half of a share refusal: the frozen token published on
