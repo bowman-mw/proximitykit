@@ -29,7 +29,7 @@
 //
 // There is also no timer in this file and none behind it. Detection is **on demand**, in the idiom
 // of `MeshNetworkManager.enforceSessionCeiling(now:monotonicElapsed:)` and `evaluateIdleLapse(now:)`
-// — P7 wires the poller that calls all three (plan §21.5).
+// — P7 item 4's `MeshNetworkManager.pollSession(now:)` calls all three, in that order, from the app's one timer (plan §21.5).
 
 import Foundation
 

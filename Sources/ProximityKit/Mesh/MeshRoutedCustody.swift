@@ -973,8 +973,9 @@ nonisolated extension MeshRoutedStore {
     /// Removes every item whose expiry has passed, taking its payload files and its stored receipts
     /// with it.
     ///
-    /// On demand only — P7 owns the poller, exactly as `enforceSessionCeiling` and
-    /// `evaluatePartition` are on-demand.
+    /// On demand only — exactly as `enforceSessionCeiling` and `evaluatePartition` are, and unlike
+    /// them NOT driven by P7 item 4's `pollSession(now:)`: the expiry sweep has its own callers on
+    /// the drain path, and a sweep per poll would be a sealed-index load every 30 s for nothing.
     func sweepingExpired(now: Date) -> MeshRoutedOutcome<MeshRoutedSweepReport> {
         var index: MeshRoutedIndex
         let token: LoadToken

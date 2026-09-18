@@ -1932,16 +1932,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// fire unless this device's routed index is provably EMPTY, and a roster of one can never have
     /// staged an item of its own (`originateRoutedItem` answers `.noDestinations` first).
     ///
-    /// **Named, not fixed: a yielder ends with a mesh and no session ceiling.**
-    /// `resetSessionStateMachine` nils `sessionCeiling`, and ``startSessionCeiling(hardDeadline:startedAt:)``
-    /// has exactly two shipping callers — ``foundMesh(_:now:)`` and the launch restore — while
-    /// `handleAdmissionGrant` restarts the beacon and arms no ceiling. So the yielder, which is one
-    /// half of every symmetric pair, ends at `.idle` with `sessionCeiling == nil`, exactly as every
-    /// proximity JOINER has since P3. It is latent rather than live because `enforceSessionCeiling`
-    /// still has no shipping caller at all: the poller that would read it is P7's
-    /// (`ProximityRunPolicy`), and arming the ceiling on the joiner side is that poller's
-    /// prerequisite, not this commit's. Nothing routed depends on it — `routedHardDeadline` is
-    /// derived from `mesh.createdAt`, which the adopted descriptor carries.
+    /// **A yielder ends with a mesh and no session ceiling — until it adopts one.** (P6 named this
+    /// as a residual; P7 item 4 closed it.) `resetSessionStateMachine` nils `sessionCeiling`, and
+    /// ``startSessionCeiling(hardDeadline:startedAt:)`` had exactly two shipping callers —
+    /// ``foundMesh(_:now:)`` and the launch restore — so the yielder, one half of every symmetric
+    /// pair, ended at `.idle` with `sessionCeiling == nil`, exactly as every proximity JOINER had
+    /// since P3, and `enforceSessionCeiling` had no shipping caller to notice. Since P7 item 4 the
+    /// descriptor adoption and the admission grant both call
+    /// ``armSessionCeilingFromAdoptedMeshIfNeeded(now:)``, which arms the deadline every member
+    /// shares (`mesh.createdAt + 6 h`, `routedHardDeadline`'s own derivation) once, and the app's
+    /// poller drives ``pollSession(now:)`` against it.
     private func unwindNewbornMesh() {
         // `clearGroupKeyState()` nils `lastRotationBlockReason` — and on the founding-failure path
         // that string is the ONE surface saying why the founding was abandoned, written by
@@ -9620,9 +9620,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Plan §10.2's partition detection, evaluated **on demand** against a supplied reachable set.
     ///
     /// There is deliberately **no new timer**: this is the same shape as
-    /// ``enforceSessionCeiling(now:monotonicElapsed:)`` and ``evaluateIdleLapse(now:)``, and P7
-    /// wires the one poller that drives all three (plan §21.5). Inventing a timer here would
-    /// duplicate that seam and give partition its own clock.
+    /// ``enforceSessionCeiling(now:monotonicElapsed:)`` and ``evaluateIdleLapse(now:)``, and
+    /// ``pollSession(now:)`` (P7 item 4) is the one seam that drives all three, in that order, from
+    /// the app's one timer (plan §21.5). Inventing a timer here would duplicate that seam and give
+    /// partition its own clock.
     ///
     /// A verdict raises a session event and nothing else: **no record is minted, and the derived
     /// roster does not move.** That is the whole of "disconnect ≠ removal" at this seam.
@@ -11660,6 +11661,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } else {
             currentMesh = incoming
         }
+        // P7 item 4: a device that ADOPTS a mesh — a joiner, or the yielding half of a symmetric
+        // founding whose `unwindNewbornMesh()` just nilled its own — arms the ceiling every member
+        // shares, so `pollSession(now:)` has something to enforce for it (P6 §12.3 finding 3).
+        armSessionCeilingFromAdoptedMeshIfNeeded(now: Date())
         isSessionOpen = currentMesh?.mode == .open
         // The re-assert runs BEFORE the republish (fix review P3-5): it is itself a `setMeshMode`,
         // which republishes, so publishing first briefly advertised the adopted OPEN mesh's
@@ -12190,6 +12195,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // with the pull protocol in P5 item 13; `localJoinedEpoch` is control plane only now.
             localJoinedEpoch = grant.currentKeyEpoch
         }
+        // P7 item 4: the grant is the second place a joiner's ceiling can be armed — a no-op when
+        // the descriptor adoption already armed it, the arm itself when the grant reached this
+        // device first.
+        armSessionCeilingFromAdoptedMeshIfNeeded(now: Date())
         startBeaconLoop()
         // One round trip to convergence (plan §10.5): ask the peer that admitted us what it holds.
         // Its reply is the bounded record re-gossip, and `MeshLedgerAdoption` rebases this device's
@@ -13328,9 +13337,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The branch is applied as an **intersection with the current full roster**, not as a
     /// substitute for it: ``branchView`` is a snapshot that a departure or removal since the last
     /// evaluation could have outdated, and a rotation must never present a member the records have
-    /// already excluded. Off a partition — including everywhere in shipping code today, since
-    /// nothing calls ``evaluatePartition(reachable:now:)`` until P7 wires the poller — this is
-    /// exactly the value it always was.
+    /// already excluded. Off a partition — which is every device until a poll
+    /// (``pollSession(now:)``, P7 item 4) judges one lost — this is exactly the value it always
+    /// was.
     private func presentedRotationRoster() -> [String] {
         let full = fullRotationRoster()
         guard let branch = branchView, branch.isPartitioned else { return full }

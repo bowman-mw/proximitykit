@@ -1341,7 +1341,11 @@ and lets the returning peer take `peerCommitted` into the merge path.
 
 Detection is **on demand**: `MeshNetworkManager.evaluatePartition(reachable:now:)` is the same shape
 as `enforceSessionCeiling(now:monotonicElapsed:)` and `evaluateIdleLapse(now:)`, with no timer of its
-own — P7 wires the one poller that drives all three. While a device is partitioned its rotation
+own — ``MeshNetworkManager/pollSession(now:)`` (P7 item 4) is the one seam that drives all three, in
+that order, from the app's one timer, and ``MeshSessionPollReport`` is what a poll says it moved. The
+same item made every ADOPTING member arm the ceiling the founder signed
+(`armSessionCeilingFromAdoptedMeshIfNeeded(now:)`), so a joiner's session ends at the same 6-hour
+bound as the founder's. While a device is partitioned its rotation
 roster is scoped to the branch (intersected with the current full roster, so a departure since the
 last evaluation still excludes), which makes the **branch coordinator the lowest fingerprint
 present** and is exactly why two branches rotating independently at the same counter mint distinct
@@ -2026,6 +2030,7 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshSessionCeiling``
 - ``MeshSessionCeilingBound``
 - ``MeshSessionCeilingVerdict``
+- ``MeshSessionPollReport``
 - ``MeshSessionRestore``
 - ``MeshSessionRestoreOutcome``
 - ``MeshSessionRestoredDisposition``
