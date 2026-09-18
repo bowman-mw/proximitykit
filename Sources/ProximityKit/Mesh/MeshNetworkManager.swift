@@ -472,6 +472,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// exceed the slot cap. Enforced explicitly rather than merely implied, because the writer
     /// sits on a wire-driven path.
     private static let maxOutstandingAdmissionRequests = maxTotalSlots
+
+    /// How many `(sender, refused mesh id)` re-announcements one mesh may spend: one per slot is
+    /// the honest maximum, so the slot cap with headroom for a peer that re-founds after a blip.
+    private static let maxNewbornReannouncements = maxTotalSlots * 2
     /// Wall-post count at which older multi-photo sessions start collapsing into one aggregated
     /// post — the bound of the aggregation loop in `progressivelyAggregatePhotoSessions`.
     private static let maxUnaggregatedWallPosts = 24
@@ -2178,6 +2182,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         membershipVerifier = nil
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
+        reannouncedNewbornMeshKeys.removeAll()
         clearKeyAdvertisementState()
         routedSweptFingerprints.removeAll()
         routedSweepsDeferredFingerprints.removeAll()
@@ -2641,8 +2646,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // A descriptor adopts a whole mesh identity, so it is member business: require a
             // COMMITTED slot. `peer` is the coordinator's connected-OR-PENDING identity, so a
             // merely-pending peer would otherwise reach `handleMeshDescriptor` with a fingerprint.
-            // A descriptor dropped in a commit-timing race is re-sent: `onSlotConnected` sends one
-            // post-commit and `announcePromotedMesh` re-broadcasts.
+            // A descriptor dropped in a commit-timing race is re-sent from the OTHER side: the
+            // late committer founds and announces its own mesh, and the early committer answers
+            // that refusal with `reannounceToNewbornPeerIfNeeded` (or yields to it). Neither
+            // `onSlotConnected`'s post-commit send nor `announcePromotedMesh` reaches this slot
+            // again — P8 item 0, device finding (a).
             guard slot?.fingerprint != nil else {
                 FernletAuditLog.log("mesh.meshDescriptor.droppedUncommittedSlot")
                 return
@@ -2703,6 +2711,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// spend this device's bytes by re-sending digests. Cleared with the session, bounded by the
     /// roster cap (plan §10.5).
     @ObservationIgnored private var reGossipedToFingerprints: Set<String> = []
+
+    /// `(sender fingerprint, refused mesh id)` pairs this device has already answered with a
+    /// re-announcement of its own descriptor (``reannounceToNewbornPeerIfNeeded(local:incoming:from:)``),
+    /// so the repair of the asymmetric-commit founding race runs ONCE per refused descriptor and
+    /// two refusing devices cannot ping-pong. Never reset within a mesh; cleared with the ledger,
+    /// exactly like ``reGossipedToFingerprints``. Bounded by ``maxNewbornReannouncements`` (R3).
+    @ObservationIgnored private var reannouncedNewbornMeshKeys: Set<String> = []
 
     // MARK: Key advertisements (network migration P6 item 1, plan §11.3 item 13(ii))
 
@@ -3046,6 +3061,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
+        reannouncedNewbornMeshKeys.removeAll()
         // Addressing is mesh-scoped exactly as the records are. The local row is minted at the
         // founder's `seedFounderAdmission(meshID:)`, NOT here: this arms an EMPTY ledger, so a
         // self-mint at this instant would be refused `signerNotAdmitted` by its own verifier.
@@ -4644,6 +4660,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             membershipVerifier = verifier
             peerInventoryDigests.removeAll()
             reGossipedToFingerprints.removeAll()
+            reannouncedNewbornMeshKeys.removeAll()
             clearKeyAdvertisementState()
             routedSweptFingerprints.removeAll()
             routedSweepsDeferredFingerprints.removeAll()
@@ -11658,6 +11675,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 currentMesh = incoming
             } else {
                 mergeMeshDescriptor(existing, incoming: incoming)
+                reannounceToNewbornPeerIfNeeded(local: existing, incoming: incoming, from: senderFingerprint)
             }
         } else {
             currentMesh = incoming
@@ -11815,6 +11833,57 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .loaded(let index, _): return index.items.isEmpty
         case .absent: return true
         case .deferred, .corrupt, .refused: return false
+        }
+    }
+
+    /// The asymmetric-commit founding race, repaired from the side that SURVIVES it (P8 item 0,
+    /// device finding (a)).
+    ///
+    /// Without UWB the two proximity commits are two taps seconds apart. The first tapper founds and
+    /// announces inside its own commit callback, but the second tapper's slot is still uncommitted,
+    /// so `dispatchMembershipPayload` drops that descriptor (`droppedUncommittedSlot`) and nothing
+    /// re-sends it. The second tapper then founds its own mesh and announces. If the first tapper's
+    /// fingerprint is the higher one it yields (``yieldsNewbornMesh(_:to:from:)``); if it is the
+    /// lower one it refuses the second's mesh as foreign — and the second never saw a descriptor it
+    /// could yield to, so both sat alone for the whole session (chat `.noDestinations`, photos
+    /// silent). `MeshFoundingRig` never crossed the uncommitted door because every cell committed
+    /// both halves before its first `settle`.
+    ///
+    /// The repair is the one post-commit, sender-authenticated event the surviving side still
+    /// gets: the refusal itself. When the refused descriptor is a newborn one-member mesh whose one
+    /// member is the sender, and ``yieldsNewbornMesh(_:to:from:)`` read from the sender's side would
+    /// say "yield" — this device's mesh has more than one member, or the pairwise order names it —
+    /// this device's own descriptor is sent to that slot once more, and the peer yields through the
+    /// existing path. The more-than-one-member leg also covers a third device that founded alone
+    /// before an established mesh's descriptor reached it. Once per `(sender, refused mesh id)`,
+    /// never reset within a mesh: a peer that refuses in turn re-announces at most once too, so two
+    /// refusals terminate instead of ping-ponging. Not a new trust decision: the slot is committed
+    /// (the door required it) and a descriptor send to a committed slot is what every commit path
+    /// already does.
+    private func reannounceToNewbornPeerIfNeeded(
+        local: MeshDescriptor, incoming: MeshDescriptor, from senderFingerprint: String?
+    ) {
+        guard incoming.meshID != local.meshID, let sender = senderFingerprint else { return }
+        guard incoming.members.count == 1, incoming.members.first?.fingerprint == sender else { return }
+        guard let slot = slots.first(where: { $0.fingerprint == sender }) else { return }
+        let survives = local.members.count > 1
+            || Self.foundsPairwiseMesh(local: identity.localFingerprint, peer: sender)
+        guard survives else { return }
+        let key = "\(sender)|\(incoming.meshID.uuidString)"
+        guard reannouncedNewbornMeshKeys.count < Self.maxNewbornReannouncements,
+              reannouncedNewbornMeshKeys.insert(key).inserted else {
+            FernletAuditLog.log(
+                "mesh.descriptor.reannounceSpent", context: ["offered": incoming.meshID.uuidString]
+            )
+            return
+        }
+        FernletAuditLog.log(
+            "mesh.descriptor.reannouncedToNewbornPeer",
+            context: ["held": local.meshID.uuidString, "offered": incoming.meshID.uuidString]
+        )
+        spawnHostPinned { [weak self] in
+            guard let self else { return }
+            await self.sendMeshDescriptor(to: slot)
         }
     }
 
