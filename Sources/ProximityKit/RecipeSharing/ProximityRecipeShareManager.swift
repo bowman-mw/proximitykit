@@ -168,6 +168,12 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         parkedSweepTask?.cancel()
     }
 
+    /// Whether the listener is up right now — the radio's own account, not the last verdict the
+    /// run policy applied to it. The seam (`ProximityRunTransition`) reads it to re-apply a verdict
+    /// the radio no longer matches: after a `didNotStart*` self-stop, `start()` is owed even
+    /// though the verdict never moved (P8 item 0, device finding (b)).
+    public var isListening: Bool { isRunning }
+
     public func start() {
         guard !isRunning else { return }
         isRunning = true
@@ -384,13 +390,15 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         session.onTransportError = { [weak self] message in
             guard let self else { return }
             self.recordDiagnostic(message)
-            // Discovery failed to (re)start (advertiser/browser didNotStart — e.g. the Bonjour
-            // restart after a record eviction's resumeDiscovery): with `isRunning` left true,
-            // ContentView's idempotent start() no-ops forever and passive listening stays dark.
-            // Stop fully so the next gate event (tab/scene/lock change) or sheet restart genuinely
-            // restarts the radio. didNotStart* only fires from start attempts — and resume runs
-            // only with no connection held — but guard on an empty connection list anyway so an
-            // unexpected error can never tear down a live pairing.
+            // Discovery failed to (re)start (advertiser/browser didNotStart — the Local Network
+            // prompt on a fresh install's first start, or the Bonjour restart after a record
+            // eviction's resumeDiscovery): with `isRunning` left true, the idempotent start()
+            // no-ops forever and passive listening stays dark. Stop fully, so `isListening` tells
+            // the truth: the app's run-policy seam reads it on every policy run and re-applies a
+            // running verdict to a stopped listener (P8 item 0, device finding (b)) — it no longer
+            // waits for a verdict edge or the share sheet's own start(). didNotStart* only fires
+            // from start attempts — and resume runs only with no connection held — but guard on an
+            // empty connection list anyway so an unexpected error can never tear down a live pairing.
             guard self.connections.isEmpty, self.isRunning else { return }
             self.stop()
             self.recordDiagnostic("Recipe share radio failed to start — listening will retry on the next app event.")

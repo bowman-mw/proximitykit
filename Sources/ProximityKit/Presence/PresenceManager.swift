@@ -234,6 +234,10 @@ public final class PresenceManager: ProximityPayloadHandling {
         for task in heartConnectTimeoutTasks.values { task.cancel() }
     }
 
+    /// Whether the presence radio is up right now — the radio's own account, on the same terms as
+    /// `ProximityRecipeShareManager.isListening`, read by the run policy's seam.
+    public var isListening: Bool { isRunning }
+
     public func start() {
         guard !isRunning else { return }
         isRunning = true
@@ -262,13 +266,29 @@ public final class PresenceManager: ProximityPayloadHandling {
             self?.removeHeartConnection(matching: peer)
         }
         session.onTransportError = { [weak self] message in
-            self?.recordDiagnostic(message)
+            self?.handleTransportError(message)
         }
         self.session = session
         session.start(serviceType: Self.serviceType, discoveryInfo: discoveryInfo())
         startEpochRotation()
         startHeartObserving()
         recordDiagnostic("Presence started.")
+    }
+
+    /// The transport reported a failure — today an advertiser or browser `didNotStart*`, which the
+    /// Local Network permission prompt guarantees on a fresh install's very first start.
+    ///
+    /// Stands the radio down (P8 item 0, device finding (b)), mirroring
+    /// `ProximityRecipeShareManager`'s handler: with `isRunning` left true the idempotent
+    /// `start()` no-ops forever over a dead radio, and the app's run-policy seam — which
+    /// re-applies a running verdict to a listener whose ``isListening`` says it is down — would
+    /// have nothing to see. `didNotStart*` only fires from start attempts, but guard on no heart
+    /// connection held anyway, so an unexpected error can never tear down a live pairing.
+    private func handleTransportError(_ message: String) {
+        recordDiagnostic(message)
+        guard heartConnections.isEmpty, isRunning else { return }
+        stop()
+        recordDiagnostic("Presence radio failed to start — the run policy re-applies it at its next run.")
     }
 
     public func stop() {
@@ -1285,6 +1305,12 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     /// Puts the manager in the running state WITHOUT starting radios (`session` stays nil; every
     /// session touch is optional-chained), deriving tags from the live vault.
+    /// Drives the transport-error handler exactly as the session would, without a radio: the
+    /// closure `start()` installs is on a session a unit test never creates.
+    func handleTransportErrorForTesting(_ message: String) {
+        handleTransportError(message)
+    }
+
     func activateForTesting() {
         guard !isRunning else { return }
         isRunning = true
