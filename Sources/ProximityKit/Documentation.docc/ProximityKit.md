@@ -39,6 +39,21 @@ key), and a background continuation task holding a live session is exactly the c
 it. Its inverse is ``MeshNetworkManager/resumeSearchingForPartitionedMesh()``, and its radio half is
 `MeshTransportSession.pauseDiscovery()` / `resumeDiscovery()` — a pause that keeps the session and
 every live connection, which `stop()` does not.
+Since P8 item 5 the manager also carries the mesh's **two session-state raises**,
+``MeshNetworkManager/beginBackgroundContinuation()`` and
+``MeshNetworkManager/endBackgroundContinuation()``: one-line public doors onto the otherwise
+internal `applySessionEvent(_:)`, spoken only by the app's continuation driver while it holds a
+`BGContinuedProcessingTask`. They are the first shipping raiser `MeshSessionEvent.backgrounded` /
+`.foregrounded` ever had, so ``MeshSessionState/continuingInBackground`` becomes reachable outside a
+test — and with it plan §24.1's deliberate disagreement: that state closes
+``MeshNetworkManager/mayCommitRoutedHeartLedgerJudgement``, because a mesh continued in the
+background holds routed ciphertext and judges no heart, while the routed access gate's foreground
+leg is a separate fact the app pushes from `ScenePhase`. Neither leg is written in terms of the
+other, and neither raise touches a radio. The pair is also the whole of
+``MeshContinuationRaising``, the two-verb seam the manager conforms to and the driver holds it as:
+a `final class` cannot be stood in for, so the driver's exhaustive sweep needs a protocol to count
+the two raises through — and behind two verbs the rest of the manager is unspellable from the app's
+continuation half.
 All three resolve the display name they advertise the same way
 (host preference, device name as fallback), and the peer-supplied names that reach chat, hearts,
 vouches, and the keep-as-friend rows pass one sanitize-or-"A friend" coercion; both live in
@@ -236,6 +251,7 @@ type has no local label). Senders keep emitting frozen English forever.
 
 - ``ProximityHost``
 - ``ProximitySupportLayout``
+- ``MeshContinuationRaising``
 
 ### Identity and signing
 

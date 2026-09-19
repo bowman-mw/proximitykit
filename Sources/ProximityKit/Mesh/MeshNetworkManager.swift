@@ -9246,6 +9246,44 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return transition
     }
 
+    /// Tells the session machine this device's scene has gone dark while a
+    /// `BGContinuedProcessingTask` keeps this mesh alive (network migration P8 item 5, plan §14).
+    ///
+    /// **Called only by the app's continuation driver, while it holds a `BGContinuedProcessingTask`**
+    /// — `MeshContinuationDriver.taskDidStart()` in the app target, on the entry into its `running`
+    /// claim, and nowhere else. `MeshContinuationRaiseWallTests` counts this raise and its sibling
+    /// at exactly one each and pins both call sites by file. A scene that merely went dark raises
+    /// NOTHING: a mesh with no continued task is suspended along with the process, and saying
+    /// otherwise would make ``MeshSessionState/continuingInBackground`` mean two different things.
+    ///
+    /// **The disagreement it produces is the point, not a side effect** (plan §24.1, §25.1). The
+    /// state leaves ``MeshSessionState/activeForeground``, which CLOSES
+    /// ``mayCommitRoutedHeartLedgerJudgement`` — a continued mesh custodies ciphertext and judges no
+    /// heart — while the routed access gate's own foreground leg is pushed separately, by the run
+    /// policy, from `ScenePhase`. The two legs never read each other: this door reads no gate, and
+    /// the gate's writer reads no session state.
+    ///
+    /// Offered from a state with no background edge it is refused by name and audited
+    /// (`mesh.sessionState.rejected`), never trapped.
+    public func beginBackgroundContinuation() {
+        applySessionEvent(.backgrounded)
+    }
+
+    /// Tells the session machine the foreground is carrying this mesh again, because the continued
+    /// task it was running under has ended (network migration P8 item 5, plan §14).
+    ///
+    /// **Called only by the app's continuation driver** — `MeshContinuationDriver.taskDidEnd(_:)`,
+    /// and only on the edges item 4's table completes a delivered task on (expiry, cancellation, the
+    /// session's own end, or the person returning). An ending of nothing completes nothing and
+    /// therefore raises nothing, so it can never tell a live foreground mesh it has just come back.
+    ///
+    /// It reopens ``mayCommitRoutedHeartLedgerJudgement``'s third leg and nothing else: the hearts a
+    /// continued mesh deferred are judged by the re-entry pass the RISING routed-access-gate leg
+    /// runs, which is the other half of the same foreground and is pushed by the run policy.
+    public func endBackgroundContinuation() {
+        applySessionEvent(.foregrounded)
+    }
+
     /// The one reconnect the machine expresses as a self-edge: a peer committing into a session
     /// that was **already live** (plan §10.3's blip, and item 1's partial heal — a peer reappearing
     /// on a branch still short of somebody, which raises no partition verdict by design).
@@ -14523,6 +14561,39 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         #endif
     }
 }
+
+// MARK: - MeshContinuationRaising
+
+/// The two session-state raises a background-continuation driver speaks, and nothing else
+/// (network migration P8 item 5, plan §14).
+///
+/// The app's `MeshContinuationDriver` holds its manager as one of these rather than as
+/// ``MeshNetworkManager`` itself, for one reason: the manager is a `final class`, so the exhaustive
+/// sweep that walks every sequence of driver calls could not otherwise COUNT the raises against the
+/// entries into and exits from the driver's `running` claim — the balance that keeps an app's
+/// continuation privilege. A protocol with exactly two members is also the narrowest reach the
+/// driver can be given: from behind this seam the whole rest of the manager — every radio verb,
+/// every store, the routed access gate — is unspellable, which is the same claim
+/// `MeshContinuationRaiseWallTests.theDriverIsSessionStateOnly` makes by needle, made by the type
+/// system instead.
+///
+/// It widens nothing: both members already existed as public doors on the manager, and the only
+/// shipping conformer is the manager itself.
+///
+/// ## Concurrency
+///
+/// `@MainActor`, because ``MeshNetworkManager`` is and the driver that speaks these is.
+@MainActor
+public protocol MeshContinuationRaising: AnyObject {
+
+    /// Tells the mesh its scene has gone dark behind a `BGContinuedProcessingTask`.
+    func beginBackgroundContinuation()
+
+    /// Tells the mesh the foreground is carrying it again, because that task has ended.
+    func endBackgroundContinuation()
+}
+
+extension MeshNetworkManager: MeshContinuationRaising {}
 
 // MARK: - MeshIntroductionAuthority
 
