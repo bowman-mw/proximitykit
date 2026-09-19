@@ -11226,6 +11226,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             payloadHandler: self,
             trustPolicy: trustPolicy,
             replayCache: replayCache,
+            // Network migration P8 item 6 (plan §14, §25.1): the mesh raises NO
+            // `ProximityForegroundAnchor` Live Activity. Two reasons, and the second is why this is
+            // unconditional rather than keyed on a running continuation. (1) A continued mesh
+            // presents the system's own `BGContinuedProcessingTask` card — title, subtitle and a
+            // progress bar — and §14 requires no duplicate UI; a conditional suppression would have
+            // a window in which both are up, and this has none. (2) The anchor was built for a 1:1
+            // transfer ("stays visible when the user leaves the app"), and a mesh seats up to
+            // `maxTotalSlots` coordinators, each with its own anchor — so the mesh path was
+            // ATTEMPTING one `Activity.request` per committed slot for a single session.
+            // **None of those requests could render** (item 6's fix round, F1):
+            // `ProximityConnectionActivityAttributes` is internal to this module and no widget in
+            // `App/FernletWidgets` declares an `ActivityConfiguration` for it, so each call either
+            // threw — audited `proximity.liveActivity.requestFailed` — or made an activity nothing
+            // draws while counting against the per-app ceiling a later workout or cooking activity
+            // needs. What this line removes is therefore the doomed requests, not a card: a person
+            // sees no change on a phone. The 1:1 paths (`ProximityRecipeShareManager`,
+            // `PresenceManager`) keep the live anchor, which is equally unrenderable today and is a
+            // P9 call — ship the widget or retire the anchor — and
+            // `ProximityLiveActivityReaper.endOrphans()` still runs once per launch.
+            foregroundAnchor: NoopProximityForegroundAnchor(),
             displayName: displayName,
             capabilities: localCapabilities(),
             timeoutSeconds: isProximityJoin ? 25 : 60

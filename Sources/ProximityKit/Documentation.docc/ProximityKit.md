@@ -53,7 +53,22 @@ other, and neither raise touches a radio. The pair is also the whole of
 ``MeshContinuationRaising``, the two-verb seam the manager conforms to and the driver holds it as:
 a `final class` cannot be stood in for, so the driver's exhaustive sweep needs a protocol to count
 the two raises through — and behind two verbs the rest of the manager is unspellable from the app's
-continuation half.
+continuation half. Item 6 added the one narrow READ beside them,
+``MeshNetworkManager/sessionContinuationReading`` → ``MeshSessionContinuationReading``: the
+monotonic elapsed seconds, this run's ceiling budget and the connected-friend count, nil when no
+ceiling is armed. It is not a field on ``MeshSessionPollReport`` because that value says what one
+poll DID and exists only on a tick, while the app reads this at two sites — the submission, whose
+request subtitle carries the count, and the tick, whose progress bar carries the fraction. Item 6
+also stopped the mesh raising ``ProximityForegroundAnchor``'s Live Activity at all: a continued mesh
+presents the system's own continued-processing card, §14 forbids the duplicate, and the mesh seats
+up to five coordinators — so the mesh path was ATTEMPTING one `Activity.request` per committed slot.
+None of those could render, which is the honest reason the suppression is unconditional and costs a
+person nothing: ``ProximityConnectionActivityAttributes`` is internal to this module and no widget in
+`App/FernletWidgets` declares an `ActivityConfiguration` for it, so each request either threw
+(audited) or made an activity nothing draws while spending the per-app Live Activity ceiling. The
+1:1 recipe-share and presence anchors are still live and are equally unrenderable — dead code in
+shipping today, whose fate (ship the widget, or retire the anchor) is a P9 decision — and the
+once-per-launch orphan reaper is untouched.
 All three resolve the display name they advertise the same way
 (host preference, device name as fallback), and the peer-supplied names that reach chat, hearts,
 vouches, and the keep-as-friend rows pass one sanitize-or-"A friend" coercion; both live in
@@ -252,6 +267,7 @@ type has no local label). Senders keep emitting frozen English forever.
 - ``ProximityHost``
 - ``ProximitySupportLayout``
 - ``MeshContinuationRaising``
+- ``MeshSessionContinuationReading``
 
 ### Identity and signing
 

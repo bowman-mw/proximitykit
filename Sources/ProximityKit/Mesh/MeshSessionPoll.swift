@@ -74,9 +74,82 @@ public nonisolated struct MeshSessionPollReport: Equatable, Sendable {
     }
 }
 
+// MARK: - MeshSessionContinuationReading
+
+/// What a background continuation needs to know about the session it is carrying: how far through
+/// the ceiling this run is, and how many friends it is holding.
+///
+/// Network migration P8 item 6 (plan §14). Deliberately **not** part of ``MeshSessionPollReport``:
+/// that value says what one POLL did — flags, never fingerprints — and exists only on a tick, while
+/// this is read at two sites, the SUBMISSION (whose request carries the friend count in its
+/// subtitle) and the tick (whose progress bar carries the elapsed fraction). One read serves both,
+/// and a skipped poll would otherwise have had to carry three meaningless zeros.
+///
+/// ## Concurrency
+///
+/// A `nonisolated`, `Sendable` value.
+public nonisolated struct MeshSessionContinuationReading: Equatable, Sendable {
+
+    /// Seconds of local runtime since this run's ceiling was armed, measured from the monotonic
+    /// origin — never the wall clock, which a time change moves backwards and which would make a
+    /// continued task's progress bar retreat, the one thing the system ends a task for.
+    public let elapsedSeconds: TimeInterval
+
+    /// This run's ceiling budget in seconds, already clamped to `0 ... MeshSessionCeiling
+    /// .ceilingSeconds` at construction.
+    public let budgetSeconds: TimeInterval
+
+    /// How many friends this device is connected to right now, EXCLUDING self.
+    public let connectedFriendCount: Int
+
+    /// Builds a reading.
+    ///
+    /// - Parameters:
+    ///   - elapsedSeconds: Monotonic seconds since the ceiling was armed.
+    ///   - budgetSeconds: This run's ceiling budget.
+    ///   - connectedFriendCount: Friends connected, excluding self.
+    public init(elapsedSeconds: TimeInterval, budgetSeconds: TimeInterval, connectedFriendCount: Int) {
+        self.elapsedSeconds = elapsedSeconds
+        self.budgetSeconds = budgetSeconds
+        self.connectedFriendCount = connectedFriendCount
+    }
+}
+
 // MARK: - The poll seam
 
 extension MeshNetworkManager {
+
+    /// What a background continuation may read about this session — the narrowest public surface
+    /// P8 item 6 needs, and the only one it got.
+    ///
+    /// `sessionCeiling`, `sessionMonotonicOrigin` and `branchView` all stay internal; this answers
+    /// the three scalars the app's `MeshContinuationTaskHost` needs and nothing else. **Nil means
+    /// there is no live session to continue**, which is the honest answer for a host deciding
+    /// whether to advance a bar at all.
+    ///
+    /// The friend count prefers the BRANCH's external present members — the roster members this
+    /// device can actually reach, which is what "friends connected" means once a mesh is larger than
+    /// a pair — and falls back to this device's committed slots, because ``branchView`` is built by
+    /// partition detection and a session's first tick has none yet.
+    ///
+    /// - Returns: The reading, or nil when no ceiling is armed.
+    public var sessionContinuationReading: MeshSessionContinuationReading? {
+        guard let ceiling = sessionCeiling,
+              let verdict = sessionCeilingVerdict(now: Date(), monotonicElapsed: nil) else {
+            return nil
+        }
+        let budget = ceiling.monotonicBudgetSeconds
+        let elapsed: TimeInterval
+        switch verdict {
+        case .live(let remainingSeconds): elapsed = max(budget - remainingSeconds, 0)
+        case .reached: elapsed = budget
+        }
+        let friends = branchView?.externalPresentFingerprints.count
+            ?? slots.filter { $0.fingerprint != nil }.count
+        return MeshSessionContinuationReading(
+            elapsedSeconds: elapsed, budgetSeconds: budget, connectedFriendCount: friends
+        )
+    }
 
     /// Runs the three on-demand consumers in their one order — the ceiling, then the idle lapse,
     /// then partition detection — for a live session, and nothing for a dead one (P7 item 4).
