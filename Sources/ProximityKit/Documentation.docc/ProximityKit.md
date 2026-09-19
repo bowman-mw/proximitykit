@@ -117,7 +117,21 @@ save surface (review sheets and the album carousel) shows identical wording.
 
 **Presence and hearts.** ``PresenceManager`` runs a standing radio that broadcasts only rotating
 pairwise-DH tags — no names, no stable identifiers, a fresh random MCPeerID per start — so kept
-friends recognize each other nearby without connecting. Hearts are delivered over short-lived
+friends recognize each other nearby without connecting. The posture behind that rotation is an
+explicit value since P9 item 2: ``PresenceEpochPosture`` answers, for any instant, the presence
+epoch, the service instance name to advertise and the TLS identity to present, all three replaced
+whole at every 900 s boundary — so that once the listener is bound to it, two sightings 901 seconds
+apart will share no byte. **Pass 1 holds that value; it does not yet advertise it.** Binding the
+QUIC presence listener's instance name and `sec_identity_t` to the posture is pass 2, and until it
+lands the MC advertiser this radio still runs mints one `MCPeerID` per `start()` and wears it for
+the radio's whole life, whatever the posture does underneath. The value is anchored to the wall
+clock on purpose — the pairwise tag epoch must be absolute for two phones to agree without
+exchanging anything, a per-launch phase would itself be a fingerprint that survives every
+rotation, and a globally synchronised rotation instant makes the anonymity set at the boundary
+every device in range; the certificate is minted at the epoch's START for the same reason, since a
+validity window anchored to the mint instant would stamp each posture with the second that radio
+came up. The value is pure (injected clock, injected entropy, no radio and no
+timer); the manager rotates it on the epoch tick it already runs, and drops it on `stop()`. Hearts are delivered over short-lived
 connections formed on that recognition, with the sealed-introduction rule
 (``SealedIntroductionEnvelope``) ensuring a tag-replay forger never sees an identity. When the
 friend is away, ``HeartDropService`` seals the heart (``HeartDropSealer``, forward-secret via
@@ -2117,6 +2131,8 @@ records rather than app-visible state.
 ### Presence and closeness
 
 - ``PresenceManager``
+- ``PresenceEpochPosture``
+- ``PresencePostureError``
 - ``FriendStateCache``
 - ``CachedFriendState``
 - ``ClosenessLedger``

@@ -32,6 +32,18 @@
 //  - The radio's MCPeerID is per-start RANDOM and never persisted (`usesEphemeralPeerID`), so
 //    presence is cross-launch unlinkable — it deliberately does NOT share the stable archived
 //    peer ID the other radios use.
+//  - P9 item 2 (plan §17.1) makes that posture an explicit VALUE rather than a property of
+//    MCPeerID semantics: `PresenceEpochPosture` answers, for any instant, the epoch, the instance
+//    name to advertise and the TLS identity to present, all three rotating together at every
+//    900 s boundary. `presencePosture` below is the one source of all three. It is MC's own
+//    randomness that this replaces, and the replacement is strictly stronger: MC mints its name
+//    once per `start()`, so today's long-lived radio rotates its tags under a stable name — the
+//    linkability the tag rotation exists to remove. Pass 1 holds and rotates the value; pass 2
+//    binds the QUIC presence listener to it and the MC path here goes away.
+//  - THE GATE that follows from the line above, stated plainly: presence must not reach testers
+//    over MC — the MC path carries a stable per-radio identifier until item 4 deletes it. Pass 1
+//    changes nothing on the air, so the advertiser below still wears one `MCPeerID` for the whole
+//    life of the radio however often the posture rotates underneath it.
 //  - Everything here is memory-only: the nearby set is never persisted, never synced, and the
 //    diagnostics ring never carries an identity.
 //  - Accepted residual (spec): an active adversary replaying a tag within its epoch can spoof
@@ -77,9 +89,13 @@ private struct PresenceHeartConnection: Identifiable {
 /// Privacy posture is the design center: the advertisement carries ONLY rotating pairwise-DH
 /// tags (truncated HMACs of the 15-minute epoch under per-friend-pair static-static X25519
 /// secrets — see `IdentityService.presenceTag`), the MCPeerID is per-start random and never
-/// persisted, and all state (nearby set, connections, diagnostics) is memory-only with no
-/// identities in any log line. Matching spans ±1 epoch; three self-exclusion layers drop our own
-/// ghost advertisements; a 45 s lost-grace debounce smooths the epoch advertiser-restart flap.
+/// persisted, the epoch's advertised name and TLS identity are a fresh ``PresenceEpochPosture``
+/// that survives no boundary — **held, not yet advertised**: P9 item 2 pass 2 binds the QUIC
+/// presence listener to that posture, and until it does the MC advertiser below keeps one peer ID
+/// for the whole life of the radio — and all state (nearby set, connections, diagnostics) is
+/// memory-only with no identities in any log line. Matching spans ±1 epoch; three self-exclusion
+/// layers drop our own ghost advertisements; a 45 s lost-grace debounce smooths the epoch
+/// advertiser restart.
 ///
 /// Hearts (Phase 4b): sends invite the tag-matched peer, run a 1-RTT friend handshake with the
 /// SEALED-INTRODUCTION rule (intro/ack sealed to the intended friend's vault KA key so a
@@ -192,12 +208,41 @@ public final class PresenceManager: ProximityPayloadHandling {
     @ObservationIgnored private var peerLostAt: [UUID: Date] = [:]
 
     @ObservationIgnored private var currentEpoch: UInt64 = 0
+    /// The ephemeral posture for ``currentEpoch`` — the ONE source of this radio's epoch index,
+    /// advertised instance name and TLS identity (plan §17.1, P9 item 2). Minted when the radio
+    /// comes up, re-minted whole at every 900 s boundary by ``rotateEpochIfNeeded()``, and dropped
+    /// by `stop()`: no name and no identity survives a boundary, a stand-down or a launch, and
+    /// none of it is ever written anywhere.
+    ///
+    /// Pass 1 holds it and reads ``currentEpoch`` off it; **pass 2** binds the QUIC presence
+    /// listener's service instance name and `sec_identity_t` to
+    /// ``PresenceEpochPosture/instanceName`` and ``PresenceEpochPosture/tlsIdentity``. That is the
+    /// rotation the MC advertiser below cannot do: `MeshMultipeerSession` mints its random
+    /// `MCPeerID` once per `start()`, so a radio left up for hours today advertises freshly
+    /// rotating tags under one unchanging name.
+    @ObservationIgnored private(set) var presencePosture: PresenceEpochPosture?
+    /// The epoch a posture mint last FAILED in — the mint's retry budget, and nothing more.
+    ///
+    /// A mint is a synchronous P-256 keygen plus a certificate mint on the main actor, and
+    /// ``refreshRoster()`` is called from six places in the app. Without a budget one failed mint
+    /// turns every later refresh in that epoch into another keygen and another audit row; with it
+    /// the radio tries once per epoch and then waits for the boundary, which is when the inputs
+    /// could plausibly have changed anyway. Memory-only, dropped by `stop()` with the posture.
+    @ObservationIgnored private var postureMintFailedEpoch: UInt64?
     @ObservationIgnored private var epochRotationTask: Task<Void, Never>?
     /// The single in-flight lost-peer sweep (see ``scheduleLostSweep()``) — nil when none is armed.
     @ObservationIgnored private var lostSweepTask: Task<Void, Never>?
 
     /// Test seam: injectable clock (epoch derivation, lost-grace expiry). Production default.
     @ObservationIgnored var nowProvider: () -> Date = { Date() }
+
+    /// Test seam: the posture mint, as `(posture held now, instant) -> the posture to wear`. The
+    /// production default is ``PresenceEpochPosture``'s own production path — the system CSPRNG
+    /// and the module's one certificate path — and nothing in shipping code writes this. A test
+    /// substitutes a failing mint to exercise the once-per-epoch budget above.
+    @ObservationIgnored var postureMint: (PresenceEpochPosture?, Date) throws -> PresenceEpochPosture = { held, now in
+        try held?.rotated(at: now) ?? PresenceEpochPosture.minted(at: now)
+    }
 
     public init(store: any ProximityHost, ledger: ProximityHeartLedger, identity: IdentityService? = nil) {
         self.store = store
@@ -241,7 +286,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     public func start() {
         guard !isRunning else { return }
         isRunning = true
-        currentEpoch = IdentityService.presenceEpoch(at: nowProvider())
+        currentEpoch = rotatePosture(at: nowProvider())
         rebuildTags(epoch: currentEpoch)
 
         // Fresh ephemeral MCPeerID per start (never persisted, never the shared archived ID).
@@ -313,6 +358,11 @@ public final class PresenceManager: ProximityPayloadHandling {
         discoveredPeers.removeAll()
         ownTagTokens.removeAll()
         candidateTokens.removeAll()
+        // The posture is ephemeral in the strong sense: a stood-down radio keeps no name and no
+        // TLS identity to come back up under, so a restart is never linkable to what preceded it.
+        // The mint's retry budget goes with it: a restart is a fresh attempt, not a resumed one.
+        presencePosture = nil
+        postureMintFailedEpoch = nil
         nearbyFriendFingerprints = []
         heartSendState = .idle
     }
@@ -322,7 +372,9 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// derives from the live vault anyway.
     public func refreshRoster() {
         guard isRunning else { return }
-        rebuildTags(epoch: IdentityService.presenceEpoch(at: nowProvider()))
+        // Through the posture, not around it: a roster refresh that happens to land after a
+        // boundary must rotate the name and the identity with the tags, never the tags alone.
+        rebuildTags(epoch: rotatePosture(at: nowProvider()))
         session?.updateDiscoveryInfo(discoveryInfo())
         reevaluateDiscoveredPeers()
     }
@@ -552,11 +604,47 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// advertisements — a peer whose (static) ad is now 2+ epochs stale falls out of the
     /// candidate window and drops.
     func rotateEpochIfNeeded() {
-        let epoch = IdentityService.presenceEpoch(at: nowProvider())
-        guard epoch != currentEpoch else { return }
-        rebuildTags(epoch: epoch)
+        let now = nowProvider()
+        guard IdentityService.presenceEpoch(at: now) != currentEpoch else { return }
+        rebuildTags(epoch: rotatePosture(at: now))
         session?.updateDiscoveryInfo(discoveryInfo())
         reevaluateDiscoveredPeers()
+    }
+
+    /// Rotates ``presencePosture`` to the epoch containing `now` and answers that epoch.
+    ///
+    /// Inside the held posture's epoch this is a no-op returning its epoch; across a boundary it
+    /// mints an entirely fresh one — new instance name, new key pair, new certificate. It has no
+    /// clock of its own: every caller hands it `nowProvider()`, and the epoch is always
+    /// `IdentityService.presenceEpoch(at:)`, the same counter the tags are derived at. It arms
+    /// nothing — the rotation tick above and the roster/start paths are the only callers, so
+    /// presence still owns exactly one timer.
+    ///
+    /// Fail-soft, NAMED (R7) and BUDGETED: a mint that fails leaves NO posture rather than a stale
+    /// one, and the epoch still comes from the same clock, so tag derivation and matching are
+    /// untouched. The failure is remembered for that epoch (``postureMintFailedEpoch``) so the
+    /// next refresh does not re-run a keygen and write another audit row — one attempt and one row
+    /// per epoch, then the boundary retries. It is deliberately not a diagnostic event — the
+    /// connection log is a user-facing surface and this is a developer fault, not a radio
+    /// condition.
+    private func rotatePosture(at now: Date) -> UInt64 {
+        let epoch = IdentityService.presenceEpoch(at: now)
+        if let posture = presencePosture, posture.epoch == epoch { return epoch }
+        guard postureMintFailedEpoch != epoch else { return epoch }
+        do {
+            let rotated = try postureMint(presencePosture, now)
+            presencePosture = rotated
+            postureMintFailedEpoch = nil
+            return rotated.epoch
+        } catch {
+            presencePosture = nil
+            postureMintFailedEpoch = epoch
+            FernletAuditLog.log(
+                "presence.posture.mintFailed",
+                context: ["error": String(describing: error)]
+            )
+            return epoch
+        }
     }
 
     /// Re-match every cached advertisement against the current candidate window (roster or epoch
@@ -1314,7 +1402,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     func activateForTesting() {
         guard !isRunning else { return }
         isRunning = true
-        currentEpoch = IdentityService.presenceEpoch(at: nowProvider())
+        currentEpoch = rotatePosture(at: nowProvider())
         rebuildTags(epoch: currentEpoch)
     }
 

@@ -372,8 +372,16 @@ public final class IdentityService {
 
     // MARK: - Presence tags (mesh redesign Phase 4a)
 
-    /// Presence epoch length in seconds. Presence tags rotate every epoch; matchers accept ±1
-    /// epoch to span clock skew and the advertiser-restart flap.
+    /// Presence epoch length in seconds — **the one place 900 is written down**. Presence tags
+    /// rotate every epoch; matchers accept ±1 epoch to span clock skew and the advertiser-restart
+    /// flap; and since P9 item 2 (plan §17.1) the radio's advertised instance name and TLS
+    /// identity rotate on the very same boundary (``PresenceEpochPosture``), so the posture and
+    /// the payload can never drift onto two clocks.
+    ///
+    /// Anchored to the WALL CLOCK — ``presenceEpoch(at:)`` is `floor(unixTime / 900)`, absolute
+    /// multiples since 1970 — and not to a per-launch phase, because two phones must land on the
+    /// same epoch index without exchanging a byte for the pairwise tag to be mutual. See
+    /// ``PresenceEpochPosture`` for why that anchoring is also the stronger privacy choice.
     public nonisolated static let presenceEpochSeconds: TimeInterval = 900
 
     /// Bytes kept from the truncated presence-tag HMAC (base64 → 12 chars on the wire, which is
@@ -383,6 +391,18 @@ public final class IdentityService {
     /// The presence epoch counter for a moment in time: `floor(unixTime / 900)`.
     public nonisolated static func presenceEpoch(at date: Date) -> UInt64 {
         UInt64(max(0, date.timeIntervalSince1970) / presenceEpochSeconds)
+    }
+
+    /// The instant ``presenceEpoch(at:)``'s epoch BEGINS — the same absolute 900 s multiple on
+    /// every device, whatever second a given device happens to ask at.
+    ///
+    /// The anchor anything epoch-scoped must be minted at rather than `now`. A value derived from
+    /// the asking instant carries that instant at 1 s resolution: a device that switches its radio
+    /// on mid-epoch would then wear a mark no other device in the room wears, which singles it out
+    /// for the whole epoch and dates the moment its radio came up. Minting at the epoch start is
+    /// what makes the anonymity set everyone present (``PresenceEpochPosture``, reason 3).
+    public nonisolated static func presenceEpochStart(at date: Date) -> Date {
+        Date(timeIntervalSince1970: Double(presenceEpoch(at: date)) * presenceEpochSeconds)
     }
 
     /// STATIC-STATIC X25519 DH pair secret for presence tags:
