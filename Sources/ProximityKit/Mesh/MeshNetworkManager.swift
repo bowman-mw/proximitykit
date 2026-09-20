@@ -4421,9 +4421,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let verifier = membershipVerifier, !parkedKeyAdvertisements.isEmpty else { return }
         let restore = parkedKeyAdvertisements
         let offers = parkedKeyAdvertisements.drain()
-        FernletAuditLog.log(
-            "mesh.keyAgreement.parkedReoffered", context: ["count": String(offers.count)]
-        )
+        // P9 item 7: `held` is the mesh this device holds — the one key a per-cell count can filter
+        // on over a process-global capture registry. Still counts only: never a fingerprint.
+        var reoffered = ["count": String(offers.count)]
+        reoffered["held"] = currentMesh?.meshID.uuidString
+        FernletAuditLog.log("mesh.keyAgreement.parkedReoffered", context: reoffered)
         let result = MeshKeyAdvertisementFold.folding(
             offers.map(\.parked.advertisement), into: keyAdvertisements, verifiedBy: verifier
         )
@@ -5501,8 +5503,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// The decision itself is ``MeshRoutedInventoryStampRule`` — pure, and the same rule the
     /// property battery's I-13 calls, so the door and the claim cannot drift apart. The audit line
-    /// carries **no context at all**, in this family's idiom: which peer it was rides the manager's
-    /// own state, never the log.
+    /// carries exactly ONE context key, `held` — the mesh id this device holds (P9 item 7, the
+    /// spelling P8 item 0 gave the founding lines) — so a per-cell count can be scoped to one rig
+    /// on a process-global capture registry. Which PEER it was still rides the manager's own state
+    /// and never the log.
     ///
     /// - Parameters:
     ///   - payload: The verified digest.
@@ -5516,7 +5520,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             inbound: payload.sentAt, recorded: peerRoutedInventories[peer]?.inventorySentAt
         )
         guard verdict == .refuseStale else { return false }
-        FernletAuditLog.log("mesh.routedInventory.staleSentAt")
+        // P9 item 7: the ONE key a per-cell count can filter on — the mesh this device holds, the
+        // same spelling P8 item 0 gave the founding lines. Never the peer (see the doc above).
+        // A nil mesh OMITS the key rather than writing a fallback: an unscopeable line must not
+        // look scoped.
+        var line: [String: String] = [:]
+        line["held"] = currentMesh?.meshID.uuidString
+        FernletAuditLog.log("mesh.routedInventory.staleSentAt", context: line)
         return true
     }
 

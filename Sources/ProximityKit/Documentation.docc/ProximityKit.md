@@ -526,7 +526,8 @@ bound every real member needs, and the map's roster cap becomes true by construc
 
 **The park's six audit tokens**, frozen English and counts only (third review P3 10 — two of them
 were in no index and on no page): `mesh.keyAgreement.parked` (a refused row took a slot in its
-sender's share), `…parkedReoffered` (a widening drained the park), `…parkCollision` (two different
+sender's share), `…parkedReoffered` (a widening drained the park — the count, plus `held`, the mesh
+id this device holds, P9 item 7), `…parkCollision` (two different
 rows for one member in one share, `kept: newcomer` or `kept: held`), `…parkFull` (the share or the
 sender bound is spent), `…parkDropped` (the roster-move eviction above) and `…parkRolledBack` (a
 re-offer whose seal was refused). None of them carries a fingerprint.
@@ -852,7 +853,9 @@ clock instead of the drain.
 
 The advertisement door carries P6 item 7's **`sentAt` monotonicity guard** (D-12.12, closed). A
 peer's own digest whose signed `sentAt` is strictly BEFORE the one already recorded for it is
-refused by name (`mesh.routedInventory.staleSentAt`) — refused as a **record**: `inventory`,
+refused by name (`mesh.routedInventory.staleSentAt`, carrying exactly one context key, `held` —
+the mesh id this device holds, so a per-cell count can be scoped on a process-global capture
+registry, P9 item 7) — refused as a **record**: `inventory`,
 `inventorySentAt` and the `quiescentLocalAsOf` stamp an admitted digest re-writes all stand. The
 peer is still **answered**, from the view already recorded (P6 item 7's fix review). That half is
 not a detail: `answerRoutedInventory` is the only caller that reaches `sendRoutedDrainBatch`, and a
