@@ -10,9 +10,15 @@ import FernletFoundation
 /// while a session is live — a Live Activity in production, a no-op elsewhere.
 ///
 /// The coordinator calls `start` when a peer identity is confirmed, `update` with running byte
-/// counters on every transfer, and `stop` at session end/failure. Conformers:
-/// `ActivityKitProximityForegroundAnchor` (ActivityKit) and `NoopProximityForegroundAnchor`
-/// (tests, platforms without ActivityKit).
+/// counters on every transfer, and `stop` at session end/failure.
+///
+/// There is exactly one conformer in shipping code: ``NoopProximityForegroundAnchor``. The
+/// ActivityKit conformer was RETIRED in the network migration's P9 item 5 — every
+/// `Activity.request` it made was doomed, because `ProximityConnectionActivityAttributes` is
+/// internal to this module and `App/FernletWidgets/FernletWidgetsBundle.swift` declares no
+/// `ActivityConfiguration` for it, so each call either threw (audited) or spent one of the per-app
+/// Live Activity slots a workout or cooking activity needs on something nothing draws. The seam
+/// itself is kept: it is what a future proximity widget would conform, and tests inject through it.
 @MainActor
 public protocol ProximityForegroundAnchoring: AnyObject {
     var isActive: Bool { get }
@@ -23,7 +29,9 @@ public protocol ProximityForegroundAnchoring: AnyObject {
 
 /// ``ProximityForegroundAnchoring`` that tracks only the active flag and shows nothing.
 ///
-/// Injected in unit tests and used as the fallback when ActivityKit is unavailable.
+/// Since P9 item 5 this is the ONLY anchor in shipping code and ``ProximityCoordinator``'s
+/// unconditional default on every platform — not a fallback. Tests observe `isActive` through it
+/// to assert that a dropped connection ended its anchor.
 @MainActor
 final class NoopProximityForegroundAnchor: ProximityForegroundAnchoring {
     private(set) var isActive = false
@@ -40,14 +48,21 @@ final class NoopProximityForegroundAnchor: ProximityForegroundAnchoring {
 }
 
 #if canImport(ActivityKit)
-/// ActivityKit attributes for the proximity-connection Live Activity: the fixed peer name and
-/// start time, plus the mutable transfer counters.
+/// ActivityKit attributes for the proximity-connection Live Activity.
 ///
-/// The app target's Live Activity widget renders these; this module only requests and updates
-/// the activity.
+/// **Nothing requests one of these any more** (P9 item 5). The type is kept for exactly one
+/// reader — ``ProximityLiveActivityReaper``, whose enumeration
+/// `Activity<ProximityConnectionActivityAttributes>.activities` is spelled in terms of it, so
+/// deleting the struct deletes the reaper. No widget declares an `ActivityConfiguration` for it,
+/// which is why no request could ever render.
+///
+/// **Do not change its stored shape.** ActivityKit decodes an activity a previous process
+/// stranded against this declaration; a renamed or re-typed property makes such an activity
+/// unreapable rather than merely unrendered. Shipping a proximity widget later means ADDING a
+/// configuration, not editing these fields.
 struct ProximityConnectionActivityAttributes: ActivityAttributes {
-    /// The mutable half of the Live Activity: running byte counters and a status word
-    /// ("Connected" / "Ended"). Updated by `ActivityKitProximityForegroundAnchor`.
+    /// The mutable half of the Live Activity: running byte counters and a status word. Only the
+    /// reaper writes one now, and only ever `"Ended"`.
     struct ContentState: Codable, Hashable {
         var bytesSent: Int
         var bytesReceived: Int
@@ -58,113 +73,17 @@ struct ProximityConnectionActivityAttributes: ActivityAttributes {
     var startedAt: Date
 }
 
-/// Production ``ProximityForegroundAnchoring``: runs a Live Activity for the duration of a
-/// proximity connection so the transfer stays visible when the user leaves the app.
-///
-/// Holds at most one `Activity` at a time; `start` no-ops when activities are disabled or one is
-/// already live, `update` deduplicates identical counter values, and `stop` claims ownership
-/// (nils the stored activity) synchronously BEFORE its await so a racing `update` bails instead
-/// of resurrecting an ended activity. Content auto-stales after 90 s as the backstop for the
-/// narrow documented races. Non-Sendable `Activity` values are transferred across nonisolated
-/// async calls via `nonisolated(unsafe)` locals — see the inline notes.
-@MainActor
-final class ActivityKitProximityForegroundAnchor: ProximityForegroundAnchoring {
-    private var activity: Activity<ProximityConnectionActivityAttributes>?
-    private(set) var isActive = false
-    private var lastBytesSent = -1
-    private var lastBytesReceived = -1
-
-    func start(peerName: String, startedAt: Date) async {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-        guard activity == nil else { return }
-        do {
-            let attributes = ProximityConnectionActivityAttributes(peerName: peerName, startedAt: startedAt)
-            let content = ActivityContent(
-                state: ProximityConnectionActivityAttributes.ContentState(
-                    bytesSent: 0,
-                    bytesReceived: 0,
-                    status: "Connected"
-                ),
-                staleDate: Date().addingTimeInterval(90)
-            )
-            activity = try Activity.request(attributes: attributes, content: content, pushType: nil)
-            lastBytesSent = 0
-            lastBytesReceived = 0
-            isActive = true
-        } catch {
-            // Recovery is "no anchor this session" — the transfer still runs — but a rejected
-            // Live Activity request is named rather than invisible (R7).
-            isActive = false
-            FernletAuditLog.log(
-                "proximity.liveActivity.requestFailed",
-                context: ["error": String(describing: error)]
-            )
-        }
-    }
-
-    func update(bytesSent: Int, bytesReceived: Int) async {
-        guard let activity else { return }
-        guard bytesSent != lastBytesSent || bytesReceived != lastBytesReceived else { return }
-        lastBytesSent = bytesSent
-        lastBytesReceived = bytesReceived
-        let content = ActivityContent(
-            state: ProximityConnectionActivityAttributes.ContentState(
-                bytesSent: bytesSent,
-                bytesReceived: bytesReceived,
-                status: "Connected"
-            ),
-            staleDate: Date().addingTimeInterval(90)
-        )
-        // Activity<…> is a non-Sendable class and update(_:) is nonisolated async; transfer the
-        // MainActor-held reference across the call via nonisolated(unsafe). The `guard let activity`
-        // above ensures we only update a live activity, and stop() clears `self.activity` BEFORE it
-        // ends the activity, so an update() scheduled after a stop() bails at that guard rather than
-        // resurrecting an ended activity. (A narrow residual race remains only if an update() is
-        // already suspended at this await when stop() runs; that content auto-stales in 90s.)
-        nonisolated(unsafe) let liveActivity = activity
-        await liveActivity.update(content)
-    }
-
-    func stop() async {
-        guard let activity else {
-            isActive = false
-            return
-        }
-        // Claim ownership synchronously BEFORE the await: a concurrently-scheduled update() that begins
-        // during end()'s suspension then sees `self.activity == nil` at its guard and skips, instead of
-        // pushing a "Connected" update onto the activity we are ending (resurrecting it). The local
-        // `activity` binding keeps the object alive for the end() call below.
-        //
-        // A symmetric start() that interleaves at end()'s suspension also sees `self.activity == nil` and
-        // may request a FRESH Live Activity while this one is still ending. That window is benign: both
-        // methods are @MainActor (so they interleave only at awaits, never truly concurrently), start()'s
-        // catch resets `isActive = false` on a rejected request, and the worst case is a brief duplicate
-        // anchor that auto-stales — the same accepted trade-off the update() race above documents.
-        self.activity = nil
-        isActive = false
-        let content = ActivityContent(
-            state: ProximityConnectionActivityAttributes.ContentState(
-                bytesSent: 0,
-                bytesReceived: 0,
-                status: "Ended"
-            ),
-            staleDate: nil
-        )
-        // non-Sendable Activity across nonisolated async end(_:); see update(_:) note above.
-        nonisolated(unsafe) let liveActivity = activity
-        await liveActivity.end(content, dismissalPolicy: .immediate)
-    }
-}
-
 /// Ends every proximity-connection Live Activity left system-side by a PREVIOUS process.
 ///
-/// Each ``ActivityKitProximityForegroundAnchor`` holds its `Activity` in a private property, and
-/// the only code that ends it is that same anchor's `stop()`. A process kill/crash while a session
-/// was live (a mesh session is deliberately kept alive in the background) strands the activity:
-/// no relaunched object holds a handle to it, and nothing else ever enumerated
-/// `Activity<ProximityConnectionActivityAttributes>.activities` — so it lingered until ActivityKit's
-/// own maximum-lifetime auto-end (hours), counting toward the per-app Live Activity ceiling that a
-/// later workout/cooking `Activity.request` needs.
+/// **Since P9 item 5 nothing in this app requests one**, so this reaper cannot find an activity
+/// THIS build created. It is kept deliberately, for two reasons. (1) A build installed before the
+/// retirement could in principle have stranded one: the requester held its `Activity` in a private
+/// property, the only code that ended it was that same anchor's `stop()`, and a process kill while
+/// a session was live left nothing holding a handle — so it lingered until ActivityKit's own
+/// maximum-lifetime auto-end (hours), spending a per-app Live Activity slot a later
+/// workout/cooking `Activity.request` needs. (2) It is the cheap, already-correct half of shipping
+/// a proximity widget later: the reap side exists, so only the configuration and the request would
+/// be new. It costs one enumeration of an empty list per launch.
 ///
 /// Call `endOrphans()` ONCE per launch, from the composition root, BEFORE any proximity manager can
 /// start a coordinator — never on scene activation, where it would end the activities of anchors
@@ -180,7 +99,9 @@ public enum ProximityLiveActivityReaper {
             staleDate: nil
         )
         for orphan in Activity<ProximityConnectionActivityAttributes>.activities {
-            // non-Sendable Activity across nonisolated async end(_:); same note as `stop()`.
+            // `Activity` is a non-Sendable class and `end(_:dismissalPolicy:)` is nonisolated
+            // async, so the MainActor-held reference is transferred across the call. One local per
+            // stranded activity, used for exactly one call, never stored — see the allowlist entry.
             nonisolated(unsafe) let activity = orphan
             await activity.end(content, dismissalPolicy: .immediate)
         }

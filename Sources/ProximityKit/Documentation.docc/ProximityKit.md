@@ -65,10 +65,14 @@ up to five coordinators — so the mesh path was ATTEMPTING one `Activity.reques
 None of those could render, which is the honest reason the suppression is unconditional and costs a
 person nothing: ``ProximityConnectionActivityAttributes`` is internal to this module and no widget in
 `App/FernletWidgets` declares an `ActivityConfiguration` for it, so each request either threw
-(audited) or made an activity nothing draws while spending the per-app Live Activity ceiling. The
-1:1 recipe-share and presence anchors are still live and are equally unrenderable — dead code in
-shipping today, whose fate (ship the widget, or retire the anchor) is a P9 decision — and the
-once-per-launch orphan reaper is untouched.
+(audited) or made an activity nothing draws while spending the per-app Live Activity ceiling. **P9
+item 5 then took the decision item 6 deferred** — the 1:1 recipe-share and presence anchors were
+RETIRED, not given a widget. The ActivityKit conformer is deleted and ``ProximityCoordinator``'s
+default anchor is `NoopProximityForegroundAnchor` unconditionally on every platform, which is what
+the three shipping sites that omit the argument now get. Nothing in the app requests a proximity Live
+Activity; ``ProximityForegroundAnchoring`` survives as the seam a future widget would conform and the
+one tests inject through, and the once-per-launch orphan reaper is untouched — it is now the only
+code that names the attributes type, which is why that type outlives its requester.
 All three resolve the display name they advertise the same way
 (host preference, device name as fallback), and the peer-supplied names that reach chat, hearts,
 vouches, and the keep-as-friend rows pass one sanitize-or-"A friend" coercion; both live in
@@ -158,9 +162,9 @@ disconnect, stale/parked sweeps, slot eviction) runs the dropped ``ProximityCoor
 kicks an evicted peer's link (`MeshTransportSession.disconnectPeer`) so no zombie link
 survives a slot (`Tests/FernletTests/MemoryLifecycleTests` + `MemoryLifecycleBoundaryTests` are
 the enforcement; see Docs/Memory-Leak-Review-2026-08-17.md). Framework delegate callbacks
-(MCSession, NearbyInteraction, ActivityKit)
-transfer non-Sendable objects across the main-actor
-hop via documented `nonisolated(unsafe)` locals. Signing inputs come from the deterministic
+(MCSession, NearbyInteraction) transfer non-Sendable objects across the main-actor
+hop via documented `nonisolated(unsafe)` locals, as does the proximity Live Activity reaper's one
+remaining `end(_:dismissalPolicy:)` call. Signing inputs come from the deterministic
 binary serializer in `CanonicalSignatureSerializer.swift` (domain-tagged per signed type,
 cross-platform stable; the legacy JSON encoder is retained verify-only). Persistence follows one
 stance throughout: small JSON sidecars in Application Support with `.completeFileProtection`,
@@ -725,7 +729,9 @@ Release build the environment-reading half is compiled out entirely.
 
 ### Foreground anchor
 
-- ``ProximityForegroundAnchoring``
+- ``ProximityForegroundAnchoring`` — the seam. Since P9 item 5 its only shipping conformer is the
+  no-op, which is ``ProximityCoordinator``'s unconditional default: the app raises no proximity Live
+  Activity, because no widget ever declared an `ActivityConfiguration` for its attributes.
 - ``ProximityLiveActivityReaper`` — launch-time reaper for proximity Live Activities a killed
   previous process stranded; `FernletStoreLoader.startIfNeeded()` calls `endOrphans()` once per process, before the store exists.
 
