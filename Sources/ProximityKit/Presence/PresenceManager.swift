@@ -136,6 +136,17 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// epoch advertiser-restart flap (lost+found) without flickering the nearby set.
     static let lostGraceInterval: TimeInterval = 45
 
+    /// The longest a single wake of the epoch-rotation loop may be armed for, and therefore the
+    /// bound on how late a boundary rotation can be.
+    ///
+    /// 30 s, picked as the largest step that keeps the worst case a *small fraction* of the 900 s
+    /// epoch (3.3%) while costing at most 30 clock reads an epoch — a no-op main-actor comparison
+    /// each — and so is not a poll anyone can feel. The measured failure it replaces was +51 s on a
+    /// ~767 s arm, which is 5.7% of an epoch spent advertising the PREVIOUS epoch's name and
+    /// certificate. See ``startEpochRotation()`` for why a deadline in bounded steps, and not a
+    /// tighter single sleep, is the fix.
+    static let maxEpochRotationStepSeconds: TimeInterval = 30
+
     /// Vault fingerprints of kept friends currently recognized nearby. Memory-only, observable.
     public private(set) var nearbyFriendFingerprints: Set<String> = []
     public private(set) var diagnosticEvents: [ProximityRecipeShareDiagnosticEvent] = []
@@ -250,6 +261,18 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     /// Test seam: injectable clock (epoch derivation, lost-grace expiry). Production default.
     @ObservationIgnored var nowProvider: () -> Date = { Date() }
+
+    /// Test seam: the epoch-rotation loop's ONE suspension, as `(seconds) async throws -> Void`.
+    ///
+    /// Deliberately narrow — it is the rotation loop's sleep and nothing else's, so no other timer
+    /// in this manager can be re-pointed through it, and presence still owns exactly one timer.
+    /// The production default is `Task.sleep` and nothing in shipping code writes this; a test
+    /// substitutes a closure that advances the injected clock instead, which is the only way the
+    /// loop's *step length* — the thing P9 item 2's tier-2 run found wrong — is observable without
+    /// waiting out a real 900 s epoch.
+    @ObservationIgnored var rotationSleep: @MainActor (TimeInterval) async throws -> Void = {
+        try await Task.sleep(for: .seconds($0))
+    }
 
     /// Test seam: the posture mint, as `(posture held now, instant) -> the posture to wear`. The
     /// production default is ``PresenceEpochPosture``'s own production path — the system CSPRNG
@@ -629,6 +652,26 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     // MARK: - Epoch rotation
 
+    /// The one long-running task presence owns, armed as a **deadline re-checked in bounded
+    /// steps** rather than as one sleep the length of the remaining epoch.
+    ///
+    /// The loop sleeps at most ``maxEpochRotationStepSeconds``, re-reads `nowProvider()` on every
+    /// wake, and lets ``rotateEpochIfNeeded()`` — which compares the wall clock's epoch against
+    /// the one being worn — decide whether this wake is the boundary. A wake inside the epoch is a
+    /// no-op, so the shape costs one clock read per step and nothing else.
+    ///
+    /// **Why it is not one `Task.sleep` to the boundary.** A single long sleep is a *duration*, and
+    /// a duration under a coalesced or loaded host is not a deadline: the tier-2 run of P9 item 2
+    /// measured the `presence.quic.rotated` line landing +0.8 s after a boundary when the arm was
+    /// ~300 s and **+51 s** late when the arm was ~767 s, on both Simulators, within 0.3 s of each
+    /// other. For those 51 s each device kept advertising the previous epoch's instance name and
+    /// certificate — precisely the window the rotation exists to close. This is the wall-clock
+    /// deadline family the repo already knows: a poll needs a deadline plus a bounded step, and a
+    /// tighter ceiling on the one sleep would not have fixed it.
+    ///
+    /// Lateness is now bounded by one step's drift rather than by the arm's whole length. **A
+    /// device measure is still owed**: the Simulator figures above are the only ones taken, and
+    /// what a real phone's coalescing does to a 30 s step is not yet known.
     private func startEpochRotation() {
         epochRotationTask?.cancel()
         // host-pin: timer — stored handle, synchronous main-actor body (`rotateEpochIfNeeded()`) (HP2)
@@ -636,10 +679,10 @@ public final class PresenceManager: ProximityPayloadHandling {
             while !Task.isCancelled {
                 // SCOPED strong bindings only — never hold `self` across the sleep (manager-Task
                 // lifetime rule; a strong capture would outlive the owning store and abort).
-                guard let delay = self?.delayToNextEpochBoundary() else { return }
+                guard let step = self?.stepToNextEpochBoundary(), let sleep = self?.rotationSleep else { return }
                 // Cancellation ends the rotation loop — that IS the recovery (R7).
                 do {
-                    try await Task.sleep(for: .seconds(delay))
+                    try await sleep(step)
                 } catch {
                     return
                 }
@@ -650,6 +693,16 @@ public final class PresenceManager: ProximityPayloadHandling {
                 }
             }
         }
+    }
+
+    /// How long the rotation loop sleeps before it next re-reads the clock: the distance to the
+    /// boundary, **clamped** to ``maxEpochRotationStepSeconds``.
+    ///
+    /// The clamp is the whole of the fix, and it is a one-way one — a step is never longer than
+    /// the cap, and never shorter than ``delayToNextEpochBoundary()``'s own 1 s floor, so a
+    /// boundary-adjacent wake still cannot busy-loop.
+    func stepToNextEpochBoundary() -> TimeInterval {
+        min(Self.maxEpochRotationStepSeconds, delayToNextEpochBoundary())
     }
 
     private func delayToNextEpochBoundary() -> TimeInterval {
@@ -1503,6 +1556,15 @@ public final class PresenceManager: ProximityPayloadHandling {
         isRunning = true
         currentEpoch = rotatePosture(at: nowProvider())
         rebuildTags(epoch: currentEpoch)
+    }
+
+    /// Arms the epoch-rotation loop WITHOUT a radio — `start()` is its only other caller and that
+    /// path creates a real `NetworkPresenceSession`, which a unit test must never do.
+    ///
+    /// The loop is otherwise unobservable: its step length and its wake-by-wake verdict are what
+    /// P9 item 2's tier-2 run had to read off two Simulators across a real 900 s boundary.
+    func startEpochRotationForTesting() {
+        startEpochRotation()
     }
 
     func handleDiscoveredPeerForTesting(_ peer: PeerHandle) {

@@ -194,6 +194,19 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     /// epochs' identities are never confused by eye, short enough to read off a log line.
     nonisolated static let certificateDigestLength = 16
 
+    /// Bytes of per-session salt behind ``peerLabel(for:)`` — 256 bits, drawn once per session
+    /// from the same CSPRNG the posture's instance name draws from.
+    nonisolated static let peerLabelSaltByteCount = 32
+
+    /// Characters of the salted digest one peer label carries. Long enough that two peers in one
+    /// room are never confused by eye, short enough to read off a log line.
+    nonisolated static let peerLabelLength = 12
+
+    /// The label a peer gets when this session has no salt to hide it behind — the fail-closed
+    /// direction, and the only branch of ``peerLabel(for:)`` that is not a digest. A constant
+    /// carries no peer value at all, which is strictly better than an unsalted one.
+    nonisolated static let unlabelledPeer = "unlabelled"
+
     /// Frozen diagnostic English for the benign close that collapses a double dial.
     ///
     /// Deliberately not a ``MeshTransportError``: nothing failed and nothing was refused. It leads
@@ -256,6 +269,16 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     private var posture: PresenceEpochPosture?
     private var advertisedFields: [String: String] = [:]
     private(set) var isRunning = false
+
+    /// The random salt every peer label in this session's diagnostics is taken under.
+    ///
+    /// Drawn once at construction and never again: not persisted, not advertised, not on the wire,
+    /// not derived from anything, and gone with the session. It is what makes ``peerLabel(for:)``
+    /// opaque *to a reader who holds the peer's name* — an unsalted digest of the name would be
+    /// recomputable by anyone who can hash, so two log excerpts from two sessions (or a log and a
+    /// packet capture) would re-link a peer exactly as the raw name did.
+    private let peerLabelSalt: [UInt8] =
+        PresenceEpochPosture.systemEntropy(NetworkPresenceSession.peerLabelSaltByteCount)
 
     /// Peers this radio currently holds a tunnel to, in no particular order.
     var connectedPeers: [PeerHandle] { tunnels.values.map(\.peer) }
@@ -355,7 +378,7 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
         guard isRunning, let key = identities.key(for: peer) else { return }
         guard let endpoint = browsedEndpoints[key] else {
             Self.logger.notice(
-                "presence dial refused for \(key.rawValue, privacy: .public): no browsed endpoint"
+                "presence dial refused for \(self.peerLabel(for: key), privacy: .public): no browsed endpoint"
             )
             return
         }
@@ -411,6 +434,38 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     /// Always zero: presence opens no per-transfer streams. Required by ``NetworkChannelHost`` so
     /// one channel type serves both radios.
     func openTransferCount(for peer: PeerHandle) -> Int { 0 }
+
+    // MARK: - Peer labels
+
+    /// The opaque, session-scoped label this radio names `key` by in **every** diagnostic line it
+    /// writes — the audit rows and the `os.Logger` lines alike.
+    ///
+    /// The first ``peerLabelLength`` hexadecimal characters of SHA-256 over this session's random
+    /// ``peerLabelSalt`` followed by the key's bytes. Three properties, and each is load-bearing:
+    ///
+    /// * **Not the peer's name.** ``MeshLinkKey`` looks opaque and is not: under this radio its
+    ///   `rawValue` is the browsed Bonjour endpoint's id, which *contains the instance name the
+    ///   peer advertises* (`fn-<16 hex>._fernlet-near2._udp.local.`). Logging it verbatim put the
+    ///   peer's rotating identifier on every sighting line — the exact value the posture rotation
+    ///   exists to keep uncorrelatable — which is what the tier-2 run of P9 item 2 observed.
+    /// * **Not recomputable.** The salt is private to this session, so a reader who holds the
+    ///   peer's name (it is public on the air) still cannot turn two log excerpts, or a log and a
+    ///   packet capture, into one peer. A plain unsalted hash would be no protection at all.
+    /// * **Stable within the session.** The same key labels identically for the session's whole
+    ///   life, so a sighting, a collapse and a teardown are still readable as one peer's story —
+    ///   which is the entire reason a per-peer token appears in these lines at all.
+    ///
+    /// Not a cryptographic decision: nothing compares two of these and nothing depends on their
+    /// unforgeability. A session whose entropy draw came back empty labels every peer
+    /// ``unlabelledPeer`` rather than falling back to anything derived from the key.
+    func peerLabel(for key: MeshLinkKey) -> String {
+        guard !peerLabelSalt.isEmpty else { return Self.unlabelledPeer }
+        var hasher = SHA256()
+        hasher.update(data: Data(peerLabelSalt))
+        hasher.update(data: Data(key.rawValue.utf8))
+        let hexadecimal = PresenceEpochPosture.hexadecimal(Array(hasher.finalize()))
+        return String(hexadecimal.prefix(Self.peerLabelLength))
+    }
 
     // MARK: - Test seam
 
@@ -474,6 +529,20 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
             advertisement: [:],
             lastSeenAt: Date()
         )
+    }
+
+    /// Drives one whole SIGHTING exactly as a browse result drives it — the record, the
+    /// `presence.quic.sighted` audit line and the owner's discovery callback — minus the framework
+    /// endpoint a unit test cannot build.
+    ///
+    /// Distinct from ``noteBrowsedNameForTesting(_:instanceName:)``, which plants only the name the
+    /// glare tie-break reads and deliberately emits nothing.
+    func noteBrowsedForTesting(
+        _ key: MeshLinkKey,
+        instanceName: String,
+        advertisement: [String: String]
+    ) {
+        recordBrowsed(key: key, instanceName: instanceName, advertisement: advertisement, at: Date())
     }
 
     /// Books a tunnel exactly as ``dial(_:helloTag:)`` and ``serveInbound(stream:pendingKey:)``
@@ -641,7 +710,8 @@ private extension NetworkPresenceSession {
     /// lines that carry it (`presence.quic.advertised` and `.rotated`) are what a tier-2 runner
     /// reads across a boundary — our name A and digest A before it, our name B and digest B after,
     /// on each device, with no byte in common. No PEER's name or tag is logged anywhere in this
-    /// file; a browsed peer is named by its opaque session key (see ``noteBrowsed(_:key:at:)``).
+    /// file; a browsed peer is named by ``peerLabel(for:)``, which is opaque in the sense the
+    /// endpoint key only looked — the key carries the peer's advertised instance name verbatim.
     /// `.private` shows on a Simulator and redacts on a device, which is the correct asymmetry —
     /// the values are public on the air, but a device log is not a place to accumulate them.
     func auditContext(for posture: PresenceEpochPosture) -> [String: String] {
@@ -689,26 +759,47 @@ private extension NetworkPresenceSession {
     /// Bonjour peer is routinely seen before its TXT record arrives, so a first sighting can carry
     /// no tags at all and the owner would never re-evaluate it if the late record went unannounced.
     func noteBrowsed(_ endpoint: Bonjour.Endpoint, key: MeshLinkKey, at now: Date) {
-        let previous = browsedRecords[key]?.advertisement
-        let advertisement = endpoint.txtRecord.dictionary
         browsedEndpoints[key] = endpoint
-        browsedRecords[key] = MeshEndpointRecord(
+        recordBrowsed(
             key: key,
             instanceName: endpoint.name,
+            advertisement: endpoint.txtRecord.dictionary,
+            at: now
+        )
+    }
+
+    /// The framework-free half of ``noteBrowsed(_:key:at:)``: everything a browse result does to
+    /// this session's own state, the audit line included, with no `Bonjour.Endpoint` in sight.
+    ///
+    /// Split out so the sighting path — and in particular what its audit line carries — is
+    /// reachable at tier 1. A unit test cannot build a `Bonjour.Endpoint`, so before the split the
+    /// one line that named a peer was observable only by starting a real radio.
+    func recordBrowsed(
+        key: MeshLinkKey,
+        instanceName: String,
+        advertisement: [String: String],
+        at now: Date
+    ) {
+        let previous = browsedRecords[key]?.advertisement
+        browsedRecords[key] = MeshEndpointRecord(
+            key: key,
+            instanceName: instanceName,
             advertisement: advertisement,
             lastSeenAt: now
         )
         guard previous != advertisement else { return }
-        // The line names the peer by its OPAQUE, session-scoped key — the same token every other
-        // per-peer line in this file uses — and never by the instance name it advertises, and it
-        // counts the tags rather than carrying them. A peer's name and a peer's tag are both
-        // values a log reader could correlate two sightings with, which is the exact linkage the
-        // whole posture rotation exists to break; "no identities in any log line" has to hold for
-        // the peer's identifiers as strictly as it does for ours.
+        // The line names the peer by ``peerLabel(for:)`` — the same opaque, salted, session-scoped
+        // token every other per-peer line in this file uses — and never by the endpoint key, which
+        // CONTAINS the instance name the peer advertises; and it counts the tags rather than
+        // carrying them. A peer's name and a peer's tag are both values a log reader could
+        // correlate two sightings with, which is the exact linkage the whole posture rotation
+        // exists to break; "no identities in any log line" has to hold for the peer's identifiers
+        // as strictly as it does for ours. Logging `key.rawValue` here is what P9 item 2's tier-2
+        // run caught: every observed line read `peer=fn-<the peer's own name>…`.
         FernletAuditLog.log(
             "presence.quic.sighted",
             context: [
-                "peer": key.rawValue,
+                "peer": peerLabel(for: key),
                 "tags": String(PresenceAdvertisement.tags(from: advertisement).count)
             ]
         )
@@ -789,7 +880,7 @@ private extension NetworkPresenceSession {
         guard isRunning else { return }
         let pendingKey = MeshLinkKey(connection.id)
         guard pendingInbound[pendingKey] == nil, pendingInbound.count < Self.maxPendingInbound else {
-            Self.logger.debug("presence connection refused pre-hello for \(pendingKey.rawValue, privacy: .public)")
+            Self.logger.debug("presence connection refused pre-hello for \(self.peerLabel(for: pendingKey), privacy: .public)")
             return
         }
         pendingInbound[pendingKey] = Task { @MainActor [weak self] in
@@ -891,12 +982,13 @@ private extension NetworkPresenceSession {
         return true
     }
 
-    /// The one audit line for a collapsed duplicate, naming the peer by its opaque session key and
-    /// which half survived. Never a peer's instance name — see ``noteBrowsed(_:key:at:)``.
+    /// The one audit line for a collapsed duplicate, naming the peer by ``peerLabel(for:)`` and
+    /// which half survived. Never the endpoint key, which carries the peer's advertised instance
+    /// name verbatim — see ``noteBrowsed(_:key:at:)``.
     func auditRedundantTunnelClosed(_ key: MeshLinkKey, kept: String) {
         FernletAuditLog.log(
             "presence.quic.redundantTunnelClosed",
-            context: ["peer": key.rawValue, "kept": kept]
+            context: ["peer": peerLabel(for: key), "kept": kept]
         )
     }
 
@@ -946,7 +1038,7 @@ private extension NetworkPresenceSession {
     func endTunnel(_ key: MeshLinkKey, reason: String, notifyOwner: Bool = true) {
         guard let tunnel = tunnels.removeValue(forKey: key) else { return }
         tunnel.task?.cancel()
-        Self.logger.notice("presence tunnel ended for \(key.rawValue, privacy: .public): \(reason, privacy: .public)")
+        Self.logger.notice("presence tunnel ended for \(self.peerLabel(for: key), privacy: .public): \(reason, privacy: .public)")
         tunnel.channel.notifyDisconnected(reason: reason)
         guard notifyOwner else { return }
         onPeerDisconnected?(tunnel.peer, reason)
