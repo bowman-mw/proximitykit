@@ -131,6 +131,29 @@ nonisolated struct MeshSessionIdentityMap {
     }
 }
 
+// MARK: - NetworkChannelHost
+
+/// The shared radio a ``NetworkPeerChannel`` routes one peer's frames through.
+///
+/// Two QUIC radios own channels — ``NetworkMeshSession`` and ``NetworkPresenceSession`` — and the
+/// channel is identical for both: it holds a peer, publishes that peer's state and inbound frames,
+/// and hands every send back to whoever owns the connections. This protocol is exactly that
+/// hand-back, and nothing else, so the channel exists once rather than twice.
+///
+/// `AnyObject` because the channel holds its host **weakly**: the host owns the channel (memory
+/// lifecycle ML4/ML5 — a manager holds its session strongly, a session's channels point back
+/// weakly), and a strong edge here would be a retain cycle per peer.
+@MainActor
+protocol NetworkChannelHost: AnyObject {
+
+    /// Sends one frame to a peer over whatever this radio's transport provides.
+    func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws
+
+    /// Per-transfer streams open on this peer's tunnel right now, in both directions. Zero for a
+    /// radio that opens none.
+    func openTransferCount(for peer: PeerHandle) -> Int
+}
+
 // MARK: - NetworkPeerChannel
 
 /// Per-peer ``PeerTransport`` adapter over one QUIC tunnel.
@@ -154,7 +177,7 @@ final class NetworkPeerChannel: PeerTransport {
     /// The peer this channel carries.
     let peer: PeerHandle
 
-    private weak var session: NetworkMeshSession?
+    private weak var host: (any NetworkChannelHost)?
     private let stateSubject = CurrentValueSubject<PeerTransportState, Never>(.idle)
     private let inboundSubject = PassthroughSubject<InboundPeerFrame, Never>()
 
@@ -162,9 +185,9 @@ final class NetworkPeerChannel: PeerTransport {
     var inbound: AnyPublisher<InboundPeerFrame, Never> { inboundSubject.eraseToAnyPublisher() }
     var connectedPeers: [PeerHandle] { [] }
 
-    init(peer: PeerHandle, session: NetworkMeshSession) {
+    init(peer: PeerHandle, host: any NetworkChannelHost) {
         self.peer = peer
-        self.session = session
+        self.host = host
     }
 
     // Discovery and admission belong to the shared session, exactly as they do under MC.
@@ -179,8 +202,8 @@ final class NetworkPeerChannel: PeerTransport {
     /// above this line can tell the difference**, which is the point: `MeshNetworkManager` sends a
     /// friend photo the same way over MultipeerConnectivity and over QUIC.
     func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws {
-        guard let session else { throw PeerTransportError.unexpectedState }
-        try await session.send(data, to: peer, mode: mode)
+        guard let host else { throw PeerTransportError.unexpectedState }
+        try await host.send(data, to: peer, mode: mode)
     }
 
     /// Per-transfer streams open on this peer's tunnel right now, in both directions.
@@ -188,7 +211,7 @@ final class NetworkPeerChannel: PeerTransport {
     /// Zero on a settled tunnel. The read exists so a test can assert that a finished transfer gave
     /// its budget slot back, rather than inferring it from a later send happening to succeed.
     var openTransferCount: Int {
-        session?.openTransferCount(for: peer) ?? 0
+        host?.openTransferCount(for: peer) ?? 0
     }
 
     func disconnect() async {
@@ -263,7 +286,7 @@ final class NetworkPeerChannel: PeerTransport {
 /// `@MainActor`; framework callbacks arrive `@Sendable` and hop in. Owners wire behaviour through
 /// the closure hooks, the same way they do for the MC session.
 @MainActor
-final class NetworkMeshSession {
+final class NetworkMeshSession: NetworkChannelHost {
 
     /// The friend mesh's QUIC service type. Frozen wire token: it must also appear in the app's
     /// Info.plist `NSBonjourServices` or discovery is silently dead on device.
@@ -905,41 +928,78 @@ private extension NetworkMeshSession {
         }
     }
 
-    /// QUIC parameters for an outbound connection. No local identity: only the listener side
-    /// presents a certificate, and neither side validates one — see ``EphemeralMeshTLSIdentity``.
-    ///
-    /// ``MeshHeartbeatSchedule/idleTimeoutMilliseconds`` is declared rather than defaulted, and that
-    /// is the P2 item 15 fix: the framework's default idle timeout sat at roughly the heartbeat
-    /// interval, so QUIC reaped every tunnel a moment before its first beat was due.
+    /// QUIC parameters for an outbound mesh connection — ``ProximityQUICParameters`` under the
+    /// mesh's own ALPN, so the two radios share one parameter factory and cannot drift apart on the
+    /// settings that are safety claims (`prohibitedInterfaceTypes`, the idle timeout).
     static func connectionParameters() -> NWParametersBuilder<QUIC> {
-        let parameters = NWParametersBuilder<QUIC>.parameters {
-            QUIC(alpn: [alpn])
-                .tls.certificateValidator { _, _ in true }
-                .tls.peerAuthentication(.none)
-                .idleTimeout(MeshHeartbeatSchedule.idleTimeoutMilliseconds)
-                .maxUDPPayloadSize(udpPayloadSize)
-                .maxDatagramFrameSize(datagramFrameSize)
-        }.prohibitedInterfaceTypes([.cellular])
-        guard includesPeerToPeer else { return parameters }
-        return parameters.peerToPeerIncluded(true)
+        ProximityQUICParameters.connection(alpn: alpn)
     }
 
-    /// QUIC parameters for the listener, presenting this session's ephemeral identity.
-    ///
-    /// The idle timeout is declared on both sides deliberately: QUIC uses the **minimum** of the two
-    /// endpoints' advertised `max_idle_timeout` values, so a listener left on the default would pull
-    /// the negotiated timeout straight back under the heartbeat interval.
+    /// QUIC parameters for the mesh listener, presenting this session's ephemeral identity.
     static func listenerParameters(identity: sec_identity_t) -> NWParametersBuilder<QUIC> {
+        ProximityQUICParameters.listener(alpn: alpn, identity: identity)
+    }
+}
+
+// MARK: - ProximityQUICParameters
+
+/// The QUIC parameter factory both proximity radios use, parameterized only by ALPN and identity.
+///
+/// Extracted from ``NetworkMeshSession`` when the presence radio arrived (plan §17.1) rather than
+/// copied, because everything in it except the ALPN is a claim rather than a preference:
+/// `prohibitedInterfaceTypes = [.cellular]` is what turns the serverless/local-link promise into
+/// something the OS enforces, the accept-any validator is the deliberate statement that
+/// certificate validation is *not* the authentication decision on either radio, and the declared
+/// idle timeout is the P2 item 15 fix — the framework's default sat at roughly the heartbeat
+/// interval, so QUIC reaped every tunnel a moment before its first beat was due. A second copy of
+/// those four lines is a second place for one of them to be forgotten.
+///
+/// The **ALPN is the parameter that must differ**: a presence connection and a mesh connection
+/// speak different protocols over the same transport, and a shared ALPN would let one radio's dial
+/// complete a TLS handshake with the other's listener.
+nonisolated enum ProximityQUICParameters {
+
+    /// Parameters for an outbound connection. No local identity: only the listener side presents a
+    /// certificate, and neither side validates one — see ``EphemeralMeshTLSIdentity``.
+    static func connection(alpn: String) -> NWParametersBuilder<QUIC> {
+        peerToPeerAdjusted(base(alpn: alpn))
+    }
+
+    /// Parameters for a listener, presenting `identity`.
+    ///
+    /// The idle timeout is declared on both sides deliberately: QUIC uses the **minimum** of the
+    /// two endpoints' advertised `max_idle_timeout` values, so a listener left on the default would
+    /// pull the negotiated timeout straight back under the heartbeat interval.
+    static func listener(alpn: String, identity: sec_identity_t) -> NWParametersBuilder<QUIC> {
         let parameters = NWParametersBuilder<QUIC>.parameters {
             QUIC(alpn: [alpn])
                 .tls.localIdentity(identity)
                 .tls.certificateValidator { _, _ in true }
                 .tls.peerAuthentication(.none)
                 .idleTimeout(MeshHeartbeatSchedule.idleTimeoutMilliseconds)
-                .maxUDPPayloadSize(udpPayloadSize)
-                .maxDatagramFrameSize(datagramFrameSize)
+                .maxUDPPayloadSize(NetworkMeshSession.udpPayloadSize)
+                .maxDatagramFrameSize(NetworkMeshSession.datagramFrameSize)
         }.prohibitedInterfaceTypes([.cellular])
-        guard includesPeerToPeer else { return parameters }
+        return peerToPeerAdjusted(parameters)
+    }
+
+    /// The settings both directions share, minus the listener's identity.
+    private static func base(alpn: String) -> NWParametersBuilder<QUIC> {
+        NWParametersBuilder<QUIC>.parameters {
+            QUIC(alpn: [alpn])
+                .tls.certificateValidator { _, _ in true }
+                .tls.peerAuthentication(.none)
+                .idleTimeout(MeshHeartbeatSchedule.idleTimeoutMilliseconds)
+                .maxUDPPayloadSize(NetworkMeshSession.udpPayloadSize)
+                .maxDatagramFrameSize(NetworkMeshSession.datagramFrameSize)
+        }.prohibitedInterfaceTypes([.cellular])
+    }
+
+    /// Requests Apple peer-to-peer Wi-Fi where the platform has an AWDL radio. Simulators have
+    /// none and reach each other over infrastructure only, which is the lane the feasibility probe
+    /// validated.
+    private static func peerToPeerAdjusted(_ parameters: NWParametersBuilder<QUIC>) -> NWParametersBuilder<QUIC> {
+        guard NetworkMeshSession.includesPeerToPeer else { return parameters }
         return parameters.peerToPeerIncluded(true)
     }
 }
@@ -1211,7 +1271,7 @@ private extension NetworkMeshSession {
     /// publishers an owner is already subscribed to.
     func prepareChannel(for key: MeshLinkKey) -> NetworkPeerChannel {
         if let existing = tunnels[key]?.channel { return existing }
-        return NetworkPeerChannel(peer: handle(for: key), session: self)
+        return NetworkPeerChannel(peer: handle(for: key), host: self)
     }
 
     /// Dialing side: open the control stream, run the signed channel introduction, and only then

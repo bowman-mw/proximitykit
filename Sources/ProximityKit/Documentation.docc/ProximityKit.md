@@ -116,15 +116,16 @@ Photo-library save failures surface through one shared mapping —
 save surface (review sheets and the album carousel) shows identical wording.
 
 **Presence and hearts.** ``PresenceManager`` runs a standing radio that broadcasts only rotating
-pairwise-DH tags — no names, no stable identifiers, a fresh random MCPeerID per start — so kept
-friends recognize each other nearby without connecting. The posture behind that rotation is an
+pairwise-DH tags — no names, no stable identifiers — so kept friends recognize each other nearby
+without connecting. The posture behind that rotation is an
 explicit value since P9 item 2: ``PresenceEpochPosture`` answers, for any instant, the presence
 epoch, the service instance name to advertise and the TLS identity to present, all three replaced
-whole at every 900 s boundary — so that once the listener is bound to it, two sightings 901 seconds
-apart will share no byte. **Pass 1 holds that value; it does not yet advertise it.** Binding the
-QUIC presence listener's instance name and `sec_identity_t` to the posture is pass 2, and until it
-lands the MC advertiser this radio still runs mints one `MCPeerID` per `start()` and wears it for
-the radio's whole life, whatever the posture does underneath. The value is anchored to the wall
+whole at every 900 s boundary — so two sightings 901 seconds apart share no byte. Since pass 2 that
+value is what the radio actually advertises: `NetworkPresenceSession` registers its Bonjour listener
+under the posture's instance name and presents its `sec_identity_t`, and re-registers both whole at
+each boundary. What a boundary does not break is stated where it belongs, on `PresenceManager` — a
+link-local observer sees one IP address throughout, and a tunnel open across the boundary belongs to
+a verified friend who already knows us. The value is anchored to the wall
 clock on purpose — the pairwise tag epoch must be absolute for two phones to agree without
 exchanging anything, a per-launch phase would itself be a fingerprint that survives every
 rotation, and a globally synchronised rotation instant makes the anonymity set at the boundary
@@ -311,11 +312,21 @@ MultipeerConnectivity half private behind ``PeerEndpointKey``, so a Network.fram
 slots in beside it without changing anything here. ``MCPeerIDStoring`` and ``FileMCPeerIDStore``
 are the two deliberate exceptions — they persist the MC peer identity itself and retire with MC.
 
-**Two conformers, one surface.** `MeshMultipeerSession` (MultipeerConnectivity, all four shipping
-radios) and `NetworkMeshSession` (Network.framework/QUIC, the friend mesh's migration target — see
+**Three sessions, one surface.** `MeshMultipeerSession` (MultipeerConnectivity, the radios still on
+it — friend mesh, recipe share, coach), `NetworkMeshSession` (Network.framework/QUIC, the friend
+mesh's migration target — see
 [the network migration plan](../../../../Docs/Plan-ProximityKit-Network-Migration-2026-08-27.md) §7)
-are the two radios; each multiplexes into per-peer channels — `PeerChannelTransport` and
-`NetworkPeerChannel` — that conform to ``PeerTransport``. Neither channel ever publishes
+and `NetworkPresenceSession` (the same framework, the presence radio, §17.1) each multiplex into
+per-peer channels — `PeerChannelTransport` and `NetworkPeerChannel` — that conform to
+``PeerTransport``. The two QUIC sessions share one channel type through `NetworkChannelHost` and one
+parameter factory through `ProximityQUICParameters`, which is where `prohibitedInterfaceTypes =
+[.cellular]`, the accept-any validator and the declared idle timeout live once rather than twice;
+what they do NOT share is the ALPN, so a presence dial can never complete a handshake with a mesh
+listener. They also share the **glare** rule: when both ends dial at the same moment, each collapses
+the duplicate with ``MeshTunnelConvergence`` — the mesh ranking two session ids, presence ranking the
+two advertised instance names, both a pure function of values the two devices agree on, so the
+connection that survives is the same one on both. Refusing the second connection instead is what
+leaves a mutually-dialing pair with none. Neither channel ever publishes
 ``PeerTransportState/discovered``: `ProximityCoordinator.shouldInviteDiscoveredPeer` is a dormant,
 opposite-direction inviter policy that wakes if one does, and two policies pointing opposite ways
 means neither side dials. Discovery reaches the owner through the sessions' closure hooks instead.
@@ -636,8 +647,10 @@ Internal to the module, and listed here because they are where the transport SEL
 `MeshTransportSession`, `MeshTransportHandlers`, `MeshTransportKind`, `MeshTransportFactory`,
 `MeshPeerChannel`, `DetachedPeerChannel`.
 
-Internal to the module, and listed here because they are where the QUIC transport's behaviour
-actually lives: `NetworkMeshSession`, `NetworkPeerChannel`, `MeshLinkTable`, `MeshLinkKey`,
+Internal to the module, and listed here because they are where the QUIC transports' behaviour
+actually lives: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkPeerChannel`,
+`NetworkChannelHost`, `ProximityQUICParameters`, `PresenceAdvertisement`, `PresenceDialHello`,
+`MeshLinkTable`, `MeshLinkKey`,
 `MeshLinkPhase`, `MeshLinkAdmission`, `MeshDialPreference`, `MeshTunnelConvergence`,
 `MeshDialOutcome`, `MeshEndpointRecord`,
 `MeshHeartbeatSchedule`, `MeshLinkAdvertisement`, `MeshSessionIdentityMap`, `NetworkMeshWire`,
