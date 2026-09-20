@@ -292,10 +292,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
         start()
         pendingOutgoing = (payload, recipient)
-        // Seeded from the radio, not defaulted: a second share to an ALREADY-PAIRED peer is minted
-        // while discovery is already standing down and fires no gate transition of its own, so a
-        // record born `radioIsQuiet == false` would claim an open radio for that whole share.
-        transfer = RecipeShareTransfer(recipientID: recipient.id, radioIsQuiet: session.isDiscoveryPaused)
+        mintTransfer(for: recipient.id)
         sendState = .connecting(recipientName: recipient.displayName)
         engagedRecipientID = recipient.id
         recordDiagnostic("Connecting to \(recipient.displayName).")
@@ -1088,6 +1085,19 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         return verdict
     }
 
+    /// Mints the live exchange record for `recipientID`, seeded from the radio's own stand-down
+    /// state.
+    ///
+    /// **One mint site, deliberately.** `sendRecipeShare` and `beginTransferForTesting` held two
+    /// copies of this expression, and only the test seam was ever executed — so restoring pass 1's
+    /// own defect on the shipping line (`radioIsQuiet: false`) left every cell green. The seed is
+    /// read from the radio rather than defaulted because a second share to an ALREADY-PAIRED peer
+    /// is minted while discovery is already standing down and fires no gate transition of its own:
+    /// a record born `radioIsQuiet == false` would claim an open radio for that whole share.
+    private func mintTransfer(for recipientID: UUID) {
+        transfer = RecipeShareTransfer(recipientID: recipientID, radioIsQuiet: session.isDiscoveryPaused)
+    }
+
     /// Applies one event to the live exchange record.
     ///
     /// - Parameters:
@@ -1193,11 +1203,11 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// The live exchange record — the read the state-table cells assert against.
     var transferForTesting: RecipeShareTransfer? { transfer }
 
-    /// Mints the exchange record exactly as `sendRecipeShare` does — including the seed from the
-    /// radio's own stand-down state — with no radio and no recipient row, so the table is reachable
-    /// at tier 1.
+    /// Mints the exchange record exactly as `sendRecipeShare` does — through the SAME private
+    /// helper, not through a second copy of its expression — with no radio and no recipient row,
+    /// so the table is reachable at tier 1. See ``mintTransfer(for:)``.
     func beginTransferForTesting(recipientID: UUID) {
-        transfer = RecipeShareTransfer(recipientID: recipientID, radioIsQuiet: session.isDiscoveryPaused)
+        mintTransfer(for: recipientID)
     }
 
     /// Drives one exchange event through the production helper.
