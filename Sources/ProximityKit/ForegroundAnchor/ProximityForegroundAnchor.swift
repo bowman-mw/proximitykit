@@ -2,8 +2,6 @@ import Foundation
 
 #if canImport(ActivityKit)
 import ActivityKit
-import FernletDomainModel
-import FernletFoundation
 #endif
 
 /// Seam for the "connection in progress" foreground anchor a ``ProximityCoordinator`` raises
