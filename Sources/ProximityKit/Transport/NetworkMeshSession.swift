@@ -831,6 +831,15 @@ private extension NetworkMeshSession {
                     self?.acceptInbound(connection)
                 }
             } catch {
+                // A cancel is this radio tidying itself, never a failure: ``updateDiscoveryInfo(_:)``
+                // cancels this task on EVERY republish (a mesh-mode change, a merge, a member-count
+                // change), because re-creating the listener is the only way to withdraw a Bonjour
+                // registration, and ``pauseDiscovery()`` cancels it at every hold. The owner's only
+                // reader is `discoveryError`, the Friends-screen banner: the republish path never
+                // clears it, and the hold and stop paths clear it BEFORE the cancel lands here, so a
+                // reported `CancellationError` is a "discovery failed" banner pinned over a healthy
+                // search. The `.cancelled` state callback below is already silent; this agrees with it.
+                guard !Task.isCancelled else { return }
                 self?.report("The QUIC listener stopped: \(error)")
             }
         }
@@ -874,6 +883,10 @@ private extension NetworkMeshSession {
                     self?.observe(endpoints)
                 }
             } catch {
+                // Same rule as the listener task above: ``pauseDiscovery()`` and ``stop()`` cancel this
+                // one, and a cancellation reported as a failure is a banner over a radio that was
+                // told to stand down.
+                guard !Task.isCancelled else { return }
                 self?.report("The Bonjour browser stopped: \(error)")
             }
         }
