@@ -312,21 +312,22 @@ MultipeerConnectivity half private behind ``PeerEndpointKey``, so a Network.fram
 slots in beside it without changing anything here. ``MCPeerIDStoring`` and ``FileMCPeerIDStore``
 are the two deliberate exceptions — they persist the MC peer identity itself and retire with MC.
 
-**Three sessions, one surface.** `MeshMultipeerSession` (MultipeerConnectivity, the radios still on
-it — friend mesh, recipe share, coach), `NetworkMeshSession` (Network.framework/QUIC, the friend
-mesh's migration target — see
-[the network migration plan](../../../../Docs/Plan-ProximityKit-Network-Migration-2026-08-27.md) §7)
-and `NetworkPresenceSession` (the same framework, the presence radio, §17.1) each multiplex into
-per-peer channels — `PeerChannelTransport` and `NetworkPeerChannel` — that conform to
-``PeerTransport``. The two QUIC sessions share one channel type through `NetworkChannelHost` and one
-parameter factory through `ProximityQUICParameters`, which is where `prohibitedInterfaceTypes =
-[.cellular]`, the accept-any validator and the declared idle timeout live once rather than twice;
-what they do NOT share is the ALPN, so a presence dial can never complete a handshake with a mesh
+**Four sessions, one surface.** `MeshMultipeerSession` (MultipeerConnectivity, the radios still on
+it — friend mesh, coach), `NetworkMeshSession` (Network.framework/QUIC, the friend mesh's migration
+target — see
+[the network migration plan](../../../../Docs/Plan-ProximityKit-Network-Migration-2026-08-27.md) §7),
+`NetworkPresenceSession` (the same framework, the presence radio, §17.1) and
+`NetworkRecipeShareSession` (the recipe radio, same plan section) each multiplex into per-peer
+channels — `PeerChannelTransport` and `NetworkPeerChannel` — that conform to ``PeerTransport``. The
+three QUIC sessions share one channel type through `NetworkChannelHost` and one parameter factory
+through `ProximityQUICParameters`, which is where `prohibitedInterfaceTypes = [.cellular]`, the
+accept-any validator and the declared idle timeout live once rather than three times; what they do
+NOT share is the ALPN, so a recipe dial can never complete a handshake with a presence or mesh
 listener. They also share the **glare** rule: when both ends dial at the same moment, each collapses
-the duplicate with ``MeshTunnelConvergence`` — the mesh ranking two session ids, presence ranking the
-two advertised instance names, both a pure function of values the two devices agree on, so the
-connection that survives is the same one on both. Refusing the second connection instead is what
-leaves a mutually-dialing pair with none. Neither channel ever publishes
+the duplicate with ``MeshTunnelConvergence`` — the mesh ranking two session ids, presence and recipe
+share ranking the two advertised instance names, each a pure function of values the two devices
+agree on, so the connection that survives is the same one on both. Refusing the second connection
+instead is what leaves a mutually-dialing pair with none. Neither channel ever publishes
 ``PeerTransportState/discovered``: `ProximityCoordinator.shouldInviteDiscoveredPeer` is a dormant,
 opposite-direction inviter policy that wakes if one does, and two policies pointing opposite ways
 means neither side dials. Discovery reaches the owner through the sessions' closure hooks instead.
@@ -661,8 +662,10 @@ actually lives: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkPeerChan
 `MeshChannelIntroductionOutcome`, `MeshIntroductionRejection`, `MeshIntroductionRoster`,
 `MeshRosterVerdict`, `MeshIntroductionNonceCache`, `MeshVerifiedPeer`, `MeshIntroductionAuthority`.
 
-The recipe-share radio has not moved to QUIC yet (P9 item 3 pass 2), but its two decisions that a
-transport swap would lose quietly are already tier-1 values. ``RecipeShareDiscoveryGate`` is the
+The recipe-share radio is on QUIC (P9 item 3 pass 2: `NetworkRecipeShareSession` on
+`_fernlet-recipe2._udp`, ALPN `fernlet-recipe-v1`, behind the `RecipeShareRadioSession` seam), and
+the two decisions a transport swap would have lost quietly were settled as tier-1 values first.
+``RecipeShareDiscoveryGate`` is the
 pause/resume contract — the radio goes quiet to new peers the moment a pairing is registered and
 reopens only when that pairing's manager-level RECORD is evicted, never on a transport disconnect
 event (a failed handshake fires none) and never over a stopped radio. ``RecipeShareTransfer`` is the
@@ -670,14 +673,30 @@ share itself: `connecting → verified → sending → sent/failed/cancelled`, w
 counted rather than assigned, and with the row that matters most — a discovery pause or resume is
 accepted in every phase and moves none of them, because closing the radio to new peers is not
 pausing a share in flight. ``RecipeShareAdvertisedName`` bounds the advertised display name in
-BYTES, not Characters, so the pass-2 Bonjour publisher (which DROPS an over-long TXT value rather
-than truncating it) cannot silently strip the name off a long one; a name it cannot publish at all
-is omitted rather than sent empty, and ``RecipeShareAdvertisedName/received(_:hint:)`` falls back to
-the peer's transport hint on an absent *and* an empty one. **Pass-2 trap:** the gate answers
-`unchanged` for `refreshRequested`, `transportErrorWhileListening` and `stopped` only because the
-SESSION's own `stop()`/`start()` clears its paused flag — a QUIC recipe session must clear that flag
-on stop, or a refresh restarts into a radio that is still standing down and the only symptom is a
-search that finds nothing.
+BYTES, not Characters, so the Bonjour publisher (which DROPS an over-long TXT value rather than
+truncating it) cannot silently strip the name off a long one; a name it cannot publish at all is
+omitted rather than sent empty, and ``RecipeShareAdvertisedName/received(_:hint:)`` falls back to
+the peer's transport hint on an absent *and* an empty one. The gate answers `unchanged` for
+`refreshRequested`, `transportErrorWhileListening` and `stopped` only because the SESSION's own
+`stop()` clears its paused flag — `NetworkRecipeShareSession.stop()` does, and a cell says so,
+because otherwise a refresh restarts into a radio that is still standing down and the only symptom
+is a search that finds nothing.
+
+**What the QUIC radio adds, and what it deliberately does not.** It wears a `RecipeSharePosture`
+minted fresh at every `start()` and every resume — a random instance name, a new TLS identity and a
+new `sid`, with **no rotation timer**, because the radio's lifetime is a Food-tab visit. That is an
+improvement on what it replaces rather than a reproduction: the retired radio advertised the
+persistent, device-name-derived peer identity, so a passive Bonjour scanner could read the device's
+name and link a person's sightings across days. **The residual, stated rather than hidden:** an
+ephemeral name does not make a recipe advertiser unlinkable, because the TXT record still carries the
+user's chosen display name on purpose — the picker on the other phone shows it. What the posture
+removes is the identifier the user never chose. It also adds the one thing the presence radio has
+none of: a **per-transfer-stream acceptor**. A recipe crosses as ONE sealed frame, but a recipe
+carrying a picture clears ``MeshTransferStreamTable/bulkFloorBytes`` and takes a stream of its own,
+exactly as a friend photo does on the mesh, so it cannot park the pairing's control stream behind
+itself. And every `report` it makes is a START failure: a per-dial miss, a refused hello and a failed
+transfer are audited and nothing more, because the owner's transport-error hook stands the whole
+radio down.
 
 Internal to the module, DEBUG-only, and listed here so they are never mistaken for production
 behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroductionChaosBehaviour`.

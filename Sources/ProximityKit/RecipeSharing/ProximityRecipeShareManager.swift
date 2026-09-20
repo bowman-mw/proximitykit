@@ -11,7 +11,7 @@ import FernletFoundation
 private struct RecipeShareConnection: Identifiable {
     let id: UUID
     let peer: PeerHandle
-    let channel: PeerChannelTransport
+    let channel: NetworkPeerChannel
     let coordinator: ProximityCoordinator
     /// Retained for the connection's lifetime so the coordinator's `weak` trustPolicy stays alive —
     /// otherwise the revoked/blocked-key envelope rejection + audit calls silently no-op (they would
@@ -62,19 +62,20 @@ public enum ProximityRecipeShareDiagnostics {
     }
 }
 
-/// The recipe-share radio (`fernlet-recipe`): discovers nearby Fernlets, forms a hard-capped
-/// 2-device verified pairing, and exchanges sealed `.recipeShare` payloads.
+/// The recipe-share radio (`_fernlet-recipe2._udp`): discovers nearby Fernlets, forms a
+/// hard-capped 2-device verified pairing, and exchanges sealed `.recipeShare` payloads.
 ///
-/// Owns its own `MeshMultipeerSession`, ``IdentityService`` cache, and ``ReplayCache``; each
-/// pairing gets a ``ProximityCoordinator`` with a retained ``FriendSessionTrustPolicy`` (the
-/// coordinator's trust ref is `weak` — dropping the retention silently disables the
-/// revoked/blocked drops). The hard 2-device cap is enforced at four layers: the inbound
-/// invitation gate, the outbound send guard, the connecting-window check, and the belt-and-braces
-/// channel admission — with the radio PAUSED while paired (`pauseDiscovery`) and reopened only on
-/// manager-level record eviction, never on MC disconnect events (a failed handshake fires none).
-/// That pause/resume contract and the send pipeline's state machine are tier-1 values
-/// (``RecipeShareDiscoveryGate``, ``RecipeShareTransfer``), so the P9 move to QUIC binds a table
-/// rather than re-deriving two guard chains.
+/// Owns its own ``RecipeShareRadioSession`` (the QUIC ``NetworkRecipeShareSession`` in
+/// production), ``IdentityService`` cache, and ``ReplayCache``; each pairing gets a
+/// ``ProximityCoordinator`` with a retained ``FriendSessionTrustPolicy`` (the coordinator's trust
+/// ref is `weak` — dropping the retention silently disables the revoked/blocked drops). The hard
+/// 2-device cap is enforced at four layers: the inbound dialer gate, the outbound send guard, the
+/// connecting-window check, and the belt-and-braces channel admission — with the radio PAUSED
+/// while paired (`pauseDiscovery`) and reopened only on manager-level record eviction, never on a
+/// transport disconnect event (a failed handshake fires none). That pause/resume contract and the
+/// send pipeline's state machine are tier-1 values (``RecipeShareDiscoveryGate``,
+/// ``RecipeShareTransfer``), and the radio is bound to those tables rather than to a reading of
+/// two guard chains.
 /// Timeouts: a 12 s pre-connect timer (the peer-is-busy case), the coordinator's 25 s handshake
 /// budget, and a parked-connection sweep for coordinators stalled pre-verification. Inbound
 /// shares are rate-limited per sender and capped at 8 pending. Lifecycle is owned by the app
@@ -104,7 +105,11 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     public private(set) var engagedRecipientID: UUID?
 
     @ObservationIgnored private unowned let store: any ProximityHost
-    @ObservationIgnored private let session = MeshMultipeerSession()
+    /// The radio this manager drives. Built once, at construction, because several of this
+    /// manager's decisions (the inbound gate, the pause flag, a discovery callback) are reachable
+    /// before `start()` ever runs — which is also what lets a unit test hand in an in-memory
+    /// conformer through the init seam and exercise them with no Bonjour anywhere.
+    @ObservationIgnored private let session: any RecipeShareRadioSession
     @ObservationIgnored private let identity: IdentityService
     @ObservationIgnored private let replayCache = ReplayCache()
     @ObservationIgnored private var connections: [RecipeShareConnection] = []
@@ -122,9 +127,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     @ObservationIgnored private var transfer: RecipeShareTransfer?
     @ObservationIgnored private var isRunning = false
     private var connectionObservationRevision = 0
-    @ObservationIgnored private var sessionID = UUID().uuidString
 
-    private static let serviceType = "fernlet-recipe"
     private static let maxPendingShares = 8
     private static let perSenderRateLimitSeconds: TimeInterval = 3
     /// How long a coordinator may sit in a pre-verification state (.idle/.starting/
@@ -144,7 +147,19 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     @ObservationIgnored var connectTimeoutSeconds: TimeInterval = 12
     @ObservationIgnored private var lastAcceptedBySender: [String: Date] = [:]
 
-    public init(store: any ProximityHost) {
+    public convenience init(store: any ProximityHost) {
+        self.init(store: store, makeSession: nil)
+    }
+
+    /// The seam a unit test builds this manager through: `makeSession` supplies the radio.
+    ///
+    /// The production default is the one QUIC recipe radio and nothing in shipping code passes a
+    /// factory — the counterpart of `PresenceManager.makeSession` for a manager that owns its
+    /// radio from construction rather than from `start()`. It is an **optional closure resolved in
+    /// the body** rather than a default argument because `NetworkRecipeShareSession` is
+    /// `@MainActor` and a main-actor type cannot be a default-argument value.
+    init(store: any ProximityHost, makeSession: (() -> any RecipeShareRadioSession)?) {
+        self.session = makeSession?() ?? NetworkRecipeShareSession()
         self.store = store
         let id = IdentityService()
         do {
@@ -186,7 +201,15 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         guard !isRunning else { return }
         isRunning = true
         recordDiagnostic("Recipe share discovery started.")
-        session.start(serviceType: Self.serviceType, discoveryInfo: discoveryInfo())
+        do {
+            try session.start(advertisement: discoveryInfo())
+        } catch {
+            // The same stand-down door a post-start failure goes through: the radio never came up,
+            // so `isListening` must say so and the run-policy seam re-applies a running verdict at
+            // its next run (P8 item 0, device finding (b)).
+            handleTransportError("The recipe share radio could not start: \(error)")
+            return
+        }
         startObserving()
     }
 
@@ -258,7 +281,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
         // Hard 2-device cap (outbound): refuse — visibly, never silently — while a connection
         // to a DIFFERENT peer exists. The radio is paused while paired, so an invite could not
-        // go out anyway (see MeshMultipeerSession.pauseDiscovery contract).
+        // go out anyway (see RecipeShareRadioSession.pauseDiscovery's contract).
         if let connection = connections.first, !isSameDevice(connection, as: recipient) {
             let name = displayName(for: connection)
             sendState = .failed(message: "Still sharing with \(name) — recipe sharing links two Fernlets at a time.")
@@ -297,7 +320,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         }
         // Hard 2-device cap (connecting window): an attempt to a different peer is already in
         // flight — inviting a second one could race two connections past the cap.
-        if session.hasPendingConnections(besides: peer) {
+        if session.hasConnectingPeers(besides: peer) {
             pendingOutgoing = nil
             applyTransfer(.cancelled)
             sendState = .failed(message: "Still connecting to another Fernlet — recipe sharing links two Fernlets at a time.")
@@ -306,7 +329,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             scheduleStatusClear()
             return
         }
-        session.invite(peer)
+        session.dial(peer, helloSID: session.advertisedSessionID)
         armConnectTimeout(for: recipient)
     }
 
@@ -394,37 +417,71 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             guard let self else { return }
             self.handlePeerLost(peer)
             self.removeConnections(matching: peer)
-            self.recordDiagnostic("\(peer.displayHint) disconnected.")
+            self.recordDiagnostic("\(self.displayName(for: peer)) disconnected.")
         }
-        session.shouldAcceptInvitation = { [weak self] peer in
+        session.resolveDialer = { [weak self] sessionID in
+            self?.peerAdvertising(sessionID: sessionID)
+        }
+        session.shouldAcceptDialer = { [weak self] peer in
             guard let self else { return false }
             // Blocklist is enforced at identity-introduction time by the coordinator.
             // Hard 2-device cap (inbound): accept only when we hold no connection AND no
-            // connecting-window pending peer — checking `connections` alone leaves a race
-            // where a second inviter slips in while the first is still MC-connecting. The
-            // SAME peer re-inviting (retry of a dropped attempt) is always let through.
+            // connecting-window peer — checking `connections` alone leaves a race where a second
+            // dialer slips in while the first is still connecting. The SAME peer re-dialing (retry
+            // of a dropped attempt) is always let through.
             if self.connections.contains(where: { $0.peer.isSameEndpoint(as: peer) }) {
                 return true
             }
             guard self.connections.isEmpty else { return false }
-            return !self.session.hasPendingConnections(besides: peer)
+            return !self.session.hasConnectingPeers(besides: peer)
         }
         session.onTransportError = { [weak self] message in
-            guard let self else { return }
-            self.recordDiagnostic(message)
-            // Discovery failed to (re)start (advertiser/browser didNotStart — the Local Network
-            // prompt on a fresh install's first start, or the Bonjour restart after a record
-            // eviction's resumeDiscovery): with `isRunning` left true, the idempotent start()
-            // no-ops forever and passive listening stays dark. Stop fully, so `isListening` tells
-            // the truth: the app's run-policy seam reads it on every policy run and re-applies a
-            // running verdict to a stopped listener (P8 item 0, device finding (b)) — it no longer
-            // waits for a verdict edge or the share sheet's own start(). didNotStart* only fires
-            // from start attempts — and resume runs only with no connection held — but guard on an
-            // empty connection list anyway so an unexpected error can never tear down a live pairing.
-            guard self.connections.isEmpty, self.isRunning else { return }
-            self.stop()
-            self.recordDiagnostic("Recipe share radio failed to start — listening will retry on the next app event.")
+            self?.handleTransportError(message)
         }
+    }
+
+    /// The radio reported a START failure — a listener or browser that could not come up (the
+    /// Local Network permission prompt on a fresh install's very first start, or the re-listen
+    /// after a record eviction's `resumeDiscovery`).
+    ///
+    /// Stands the radio down. With `isRunning` left true the idempotent `start()` no-ops forever
+    /// and passive listening stays dark; stopping fully makes `isListening` tell the truth, and the
+    /// app's run-policy seam reads it on every policy run and re-applies a running verdict to a
+    /// stopped listener (P8 item 0, device finding (b)) rather than waiting for a verdict edge or
+    /// the share sheet's own `start()`.
+    ///
+    /// **Only a start failure reaches here.** A per-dial miss, a refused hello and a transfer that
+    /// failed are logged by the radio and never reported — under the retired transport this door
+    /// was reachable from `didNotStart*` alone, and a QUIC radio that reported a per-operation
+    /// refusal through it would stand the whole radio down on an ordinary evening.
+    ///
+    /// The guard covers the whole of "something would be lost": a live pairing, and equally the
+    /// **connecting window** — a dial in flight or an inbound connection mid-hello lives in the
+    /// radio's tunnels and pending map, not in `connections`, and `stop()` cancels both. Under MC
+    /// that window was unreachable from here (the door opened at start and nowhere else); a QUIC
+    /// browser failing mid-evening would otherwise abort the user's tap and clear the picker. The
+    /// message is still recorded either way, so nothing about it is silent.
+    private func handleTransportError(_ message: String) {
+        recordDiagnostic(message)
+        guard connections.isEmpty, !session.hasConnectingPeers(besides: nil), isRunning else { return }
+        stop()
+        recordDiagnostic("Recipe share radio failed to start — listening will retry on the next app event.")
+    }
+
+    /// The browsed peer advertising `sessionID`, for the radio's inbound dialer resolution.
+    ///
+    /// The QUIC counterpart of the resolution the retired transport did for free: an inbound
+    /// connection carries a connection id that belongs to no browse result, so the dialer names the
+    /// `sid` from its own TXT record and this answers which discovered peer that is. A `sid` no
+    /// discovered peer carries resolves to nobody, and the radio refuses the connection before any
+    /// channel or handle exists.
+    private func peerAdvertising(sessionID: String) -> PeerHandle? {
+        guard !sessionID.isEmpty else { return nil }
+        for peer in discoveredPeers.values.sorted(by: { $0.id.uuidString < $1.id.uuidString })
+        where RecipeShareAdvertisement.sessionID(from: peer.discoveryInfo) == sessionID {
+            return peer
+        }
+        return nil
     }
 
     /// The advertised fields. `name` is bounded in BYTES rather than Characters — see
@@ -440,10 +497,17 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// `name` key rather than advertising an empty one, matching
     /// ``MeshLinkAdvertisement/publishedFields``: an absent name falls back to the peer's transport
     /// hint, an empty one would render as the "A friend" placeholder.
+    /// The `sid` is deliberately **absent**: it belongs to the radio, which mints it with its
+    /// instance name and TLS identity at every `start()` and every resume, and joins it to these
+    /// fields in ``RecipeShareAdvertisement/publishedFields(from:sessionID:)``. A copy kept here
+    /// would go stale at the first resume.
     private func discoveryInfo() -> [String: String] {
-        var fields = ["v": "1", "sid": sessionID, "mode": "recipe"]
+        var fields = [
+            RecipeShareAdvertisement.versionKey: RecipeShareAdvertisement.version,
+            RecipeShareAdvertisement.modeKey: RecipeShareAdvertisement.mode
+        ]
         let name = RecipeShareAdvertisedName.publishable(displayName)
-        if !name.isEmpty { fields["name"] = name }
+        if !name.isEmpty { fields[RecipeShareAdvertisement.nameKey] = name }
         return fields
     }
 
@@ -478,18 +542,21 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     private func handlePeerDiscovered(_ peer: PeerHandle) {
-        // Exclude self using session ID comparison; blocklist is enforced post-introduction.
-        if let remoteSID = peer.discoveryInfo?["sid"], remoteSID == sessionID { return }
+        // Self-exclusion, second layer: the radio already drops its own registration by instance
+        // name (which it mints and therefore recognizes even before a TXT record arrives), and
+        // this catches an echo that reaches the owner carrying our own advertised `sid`.
+        // Blocklist is enforced post-introduction.
+        if let remoteSID = RecipeShareAdvertisement.sessionID(from: peer.discoveryInfo),
+           remoteSID == session.advertisedSessionID { return }
         discoveredPeers[peer.id] = peer
         let recipient = ProximityRecipeShareRecipient(
             id: peer.id,
             // Pre-handshake label straight off the wire — the picker, the browse list and the
-            // diagnostics all read it back from here, so this is the one ingest to coerce. An
-            // absent name and an empty one both fall back to the transport hint (a bare `??` would
-            // pass "" through and render the placeholder instead) — see `received(_:hint:)`.
-            displayName: ItemNameModeration.moderatedPeerDisplayName(
-                RecipeShareAdvertisedName.received(peer.discoveryInfo?["name"], hint: peer.displayHint)
-            ),
+            // diagnostics all read it back from here, so this is the one ingest to coerce. The
+            // QUIC radio publishes NO transport hint (see `NetworkRecipeShareSession.handle(for:)`),
+            // so an absent or empty `name` falls through to the placeholder rather than to a random
+            // Bonjour instance name — see `displayName(for peer:)`.
+            displayName: displayName(for: peer),
             fingerprint: nil
         )
         nearbyRecipients.removeAll { $0.id == recipient.id }
@@ -499,10 +566,10 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     private func handlePeerLost(_ peer: PeerHandle) {
-        let displayName = nearbyRecipients.first { $0.id == peer.id }?.displayName ?? peer.displayHint
+        let name = displayName(for: peer)
         discoveredPeers.removeValue(forKey: peer.id)
         nearbyRecipients.removeAll { $0.id == peer.id }
-        recordDiagnostic("\(displayName) is no longer nearby.")
+        recordDiagnostic("\(name) is no longer nearby.")
     }
 
     /// True when `peer`'s DEVICE already holds the pairing.
@@ -545,9 +612,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         connections.first { isSameDevice($0, as: recipient) }
     }
 
-    /// Belt-and-braces admission check for a just-connected MC channel (hard 2-device cap):
+    /// Belt-and-braces admission check for a just-connected channel (hard 2-device cap):
     /// true only when no connection exists or the peer already holds it. A third peer can
-    /// still slip past both invitation gates in the connecting window; this is the last line.
+    /// still slip past both dialer gates in the connecting window; this is the last line.
     func shouldAdmitChannel(for peer: PeerHandle) -> Bool {
         connections.isEmpty || isConnected(to: peer)
     }
@@ -561,8 +628,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     enum ChannelAdmission: Equatable {
         /// Open the pairing: build the coordinator and record the connection.
         case admit
-        /// Refuse and free the MC link. A connected peer with no connection record holds a zombie
-        /// link — a channel with no owner, one of the 8 MC peer slots — until the radio stops.
+        /// Refuse and free the tunnel. A connected peer with no connection record holds a zombie
+        /// link — a channel with no owner, occupying the radio's one tunnel slot — until the radio
+        /// stops.
         case turnAway
         /// This device already holds the pairing. Leave it entirely alone: disconnecting here would
         /// drop the good connection, and admitting would seat one device twice.
@@ -572,7 +640,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// The admission decision for a freshly connected channel — see ``ChannelAdmission``.
     ///
     /// Recognizes the peer by endpoint, exactly as ``shouldAdmitChannel(for:)`` and the inbound
-    /// invitation gate beside it do. The duplicate check used to compare `peer.id` alone (plan
+    /// dialer gate beside it do. The duplicate check used to compare `peer.id` alone (plan
     /// §6.4), so a paired device whose handle churned — a bounded identity-map eviction, a
     /// transport `stop()`/restart — fell through to ``shouldAdmitChannel(for:)``, which DID
     /// recognize it, and was admitted a second time: two connection records, two coordinators and
@@ -583,21 +651,20 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         return .admit
     }
 
-    private func handleChannelReady(_ channel: PeerChannelTransport) {
+    private func handleChannelReady(_ channel: NetworkPeerChannel) {
         switch channelAdmission(for: channel.peer) {
         case .alreadyConnected:
             return
         case .turnAway:
             // Hard 2-device cap, belt-and-braces: a third peer that won the connecting-window race
-            // anyway is never admitted — best-effort kick it (see disconnectPeer's caveats) and
-            // leave the existing pairing untouched.
-            recordDiagnostic("Turned away \(channel.peer.displayHint) — recipe sharing links two Fernlets at a time.")
-            session.disconnectPeer(channel.peer)
+            // anyway is never admitted — end its tunnel and leave the existing pairing untouched.
+            recordDiagnostic("Turned away \(displayName(for: channel.peer)) — recipe sharing links two Fernlets at a time.")
+            session.endTunnel(channel.peer)
             return
         case .admit:
             break
         }
-        recordDiagnostic("Secure recipe-share channel opened with \(channel.peer.displayHint).")
+        recordDiagnostic("Secure recipe-share channel opened with \(displayName(for: channel.peer)).")
         let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
         let coordinator = ProximityCoordinator(
             identity: identity,
@@ -643,7 +710,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             connectTimeoutTask = nil
         }
         applyDiscoveryGate(.connectionRegistered)
-        recordDiagnostic("Recipe sharing closed to others while paired with \(connection.peer.displayHint).")
+        recordDiagnostic("Recipe sharing closed to others while paired with \(displayName(for: connection)).")
         updateEngagedRecipient()
         startParkedSweepIfNeeded()
     }
@@ -702,10 +769,10 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         let before = connections.count
         cancelCoordinators(of: stale)
         for connection in stale {
-            // A coordinator can fail/end without MC ever reporting a disconnect (a failed
-            // handshake never fires one) — best-effort kick so the MC link doesn't linger as
-            // a zombie while the record eviction below reopens discovery.
-            session.disconnectPeer(connection.peer)
+            // A coordinator can fail/end without the transport ever reporting a disconnect (a
+            // failed handshake never fires one) — end the tunnel so it doesn't linger as a zombie
+            // while the record eviction below reopens discovery.
+            session.endTunnel(connection.peer)
             parkedSince.removeValue(forKey: connection.id)
             connections.removeAll { $0.id == connection.id }
         }
@@ -729,7 +796,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// `cancel()` frees the Swift graph but skips `end()` — the NISession invalidate, the
     /// foreground anchor's Live Activity end, and the `.sessionEnded` audit — because the
     /// coordinator's own `.disconnected` hop is a weak-self Task that finds nothing. Every drop
-    /// path (stop, refresh, MC disconnect, parked sweep, stale sweep) funnels here. For an
+    /// path (stop, refresh, peer disconnect, parked sweep, stale sweep) funnels here. For an
     /// `.ended` record `cancel()` is idempotent; for a `.failed` one it is what guarantees the
     /// teardown runs (`fail()` only enqueues it, and this sweep can drop the last reference
     /// first). Capturing the whole record keeps the coordinator's weak trust policy alive for the
@@ -742,8 +809,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     /// Every connection-record removal funnels through here. Reopening the radio is keyed on
-    /// MANAGER-LEVEL record eviction, deliberately NOT on MC disconnect events: a failed
-    /// handshake never fires an MC disconnect, so waiting for one would leave the radio paused
+    /// MANAGER-LEVEL record eviction, deliberately NOT on transport disconnect events: a failed
+    /// handshake never fires one, so waiting for one would leave the radio paused
     /// forever with no connection — the deadlock class the redesign closes. Covered removal
     /// paths: `onPeerDisconnected` (via removeConnections), the stale-coordinator sweep
     /// (.ended/.failed) in checkCoordinatorStates, and the parked-.discovering sweep.
@@ -778,14 +845,36 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     private func displayName(for connection: RecipeShareConnection) -> String {
-        nearbyRecipients.first { $0.id == connection.id }?.displayName
-            ?? ItemNameModeration.moderatedPeerDisplayName(connection.peer.displayHint)
+        displayName(for: connection.peer)
+    }
+
+    /// The name to show for a peer, in the picker row and in every "Connection details" line: the
+    /// row this device already drew for it, else the name it advertised, else the picker's own
+    /// "A friend" placeholder.
+    ///
+    /// **The one rule for naming a peer in anything a user reads**, and a function rather than
+    /// `peer.displayHint` because the hint changed meaning with the transport. Under
+    /// MultipeerConnectivity it was a name a person had chosen for their phone; under QUIC the
+    /// radio holds only its random Bonjour instance name and the endpoint key containing it, and
+    /// publishes NEITHER — `displayHint` is empty. A reader that kept the old assumption printed
+    /// `fernlet-mesh-3f2a9c81b4de` into the picker and the connection log.
+    ///
+    /// No new display string: the placeholder is the one
+    /// ``ItemNameModeration/moderatedPeerDisplayName(_:)`` already answers for an empty name,
+    /// which is what every other pre-handshake surface in this subsystem renders.
+    private func displayName(for peer: PeerHandle) -> String {
+        if let row = nearbyRecipients.first(where: { $0.id == peer.id }) { return row.displayName }
+        return ItemNameModeration.moderatedPeerDisplayName(
+            RecipeShareAdvertisedName.received(
+                peer.discoveryInfo?[RecipeShareAdvertisement.nameKey], hint: ""
+            )
+        )
     }
 
     /// Arms the sender-side connect timeout for the PRE-CONNECT stage only. Under the hard
     /// 2-device cap the peer being busy (paired with someone else, silently rejecting invites)
     /// is the common case — surface it as a distinct visible failure instead of an eternal
-    /// "Connecting…". `registerConnection` cancels this the moment the MC channel comes up;
+    /// "Connecting…". `registerConnection` cancels this the moment the channel comes up;
     /// past that point the coordinator's 25 s handshake budget owns failure.
     private func armConnectTimeout(for recipient: ProximityRecipeShareRecipient) {
         connectTimeoutTask?.cancel()
@@ -805,10 +894,10 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             self.applyTransfer(.cancelled)
             self.sendState = .failed(message: "No answer from \(recipient.displayName) — that Fernlet may be busy sharing with someone else.")
             self.recordDiagnostic("Connect timeout: \(recipient.displayName) did not answer.")
-            // Best-effort cancel of the half-open attempt so it doesn't linger in the
-            // connecting window and block the next accept/invite.
+            // End the half-open attempt so it doesn't linger in the connecting window and
+            // block the next accepted dial.
             if let peer = self.peer(for: recipient) {
-                self.session.disconnectPeer(peer)
+                self.session.endTunnel(peer)
             }
             self.updateEngagedRecipient()
             self.scheduleStatusClear()
@@ -837,7 +926,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// Evicts connection records whose coordinator has parked in a pre-verification state
     /// (.idle/.starting/.discovering/.peerInRange) past `parkedConnectionTimeoutSeconds`. The
     /// .ended/.failed sweep in checkCoordinatorStates can never catch these: a transport that
-    /// dies pre-verification fires no MC disconnect, and the friend-mode auto-reconnect path
+    /// dies pre-verification fires no transport disconnect, and the friend-mode auto-reconnect path
     /// parks a once-connected coordinator back in .discovering — with the radio paused, such a
     /// record would hold the 2-device cap closed forever. Internal so tests can drive it with
     /// synthetic dates; production calls it from the periodic sweep task.
@@ -861,11 +950,11 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         let before = connections.count
         cancelCoordinators(of: evicted)
         for connection in evicted {
-            // Same zombie caveat as the stale sweep: the MC link may still be up even though
-            // the coordinator stalled — kick it best-effort.
-            session.disconnectPeer(connection.peer)
+            // Same zombie caveat as the stale sweep: the tunnel may still be up even though
+            // the coordinator stalled — end it.
+            session.endTunnel(connection.peer)
             parkedSince.removeValue(forKey: connection.id)
-            recordDiagnostic("Dropped stalled connection to \(connection.peer.displayHint).")
+            recordDiagnostic("Dropped stalled connection to \(displayName(for: connection)).")
             connections.removeAll { $0.id == connection.id }
         }
         finalizeConnectionRemovals(previousCount: before)
@@ -886,6 +975,10 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         guard let outgoing = pendingOutgoing,
               isSameDevice(connection, as: outgoing.recipient) else { return }
         connectTimeoutTask?.cancel()  // connected + verified — the connect phase is over
+        // The record this send belongs to, captured BEFORE the first `await`. A second share to the
+        // same already-paired peer mints a new record while this one is in flight; every outcome
+        // below is attributed to the record that began it, or refused.
+        let token = transfer?.token
         pendingOutgoing = nil
         updateEngagedRecipient()
         sendState = .sending(recipientName: outgoing.recipient.displayName)
@@ -905,7 +998,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             // The exchange's once-only start. `pendingOutgoing = nil` above already makes a second
             // entry return, so this is belt-and-braces — but it is the half a pass-2 session cannot
             // quietly lose, and a refusal is surfaced rather than swallowed.
-            guard applyTransfer(.sendBegan(wireByteCount: payloadData.count)) else {
+            guard applyTransfer(.sendBegan(wireByteCount: payloadData.count), token: token) else {
                 sendState = .failed(message: "Could not send that recipe.")
                 recordDiagnostic("Refused a second send of \(outgoing.payload.recipe.title).")
                 scheduleStatusClear()
@@ -917,18 +1010,22 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
                 payload: payloadData,
                 sealed: true
             )
-            // The record is minted per SEND, not per payload: two overlapping shares to one
-            // already-paired peer share one record, so a completion can arrive for a share the
-            // record has already moved past. The oracle holds WITHIN a record; a refusal here says
-            // it was asked to hold across two, and is audited rather than dropped. The payload did
-            // land, so the status line is still the sent one.
-            if applyTransfer(.sendCompleted) == false {
+            // A completion is attributed to the record that BEGAN this send, by its token: two
+            // overlapping shares to one already-paired peer carry the same `recipientID`, so
+            // without the token this completion would be counted against whichever record is live
+            // — crediting the wrong recipe. A refusal means a newer share has superseded this one;
+            // the payload DID land, so it is audited rather than failed — but the status line
+            // belongs to the live record, and writing `.sent` over its `.sending` would announce a
+            // recipe the user is no longer watching. The observable half is the half the token was
+            // meant to protect.
+            guard applyTransfer(.sendCompleted, token: token) else {
                 recordDiagnostic("A send completed against a newer share record — completion not counted.")
+                return
             }
             sendState = .sent(recipientName: outgoing.recipient.displayName)
             recordDiagnostic("Sent \(outgoing.payload.recipe.title) to \(outgoing.recipient.displayName).")
         } catch {
-            applyTransfer(.sendFailed)
+            applyTransfer(.sendFailed, token: token)
             sendState = .failed(message: "Could not send that recipe.")
             recordDiagnostic("Recipe share failed while sending to \(outgoing.recipient.displayName).")
         }
@@ -940,7 +1037,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             return connection.peer
         }
         return discoveredPeers[recipient.id]
-            ?? session.channels.values.map(\.peer).first { $0.id == recipient.id }
+            ?? session.connectedPeers.first { $0.id == recipient.id }
     }
 
     private func scheduleStatusClear() {
@@ -966,7 +1063,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// Applies ``RecipeShareDiscoveryGate``'s verdict for `event` to the radio and tells the live
     /// exchange which way the door moved.
     ///
-    /// The two pause/resume call sites the MultipeerConnectivity manager had are now one table, so a
+    /// The two bare pause/resume call sites this manager used to hold are now one table, so the
     /// QUIC session can be bound to the contract rather than to a reading of two guard chains. The
     /// verdict is returned rather than swallowed because the resume's diagnostic line is conditional
     /// on it and the pause's is not — exactly as they are today.
@@ -993,12 +1090,21 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     /// Applies one event to the live exchange record.
     ///
+    /// - Parameters:
+    ///   - event: What happened.
+    ///   - token: The record the event belongs to, for the events a SEND owns
+    ///     (`sendBegan`/`sendCompleted`/`sendFailed`). A mismatch is refused rather than applied to
+    ///     whatever record happens to be live: two overlapping shares to one already-paired peer
+    ///     carry the same `recipientID`, so without this the first send's completion lands on the
+    ///     second share's record and the status line credits the wrong recipe. Events that belong
+    ///     to whatever share is live — a verification, a teardown, a discovery pause — pass nil.
     /// - Returns: whether the exchange took the event. **True when there is no exchange**: every
     ///   send path mints one, so a missing record means a teardown has already run and the caller's
     ///   own guards have handled it — a refusal here would turn that into a silent dropped share.
     @discardableResult
-    private func applyTransfer(_ event: RecipeShareTransfer.Event) -> Bool {
+    private func applyTransfer(_ event: RecipeShareTransfer.Event, token: UUID? = nil) -> Bool {
         guard var live = transfer else { return true }
+        if let token, live.token != token { return false }
         let accepted = live.apply(event)
         transfer = live
         return accepted
@@ -1011,7 +1117,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// coordinator's `weak` trustPolicy survives past this method's scope — but over an injected transport
     /// so a unit test can drive a revoked/blocked-key envelope through the coordinator. Returns the
     /// connection's coordinator. `internal` for `@testable` unit tests only: the production connection path
-    /// is driven by a live `MeshMultipeerSession` a unit test cannot fake (mirrors the clothing manager's
+    /// is driven by a live QUIC radio a unit test cannot fake (mirrors the clothing manager's
     /// `clearCatalogs(...)` and the heart manager's `evaluateConnectedCoordinatorForTesting(...)`). If the
     /// retention regresses (policy no longer stored on the connection), the coordinator's weak ref goes nil
     /// once this returns and the revoked-key drop this drives silently stops firing.
@@ -1035,7 +1141,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         let connection = RecipeShareConnection(
             id: peer.id,
             peer: peer,
-            channel: PeerChannelTransport(peer: peer, session: session),
+            channel: session.channel(for: peer),
             coordinator: coordinator,
             trustPolicy: trustPolicy,
             fingerprint: nil,
@@ -1047,11 +1153,11 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         return coordinator
     }
 
-    /// The private MeshMultipeerSession, exposed for cap tests only: they assert the
-    /// pause/resume flag and drive the manager's own session callbacks (onPeerDisconnected,
-    /// shouldAcceptInvitation) — the production writers need live radios a unit test must
-    /// never start.
-    var multipeerSessionForTesting: MeshMultipeerSession { session }
+    /// The radio, exposed for cap tests only: they assert the pause/resume flag and drive the
+    /// manager's own session callbacks (`onPeerDiscovered`, `onPeerDisconnected`,
+    /// `shouldAcceptDialer`) — the production writers need live radios a unit test must never
+    /// start. A cell that needs to *drive* the radio hands one in through the init seam instead.
+    var radioForTesting: any RecipeShareRadioSession { session }
 
     var connectionCountForTesting: Int { connections.count }
 
@@ -1066,9 +1172,16 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         isRunning = true
     }
 
-    /// Drives the production inbound-invitation gate closure exactly as the transport would.
-    func shouldAcceptInvitationForTesting(_ peer: PeerHandle) -> Bool {
-        session.shouldAcceptInvitation?(peer) ?? false
+    /// Drives the production inbound-dialer gate closure exactly as the radio would, once a dial
+    /// hello has resolved to a browsed peer. Fails closed, as the hook itself does.
+    func shouldAcceptDialerForTesting(_ peer: PeerHandle) -> Bool {
+        session.shouldAcceptDialer?(peer) ?? false
+    }
+
+    /// Drives the production dialer RESOLUTION closure exactly as the radio would: which browsed
+    /// peer, if any, is advertising `sessionID`.
+    func resolveDialerForTesting(_ sessionID: String) -> PeerHandle? {
+        session.resolveDialer?(sessionID) ?? nil
     }
 
     /// Runs the stale-coordinator sweep deterministically (production runs it from the
@@ -1091,6 +1204,13 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     @discardableResult
     func applyTransferForTesting(_ event: RecipeShareTransfer.Event) -> Bool {
         applyTransfer(event)
+    }
+
+    /// Drives one exchange event through the production helper, ATTRIBUTED to `token` — the path a
+    /// send's own outcome takes. An event whose token is not the live record's is refused.
+    @discardableResult
+    func applyTransferForTesting(_ event: RecipeShareTransfer.Event, token: UUID?) -> Bool {
+        applyTransfer(event, token: token)
     }
 
     /// Drives the discovery gate exactly as a manager event does — the production pause/resume path,

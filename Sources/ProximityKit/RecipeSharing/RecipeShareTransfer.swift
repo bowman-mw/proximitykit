@@ -212,6 +212,21 @@ nonisolated struct RecipeShareTransfer: Equatable, Sendable {
     /// The picker row this share is for — `ProximityRecipeShareRecipient.id`.
     let recipientID: UUID
 
+    /// This record's own identity, minted per SEND.
+    ///
+    /// ``recipientID`` cannot do this job: a second share to the SAME already-paired peer mints a
+    /// second record carrying the same recipient, and the first send is still in flight. Its
+    /// completion then arrives against a record that is not the one it began, and — because
+    /// `sendCompleted` is legal from `sending` — is counted there. The oracle still holds inside
+    /// each record; what breaks is the attribution, which is the user-visible half: the status line
+    /// says the second recipe landed when it is the first that did.
+    ///
+    /// So every send captures the token of the record it began and hands it back with its outcome,
+    /// and `ProximityRecipeShareManager.applyTransfer(_:token:)` refuses an outcome whose token is
+    /// not the live record's. Events that belong to whatever share is live — a verification, a
+    /// teardown, a discovery pause — pass no token and are unaffected.
+    let token: UUID
+
     /// Where the share has got to.
     private(set) var phase: Phase = .connecting
 
@@ -231,14 +246,19 @@ nonisolated struct RecipeShareTransfer: Equatable, Sendable {
     /// before that.
     private(set) var wireByteCount = 0
 
-    /// A share for `recipientID`, in ``Phase/connecting``.
+    /// A share for `recipientID`, in ``Phase/connecting``, under a fresh ``token``.
     ///
-    /// - Parameter radioIsQuiet: The radio's stand-down state **at the mint** — the caller passes
-    ///   what the radio actually holds (`isDiscoveryPaused`), never a guess. The default is the
-    ///   open radio a share that has to form its pairing first will find.
-    init(recipientID: UUID, radioIsQuiet: Bool = false) {
+    /// - Parameters:
+    ///   - recipientID: The picker row the user chose.
+    ///   - radioIsQuiet: The radio's stand-down state **at the mint** — the caller passes what the
+    ///     radio actually holds (`isDiscoveryPaused`), never a guess. The default is the open radio
+    ///     a share that has to form its pairing first will find.
+    ///   - token: This record's identity. Defaulted to a fresh value, because a caller that could
+    ///     reuse one would be handing two sends one attribution — the defect the token exists for.
+    init(recipientID: UUID, radioIsQuiet: Bool = false, token: UUID = UUID()) {
         self.recipientID = recipientID
         self.radioIsQuiet = radioIsQuiet
+        self.token = token
     }
 
     /// Which pipe this share's payload would ride over a QUIC tunnel, or nil before the size is
@@ -246,10 +266,15 @@ nonisolated struct RecipeShareTransfer: Equatable, Sendable {
     ///
     /// A text-only recipe is a few kilobytes and stays on the control stream; a recipe carrying a
     /// picture (`ProximityRecipeSharePayload.maxImageBytes`, 512 KiB, base64'd into the JSON) clears
-    /// ``MeshTransferStreamTable/bulkFloorBytes`` and earns a stream of its own. The size here is the
-    /// **plaintext** the manager encodes, and the sealed frame is strictly larger, so this is a floor
-    /// on the route and never an over-estimate: a share this says rides a transfer stream certainly
-    /// does.
+    /// ``MeshTransferStreamTable/bulkFloorBytes`` and earns a stream of its own.
+    ///
+    /// **It is an estimate in both directions, not a floor.** The size here is the *plaintext* the
+    /// manager encodes, and the radio routes on the sealed frame's real size —
+    /// `SealedPayloadFraming.frame` DEFLATES a body of 128 bytes or more whenever that shrinks it,
+    /// so a verbose text recipe of 70 KiB can seal to well under the floor and ride the control
+    /// stream after all. Nothing acts on this value; it is what said, at pass 1, that this radio
+    /// would need a per-transfer-stream acceptor. The two real cases — a text recipe, and a picture
+    /// recipe at ~693 KiB on the wire after base64 — sit on the same side of the floor either way.
     ///
     /// Projected rather than acted on. Pass 1 moves no bytes; the projection is what tells pass 2
     /// that a recipe radio needs a per-transfer-stream acceptor, which the presence radio
