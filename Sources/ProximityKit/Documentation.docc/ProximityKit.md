@@ -661,6 +661,24 @@ actually lives: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkPeerChan
 `MeshChannelIntroductionOutcome`, `MeshIntroductionRejection`, `MeshIntroductionRoster`,
 `MeshRosterVerdict`, `MeshIntroductionNonceCache`, `MeshVerifiedPeer`, `MeshIntroductionAuthority`.
 
+The recipe-share radio has not moved to QUIC yet (P9 item 3 pass 2), but its two decisions that a
+transport swap would lose quietly are already tier-1 values. ``RecipeShareDiscoveryGate`` is the
+pause/resume contract — the radio goes quiet to new peers the moment a pairing is registered and
+reopens only when that pairing's manager-level RECORD is evicted, never on a transport disconnect
+event (a failed handshake fires none) and never over a stopped radio. ``RecipeShareTransfer`` is the
+share itself: `connecting → verified → sending → sent/failed/cancelled`, with a completion that is
+counted rather than assigned, and with the row that matters most — a discovery pause or resume is
+accepted in every phase and moves none of them, because closing the radio to new peers is not
+pausing a share in flight. ``RecipeShareAdvertisedName`` bounds the advertised display name in
+BYTES, not Characters, so the pass-2 Bonjour publisher (which DROPS an over-long TXT value rather
+than truncating it) cannot silently strip the name off a long one; a name it cannot publish at all
+is omitted rather than sent empty, and ``RecipeShareAdvertisedName/received(_:hint:)`` falls back to
+the peer's transport hint on an absent *and* an empty one. **Pass-2 trap:** the gate answers
+`unchanged` for `refreshRequested`, `transportErrorWhileListening` and `stopped` only because the
+SESSION's own `stop()`/`start()` clears its paused flag — a QUIC recipe session must clear that flag
+on stop, or a refresh restarts into a radio that is still standing down and the only symptom is a
+search that finds nothing.
+
 Internal to the module, DEBUG-only, and listed here so they are never mistaken for production
 behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroductionChaosBehaviour`.
 They exist so the rejection matrix above can be *observed on a real radio* rather than only
@@ -2172,6 +2190,9 @@ records rather than app-visible state.
 ### Recipe sharing
 
 - ``ProximityRecipeShareManager``
+- ``RecipeShareDiscoveryGate``
+- ``RecipeShareTransfer``
+- ``RecipeShareAdvertisedName``
 - ``ProximityRecipeSharePayload``
 - ``ProximitySharedRecipe``
 - ``ProximitySharedRecipeKind``
