@@ -2564,7 +2564,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // captures, and the count leaves with the session.
         photosKeptOnThisPhone += 1
         FernletAuditLog.log(
-            "mesh.routedShare.skipped", context: ["reason": skip.rawValue, "type": "friendPhoto"]
+            "mesh.routedShare.skipped",
+            context: heldMeshAuditContext(["reason": skip.rawValue, "type": "friendPhoto"])
         )
     }
 
@@ -4101,13 +4102,47 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         adoptKeyAdvertisements(result.set)
         guard persistSessionContext(addingEpochHead: nil) else {
             rollBackKeyAdvertisements(to: rollback, version: rollbackVersion)
-            FernletAuditLog.log("mesh.keyAgreement.notDurable")
+            FernletAuditLog.log("mesh.keyAgreement.notDurable", context: heldMeshAuditContext())
             return false
         }
         return true
     }
 
+    /// `base`, plus the one context key `held` — the mesh id this device holds, in the spelling
+    /// P8 item 0 froze for the founding lines and P9 item 7 gave the two digest lines.
+    ///
+    /// **Why every count-bearing line in these families carries it** (P9 item 7's fix review,
+    /// FIX-1). `FernletAuditLog`'s capture registry is process-global and Swift Testing runs suites
+    /// in parallel, so a cell asserting `capture.count(of: token) == N` over a token ANY rig can
+    /// emit is making a claim about the PROCESS, not about itself. The mesh id is the one value in
+    /// the line a sibling rig cannot mint, so it is what turns those counts back into per-cell
+    /// claims — the `count(of:where:)` readers filter on it. Item 6 put twenty such counts onto the
+    /// gated CI line beside suites that demonstrably emit the same tokens, with nothing to filter
+    /// on; this is what closed them, and one of them had already read 4 for 3 under full-suite load.
+    ///
+    /// **Counts and the held mesh id only, never a fingerprint** — the module's audit rule is
+    /// unchanged, and `base` is passed through untouched.
+    ///
+    /// A device that holds no mesh OMITS the key rather than writing a fallback: an unscopeable
+    /// line must not look scoped, and a shared placeholder would be a second id every rig answers
+    /// to. Most callers are unreachable in that state (their door guards `currentMesh` first); the
+    /// routed dispatch's uncommitted-slot drop is the one that is not, and it refuses before the
+    /// mesh guard by design.
+    ///
+    /// - Parameter base: The door's own context, empty for the lines that had none.
+    /// - Returns: `base` with `held` added, when this device holds a mesh.
+    private func heldMeshAuditContext(_ base: [String: String] = [:]) -> [String: String] {
+        guard let meshID = currentMesh?.meshID else { return base }
+        var context = base
+        context["held"] = meshID.uuidString
+        return context
+    }
+
     /// Writes one audit line per outcome that has one.
+    ///
+    /// Every line carries ``heldMeshAuditContext(_:)``'s `held` key on top of the outcome's own
+    /// context, so the per-cell `== N` counts over `mesh.keyAgreement.conflicted` and its siblings
+    /// are claims about one rig rather than about the process.
     ///
     /// - Parameter outcomes: The outcomes to name. `alreadyHeld` deliberately has no token, which
     ///   is what keeps an honest replay silent.
@@ -4115,7 +4150,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // R2: bounded by the frame's own clamp (`MeshKeyAgreementAdvertisementSet.capacity`).
         for outcome in outcomes {
             guard let token = outcome.auditToken else { continue }
-            FernletAuditLog.log(token, context: outcome.auditContext)
+            FernletAuditLog.log(token, context: heldMeshAuditContext(outcome.auditContext))
         }
     }
 
@@ -4314,7 +4349,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard armOwnKeyAdvertisement() else {
             FernletAuditLog.log(
                 "mesh.keyAgreement.selfMintUnavailable",
-                context: ["attempt": String(keyAdvertisementSelfMintAttempts)]
+                context: heldMeshAuditContext(
+                    ["attempt": String(keyAdvertisementSelfMintAttempts)]
+                )
             )
             return
         }
@@ -4390,7 +4427,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             guard outcome == .refused(.signerNotAdmitted) else { continue }
             let parked = parkedKeyAdvertisements.parking(advertisement, from: senderFingerprint)
             guard let token = parked.auditToken else { continue }
-            FernletAuditLog.log(token, context: parked.auditContext)
+            FernletAuditLog.log(token, context: heldMeshAuditContext(parked.auditContext))
         }
     }
 
@@ -4423,9 +4460,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let offers = parkedKeyAdvertisements.drain()
         // P9 item 7: `held` is the mesh this device holds — the one key a per-cell count can filter
         // on over a process-global capture registry. Still counts only: never a fingerprint.
-        var reoffered = ["count": String(offers.count)]
-        reoffered["held"] = currentMesh?.meshID.uuidString
-        FernletAuditLog.log("mesh.keyAgreement.parkedReoffered", context: reoffered)
+        //
+        // UNCONDITIONAL, off the verifier the guard above already holds (the item's fix review,
+        // NOTE-2): the park cannot hold a row without a mesh. Rows enter only through
+        // `parkKeyAdvertisements`, reached only from `receiveKeyAdvertisements`, which guards
+        // `currentMesh`; and every site that nils `currentMesh` — `leaveMesh()`,
+        // `abandonUnpersistedSession()` — empties the park in the same breath through
+        // `clearKeyAdvertisementState()`, which the `!parkedKeyAdvertisements.isEmpty` guard above
+        // then returns on. A `currentMesh?` read here could only ever have described an
+        // unreachable nil, and would have made these lines look conditionally scopeable.
+        let held = verifier.meshID.uuidString
+        FernletAuditLog.log(
+            "mesh.keyAgreement.parkedReoffered",
+            context: ["count": String(offers.count), "held": held]
+        )
         let result = MeshKeyAdvertisementFold.folding(
             offers.map(\.parked.advertisement), into: keyAdvertisements, verifiedBy: verifier
         )
@@ -4433,11 +4481,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard !result.changed || committed else {
             parkedKeyAdvertisements = restore
             FernletAuditLog.log(
-                "mesh.keyAgreement.parkRolledBack", context: ["count": String(offers.count)]
+                "mesh.keyAgreement.parkRolledBack",
+                context: ["count": String(offers.count), "held": held]
             )
             return
         }
-        reparkRefusedKeyAdvertisements(offers, outcomes: result.outcomes)
+        reparkRefusedKeyAdvertisements(offers, outcomes: result.outcomes, heldBy: held)
     }
 
     /// Puts back every re-offered row the widening still could not prove, and drops the ones that
@@ -4451,9 +4500,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameters:
     ///   - offers: The drained rows, with the share each came from.
     ///   - outcomes: The fold's outcomes, one per offer and in the same order.
+    ///   - held: The mesh id this device holds, passed in rather than re-read (P9 item 7's fix
+    ///     review, NOTE-2): the one caller has it unconditionally from the verifier, so the drop
+    ///     line is scopeable to one rig without a conditional read that could never be nil here.
     private func reparkRefusedKeyAdvertisements(
         _ offers: [MeshParkedKeyAdvertisementOffer],
-        outcomes: [MeshKeyAdvertisementFoldOutcome]
+        outcomes: [MeshKeyAdvertisementFoldOutcome],
+        heldBy held: String
     ) {
         var unproven: [MeshParkedKeyAdvertisementOffer] = []
         // R2: bounded by the drained park's own size.
@@ -4464,7 +4517,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let dropped = parkedKeyAdvertisements.reparkFailed(unproven)
         guard dropped > 0 else { return }
         FernletAuditLog.log(
-            "mesh.keyAgreement.parkDropped", context: ["count": String(dropped)]
+            "mesh.keyAgreement.parkDropped",
+            context: ["count": String(dropped), "held": held]
         )
     }
 
@@ -4518,7 +4572,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameter rejection: Why the frame was refused.
     private func refuseKeyAdvertisementFrame(_ rejection: MeshMembershipRecordRejection) {
         FernletAuditLog.log(
-            "mesh.keyAgreement.rejected", context: ["reason": rejection.diagnosticDescription]
+            "mesh.keyAgreement.rejected",
+            context: heldMeshAuditContext(["reason": rejection.diagnosticDescription])
         )
     }
 
@@ -4535,11 +4590,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let spent = keyAdvertisementFramesBySender[senderFingerprint]
         guard spent != nil || keyAdvertisementFramesBySender.count < MeshMembershipBounds.maxRosterMembers
         else {
-            FernletAuditLog.log("mesh.keyAgreement.senderBudgetSpent")
+            FernletAuditLog.log(
+                "mesh.keyAgreement.senderBudgetSpent", context: heldMeshAuditContext()
+            )
             return false
         }
         guard (spent ?? 0) < MeshKeyAdvertisementReceiveBounds.framesPerSenderPerSession else {
-            FernletAuditLog.log("mesh.keyAgreement.senderBudgetSpent")
+            FernletAuditLog.log(
+                "mesh.keyAgreement.senderBudgetSpent", context: heldMeshAuditContext()
+            )
             return false
         }
         keyAdvertisementFramesBySender[senderFingerprint] = (spent ?? 0) + 1
@@ -5139,7 +5198,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         now: Date = Date()
     ) {
         guard let senderFingerprint = slot?.fingerprint else {
-            FernletAuditLog.log("mesh.routedDrain.droppedUncommittedSlot", context: ["type": type.rawValue])
+            // The one `held` site where a nil mesh is genuinely reachable: this refusal is
+            // deliberately BEFORE the `currentMesh` guard below, so a frame on an uncommitted slot
+            // is dropped whether or not this device holds a mesh. A drop with no mesh carries no
+            // key and no cell counts it — which is honest, not a gap.
+            FernletAuditLog.log(
+                "mesh.routedDrain.droppedUncommittedSlot",
+                context: heldMeshAuditContext(["type": type.rawValue])
+            )
             return
         }
         guard let mesh = currentMesh, let verifier = membershipVerifier else {
@@ -5522,11 +5588,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard verdict == .refuseStale else { return false }
         // P9 item 7: the ONE key a per-cell count can filter on — the mesh this device holds, the
         // same spelling P8 item 0 gave the founding lines. Never the peer (see the doc above).
-        // A nil mesh OMITS the key rather than writing a fallback: an unscopeable line must not
-        // look scoped.
-        var line: [String: String] = [:]
-        line["held"] = currentMesh?.meshID.uuidString
-        FernletAuditLog.log("mesh.routedInventory.staleSentAt", context: line)
+        //
+        // The nil leg is unreachable from this door and is a shape, not a case (the item's fix
+        // review, NOTE-2): the one caller, `receiveRoutedInventory(_:from:now:)`, guards
+        // `let mesh = currentMesh` and then pins `payload.meshID == mesh.meshID` before reaching
+        // here, synchronously. It omits the key rather than writing a fallback for the rule's sake
+        // — an unscopeable line must not look scoped — and the three scoped `== 0` cells in
+        // `MeshRoutedDrainTests` rest on that guard, not on a maybe.
+        FernletAuditLog.log(
+            "mesh.routedInventory.staleSentAt", context: heldMeshAuditContext()
+        )
         return true
     }
 
@@ -8225,7 +8296,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             FernletAuditLog.log(
                 "mesh.routedProjection.openFailed",
-                context: ["type": manifest.typeToken, "error": String(describing: error)]
+                context: heldMeshAuditContext(
+                    ["type": manifest.typeToken, "error": String(describing: error)]
+                )
             )
             return nil
         }
@@ -8385,7 +8458,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             FernletAuditLog.log(
                 "mesh.routedProjection.openFailed",
-                context: ["type": manifest.typeToken, "error": String(describing: error)]
+                context: heldMeshAuditContext(
+                    ["type": manifest.typeToken, "error": String(describing: error)]
+                )
             )
             return nil
         }

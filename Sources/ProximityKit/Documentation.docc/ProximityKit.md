@@ -526,11 +526,20 @@ bound every real member needs, and the map's roster cap becomes true by construc
 
 **The park's six audit tokens**, frozen English and counts only (third review P3 10 — two of them
 were in no index and on no page): `mesh.keyAgreement.parked` (a refused row took a slot in its
-sender's share), `…parkedReoffered` (a widening drained the park — the count, plus `held`, the mesh
-id this device holds, P9 item 7), `…parkCollision` (two different
-rows for one member in one share, `kept: newcomer` or `kept: held`), `…parkFull` (the share or the
-sender bound is spent), `…parkDropped` (the roster-move eviction above) and `…parkRolledBack` (a
-re-offer whose seal was refused). None of them carries a fingerprint.
+sender's share), `…parkedReoffered` (a widening drained the park — the count), `…parkCollision`
+(two different rows for one member in one share, `kept: newcomer` or `kept: held`), `…parkFull`
+(the share or the sender bound is spent), `…parkDropped` (the roster-move eviction above) and
+`…parkRolledBack` (a re-offer whose seal was refused). None of them carries a fingerprint.
+
+**Every one of them — and the rest of the key-agreement vocabulary, the routed projection's
+`openFailed`, the share's `skipped` and the routed dispatch's `droppedUncommittedSlot` — also
+carries `held`, the mesh id this device holds** (P8 item 0's spelling; P9 item 7 for the two digest
+lines, its fix review for the other twenty). `FernletAuditLog`'s capture registry is process-global
+and Swift Testing runs suites in parallel, so a test's `count(of: token) == N` is a claim about the
+whole PROCESS unless it can filter; the mesh id is the one value in the line a sibling rig cannot
+mint. The single door is `MeshNetworkManager.heldMeshAuditContext(_:)`, and the key is omitted
+rather than faked where this device holds no mesh — the routed dispatch's uncommitted-slot drop is
+the only site where that is reachable, because it refuses before the mesh guard by design.
 
 **An epoch is a value, not a number** (plan §8.4, P3 item 4). `MeshEpochRef` is a Lamport counter
 (cap 4096, and a counter *at* the cap refuses to mint a successor rather than trapping — a mesh that
