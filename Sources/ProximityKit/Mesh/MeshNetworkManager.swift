@@ -13400,37 +13400,31 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Delete-all seam (bitchat adoptions Increment 1, Docs/PrivacyWipeCoverage.md): wipes the
     /// proximity identity keypairs + backup-escrow rows (this manager owns one of the three live
     /// `IdentityService` caches — presence and recipe share hold the others over the same
-    /// keychain rows), removes the MC peer-identity archive, and drops the mesh photo cache's
-    /// in-memory media key so a post-wipe write can't use the orphaned key. Breaks every trust
-    /// relationship on purpose.
+    /// keychain rows) and drops the mesh photo cache's in-memory media key so a post-wipe write
+    /// can't use the orphaned key. Breaks every trust relationship on purpose.
     ///
-    /// The archive (`FernletPeerID.archive`) is the transport half of the same identity: the device
-    /// name — in practice the user's own first name — and the stable `MCPeerID` every stable radio
-    /// re-advertises. Kept, it would make a "brand-new Fernlet identity" recognizable on the air by
-    /// exactly the identifier the keypair rotation above just retired. Cleared through a store
-    /// pointed at the same default path `MeshMultipeerSession` loads from; the mint is lazy, so the
-    /// next session to start gets a fresh one. Safe even if the friend radio is still up — the
-    /// funnel stops the presence radio before this leg but not this one — because
-    /// `MeshMultipeerSession.localPeerID` is a `let` resolved at init from an already-read archive:
-    /// deleting the file cannot mutate or invalidate an `MCSession` that is running on it.
+    /// **The MC peer-identity archive leg RETIRED here on 2026-09-21** — decision D-4.4, the
+    /// owner's, recorded in `Docs/Mesh-Migration-Loop-Ledger-Cutover-2026-09-21.md`. Until the
+    /// MC→QUIC cutover this method also cleared `Application Support/FernletPeerID.archive`
+    /// through `FileMCPeerIDStore`, because `MeshMultipeerSession` minted and archived a stable
+    /// `MCPeerID` carrying the device name — in practice the user's own first name. **No shipping
+    /// path mints or archives a peer identity any more:** the three QUIC radios each mint a fresh
+    /// TLS identity and a random instance name per epoch (mesh, presence) or per start (recipe
+    /// share), so there is nothing stable left for this leg to erase.
     ///
-    /// Ordering: the archive clear runs FIRST — a keychain that refuses to delete must not leave the
-    /// identifier behind too — but its own failure is carried to the end and thrown there, so a
-    /// refusing file system cannot skip the keypair wipe or the media-key-cache drop.
-    /// - Throws: ``IdentityError/keychainDeleteFailed(_:)`` when the keypair rows survive, or the
-    ///   `FileManager` error when the peer-identity archive does — a wipe the user is told is
-    ///   complete must not silently leave either behind.
+    /// What the decision costs, said out loud rather than left to be discovered: an install that
+    /// ran a PRE-flip build still holds that file, and **delete-all does not sweep it**. The owner
+    /// took the pure retire over the survey's recommended legacy `FileManager` sweep knowing the
+    /// only install in the world is their own phone, which has run pre-P9 builds and holds the
+    /// file until a reinstall. `FileMCPeerIDStore.clearForDeleteAll()` still exists and is still
+    /// tested; it simply has no caller on the wipe path. It retires with the radio's two files in
+    /// the deletion round.
+    ///
+    /// - Throws: ``IdentityError/keychainDeleteFailed(_:)`` when the keypair rows survive — a wipe
+    ///   the user is told is complete must not silently leave them behind.
     public func wipeIdentityForDeleteAll() throws {
-        var archiveError: (any Error)?
-        do {
-            try FileMCPeerIDStore().clearForDeleteAll()
-        } catch {
-            archiveError = error
-        }
         try identity.wipe()
         photoCacheStore.invalidateEncryptionKeyCache()
-        guard let archiveError else { return }
-        throw archiveError
     }
 
     // MARK: - Phase 3: Static decrypt helper (the surviving control half)
