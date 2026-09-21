@@ -461,10 +461,10 @@ nonisolated enum MeshChannelIntroductionOutcome: Equatable, Sendable {
 /// ``MeshIntroductionRoster/admitsStrangersProvisionally`` is set.
 ///
 /// The transcript then has to name **one** mesh id, because both ends derive it and neither receives
-/// it: it takes the **responder's**, on both sides. The dialer is the one asking into a mesh, so the
-/// mesh it is asking into is the answer, and it is a value both ends already hold. When the two
-/// hellos agree — every introduction that could complete before D-4.3 — the responder's id *is* the
-/// initiator's and not one byte of the signed bytes moves.
+/// it: it takes the **responder's**, on both sides — see ``agreedMeshID(_:_:)`` for why that is a
+/// tie-break and not a claim about who is joining whom. When the two hellos agree — every
+/// introduction that could complete before D-4.3 — the responder's id *is* the initiator's and not
+/// one byte of the signed bytes moves.
 ///
 /// **epochRef must converge, strictly** (plan §8.4, §20.1). Every non-empty reference must be a
 /// canonical ``MeshEpochRef`` — checked with the field widths, before any comparison — and two
@@ -640,12 +640,20 @@ nonisolated struct MeshChannelIntroductionExchange {
     /// pick the same id by the same rule, the two signatures verify over different bytes and every
     /// first meeting fails as ``MeshIntroductionRejection/signatureInvalid``.
     ///
-    /// The responder's, rather than the initiator's, because the dialer is the side *asking into* a
-    /// mesh: on the two shapes the tolerance exists for — a mesh-less joiner dialing an established
-    /// open mesh, and a founding pair's double mint — the responder's id is the one the tunnel is
-    /// about. Taking it costs nothing in safety: the id is not a secret and not an authorization,
-    /// both ends sign whichever value is chosen, and the TLS-exporter hash in the same transcript is
-    /// what stops either signature being replayed anywhere else.
+    /// The responder's, rather than the initiator's, for one reason and not a better one: **both
+    /// sides know which of them is the responder, and it is deterministic.** It is deliberately
+    /// *not* "the dialer is the side asking into a mesh" — that is only sometimes true. Either half
+    /// of a pair may dial (``MeshDialPreference`` ranks by session id, not by who holds a mesh), so
+    /// when the established member is the one that dials, the responder is the mesh-less joiner and
+    /// the transcript names `MeshNetworkManager.unboundMeshID` — the all-zero UUID.
+    ///
+    /// That is inert, and this is why it is safe to be. The transcript's `meshID` has exactly one
+    /// consumer, ``bind(channelBindingHash:)``, which folds it into the bytes both ends sign;
+    /// nothing anywhere decides anything on it. So whichever of the two ids is chosen, the only
+    /// property that matters is that both ends choose the same one. Taking it costs nothing in
+    /// safety either: the id is not a secret and not an authorization, both ends sign whichever
+    /// value is chosen, and the TLS-exporter hash in the same transcript is what stops either
+    /// signature being replayed anywhere else.
     ///
     /// Both ends are taken so the call site reads as the pair rule it is — the same shape
     /// ``agreedEpoch(_:_:)`` has — and so a reader sees at the declaration that the initiator's id

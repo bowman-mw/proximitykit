@@ -1308,8 +1308,13 @@ stays frozen beside the signed departure record. The spelling is the tell: **dot
 pair, **hyphens** for the signed quorum.
 
 **The introduction authority answers from the derived roster** (plan §8.1, §20.4.4, P3 item 7).
-`MeshNetworkManager.roster` is `MeshDerivedRoster.introductionRoster(additionalBarred:)`, so the
-QUIC radio judges a peer against `admitted − departed − removed` and nothing else. This closes plan
+`MeshNetworkManager.roster` is
+`MeshDerivedRoster.introductionRoster(additionalBarred:admitsStrangersProvisionally:)`, so the QUIC
+radio judges *membership* against `admitted − departed − removed` and nothing else — the second
+argument is not a membership answer but the owner's join-door posture, which since D-4.3
+(2026-09-21) lets a **stranger** hold a tunnel provisionally while the session is open (see
+``MeshIntroductionRoster/admitsStrangersProvisionally``). A barred key is refused with the doors
+wide open. This closes plan
 §20.1's recorded gap: the manager used to keep removals by *fingerprint* and hold no signing key for
 a member it had dropped, so `barred` was empty in production and a removed peer refused as an
 anonymous `unknownIdentity` — matrix row 3 (`barredMember`) was produced by a DEBUG chaos hook. The
@@ -1655,14 +1660,22 @@ every member ends on exactly one post-merge epoch.
 ``MeshEpochIntroductionVerdict/reconcile(local:peer:)`` replaces P3's blanket refusal, because the
 merge runs *over* the tunnel the old rule tore down — two branches that had each rotated while split
 could never reconnect at all. The relaxation is scoped three ways: it is reachable only from
-``NetworkMeshSession``'s signed channel introduction, which is members-only before any app frame (MC
-runs no such stage — 0b's lesson, and the reason ``MeshNetworkManager/maySeatVerifiedPeer(signingPublicKey:)``
-exists for the other radio); only the epoch rule moved, with the roster's `stranger` / `barred`
-verdict, the mesh-ID check and the malformed-reference check untouched and still downstream of it;
-and it applies only when ``MeshIntroductionAuthority/mayReconcileDivergentEpochs`` says a merge can
-actually run — a device with no mesh or no ledger keeps
-``MeshIntroductionRejection/divergentEpoch``, and the parameter's default is `false` so a caller that
-forgets it fails closed.
+``NetworkMeshSession``'s signed channel introduction (MC runs no such stage — 0b's lesson, and the
+reason ``MeshNetworkManager/maySeatVerifiedPeer(signingPublicKey:)`` exists for the other radio);
+only the epoch rule moved *here*, with the roster's `barred` verdict, the mesh-ID check and the
+malformed-reference check untouched by it; and it applies only when
+``MeshIntroductionAuthority/mayReconcileDivergentEpochs`` says a merge can actually run — a device
+with no mesh or no ledger keeps ``MeshIntroductionRejection/divergentEpoch``, and the parameter's
+default is `false` so a caller that forgets it fails closed.
+
+**That introduction is no longer members-only before any app frame** (D-4.3, 2026-09-21), and this
+paragraph is corrected rather than removed because the epoch gate itself did not move with it. Two
+identity decisions did, in a different arm: the roster's verdict is now read **before** the mesh ids
+are compared, so a `stranger` the owner's open join doors admit provisionally may differ on meshID —
+a *member* naming a foreign mesh is refused as strictly as before — and a `stranger` is refused
+unless ``MeshIntroductionRoster/admitsStrangersProvisionally`` says those doors are open. What a
+provisional peer gets is a tunnel and an uncommitted slot; plan §10.3's merge runs on signed records
+from a **committed** slot, so no merge runs over one.
 
 **Content merges by key-keyed union, and the gates re-run at the receiving member** (P4 item 7,
 plan §10.3 + §21.3). ``MeshContentLedger`` is the content twin of ``MeshMembershipLedger``: three

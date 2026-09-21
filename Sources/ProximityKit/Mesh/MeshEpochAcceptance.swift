@@ -91,11 +91,18 @@ nonisolated enum MeshEpochIntroductionVerdict: Equatable, Sendable {
     /// diverged on could never be reconciled. The verdict now says *reconcile* — admit the tunnel
     /// and let plan §10.3's merge mint the strictly greater successor that retires both heads.
     ///
-    /// Admitting it is a decision about **epochs only**. Every identity decision downstream is
-    /// unchanged: ``MeshChannelIntroductionExchange/receive(_:roster:nonces:mayReconcileDivergentEpochs:)``
-    /// still asks the roster whether the peer is a member, still refuses a departed or removed one,
-    /// still refuses a foreign mesh, and still refuses a malformed reference before this case can
-    /// even be reached.
+    /// Admitting it is a decision about **epochs only**, and no identity decision moved *with* it:
+    /// ``MeshChannelIntroductionExchange/receive(_:roster:nonces:mayReconcileDivergentEpochs:)``
+    /// still asks the roster what the peer is, still refuses a departed or removed one, and still
+    /// refuses a malformed reference before this case can even be reached.
+    ///
+    /// **Two of those decisions did move, on 2026-09-21, and in a different arm** (D-4.3 Option 1).
+    /// The roster's verdict is now read *before* the mesh ids are compared, so a stranger the
+    /// owner's open join doors admit provisionally may differ on meshID — a **member** naming a
+    /// foreign mesh is refused exactly as strictly as before — and a stranger is refused unless
+    /// ``MeshIntroductionRoster/admitsStrangersProvisionally`` says those doors are open. A
+    /// provisional peer that reaches this verdict gets a tunnel and nothing more: plan §10.3's
+    /// merge runs on signed records from a committed slot, which it does not have.
     case reconcile(local: MeshEpochRef, peer: MeshEpochRef)
 }
 
