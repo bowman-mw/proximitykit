@@ -368,6 +368,19 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// enough that a room converges while people are still standing in it.
     nonisolated static let reproposeIntervalSeconds: TimeInterval = 5
 
+    /// Bytes of per-session salt behind ``peerLabel(for:)`` — 256 bits, drawn once per session from
+    /// the same CSPRNG this radio's instance name draws from.
+    nonisolated static let peerLabelSaltByteCount = 32
+
+    /// Characters of the salted digest one peer label carries. Long enough that two peers in one
+    /// room are never confused by eye, short enough to read off a log line.
+    nonisolated static let peerLabelLength = 12
+
+    /// The label a peer gets when this session has no salt to hide it behind — the fail-closed
+    /// direction, and the only branch of ``peerLabel(for:)`` that is not a digest. A constant
+    /// carries no peer value at all, which is strictly better than an unsalted one.
+    nonisolated static let unlabelledPeer = "unlabelled"
+
     /// Whether Apple peer-to-peer Wi-Fi is requested. Simulators have no AWDL radio and reach each
     /// other over infrastructure only, which is the lane the feasibility probe validated.
     #if targetEnvironment(simulator)
@@ -483,6 +496,20 @@ final class NetworkMeshSession: NetworkChannelHost {
     private var browserTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var instanceName = MeshLinkAdvertisement.randomInstanceName()
+
+    /// The random salt every peer label in this session's diagnostics is taken under.
+    ///
+    /// Drawn once at construction and never again: not persisted, not advertised, not on the wire,
+    /// not derived from anything, and gone with the session. It is what makes ``peerLabel(for:)``
+    /// opaque *to a reader who holds the peer's name* — a ``MeshLinkKey`` under this radio is the
+    /// browsed Bonjour endpoint's id, which carries the peer's advertised instance name verbatim,
+    /// and an unsalted digest of it would be recomputable by anyone who can hash.
+    ///
+    /// The same shape as `NetworkPresenceSession.peerLabelSalt` and
+    /// `NetworkRecipeShareSession.peerLabelSalt`, deliberately: three radios that label peers three
+    /// different ways are three separate arguments to have to make.
+    private let peerLabelSalt: [UInt8] =
+        PresenceEpochPosture.systemEntropy(NetworkMeshSession.peerLabelSaltByteCount)
     private var advertisedFields: [String: String] = [:]
     private var listenerIsReady = false
     private var listenerIsAdvertised = false
@@ -630,6 +657,73 @@ final class NetworkMeshSession: NetworkChannelHost {
         isRunning = false
     }
 
+    // MARK: - Peer labels
+
+    /// The opaque, session-scoped label this radio names `key` by in **every** `os.Logger` line it
+    /// writes.
+    ///
+    /// The first ``peerLabelLength`` hexadecimal characters of SHA-256 over this session's random
+    /// ``peerLabelSalt`` followed by the key's bytes. The same rule, and the same three reasons, as
+    /// `NetworkPresenceSession.peerLabel(for:)`: a ``MeshLinkKey`` looks opaque and is not (under
+    /// this radio its `rawValue` is the browsed Bonjour endpoint's id, which contains the instance
+    /// name the peer advertises); an unsalted digest is recomputable by anyone holding that public
+    /// name; and the label must stay stable within the session so a sighting, a refusal and a
+    /// teardown still read as one peer's story.
+    ///
+    /// **Why the mesh radio owes this and only got it in the cutover.** Until 2026-09-21 the two
+    /// sibling radios shipped and this one was DEBUG-only, so its diagnostics logged `key.rawValue`
+    /// verbatim at `privacy: .public`. The flip made it the shipping radio without moving its log
+    /// lines, which put a nearby device's rotating identifier — and, on every teardown, the peer's
+    /// stable 16-character identity fingerprint — into the system log and therefore into a
+    /// sysdiagnose. This closes that, on the same terms the siblings already ran on.
+    ///
+    /// Not a cryptographic decision: nothing compares two of these and nothing depends on their
+    /// unforgeability. A session whose entropy draw came back empty labels every peer
+    /// ``unlabelledPeer`` rather than falling back to anything derived from the key.
+    func peerLabel(for key: MeshLinkKey) -> String {
+        guard !peerLabelSalt.isEmpty else { return Self.unlabelledPeer }
+        var hasher = SHA256()
+        hasher.update(data: Data(peerLabelSalt))
+        hasher.update(data: Data(key.rawValue.utf8))
+        let hexadecimal = PresenceEpochPosture.hexadecimal(Array(hasher.finalize()))
+        return String(hexadecimal.prefix(Self.peerLabelLength))
+    }
+
+    /// The two spellings one peer-scoped diagnostic needs: the one that is logged and the one that
+    /// is echoed.
+    ///
+    /// `logged` names the peer by ``peerLabel(for:)`` and is what goes to `os.Logger`; `echoed`
+    /// names it by the raw ``MeshLinkKey`` and is what goes to ``MeshTransportConsoleLog``, which
+    /// is an empty function outside DEBUG and silent inside it unless a launch asked for the
+    /// mirror.
+    ///
+    /// The split is the decision `noteBrowseSet` took in the cutover, generalized: the system log
+    /// is persisted, leaves the device in a sysdiagnose, and is read by nobody debugging this
+    /// radio; the console mirror is a developer transcript a Simulator lane greps, and a lane that
+    /// could not match a tunnel line against its own `browsed peers=` list could not tell a
+    /// three-node star from a three-node mesh. One helper rather than the pair spelled out at each
+    /// site, because a site that forgets which half it is writing is exactly how the raw key got
+    /// into the system log in the first place.
+    ///
+    /// - Parameters:
+    ///   - body: Everything before the peer — frozen tokens, counts, causes, capacities. Never
+    ///     peer-derived.
+    ///   - key: The link the line is about.
+    ///   - detail: Free text appended after `": "`, or `""` for none. Framework error text, never
+    ///     a peer value.
+    /// - Returns: The line to log, and the line to echo.
+    private func peerLines(
+        _ body: String,
+        key: MeshLinkKey,
+        detail: String = ""
+    ) -> (logged: String, echoed: String) {
+        let tail = detail.isEmpty ? "" : ": \(detail)"
+        return (
+            logged: "\(body) for \(peerLabel(for: key))\(tail)",
+            echoed: "\(body) for \(key.rawValue)\(tail)"
+        )
+    }
+
     // MARK: - Dialing
 
     /// Opens a tunnel to a discovered peer, if ``MeshLinkTable`` admits it.
@@ -644,9 +738,9 @@ final class NetworkMeshSession: NetworkChannelHost {
             // `notice` + console mirror, for the same reason ``noteInboundRefusal(_:key:)`` is:
             // a refused dial and a dial nobody made are indistinguishable in a `--console-pty`
             // transcript otherwise, and telling those two apart is the whole of a topology bug.
-            let line = "dial refused \(admission) for \(key.rawValue)"
-            Self.logger.notice("\(line, privacy: .public)")
-            MeshTransportConsoleLog.echo(line)
+            let lines = peerLines("dial refused \(admission)", key: key)
+            Self.logger.notice("\(lines.logged, privacy: .public)")
+            MeshTransportConsoleLog.echo(lines.echoed)
             return
         }
         startOutboundTunnel(to: key)
@@ -1259,7 +1353,9 @@ private extension NetworkMeshSession {
         guard isRunning else { return }
         let key = MeshLinkKey(connection.id)
         guard pendingInbound[key] == nil, pendingInbound.count < Self.maxPendingInboundTunnels else {
-            Self.logger.debug("inbound QUIC tunnel refused pre-introduction for \(key.rawValue, privacy: .public)")
+            Self.logger.debug(
+                "inbound QUIC tunnel refused pre-introduction for \(self.peerLabel(for: key), privacy: .public)"
+            )
             return
         }
         pendingInbound[key] = PendingInbound(
@@ -1340,7 +1436,9 @@ private extension NetworkMeshSession {
             .filter { now.timeIntervalSince($0.value.startedAt) > Self.introductionDeadlineSeconds }
             .keys
         for key in expired {
-            Self.logger.debug("inbound QUIC tunnel timed out mid-introduction for \(key.rawValue, privacy: .public)")
+            Self.logger.debug(
+                "inbound QUIC tunnel timed out mid-introduction for \(self.peerLabel(for: key), privacy: .public)"
+            )
             dropPendingInbound(key)
         }
     }
@@ -1543,12 +1641,15 @@ private extension NetworkMeshSession {
         _ key: MeshLinkKey,
         datagrams: Network.QUIC.Datagrams<QUICDatagram>
     ) {
-        let line = "datagramCapacity usable=\(datagrams.parent.usableDatagramFrameSize) "
-            + "requested=\(Self.datagramFrameSize) required=\(Self.heartbeatDatagram.count) "
-            + "idleTimeoutMs=\(MeshHeartbeatSchedule.idleTimeoutMilliseconds) "
-            + "beatSeconds=\(Int(MeshHeartbeatSchedule.intervalSeconds)) for \(key.rawValue)"
-        Self.logger.notice("\(line, privacy: .public)")
-        MeshTransportConsoleLog.echo(line)
+        let lines = peerLines(
+            "datagramCapacity usable=\(datagrams.parent.usableDatagramFrameSize) "
+                + "requested=\(Self.datagramFrameSize) required=\(Self.heartbeatDatagram.count) "
+                + "idleTimeoutMs=\(MeshHeartbeatSchedule.idleTimeoutMilliseconds) "
+                + "beatSeconds=\(Int(MeshHeartbeatSchedule.intervalSeconds))",
+            key: key
+        )
+        Self.logger.notice("\(lines.logged, privacy: .public)")
+        MeshTransportConsoleLog.echo(lines.echoed)
     }
 
     // MARK: Duplicate collapse
@@ -1769,12 +1870,21 @@ private extension NetworkMeshSession {
     /// on a device, where there is no console mirror at all — and the console mirror exists to make
     /// a headless simulator run legible, not to be the only place the fact is recorded.
     ///
-    /// What it carries is reasons and hashes: the frozen ``MeshTunnelEndReason`` token, the peer's
-    /// 16-character key fingerprint (or ``MeshTunnelEndReason/unverifiedFingerprint`` when the
-    /// tunnel died before anyone proved who they were), whether the tunnel had ever gone live, the
-    /// surviving tunnel count, and the framework's own error text. No payload, no endpoint address,
-    /// no display name — `key.rawValue` is the same session-scoped opaque endpoint id every other
-    /// line in this class already logs.
+    /// What it carries is reasons and counts: the frozen ``MeshTunnelEndReason`` token, whether the
+    /// tunnel had ever gone live, the surviving tunnel count, the framework's own error text, and
+    /// the peer — named by ``peerLabel(for:)``. No payload, no endpoint address, no display name.
+    ///
+    /// **The fingerprint is not public here, and that is the whole of the cutover's fix to this
+    /// line.** `tunnel.verified?.fingerprint` is the peer's *stable* 16-character identity
+    /// fingerprint — the value the ledger, the roster and the moderation record are keyed on — and
+    /// until 2026-09-21 it interpolated at `privacy: .public` on **every teardown**, on a radio
+    /// that had just become the shipping one. That is not a rotating token that a scanner on the
+    /// same link could read for itself; it is the peer's identity, persisted into the system log
+    /// and carried off the device in a sysdiagnose. It is now `privacy: .private`, so the field
+    /// keeps its place on the line for a lane that installs a logging profile and renders
+    /// `<private>` for everyone else. The DEBUG console mirror keeps it in clear, unchanged: that
+    /// is the transcript the runbook's Simulator lanes grep, and its `tunnelEnded <cause>
+    /// <fingerprint> …` shape is quoted verbatim in those lanes' evidence rows.
     ///
     /// A benign end logs at `notice` and a fault at `error`, so an owner tidying a slot does not
     /// read as a radio failure — see ``MeshTunnelEndReason/isBenign``.
@@ -1785,15 +1895,22 @@ private extension NetworkMeshSession {
         detail: String
     ) {
         let fingerprint = tunnel.verified?.fingerprint ?? MeshTunnelEndReason.unverifiedFingerprint
-        let line = "tunnelEnded \(cause.rawValue) \(fingerprint) live=\(tunnel.controlStream != nil) "
-            + "tunnels=\(tunnels.count) for \(key.rawValue): \(detail)"
+        let logged = "tunnelEnded \(cause.rawValue) live=\(tunnel.controlStream != nil) "
+            + "tunnels=\(tunnels.count) for \(peerLabel(for: key)): \(detail)"
+        let echoed = "tunnelEnded \(cause.rawValue) \(fingerprint) "
+            + "live=\(tunnel.controlStream != nil) tunnels=\(tunnels.count) "
+            + "for \(key.rawValue): \(detail)"
         guard cause.isBenign else {
-            Self.logger.error("\(line, privacy: .public)")
-            MeshTransportConsoleLog.echo(line)
+            Self.logger.error(
+                "\(logged, privacy: .public) fingerprint=\(fingerprint, privacy: .private)"
+            )
+            MeshTransportConsoleLog.echo(echoed)
             return
         }
-        Self.logger.notice("\(line, privacy: .public)")
-        MeshTransportConsoleLog.echo(line)
+        Self.logger.notice(
+            "\(logged, privacy: .public) fingerprint=\(fingerprint, privacy: .private)"
+        )
+        MeshTransportConsoleLog.echo(echoed)
     }
 
     /// Books a failed dial attempt and reports the give-up. The retry itself is not scheduled here:
@@ -1877,7 +1994,9 @@ private extension NetworkMeshSession {
             }
         } catch {
             guard !Task.isCancelled else { return }
-            Self.logger.debug("QUIC transfer acceptor ended for \(key.rawValue, privacy: .public)")
+            Self.logger.debug(
+                "QUIC transfer acceptor ended for \(self.peerLabel(for: key), privacy: .public)"
+            )
         }
     }
 
@@ -1938,13 +2057,15 @@ private extension NetworkMeshSession {
 
     /// Records one transfer crossing: the verb, the payload size, and the stream it rode.
     ///
-    /// Byte counts and stream ids only — no payload, no peer name, and the same session-scoped
-    /// opaque endpoint id every other line in this class logs. `notice`, not `debug`: a transfer is
-    /// a rare, significant event, and this is the line a Lane C transcript reads the photo flow off.
+    /// Byte counts and stream ids only — no payload and no peer name. The peer is named by
+    /// ``peerLabel(for:)`` in the system log and by its raw endpoint id in the DEBUG console
+    /// mirror, which is the split ``peerLines(_:key:detail:)`` exists to make. `notice`, not
+    /// `debug`: a transfer is a rare, significant event, and this is the line a Lane C transcript
+    /// reads the photo flow off.
     func noteTransfer(_ verb: String, bytes: Int, streamID: UInt64, key: MeshLinkKey) {
-        let line = "transfer \(verb) bytes=\(bytes) stream=\(streamID) for \(key.rawValue)"
-        Self.logger.notice("\(line, privacy: .public)")
-        MeshTransportConsoleLog.echo(line)
+        let lines = peerLines("transfer \(verb) bytes=\(bytes) stream=\(streamID)", key: key)
+        Self.logger.notice("\(lines.logged, privacy: .public)")
+        MeshTransportConsoleLog.echo(lines.echoed)
     }
 }
 
@@ -2292,10 +2413,13 @@ private extension NetworkMeshSession {
             return
         }
         tunnels[key]?.datagramWriteFailed = true
-        let line = "heartbeat datagram refused, falling back to the control stream "
-            + "for \(key.rawValue): \(error.localizedDescription)"
-        Self.logger.notice("\(line, privacy: .public)")
-        MeshTransportConsoleLog.echo(line)
+        let lines = peerLines(
+            "heartbeat datagram refused, falling back to the control stream",
+            key: key,
+            detail: error.localizedDescription
+        )
+        Self.logger.notice("\(lines.logged, privacy: .public)")
+        MeshTransportConsoleLog.echo(lines.echoed)
     }
 
     /// Records one heartbeat crossing, at `debug` level plus the console mirror.
@@ -2305,9 +2429,9 @@ private extension NetworkMeshSession {
     /// observable is the thing that was only ever inferred before — that beats are *flowing*, and on
     /// which pipe.
     func noteHeartbeat(_ verb: String, key: MeshLinkKey, over channel: MeshHeartbeatChannel) {
-        let line = "heartbeat \(verb) over \(channel) for \(key.rawValue)"
-        Self.logger.debug("\(line, privacy: .public)")
-        MeshTransportConsoleLog.echo(line)
+        let lines = peerLines("heartbeat \(verb) over \(channel)", key: key)
+        Self.logger.debug("\(lines.logged, privacy: .public)")
+        MeshTransportConsoleLog.echo(lines.echoed)
     }
 
     /// Records one inbound tunnel this session verified and then declined to keep.
@@ -2323,9 +2447,9 @@ private extension NetworkMeshSession {
     ///   - reason: Frozen English naming who refused — `owner`, or the ``MeshLinkAdmission`` case.
     ///   - key: The link the refused tunnel would have lived under.
     func noteInboundRefusal(_ reason: String, key: MeshLinkKey) {
-        let line = "inbound tunnel refused \(reason) for \(key.rawValue)"
-        Self.logger.notice("\(line, privacy: .public)")
-        MeshTransportConsoleLog.echo(line)
+        let lines = peerLines("inbound tunnel refused \(reason)", key: key)
+        Self.logger.notice("\(lines.logged, privacy: .public)")
+        MeshTransportConsoleLog.echo(lines.echoed)
     }
 
     /// Logs a diagnostic and hands it to the owner. Frozen English: this is the surface that makes
