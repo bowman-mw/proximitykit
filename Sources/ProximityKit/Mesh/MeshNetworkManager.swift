@@ -4127,11 +4127,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// A device that holds no mesh OMITS the key rather than writing a fallback: an unscopeable
     /// line must not look scoped, and a shared placeholder would be a second id every rig answers
-    /// to. Most callers guard `currentMesh` first and are unreachable in that state. Three are
-    /// REACHABLE with none held, and P10 item 5 named all three rather than leaving it to a reader:
-    /// the routed dispatch's uncommitted-slot drop refuses BEFORE the mesh guard; the projection
-    /// author's `originUnresolvable` leg is reached after a `leaveMesh()`; and the routed access
-    /// gate is the app's lock door, which a device holding no mesh still pushes.
+    /// to. Most callers guard `currentMesh` first and are unreachable in that state. FIVE are
+    /// reachable with none held — the list is the point of this paragraph, so a caller that joins
+    /// them is added here in the same commit rather than left for a reader to re-derive:
+    ///   * the routed dispatch's uncommitted-slot drop refuses BEFORE the mesh guard;
+    ///   * the projection author's `originUnresolvable` leg is reached after a `leaveMesh()`;
+    ///   * the routed access gate is the app's lock door, which a device holding no mesh still
+    ///     pushes;
+    ///   * the launch restore's key-advertisement refusals — ``restoreKeyAdvertisements(from:verifiedBy:)``
+    ///     folds the persisted set against the re-proved ledger and names each drop through
+    ///     ``auditKeyAdvertisementOutcomes(_:)``, while ``restoreSessionContextAtLaunch(now:)``
+    ///     deliberately leaves `currentMesh` nil ("restoring is not reconnecting"). Item 5's verify
+    ///     review found this one missing from the list; `MeshRoutedPhotoDeliveryTests` reads that
+    ///     `mesh.keyAgreement.rejected` unscoped for exactly this reason.
+    ///   * the membership dispatch's `signerNotAMember` frame refusal, through
+    ///     ``refuseKeyAdvertisementFrame(_:)``: gated on the committed slot and the VERIFIER, not
+    ///     on a held mesh, which a device that restored a ledger without reconnecting has. That
+    ///     function's two OTHER callers are not on this list — both sit inside
+    ///     ``receiveKeyAdvertisements(_:from:)``'s `guard let … mesh = currentMesh`.
     ///
     /// The rule that follows is about the CELL, not about the door. A cell whose own rig
     /// demonstrably holds a mesh may read any of these `== N` through the scoped reader, because
@@ -6136,7 +6149,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func noteRoutedHeldBack(_ key: MeshRoutedItemKey, at now: Date) {
         guard routedHeldBackKeys.contains(key)
                 || routedHeldBackKeys.count < MeshRoutedStoreFormat.maxItems else {
-            FernletAuditLog.log("mesh.routedDrain.heldBackSetFull")
+            // Its one production caller is the routed drain's capacity refusal, which runs inside
+            // the mesh this device holds, so the bound is named with `held` on the line.
+            FernletAuditLog.log(
+                "mesh.routedDrain.heldBackSetFull", context: heldMeshAuditContext()
+            )
             refreshRoutedDeliveryHold(at: now)
             return
         }
@@ -11586,7 +11603,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   nothing at all was touched.
     private func promoteToMesh() -> Bool {
         guard currentMesh == nil else {
-            FernletAuditLog.log("mesh.promotion.refusedExistingMesh")
+            // The `else` of `currentMesh == nil`: this line is written while a mesh IS held, so it
+            // carries `held` and a cell's `== N` over it is a claim about its own rig, not the
+            // process. The guard's NAME reads like a no-mesh door; its branch is the opposite one.
+            FernletAuditLog.log(
+                "mesh.promotion.refusedExistingMesh", context: heldMeshAuditContext()
+            )
             return false
         }
         // A mesh we CREATE starts at epoch 0 by definition. Any key state surviving from the
