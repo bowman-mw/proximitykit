@@ -1469,9 +1469,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         routedAccessGate = gate
         FernletAuditLog.log(
             "mesh.routedAccess.gateChanged",
-            context: ["protectedData": String(gate.protectedDataAvailable),
-                      "foreground": String(gate.appIsForeground),
-                      "duress": String(gate.duressActive)]
+            context: heldMeshAuditContext(
+                ["protectedData": String(gate.protectedDataAvailable),
+                 "foreground": String(gate.appIsForeground),
+                 "duress": String(gate.duressActive)]
+            )
         )
         guard edge.runsPass else { return nil }
         return runRoutedReentry(edge, now: now)
@@ -4125,9 +4127,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// A device that holds no mesh OMITS the key rather than writing a fallback: an unscopeable
     /// line must not look scoped, and a shared placeholder would be a second id every rig answers
-    /// to. Most callers are unreachable in that state (their door guards `currentMesh` first); the
-    /// routed dispatch's uncommitted-slot drop is the one that is not, and it refuses before the
-    /// mesh guard by design.
+    /// to. Most callers guard `currentMesh` first and are unreachable in that state. Three are
+    /// REACHABLE with none held, and P10 item 5 named all three rather than leaving it to a reader:
+    /// the routed dispatch's uncommitted-slot drop refuses BEFORE the mesh guard; the projection
+    /// author's `originUnresolvable` leg is reached after a `leaveMesh()`; and the routed access
+    /// gate is the app's lock door, which a device holding no mesh still pushes.
+    ///
+    /// The rule that follows is about the CELL, not about the door. A cell whose own rig
+    /// demonstrably holds a mesh may read any of these `== N` through the scoped reader, because
+    /// the key is on the line its own device wrote — that is what the routed-access counts do. A
+    /// cell that drives the door with NO mesh held cannot: the line carries no key, a `where:` on
+    /// it would answer 0, and the honest read is the weaker `>= 1` with the reason written in
+    /// beside it.
     ///
     /// - Parameter base: The door's own context, empty for the lines that had none.
     /// - Returns: `base` with `held` added, when this device holds a mesh.
@@ -5735,8 +5746,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         peerRoutedInventories[senderFingerprint] = state
         FernletAuditLog.log(
             "mesh.merge.routedQuiescent",
-            context: ["peerQuiescent": String(payload.answer.quiescent),
-                      "localQuiescent": String(state.localQuiescent)]
+            context: heldMeshAuditContext(
+                ["peerQuiescent": String(payload.answer.quiescent),
+                 "localQuiescent": String(state.localQuiescent)]
+            )
         )
     }
 
@@ -6939,10 +6952,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         refreshRoutedDeliveryHold(at: now)
         FernletAuditLog.log(
             "mesh.routedAccess.reentry",
-            context: ["legs": edge.logToken, "restored": String(restored),
-                      "committed": String(committed), "sweptPeers": String(swept),
-                      "acksFiled": String(acks.filed), "heartsPending": String(acks.hearts),
-                      "projected": String(projected)]
+            context: heldMeshAuditContext(
+                ["legs": edge.logToken, "restored": String(restored),
+                 "committed": String(committed), "sweptPeers": String(swept),
+                 "acksFiled": String(acks.filed), "heartsPending": String(acks.hearts),
+                 "projected": String(projected)]
+            )
         )
         return MeshRoutedReentryReport(
             legs: edge, restoredSession: restored, committedCustodyCount: committed,
@@ -7373,7 +7388,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let event = mayCommitRoutedHeartLedgerJudgement
             ? "mesh.routedAccess.heartStageEvaluable"
             : "mesh.routedAccess.heartStageDeferred"
-        FernletAuditLog.log(event, context: ["items": String(count)])
+        FernletAuditLog.log(event, context: heldMeshAuditContext(["items": String(count)]))
     }
 
     /// An item just became complete on this device: take whichever rungs this device is entitled to,
@@ -8255,16 +8270,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
               let author = (roster.members + roster.barred)
                 .first(where: { $0.fingerprint == manifest.originFingerprint }) else {
             FernletAuditLog.log(
-                "mesh.routedProjection.originUnresolvable", context: ["type": manifest.typeToken]
+                "mesh.routedProjection.originUnresolvable",
+                context: heldMeshAuditContext(["type": manifest.typeToken])
             )
             return .notYet
         }
         guard !verifier.ledger.removals.memberFingerprints.contains(author.fingerprint) else {
-            FernletAuditLog.log("mesh.routedProjection.originRemoved")
+            FernletAuditLog.log(
+                "mesh.routedProjection.originRemoved", context: heldMeshAuditContext()
+            )
             return .refusedForGood
         }
         guard !store.isBlockedFingerprint(author.fingerprint) else {
-            FernletAuditLog.log("mesh.routedProjection.blockedOrigin")
+            FernletAuditLog.log(
+                "mesh.routedProjection.blockedOrigin", context: heldMeshAuditContext()
+            )
             return .refusedForGood
         }
         return .resolved(author)
