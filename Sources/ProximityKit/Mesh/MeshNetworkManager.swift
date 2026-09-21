@@ -14837,8 +14837,8 @@ extension MeshNetworkManager: MeshContinuationRaising {}
 /// introduction because the roster is read fresh each time.
 ///
 /// **Scope, stated plainly** (D-4.3 Option 1, 2026-09-21). A stranger is admitted **provisionally**
-/// while the join doors are open — the posture the MultipeerConnectivity radio ships, with the key
-/// proven — and becomes a member only at the same three doors. Concretely: while the session is
+/// while the join doors are open — the posture the MultipeerConnectivity radio shipped until
+/// 2026-09-21, with the key proven — and becomes a member only at the same three doors. Concretely: while the session is
 /// open — on a device with no mesh yet, or on an open one — ``mayAdmitStrangerProvisionally`` rides
 /// out on ``roster`` and the QUIC radio lets a peer nobody has vouched for complete the signed
 /// introduction; what it gets for that is a tunnel and an uncommitted slot, not a roster seat.

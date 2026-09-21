@@ -93,7 +93,8 @@ private struct SessionPeerIdentity {
 /// The shared MultipeerConnectivity radio: one MCSession, advertiser, and browser, multiplexed
 /// into per-peer ``PeerChannelTransport`` channels.
 ///
-/// Every multi-peer radio (mesh, recipe share, presence) owns an instance. Responsibilities:
+/// Since the MC→QUIC cutover (2026-09-21) the only owner is the mesh's DEBUG bisect path: the
+/// recipe-share and presence radios run on their own Network.framework sessions. Responsibilities:
 /// stable-vs-ephemeral peer identity (`usesEphemeralPeerID: true` mints a random, never-persisted
 /// MCPeerID for the presence radio — it must NOT touch the shared ``FileMCPeerIDStore``);
 /// discovery lifecycle including `pauseDiscovery`/`resumeDiscovery` (radio quiet to new peers,
@@ -183,8 +184,9 @@ final class MeshMultipeerSession: NSObject {
     /// `usesEphemeralPeerID: true` (presence radio, Phase 4a): a fresh RANDOM MCPeerID per
     /// instance, NEVER persisted — identifier hygiene for the standing presence advertiser
     /// (cross-launch unlinkable; the random display name carries no user info). It MUST NOT
-    /// write through the shared `FileMCPeerIDStore`: the other radios rely on that archived
-    /// ID staying stable, and clobbering it would break their peer identity continuity.
+    /// write through the shared `FileMCPeerIDStore`: a bisect launch of the mesh radio relies on
+    /// that archived ID staying stable, and clobbering it would break its peer identity
+    /// continuity. (Until the cutover the other radios relied on it too; they no longer use it.)
     init(peerIDStore: (any MCPeerIDStoring)? = nil, usesEphemeralPeerID: Bool = false) {
         if usesEphemeralPeerID {
             self.localPeerID = MCPeerID(displayName: Self.randomEphemeralDisplayName())

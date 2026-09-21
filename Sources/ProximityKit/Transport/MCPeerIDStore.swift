@@ -23,7 +23,9 @@ public protocol MCPeerIDStoring {
 /// (`FernletPeerID.archive`).
 ///
 /// Best-effort file I/O — a failed load simply mints a fresh peer ID on the next launch.
-/// Shared by the stable radios (mesh, recipe share) so their MC peer identity is continuous.
+/// Read by the mesh radio's DEBUG bisect launch, so its MC peer identity is continuous across
+/// them. Until the MC→QUIC cutover (2026-09-21) the recipe-share radio shared it; it no longer
+/// runs on MultipeerConnectivity at all.
 ///
 /// That continuity is exactly why the archive is part of the delete-all identity rotation
 /// (``clearForDeleteAll()``): it holds `UIDevice.current.name` — in practice the user's own first

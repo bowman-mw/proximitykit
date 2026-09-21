@@ -354,7 +354,7 @@ DEBUG-only `FERNLET_MESH_TRANSPORT=multipeer` launch variable, which is what mak
 the cutover boundary possible — and **nothing about the choice is persisted**, in either direction:
 no setting, no UI, no `UserDefaults` key, so it owes no row on the wipe ledger. A slot's channel is
 held as `MeshPeerChannel` for the same reason; `DetachedPeerChannel` is the radio-less one the
-manager's test seams use. The QUIC radio is attached the manager as its `MeshIntroductionAuthority`
+manager's test seams use. The manager is attached to the QUIC radio as its `MeshIntroductionAuthority`
 (mesh id, epoch reference, roster, signing key), which the MC radio is handed and ignores by
 contract — it authenticates one layer up, inside the slot coordinator's identity introduction.
 

@@ -301,8 +301,8 @@ nonisolated struct MeshIntroductionRoster: Equatable, Sendable {
     ///
     /// **A tunnel, never a roster seat.** It admits a peer nobody has vouched for to the signed
     /// introduction and to everything an uncommitted slot reaches — exactly what the
-    /// MultipeerConnectivity radio admits today while the doors are open, and with the stranger's
-    /// signing key proven-held rather than merely claimed. Membership is still decided one layer up,
+    /// MultipeerConnectivity radio admitted until the flip while the doors are open, and with the
+    /// stranger's signing key proven-held rather than merely claimed. Membership is still decided one layer up,
     /// at `MeshNetworkManager`'s three doors: the seat check at the identity introduction, the
     /// 15 cm / QR commit, and the admission grant.
     ///
