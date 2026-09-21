@@ -1090,13 +1090,31 @@ private extension NetworkMeshSession {
     /// browsed it and declined to dial" are different defects with different owners, and without
     /// the set they read identically. Size, not identity, is the trigger — a TXT record arriving
     /// late re-announces the same peer and must not re-print the set.
+    ///
+    /// **The COUNT is public and the NAMES are private** (plan §8.7 finding 1, the one item owed
+    /// before QUIC ships — taken 2026-09-21, in the cutover that made this radio the shipping one).
+    /// The count is what a transcript is read for, it identifies nobody, and it stays redactable to
+    /// nothing. The names are the other devices' Bonjour instance names, and the interpolation that
+    /// carried them was `.public` — a system-log line, off-device in a sysdiagnose, naming who else
+    /// was in the room.
+    ///
+    /// **This is hygiene, not a leak fix, and the difference is worth keeping straight.** A mesh
+    /// instance name is `MeshLinkAdvertisement`'s random per-session token, not a device name and
+    /// not a person: it carries nothing across sessions and nothing a scanner on the same link
+    /// could not read for itself. What the downgrade buys is that the log stops being the place a
+    /// stable-looking identifier accumulates if that ever stops being true, and it stops a
+    /// transcript of who was nearby riding out in a diagnostic the user never reads.
+    ///
+    /// The DEBUG console echo keeps the whole line: `MeshTransportConsoleLog.echo` is a no-op
+    /// outside DEBUG, and it is the transcript the runbook's Simulator lanes grep. A lane that
+    /// could not see the names could not tell the three-node star from the mesh, which is the
+    /// defect this line was added for.
     func noteBrowseSet(_ keys: Set<MeshLinkKey>) {
         guard keys.count != lastBrowseSetCount else { return }
         lastBrowseSetCount = keys.count
         let names = keys.map(\.rawValue).sorted().joined(separator: ",")
-        let line = "browsed peers=\(keys.count) [\(names)]"
-        Self.logger.notice("\(line, privacy: .public)")
-        MeshTransportConsoleLog.echo(line)
+        Self.logger.notice("browsed peers=\(keys.count, privacy: .public) [\(names, privacy: .private)]")
+        MeshTransportConsoleLog.echo("browsed peers=\(keys.count) [\(names)]")
     }
 
     /// Re-offers every browsed peer this session holds no link to, at most once per
