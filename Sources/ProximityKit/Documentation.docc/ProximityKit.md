@@ -1,12 +1,12 @@
 # ``ProximityKit``
 
-Fernlet's self-contained peer-to-peer subsystem: signed identity, MultipeerConnectivity + UWB session formation, trust lifecycle, and every in-person social feature (photos, recipes, the clothing shop, chat, hearts, activities, moderation).
+Fernlet's self-contained peer-to-peer subsystem: signed identity, QUIC + UWB session formation, trust lifecycle, and every in-person social feature (photos, recipes, the clothing shop, chat, hearts, activities, moderation).
 
 ## Overview
 
 ProximityKit is the "meet in person" half of Fernlet's social layer. Nothing here talks to a
 server except the heart dead-drop's injected transport seam; everything else moves over local
-radios (MultipeerConnectivity for data, NearbyInteraction/UWB for distance) between two phones
+radios (Network.framework/QUIC over Bonjour for data, NearbyInteraction/UWB for distance) between two phones
 that are physically together. The design center is a privacy stance the rest of the app depends
 on: identities are per-device Ed25519/X25519 key pairs (``IdentityService``), every wire transfer
 travels in a signed ``FernletIdentityEnvelope`` that is verified — signature, expiry, recipient,
@@ -28,8 +28,10 @@ list in the manifest is the truth.
 
 **How a session forms.** A radio owner (``MeshNetworkManager`` for the friend mesh,
 ``ProximityRecipeShareManager`` for recipe pairing, ``PresenceManager`` for presence hearts)
-runs one shared radio multiplexed into per-peer channels — a `MeshMultipeerSession` on every
-shipping path (the friend mesh *selects* its radio; see Transport below).
+runs one shared radio multiplexed into per-peer channels — one of the three `Network*Session`
+types, one per radio, since the MC→QUIC cutover (2026-09-21) took the friend mesh off
+`MeshMultipeerSession` (the friend mesh still *selects* its radio, but there is one shipping answer;
+see Transport below).
 The friend mesh has **three** discovery verbs, not two: ``MeshNetworkManager/startJoin()`` and
 ``MeshNetworkManager/stopJoin()``, and — since P8 item 3 —
 ``MeshNetworkManager/holdCommittedLinks()``, which stops browsing and closes the admission doors
@@ -312,14 +314,18 @@ type has no local label). Senders keep emitting frozen English forever.
 ### Transport
 
 The protocol surface carries no framework peer type: `MeshMultipeerSession` keeps the
-MultipeerConnectivity half private behind ``PeerEndpointKey``, so a Network.framework/QUIC conformer
-slots in beside it without changing anything here. ``MCPeerIDStoring`` and ``FileMCPeerIDStore``
-are the two deliberate exceptions — they persist the MC peer identity itself and retire with MC.
+MultipeerConnectivity half private behind ``PeerEndpointKey``, which is what let the
+Network.framework/QUIC conformer slot in beside it without changing anything here — and then, at the
+cutover, replace it as the default without changing anything here either. ``MCPeerIDStoring`` and
+``FileMCPeerIDStore`` are the two deliberate exceptions — they persist the MC peer identity itself,
+nothing on a shipping path writes one any more, and they retire with MC in the deletion round.
 
-**Four sessions, one surface.** `MeshMultipeerSession` (MultipeerConnectivity, the radios still on
-it — friend mesh, coach), `NetworkMeshSession` (Network.framework/QUIC, the friend mesh's migration
-target — see
+**Four sessions, one surface — and since the cutover, three that ship.** `NetworkMeshSession`
+(Network.framework/QUIC, **the friend mesh's radio** since `MeshTransportFactory.shippingDefault`
+flipped to `.quic` on 2026-09-21 — see
 [the network migration plan](../../../../Docs/Plan-ProximityKit-Network-Migration-2026-08-27.md) §7),
+`MeshMultipeerSession` (MultipeerConnectivity, on no shipping path any more: a DEBUG-only
+`FERNLET_MESH_TRANSPORT=multipeer` bisect path, held with its files until the deletion round),
 `NetworkPresenceSession` (the same framework, the presence radio, §17.1) and
 `NetworkRecipeShareSession` (the recipe radio, same plan section) each multiplex into per-peer
 channels — `PeerChannelTransport` and `NetworkPeerChannel` — that conform to ``PeerTransport``. The
@@ -336,16 +342,19 @@ instead is what leaves a mutually-dialing pair with none. Neither channel ever p
 opposite-direction inviter policy that wakes if one does, and two policies pointing opposite ways
 means neither side dials. Discovery reaches the owner through the sessions' closure hooks instead.
 
-**Which radio a manager gets is a selection, not a hard-coding** (plan §7, P2 item 8).
-`MeshNetworkManager` holds its radio as a `MeshTransportSession` — `wire(_:)` installs one
-`MeshTransportHandlers` value, and start/stop/republish/invite/disconnect are the whole surface — so
-the same manager runs on either conformer and, in the suite, on an in-memory fake.
-`MeshTransportFactory` decides: `shippingDefault` is MultipeerConnectivity and is the only answer a
-Release build can produce; QUIC is reachable from an internal injection or the DEBUG-only
-`FERNLET_MESH_TRANSPORT=quic` launch variable, and **nothing about the choice is persisted** — no
-setting, no UI, no `UserDefaults` key, so it owes no row on the wipe ledger. A slot's channel is held
-as `MeshPeerChannel` for the same reason; `DetachedPeerChannel` is the radio-less one the manager's
-test seams use. Selecting QUIC also attaches the manager as the radio's `MeshIntroductionAuthority`
+**The manager holds its radio through a seam, and `NetworkMeshSession` is the only conformer a
+shipping build constructs** (plan §7, P2 item 8; the cutover, 2026-09-21). `MeshNetworkManager`
+holds its radio as a `MeshTransportSession` — `wire(_:)` installs one `MeshTransportHandlers` value,
+and start/stop/republish/invite/disconnect are the whole surface — so the same manager runs on
+either conformer and, in the suite, on an in-memory fake. That seam was built to make the migration
+possible and is what the migration then travelled through: `MeshTransportFactory` still decides, but
+`shippingDefault` is `.quic` and is the only answer a Release build can produce. The
+MultipeerConnectivity conformer is now the opt-in one — reachable from an internal injection or the
+DEBUG-only `FERNLET_MESH_TRANSPORT=multipeer` launch variable, which is what makes a bisect across
+the cutover boundary possible — and **nothing about the choice is persisted**, in either direction:
+no setting, no UI, no `UserDefaults` key, so it owes no row on the wipe ledger. A slot's channel is
+held as `MeshPeerChannel` for the same reason; `DetachedPeerChannel` is the radio-less one the
+manager's test seams use. The QUIC radio is attached the manager as its `MeshIntroductionAuthority`
 (mesh id, epoch reference, roster, signing key), which the MC radio is handed and ignores by
 contract — it authenticates one layer up, inside the slot coordinator's identity introduction.
 
