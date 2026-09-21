@@ -292,9 +292,11 @@ final class NetworkPeerChannel: PeerTransport {
 /// selected (P2 item 8). A session with no authority cannot authenticate anyone, so it refuses every
 /// tunnel rather than admitting one unverified — as does one whose owner wired no ``invitationGate``.
 ///
-/// **Selected, never defaulted.** `MeshTransportFactory` hands the manager a `MeshMultipeerSession`
-/// on every shipping path; this radio is reachable only from an internal injection or the DEBUG-only
-/// `FERNLET_MESH_TRANSPORT=quic` launch variable, and nothing about that choice is persisted.
+/// **The default, since the cutover.** `MeshTransportFactory.shippingDefault` is `.quic` as of
+/// 2026-09-21, so this radio is what the app's own initializer builds on every shipping path; the
+/// MultipeerConnectivity conformer is now the one reachable only from an internal injection or the
+/// DEBUG-only `FERNLET_MESH_TRANSPORT=multipeer` launch variable, as a bisect path across that
+/// boundary. Nothing about the choice is persisted, in either direction.
 ///
 /// `@MainActor`; framework callbacks arrive `@Sendable` and hop in. Owners wire behaviour through
 /// the closure hooks, the same way they do for the MC session.

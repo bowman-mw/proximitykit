@@ -6,9 +6,13 @@ import Foundation
 /// A per-peer channel a shared mesh radio hands to its owner.
 ///
 /// A ``PeerTransport`` that also knows which peer it carries and can be told to publish
-/// `.connected` / `.disconnected`. `PeerChannelTransport` (MultipeerConnectivity) and
-/// `NetworkPeerChannel` (QUIC) already had exactly this shape; the protocol only names it, so
-/// `MeshNetworkManager` can hold a slot's channel without knowing which radio minted it.
+/// `.connected` / `.disconnected`. The protocol outlived the two-radio period it was introduced
+/// for (P2): it named the shape `PeerChannelTransport` (MultipeerConnectivity — no longer on any
+/// shipping path since the 2026-09-21 MC→QUIC cutover, kept as a DEBUG bisect path until the
+/// deletion round) and `NetworkPeerChannel` (QUIC, the one radio a shipping build constructs)
+/// share, so `MeshNetworkManager` can hold a slot's channel without knowing which radio minted it.
+/// It still earns its place — `DetachedPeerChannel` is the third conformer, and the manager's test
+/// seams are built on it.
 ///
 /// `notifyConnected()` is the owner's call, never the radio's: the owner creates the slot's
 /// coordinator and awaits its `begin()` first, because publishing `.connected` before that returns
@@ -299,39 +303,63 @@ extension NetworkMeshSession: MeshTransportSession {
 ///
 /// Frozen internal tokens: the raw values are parsed from a DEBUG-only environment variable and
 /// never localized, persisted, or put on a wire.
+///
+/// **The seam outlived the choice it was built for.** Since the MC→QUIC cutover (2026-09-21) there
+/// is one shipping answer, and the second case is kept for exactly one job: letting a DEBUG build
+/// be launched back onto MultipeerConnectivity to bisect a regression across the cutover boundary.
+/// It retires with `MeshMultipeerSession` in the deletion round that follows this flip.
 enum MeshTransportKind: String, Sendable, CaseIterable {
 
-    /// MultipeerConnectivity — the shipping default on every path.
+    /// MultipeerConnectivity — off every shipping path since the cutover; opt-in under DEBUG with
+    /// `FERNLET_MESH_TRANSPORT=multipeer`, as the bisect path across that boundary, until the
+    /// deletion round removes the radio and this case with it.
     case multipeer
 
-    /// Network.framework QUIC — opt-in, DEBUG-only, for the migration's tier-2 lanes.
+    /// Network.framework QUIC — ``MeshTransportFactory/shippingDefault`` since the cutover, so this
+    /// is what every launch that selects nothing gets.
     case quic
 }
 
 /// Builds the friend mesh's radio, and decides which one a build gets.
 ///
-/// **MultipeerConnectivity is the default in every shipping path.** ``shippingDefault`` is the only
-/// answer a Release build can produce — the environment read is compiled out — and nothing about the
-/// choice is persisted: there is no setting, no UI, and no `UserDefaults` key, so the selection owes
-/// no row on the persisted-surface wipe ledger. A DEBUG build can opt into QUIC for one launch with
-/// ``quicSelectionEnvironmentKey``, which is how the migration's Simulator lanes drive it.
+/// **QUIC is the default in every shipping path** since the MC→QUIC cutover (2026-09-21).
+/// ``shippingDefault`` is the only answer a Release build can produce — the environment read is
+/// compiled out — and nothing about the choice is persisted: there is no setting, no UI, and no
+/// `UserDefaults` key, so the selection owes no row on the persisted-surface wipe ledger. A DEBUG
+/// build can opt BACK onto the retired MultipeerConnectivity radio for one launch with
+/// ``quicSelectionEnvironmentKey`` (`FERNLET_MESH_TRANSPORT=multipeer`), which is what makes a
+/// bisect across the cutover boundary possible; that arm, this type's `.multipeer` case and the MC
+/// radio itself retire together in the deletion round.
 @MainActor
 enum MeshTransportFactory {
 
     /// What every shipping build uses, unconditionally.
-    static var shippingDefault: MeshTransportKind { .multipeer }
+    ///
+    /// Flipped `.multipeer` → `.quic` by the cutover (2026-09-21). This is a VALUE two suites pin in
+    /// both directions — `MeshTransportSelectionTests.theShippingDefaultIsQUIC` and
+    /// `MeshP9McRetirementAcceptanceTests` — precisely so it cannot move back, or move again,
+    /// without a commit that argues for it.
+    static var shippingDefault: MeshTransportKind { .quic }
 
     #if DEBUG
-    /// Launch environment key selecting the radio, e.g. `FERNLET_MESH_TRANSPORT=quic`. DEBUG only,
-    /// per-launch, never written anywhere. An unrecognized value falls back to ``shippingDefault``
-    /// rather than failing to start a radio at all.
+    /// Launch environment key selecting the radio, e.g. `FERNLET_MESH_TRANSPORT=multipeer`. DEBUG
+    /// only, per-launch, never written anywhere. An unrecognized value falls back to
+    /// ``shippingDefault`` rather than failing to start a radio at all.
+    ///
+    /// The SYMBOL's name is a leftover from the period when the only thing worth selecting was QUIC;
+    /// since the cutover the only selection that changes anything is the retired radio. The name is
+    /// kept as it is because the VARIABLE's spelling — `FERNLET_MESH_TRANSPORT` — is what every
+    /// runbook recipe, Simulator lane and `SIMCTL_CHILD_` line passes, and that must not drift.
     static let quicSelectionEnvironmentKey = "FERNLET_MESH_TRANSPORT"
     #endif
 
     /// The radio this build should use, given a launch environment.
     ///
     /// Takes the environment rather than reading `ProcessInfo` so the decision is a pure function a
-    /// test can enumerate, including the Release answer.
+    /// test can enumerate, including the Release answer. Since the cutover every branch that is not
+    /// an explicit DEBUG opt-in answers ``shippingDefault``, i.e. QUIC — and no branch names a radio
+    /// literally, which is the invariant `MeshP9McRetirementAcceptanceTests` pins over this body
+    /// because a DEBUG test build cannot execute the `#else` arm at all.
     static func resolvedKind(environment: [String: String]) -> MeshTransportKind {
         #if DEBUG
         guard let raw = environment[quicSelectionEnvironmentKey] else { return shippingDefault }
@@ -347,6 +375,10 @@ enum MeshTransportFactory {
     }
 
     /// Builds one radio of the given kind.
+    ///
+    /// The `.multipeer` arm is the DEBUG bisect path's only construction site, and the last thing
+    /// that builds a `MeshMultipeerSession` on any launch since the cutover. It goes with the file
+    /// in the deletion round.
     static func makeSession(_ kind: MeshTransportKind) -> any MeshTransportSession {
         switch kind {
         case .multipeer: return MeshMultipeerSession()

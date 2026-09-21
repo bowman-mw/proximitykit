@@ -310,9 +310,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored public private(set) var routedAccessGate: MeshRoutedAccessGate = .closed
 
     @ObservationIgnored private unowned let store: any ProximityHost
-    /// The shared radio, held through ``MeshTransportSession`` so this manager never names one.
-    /// `MeshTransportFactory` picks it: MultipeerConnectivity on every shipping path, the QUIC
-    /// conformer only from an internal injection or the DEBUG-only launch variable.
+    /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
+    /// its body. `MeshTransportFactory` picks it, and since the MC→QUIC cutover (2026-09-21) it has
+    /// one shipping answer: `NetworkMeshSession`. The MultipeerConnectivity conformer is reachable
+    /// only from an internal injection or the DEBUG-only launch variable, as the bisect path across
+    /// that boundary, and retires with its file in the deletion round; a test injects its own.
     @ObservationIgnored private let transport: any MeshTransportSession
     /// The callbacks installed on ``transport``. Kept so a unit test can fire the events a radio
     /// drives in production — `onPeerDisconnected` above all, whose retry and local-kick bookkeeping
@@ -529,10 +531,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// The app's entry point: a manager over the radio this build selected.
     ///
-    /// That is MultipeerConnectivity everywhere it matters — ``MeshTransportFactory/shippingDefault``
-    /// is the only answer a Release build can produce. A DEBUG build can be launched onto the QUIC
-    /// radio with `FERNLET_MESH_TRANSPORT=quic`; nothing about the choice is stored, so it lasts one
-    /// launch and owes no row on the persisted-surface wipe ledger.
+    /// That is `NetworkMeshSession` — Network.framework/QUIC on `_fernlet-mesh2._udp` — everywhere
+    /// it matters since the MC→QUIC cutover (2026-09-21): ``MeshTransportFactory/shippingDefault``
+    /// is the only answer a Release build can produce. A DEBUG build can be launched back onto the
+    /// retired MultipeerConnectivity radio with `FERNLET_MESH_TRANSPORT=multipeer` to bisect across
+    /// that boundary; nothing about the choice is stored, so it lasts one launch and owes no row on
+    /// the persisted-surface wipe ledger.
     public convenience init(store: any ProximityHost) {
         self.init(store: store, transport: nil)
     }
