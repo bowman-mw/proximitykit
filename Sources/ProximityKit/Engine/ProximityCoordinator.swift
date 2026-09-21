@@ -572,7 +572,7 @@ public final class ProximityCoordinator {
             await end(.transportLost)
         case .failed(let error):
             updateInspectorTransport(state: "failed", disconnected: true)
-            inspector?.recordError(domain: "Multipeer", message: String(describing: error), recoverable: false)
+            inspector?.recordError(domain: "Transport", message: String(describing: error), recoverable: false)
             fail(String(describing: error))
         case .idle:
             break
@@ -877,9 +877,11 @@ public final class ProximityCoordinator {
     /// `TrainerExportPayload.isWellFormed` can only run after decrypt+inflate, which is the wrong
     /// layer for a bound: coach payloads are ~1000× a heart, so the inflate-bomb exposure is
     /// correspondingly worse. Trainer-scoped: this is the MODE-SPECIFIC tightening on top of the
-    /// uniform floor every radio already gets from `MeshMultipeerSession.maxInboundWireBytes`
-    /// (16 MiB, dropped before the frame ever reaches a channel). 4 MB ≪ 16 MiB, so the trainer
-    /// bound still binds. True when the session was failed and the caller stops.
+    /// uniform floor every radio already gets from `NetworkMeshSession.maxInboundWireBytes`
+    /// (16 MiB, dropped before the frame ever reaches a channel — the shipping radio's copy of a
+    /// value both transports pin to `SealedPayloadFraming.maxInflatedByteCount`, deliberately, so
+    /// they refuse the same frame). 4 MB ≪ 16 MiB, so the trainer bound still binds. True when the
+    /// session was failed and the caller stops.
     private func rejectsOversizedTrainerBlob(_ message: InboundPeerFrame) -> Bool {
         guard currentMode == .trainer,
               message.data.count > TrainerExportPayload.maxTrainerWireBytes else { return false }
