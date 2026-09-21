@@ -354,9 +354,26 @@ nonisolated struct MeshLinkTable {
     /// it: the browser's own announcement and the dial retry budget are untouched.
     ///
     /// The one thing that gives a booking back is ``refundRepropose(_:)``, and it is not a refill:
-    /// it answers a pre-commit **timeout**, which is not the loop above — nobody refused anything —
-    /// and it never answers a refusal, so six refusals still end the sweep for the session.
+    /// it consumes the **booking** that paid for one tunnel, and only when that tunnel ended in a
+    /// pre-commit timeout — not the loop above, because nobody refused anything. A refusal's own
+    /// teardown consumes its booking, so six refusals still end the sweep for the session however
+    /// many timeouts are interleaved on the same endpoint, and an inbound tunnel — which books
+    /// nothing — can never hand back a booking an offer paid for.
     static let maxReproposalsPerEndpoint = 6
+
+    /// Times a pre-commit timeout may hand one endpoint's booking back in a session.
+    ///
+    /// **Never reset either**, and for the cap above's own reason. A refund is right for the pair
+    /// who missed the 15 cm hold and will manage it next time; it is wrong as an unlimited
+    /// allowance, because a peer whose *every* tunnel ends in a timeout would refund every offer it
+    /// was ever made and the six-offer cap would never be reached — the sweep would re-offer it for
+    /// the life of the session, which is exactly the unbounded shape
+    /// ``maxReproposalsPerEndpoint`` exists to forbid. The five-minute proximity gate
+    /// (`Engine/ProximityCoordinator.swift:1320`) rate-limits that loop to roughly one offer per
+    /// five minutes per endpoint; it does not bound it, and a bound is what this table trades in.
+    /// Two is what the refund is for — an endpoint gets its six offers plus two more, eight in all
+    /// — and it is finite for the shape it must not sustain.
+    static let maxTimeoutRefundsPerEndpoint = 2
 
     /// One endpoint's dial bookkeeping. Private because the phase is the only part callers reason
     /// about, and the attempt count must not be settable from outside the transitions that own it.
@@ -364,6 +381,18 @@ nonisolated struct MeshLinkTable {
         var phase: MeshLinkPhase
         var dialAttempts: Int
         var retryDueAt: Date?
+
+        /// Whether a re-propose offer paid for this link.
+        ///
+        /// The booking, not the counter, is what ``refundRepropose(_:)`` consumes: set by
+        /// ``admitRepropose(_:)``, carried through the dial and the live tunnel, cleared by the
+        /// refund and by every other end. That is what makes a refund answer *this* tunnel — an
+        /// inbound tunnel starts unbooked because no offer preceded it, a second timeout reported
+        /// for the same tunnel finds the booking already spent, and a tunnel the owner refused has
+        /// it cleared by its own teardown before any later timeout can reach it.
+        ///
+        /// Deliberately without a default, so a new construction site has to decide.
+        var reproposeBooked: Bool
     }
 
     private var links: [MeshLinkKey: Link] = [:]
@@ -371,6 +400,9 @@ nonisolated struct MeshLinkTable {
     /// for a browsed key, and they die with the cache entry in ``forget(_:)``, the oldest-first
     /// eviction and ``removeAll()``.
     private var reproposals: [MeshLinkKey: Int] = [:]
+    /// Timeout refunds already given per endpoint, against ``maxTimeoutRefundsPerEndpoint``.
+    /// Bounded and evicted exactly as ``reproposals`` is, and for the same reason.
+    private var reproposalRefunds: [MeshLinkKey: Int] = [:]
     private var cache: [MeshLinkKey: MeshEndpointRecord] = [:]
     /// First-seen order, for the cache's oldest-first eviction.
     private var cacheOrder: [MeshLinkKey] = []
@@ -405,38 +437,71 @@ nonisolated struct MeshLinkTable {
     ///
     /// Booking on the *refused* answer too is the point: a cap that only counted accepted offers
     /// would never be reached by the loop it exists to stop. See ``maxReproposalsPerEndpoint``.
+    ///
+    /// It books in two places, and the second is what makes the refund honest: the per-endpoint
+    /// counter the cap reads, and ``Link/reproposeBooked`` on the link itself — the marker saying
+    /// *this* link was paid for by an offer, which is the only thing ``refundRepropose(_:)`` gives
+    /// back.
     mutating func admitRepropose(_ key: MeshLinkKey) -> Bool {
         let spent = reproposals[key, default: 0]
         guard spent < Self.maxReproposalsPerEndpoint else { return false }
         reproposals[key] = spent + 1
+        var link = links[key] ?? Link(
+            phase: .idle, dialAttempts: 0, retryDueAt: nil, reproposeBooked: false
+        )
+        link.reproposeBooked = true
+        links[key] = link
         return true
     }
 
-    /// Gives back one booking, because the offer it paid for did not end in the loop the cap exists
-    /// to stop.
+    /// Consumes the re-propose **booking** that paid for this endpoint's link, handing the offer
+    /// back when — and only when — that link ended in a pre-commit timeout.
     ///
     /// The only caller is a ``MeshSlotEvictionCause/preCommitTimeout``: the owner seated the peer,
-    /// nobody refused it, and the twenty-five/sixty-second dwell deadline simply ran out. Charging
-    /// that to a budget the table deliberately never refills is how a genuine friend who cannot get
-    /// two phones together on the sixth attempt is locked out for the rest of the session (D-4.3
-    /// Option 1's "two bounds to name").
+    /// nobody refused it, and the pre-commit deadline simply ran out. That deadline is **five
+    /// minutes**, not the 25 s / 60 s connection-phase timer `handleChannelReady` arms:
+    /// `ProximityCoordinator.transitionToProximityGate` cancels that one the moment the identity
+    /// introduction verifies and replaces it with a five-minute gate
+    /// (`Engine/ProximityCoordinator.swift:1320`) — which is exactly the state a provisionally
+    /// admitted stranger sits in. Charging that end to a budget the table deliberately never
+    /// refills is how a genuine friend who cannot get two phones together on the sixth attempt is
+    /// locked out for the rest of the session (D-4.3 Option 1's "two bounds to name").
     ///
-    /// **It is not the refill the cap's doc rules out.** That refill was "a successful connect gives
-    /// the budget back", which an owner REFUSAL also earns — so the refusal loop would run forever.
-    /// This one is spent by a refusal and returned only by a timeout, so six refusals still stop the
-    /// sweep for the session.
+    /// **It is the booking that is consumed, not the counter**, and that is the whole of why it
+    /// cannot become the refill ``maxReproposalsPerEndpoint``'s doc rules out:
     ///
-    /// Floors at zero rather than going negative: an INBOUND tunnel is not preceded by an offer, so
-    /// a peer that dialed this device and then timed out has no booking to give back, and a table
-    /// that let the count run below zero would hand it free offers later.
+    /// * an INBOUND tunnel books nothing — ``admitInbound(from:preference:now:)`` starts the link
+    ///   unbooked — so a peer that dialed *this* device and then timed out gives back nothing,
+    ///   least of all a booking an earlier owner refusal had spent;
+    /// * a second timeout reported for the same link finds the booking already spent;
+    /// * a link the owner refused has its booking cleared by its own teardown (``noteClosed(_:)``),
+    ///   so six refusals still end the sweep with timeouts interleaved on that same endpoint.
+    ///
+    /// And it is capped: ``maxTimeoutRefundsPerEndpoint`` refunds per endpoint per session, never
+    /// reset, so an endpoint whose every tunnel times out is offered eight times in all and then
+    /// never again. The booking is consumed even when that cap is spent — the link it paid for is
+    /// over either way, and leaving it set would let some later end refund it.
     mutating func refundRepropose(_ key: MeshLinkKey) {
-        guard let spent = reproposals[key], spent > 0 else { return }
+        guard links[key]?.reproposeBooked == true else { return }
+        links[key]?.reproposeBooked = false
+        let refunded = reproposalRefunds[key, default: 0]
+        guard refunded < Self.maxTimeoutRefundsPerEndpoint else { return }
+        let spent = reproposals[key, default: 0]
+        guard spent > 0 else { return }
+        reproposalRefunds[key] = refunded + 1
         reproposals[key] = spent - 1
     }
 
     /// Re-proposals booked for this endpoint so far — the read a test asserts the cap through.
     func reproposalCount(of key: MeshLinkKey) -> Int {
         reproposals[key, default: 0]
+    }
+
+    /// Timeout refunds already given for this endpoint — the read a test asserts
+    /// ``maxTimeoutRefundsPerEndpoint`` through, and the one that tells "the refund was declined"
+    /// apart from "there was nothing to refund" in a failure message.
+    func reproposalRefundCount(of key: MeshLinkKey) -> Int {
+        reproposalRefunds[key, default: 0]
     }
 
     // MARK: - Dialing
@@ -449,7 +514,9 @@ nonisolated struct MeshLinkTable {
     /// refusal — the one answer that would send an owner looking at the roster cap for a bug that
     /// is not there.
     mutating func admitDial(to key: MeshLinkKey, now: Date) -> MeshLinkAdmission {
-        let link = links[key] ?? Link(phase: .idle, dialAttempts: 0, retryDueAt: nil)
+        let link = links[key] ?? Link(
+            phase: .idle, dialAttempts: 0, retryDueAt: nil, reproposeBooked: false
+        )
         switch link.phase {
         case .dialing, .connected:
             return .refusedDuplicateTunnel(link.phase)
@@ -463,7 +530,11 @@ nonisolated struct MeshLinkTable {
             break
         }
         guard occupiedSlotCount < Self.maxConcurrentLinks else { return .refusedAtCapacity }
-        links[key] = Link(phase: .dialing, dialAttempts: link.dialAttempts + 1, retryDueAt: nil)
+        // The booking travels with the link it paid for: this dial IS the offer being taken up.
+        links[key] = Link(
+            phase: .dialing, dialAttempts: link.dialAttempts + 1, retryDueAt: nil,
+            reproposeBooked: link.reproposeBooked
+        )
         return .admit
     }
 
@@ -489,7 +560,10 @@ nonisolated struct MeshLinkTable {
         guard current == .dialing || occupiedSlotCount < Self.maxConcurrentLinks else {
             return .refusedAtCapacity
         }
-        links[key] = Link(phase: .connected, dialAttempts: 0, retryDueAt: nil)
+        // `reproposeBooked: false` is load-bearing. An inbound tunnel is not preceded by an offer,
+        // so it must not inherit a booking an earlier offer to this endpoint spent: a timeout on it
+        // would otherwise refund something this side never paid for.
+        links[key] = Link(phase: .connected, dialAttempts: 0, retryDueAt: nil, reproposeBooked: false)
         remember(lastSeen: key, at: now)
         return .admit
     }
@@ -518,7 +592,12 @@ nonisolated struct MeshLinkTable {
     /// are a budget for *reaching* a peer, not a lifetime quota, so a peer that connects and later
     /// drops gets a fresh campaign rather than inheriting a spent one.
     mutating func noteReady(_ key: MeshLinkKey, now: Date) {
-        links[key] = Link(phase: .connected, dialAttempts: 0, retryDueAt: nil)
+        links[key] = Link(
+            phase: .connected, dialAttempts: 0, retryDueAt: nil,
+            // Carried, not reset: a tunnel that reaches ready is the tunnel the offer paid for, and
+            // it is the one a pre-commit timeout may hand back.
+            reproposeBooked: links[key]?.reproposeBooked ?? false
+        )
         remember(lastSeen: key, at: now)
     }
 
@@ -529,14 +608,21 @@ nonisolated struct MeshLinkTable {
     /// that can be re-armed by a duplicate callback is exactly the unbounded loop rule 2 forbids.
     mutating func noteDialFailed(_ key: MeshLinkKey, now: Date) -> MeshDialOutcome {
         let attempts = links[key]?.dialAttempts ?? Self.maxDialAttempts
+        // A dial campaign that is still running is still the offer's: the retry that follows is the
+        // same attempt to reach the peer the sweep proposed.
+        let booked = links[key]?.reproposeBooked ?? false
         guard attempts < Self.maxDialAttempts else {
-            links[key] = Link(phase: .exhausted, dialAttempts: Self.maxDialAttempts, retryDueAt: nil)
+            links[key] = Link(
+                phase: .exhausted, dialAttempts: Self.maxDialAttempts, retryDueAt: nil,
+                reproposeBooked: booked
+            )
             return .giveUp(attempts: Self.maxDialAttempts)
         }
         links[key] = Link(
             phase: .backingOff,
             dialAttempts: attempts,
-            retryDueAt: now.addingTimeInterval(Self.dialRetryDelaySeconds)
+            retryDueAt: now.addingTimeInterval(Self.dialRetryDelaySeconds),
+            reproposeBooked: booked
         )
         return .retry(attempt: attempts + 1, delay: Self.dialRetryDelay)
     }
@@ -545,8 +631,13 @@ nonisolated struct MeshLinkTable {
     /// ``MeshLinkPhase/idle`` with a full budget — a disconnect is not a dial failure, and charging
     /// it to the retry budget is how a peer that reconnects a few times becomes permanently
     /// undialable.
+    ///
+    /// The re-propose booking dies with the tunnel, and that is the other half of
+    /// ``refundRepropose(_:)``'s honesty: whatever ended this link, it was not a pre-commit timeout
+    /// — the refund runs *before* the teardown that lands here — so the offer that paid for it is
+    /// spent, and a later timeout on a re-dial has to have been paid for again.
     mutating func noteClosed(_ key: MeshLinkKey) {
-        links[key] = Link(phase: .idle, dialAttempts: 0, retryDueAt: nil)
+        links[key] = Link(phase: .idle, dialAttempts: 0, retryDueAt: nil, reproposeBooked: false)
     }
 
     /// Endpoints whose backoff has elapsed, oldest key first for a deterministic order.
@@ -565,6 +656,7 @@ nonisolated struct MeshLinkTable {
     mutating func forget(_ key: MeshLinkKey) {
         links.removeValue(forKey: key)
         reproposals.removeValue(forKey: key)
+        reproposalRefunds.removeValue(forKey: key)
         cache.removeValue(forKey: key)
         cacheOrder.removeAll { $0 == key }
     }
@@ -574,6 +666,7 @@ nonisolated struct MeshLinkTable {
     mutating func removeAll() {
         links.removeAll()
         reproposals.removeAll()
+        reproposalRefunds.removeAll()
         cache.removeAll()
         cacheOrder.removeAll()
     }
@@ -644,8 +737,11 @@ nonisolated struct MeshLinkTable {
         cacheOrder.removeFirst()
         cache.removeValue(forKey: oldest)
         // The re-propose budget is keyed by browsed endpoint, so it is bounded by this cache and
-        // must be evicted with it — otherwise a busy room grows one map without end.
+        // must be evicted with it — otherwise a busy room grows one map without end. The booking
+        // goes with the counters so the two cannot disagree about an endpoint whose budget is gone.
         reproposals.removeValue(forKey: oldest)
+        reproposalRefunds.removeValue(forKey: oldest)
+        links[oldest]?.reproposeBooked = false
     }
 
     /// Refreshes an existing cache entry's `lastSeenAt` without inventing one for an endpoint the

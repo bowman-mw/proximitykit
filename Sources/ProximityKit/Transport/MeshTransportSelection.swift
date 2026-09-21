@@ -121,9 +121,18 @@ struct MeshTransportHandlers {
 /// not identical to the bound that reads them. ``MeshLinkTable/maxReproposalsPerEndpoint`` is
 /// deliberately never refilled because its loop is *connect → the owner refuses the seat →
 /// disconnect → idle → re-offer*, and six of those is plenty. A pre-commit **timeout** produces the
-/// same shape and is not that loop: it is two people who did not get their phones close enough in
-/// twenty-five seconds, and spending a never-refilled budget on it strands a genuine friend for the
-/// rest of the session on the sixth try (D-4.3 Option 1's "two bounds to name").
+/// same shape and is not that loop: it is two people who did not get their phones close enough
+/// inside the pre-commit deadline, and spending a never-refilled budget on it strands a genuine
+/// friend for the rest of the session on the sixth try (D-4.3 Option 1's "two bounds to name").
+///
+/// **That deadline is five minutes, not the 25 s / 60 s connection-phase timer.** `handleChannelReady`
+/// arms `timeoutSeconds: isProximityJoin ? 25 : 60`, but `ProximityCoordinator.transitionToProximityGate`
+/// cancels it the moment the identity introduction verifies and arms a five-minute proximity gate
+/// in its place (`Engine/ProximityCoordinator.swift:1320`) — which is precisely the state a
+/// provisionally admitted stranger sits in, so five minutes is the number this cause is about.
+/// It is also why the refund is capped rather than unlimited: five minutes rate-limits an
+/// all-timeout endpoint's re-offers, it does not bound them
+/// (``MeshLinkTable/maxTimeoutRefundsPerEndpoint``).
 ///
 /// Frozen automation tokens, never display text and never persisted.
 nonisolated enum MeshSlotEvictionCause: Equatable, Sendable {
@@ -134,9 +143,10 @@ nonisolated enum MeshSlotEvictionCause: Equatable, Sendable {
     /// this decision.
     case ownerDecision
 
-    /// The pre-commit deadline expired with no dwell and no tap
+    /// The pre-commit deadline — the five-minute proximity gate — expired with no dwell and no tap
     /// (`ProximityCoordinator.EndReason.timeout`). Nothing was refused and nothing is likely to be:
-    /// the re-propose booking that produced this tunnel is given back.
+    /// the re-propose booking that produced this tunnel is given back, up to
+    /// ``MeshLinkTable/maxTimeoutRefundsPerEndpoint`` times per endpoint per session.
     case preCommitTimeout
 }
 

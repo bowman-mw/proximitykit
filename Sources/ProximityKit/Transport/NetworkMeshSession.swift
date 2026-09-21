@@ -665,12 +665,15 @@ final class NetworkMeshSession: NetworkChannelHost {
 
     /// The same eviction, with the one fact this radio cannot work out for itself.
     ///
-    /// A ``MeshSlotEvictionCause/preCommitTimeout`` gives back the re-propose booking that produced
-    /// this tunnel, so the never-refilled budget is spent only by the loop it exists to stop — an
-    /// owner that keeps refusing the seat — and never by two people who did not get their phones
-    /// close enough inside the dwell deadline. Everything else about the teardown is identical, and
-    /// the tunnel still ends as a `localEviction`: the *reason the link died* is unchanged, only
-    /// what this side owes the endpoint afterwards.
+    /// A ``MeshSlotEvictionCause/preCommitTimeout`` gives back the re-propose **booking** that
+    /// produced this tunnel, so the never-refilled budget is spent only by the loop it exists to
+    /// stop — an owner that keeps refusing the seat — and never by two people who did not get their
+    /// phones close enough inside the five-minute proximity gate. It is the booking that is
+    /// consumed rather than the counter, so an inbound tunnel (which books nothing) and a second
+    /// report of the same timeout give back nothing, and the refunds themselves are capped per
+    /// endpoint per session: see ``MeshLinkTable/refundRepropose(_:)``. Everything else about the
+    /// teardown is identical, and the tunnel still ends as a `localEviction`: the *reason the link
+    /// died* is unchanged, only what this side owes the endpoint afterwards.
     func disconnectPeer(_ peer: PeerHandle, cause: MeshSlotEvictionCause) {
         guard let key = identities.key(for: peer) else { return }
         if cause == .preCommitTimeout { links.refundRepropose(key) }
@@ -766,6 +769,17 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// Runs the pending-introduction sweep the shared poll runs, at a caller-chosen `now`.
     func expirePendingInboundForTesting(now: Date) {
         expirePendingInbound(now: now)
+    }
+
+    /// Books one re-propose offer for `key`, exactly as ``reproposeIdleBrowsedPeers(now:)`` books
+    /// one — the half of the sweep reachable without a browser, a listener and a five-second wait.
+    ///
+    /// It exists so the `.preCommitTimeout` arm of ``disconnectPeer(_:cause:)`` has a driver: the
+    /// booking is the thing that arm consumes, and a cell that could not make one could only assert
+    /// the arm compiles.
+    @discardableResult
+    func bookReproposalForTesting(_ key: MeshLinkKey) -> Bool {
+        links.admitRepropose(key)
     }
 
     /// Which endpoints hold a tunnel right now, in sorted key order — the read that lets a test say
@@ -1112,7 +1126,12 @@ private extension NetworkMeshSession {
     ///   owner has reasons to refuse a seat that this radio cannot see — a locally-kicked peer, a
     ///   removed member, a capacity race — and each refusal ends the tunnel, which returns the link
     ///   to `idle` with a full *dial* budget. Without a separate, never-refilled budget here that is
-    ///   an unbounded connect/refuse/re-dial cycle at 0.2 Hz.
+    ///   an unbounded connect/refuse/re-dial cycle at 0.2 Hz. A pre-commit **timeout** hands its own
+    ///   booking back (``MeshLinkTable/refundRepropose(_:)``), because nobody refused anything — but
+    ///   only ``MeshLinkTable/maxTimeoutRefundsPerEndpoint`` times per endpoint per session, so an
+    ///   endpoint whose every tunnel times out is re-offered eight times in all and then stops. The
+    ///   five-minute proximity gate that ends those tunnels rate-limits that loop; the cap is what
+    ///   bounds it.
     ///
     /// Bounded by ``browsedEndpoints``, itself bounded by ``MeshSessionIdentityMap/maxTrackedEndpoints``.
     func reproposeIdleBrowsedPeers(now: Date) {
