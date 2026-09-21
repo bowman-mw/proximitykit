@@ -14167,11 +14167,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// What one coordinator's terminal state means to the radio's re-propose budget.
     ///
     /// The **pre-commit timeout** is the one end that is not this device refusing anything: the
-    /// deadline `handleChannelReady` set (`timeoutSeconds: isProximityJoin ? 25 : 60`) expired with
-    /// no dwell and no tap. Charging it to `MeshLinkTable.maxReproposalsPerEndpoint`, which is
-    /// never refilled, locks a pair who keep missing the 15 cm hold out of each other for the rest
-    /// of the session on the sixth try — and D-4.3 Option 1 makes that reachable far more often,
-    /// because a provisional stranger is seated and then timed out exactly this way.
+    /// deadline expired with no dwell and no tap. That deadline is **five minutes**, not the
+    /// `timeoutSeconds: isProximityJoin ? 25 : 60` `handleChannelReady` sets — that one is the
+    /// connection-phase timer, and `ProximityCoordinator.transitionToProximityGate` cancels it the
+    /// moment the identity introduction verifies and arms a five-minute proximity gate in its place
+    /// (`Engine/ProximityCoordinator.swift:1320`), which is exactly the state a provisionally
+    /// admitted stranger sits in. Charging that end to `MeshLinkTable.maxReproposalsPerEndpoint`,
+    /// which is never refilled, locks a pair who keep missing the 15 cm hold out of each other for
+    /// the rest of the session on the sixth try — and D-4.3 Option 1 makes that reachable far more
+    /// often, because a provisional stranger is seated and then timed out exactly this way. The
+    /// refund the radio makes for it is itself capped (`MeshLinkTable.maxTimeoutRefundsPerEndpoint`),
+    /// so an endpoint whose every tunnel times out still stops being re-offered.
     ///
     /// Every other terminal state keeps charging, deliberately: a peer whose link keeps ending in a
     /// transport loss, a verification failure or a cancel is one re-offering cannot help, which is
@@ -14180,8 +14186,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// search builds a fresh table.
     ///
     /// A static function over the state alone so the table is enumerable with no manager, no radio
-    /// and no twenty-five-second wait; the sweep's single call site above is what makes it the
-    /// shipping answer.
+    /// and no five-minute wait; the sweep's single call site above is what makes it the shipping
+    /// answer.
     static func evictionCause(for state: ProximityCoordinator.State) -> MeshSlotEvictionCause {
         state == .ended(reason: .timeout) ? .preCommitTimeout : .ownerDecision
     }
@@ -14834,14 +14840,15 @@ extension MeshNetworkManager: MeshContinuationRaising {}
 ///
 /// **Scope, stated plainly** (D-4.3 Option 1, 2026-09-21). A stranger is admitted **provisionally**
 /// while the join doors are open — the posture the MultipeerConnectivity radio ships, with the key
-/// proven — and becomes a member only at the same three doors. Concretely: with no mesh yet, or on
-/// an open one, ``mayAdmitStrangerProvisionally`` rides out on ``roster`` and the QUIC radio lets a
-/// peer nobody has vouched for complete the signed introduction; what it gets for that is a tunnel
-/// and an uncommitted slot, not a roster seat. Membership is still decided exactly where it was
-/// before this — ``maySeatVerifiedPeer(signingPublicKey:)`` at the identity introduction, the 15 cm
-/// dwell or the in-session QR commit, and the admission grant (auto-granted for a founding pair, a
-/// prompt for anyone else). With the doors shut, and on a **closed** mesh, the roster is the only
-/// answer and a stranger is refused before any app frame, as before.
+/// proven — and becomes a member only at the same three doors. Concretely: while the session is
+/// open — on a device with no mesh yet, or on an open one — ``mayAdmitStrangerProvisionally`` rides
+/// out on ``roster`` and the QUIC radio lets a peer nobody has vouched for complete the signed
+/// introduction; what it gets for that is a tunnel and an uncommitted slot, not a roster seat.
+/// Membership is still decided exactly where it was before this —
+/// ``maySeatVerifiedPeer(signingPublicKey:)`` at the identity introduction, the 15 cm dwell or the
+/// in-session QR commit, and the admission grant (auto-granted for a founding pair, a prompt for
+/// anyone else). With the session closed — whether or not a descriptor exists yet — and under a
+/// hold, the roster is the only answer and a stranger is refused before any app frame, as before.
 ///
 /// Two things this is not. It is not weaker than the radio it replaces: MC's invitation carries no
 /// identity at all, while a peer that reaches this manager over QUIC has produced an Ed25519
@@ -14976,21 +14983,26 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
     }
 
     /// Whether a peer nobody here has ever met may hold a QUIC tunnel *provisionally* right now
-    /// (D-4.3 Option 1) — the posture half of what ``makeTransportHandlers()``'s
-    /// `shouldAcceptInvitation` already answers for a stranger on the MC radio.
+    /// (D-4.3 Option 1): both of the owner's join doors are open, and neither condition is new.
     ///
-    /// It is exactly two conditions, and neither of them is new:
+    /// It is **stricter than** ``makeTransportHandlers()``'s `shouldAcceptInvitation`, which is
+    /// `isAdmittingNewPeers || hasCommittedSlot` and never reads `isSessionOpen` at all. Calling it
+    /// "the posture half" of that gate would be wrong in both directions — it drops the committed
+    /// peer's excuse (a stranger has no slot to have committed) and it adds the open/closed answer
+    /// the seat gate one layer up gives. The two conditions:
     ///
     /// 1. ``isAdmittingNewPeers`` — the ONE flag ``holdCommittedLinks()`` lowers. A held session
-    ///    admits nobody new on either radio, and `hasCommittedSlot`, the excuse that closure makes
-    ///    for a *committed* peer re-asking across a hold, cannot apply here by construction: a
-    ///    stranger has no slot to have committed.
-    /// 2. `currentMesh == nil || isSessionOpen` — the same half ``maySeatVerifiedPeer(signingPublicKey:)``
-    ///    tests one layer up. A device with no mesh is meeting somebody for the first time and an
-    ///    open mesh is one whose owner is inviting; a **closed** mesh refuses a stranger *at the
-    ///    transport* rather than seating it and evicting it a moment later at the seat gate. That is
-    ///    deliberately stronger than the MC radio, where the tunnel exists until the seat check
-    ///    runs, and it costs nothing: the seat check would refuse the same peer either way.
+    ///    admits nobody new on either radio.
+    /// 2. ``isSessionOpen`` — the user's own open/closed control, and the same answer
+    ///    ``maySeatVerifiedPeer(signingPublicKey:)`` reaches one layer up. A **closed** session
+    ///    refuses a stranger *at the transport* rather than seating it and evicting it a moment
+    ///    later at the seat gate, and that costs nothing, because the seat gate would refuse the
+    ///    same peer anyway. It is read **unconditionally**, with no `currentMesh == nil` escape:
+    ///    "I am not forming a session with anybody" has to keep meaning that before a descriptor
+    ///    exists as well as after — the rule
+    ///    `MeshClosedMeshStarTopologyTests.aClosedSessionWithNoMeshStillRefusesEveryLink` pins for
+    ///    the three MC gates. It costs a first meeting nothing: `isSessionOpen` defaults `true` and
+    ///    ``startJoin()`` sets it `true`, so a phone that has met nobody has this door open.
     ///
     /// **What it deliberately does not duplicate.** The slot cap and the proximity-join link rule
     /// are the invitation gate's other two clauses, and the QUIC radio consults that very closure as
@@ -15002,8 +15014,8 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
     /// on every introduction, so closing the doors takes effect on the next tunnel with nothing to
     /// invalidate — and it owes no row on the wipe ledger, because there is nothing to wipe.
     var mayAdmitStrangerProvisionally: Bool {
-        guard isAdmittingNewPeers else { return false }
-        return currentMesh == nil || isSessionOpen
+        guard isAdmittingNewPeers, isSessionOpen else { return false }
+        return true
     }
 
     /// The pre-records answer: the gossiped descriptor's members, with nobody nameably barred.
@@ -15036,12 +15048,21 @@ extension MeshNetworkManager {
 
     /// Founds a mesh on the id this device ALREADY holds, instead of minting a new one.
     ///
-    /// Lane C's founder/joiner shape needs this and nothing smaller. The QUIC transport is
-    /// members-only by construction — `MeshChannelIntroductionExchange.receive` refuses a foreign
-    /// mesh id and a stranger key — so two Simulators cannot meet at all unless each already names
-    /// the other's mesh and holds the other's key. That is what the seeded descriptor
-    /// (`FERNLET_MESH_MATRIX_MEMBERS`) is for, and it is why ``startNewMesh(name:)``, which mints a
-    /// random id and a one-member descriptor, is unreachable from the harness.
+    /// Lane C's founder/joiner shape needs this and nothing smaller. When it was written the QUIC
+    /// transport was members-only by construction — `MeshChannelIntroductionExchange.receive`
+    /// refused a foreign mesh id and a stranger key — so two Simulators could not meet at all
+    /// unless each already named the other's mesh and held the other's key, and the seeded
+    /// descriptor (`FERNLET_MESH_MATRIX_MEMBERS`) was the only thing that could open the first
+    /// tunnel.
+    ///
+    /// **Since D-4.3 (2026-09-21) the seed is a convenience, not the only way in.** A stranger is
+    /// admitted provisionally while the join doors are open, so two *unseeded* Simulators now have
+    /// a path to a first meeting on this radio — a path **no radio has yet run**: the unseeded Lane
+    /// C row is the stranger-admission design's owed test (vi) and is still unobserved. What the
+    /// seed still buys is a deterministic pair — byte-identical TXT records and a mesh id known
+    /// before launch — which is what makes a matrix run comparable between runs, and it is still
+    /// why ``startNewMesh(name:)``, which mints a random id and a one-member descriptor, is
+    /// unreachable from a seeded run.
     ///
     /// This is the same founding, re-ordered: the seeded two-member descriptor opens the tunnel,
     /// and then this call collapses the descriptor to **what `startNewMesh` would have produced —
