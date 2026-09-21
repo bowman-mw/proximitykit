@@ -352,6 +352,10 @@ nonisolated struct MeshLinkTable {
     /// life of the session. Six is generous for the case the sweep exists for (an owner whose gate
     /// was momentarily shut) and finite for the case it must not sustain. Nothing else is capped by
     /// it: the browser's own announcement and the dial retry budget are untouched.
+    ///
+    /// The one thing that gives a booking back is ``refundRepropose(_:)``, and it is not a refill:
+    /// it answers a pre-commit **timeout**, which is not the loop above — nobody refused anything —
+    /// and it never answers a refusal, so six refusals still end the sweep for the session.
     static let maxReproposalsPerEndpoint = 6
 
     /// One endpoint's dial bookkeeping. Private because the phase is the only part callers reason
@@ -406,6 +410,28 @@ nonisolated struct MeshLinkTable {
         guard spent < Self.maxReproposalsPerEndpoint else { return false }
         reproposals[key] = spent + 1
         return true
+    }
+
+    /// Gives back one booking, because the offer it paid for did not end in the loop the cap exists
+    /// to stop.
+    ///
+    /// The only caller is a ``MeshSlotEvictionCause/preCommitTimeout``: the owner seated the peer,
+    /// nobody refused it, and the twenty-five/sixty-second dwell deadline simply ran out. Charging
+    /// that to a budget the table deliberately never refills is how a genuine friend who cannot get
+    /// two phones together on the sixth attempt is locked out for the rest of the session (D-4.3
+    /// Option 1's "two bounds to name").
+    ///
+    /// **It is not the refill the cap's doc rules out.** That refill was "a successful connect gives
+    /// the budget back", which an owner REFUSAL also earns — so the refusal loop would run forever.
+    /// This one is spent by a refusal and returned only by a timeout, so six refusals still stop the
+    /// sweep for the session.
+    ///
+    /// Floors at zero rather than going negative: an INBOUND tunnel is not preceded by an offer, so
+    /// a peer that dialed this device and then timed out has no booking to give back, and a table
+    /// that let the count run below zero would hand it free offers later.
+    mutating func refundRepropose(_ key: MeshLinkKey) {
+        guard let spent = reproposals[key], spent > 0 else { return }
+        reproposals[key] = spent - 1
     }
 
     /// Re-proposals booked for this endpoint so far — the read a test asserts the cap through.

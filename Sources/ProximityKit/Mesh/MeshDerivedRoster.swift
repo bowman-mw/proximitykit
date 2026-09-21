@@ -279,13 +279,22 @@ nonisolated struct MeshDerivedRoster: Equatable, Sendable {
     /// introduction as ``MeshRosterVerdict/barred`` — named — rather than falling out of `members`
     /// and refusing as an anonymous stranger.
     ///
-    /// - Parameter additionalBarred: Keys to bar on top of the derived ones. Only ever ADDS a
-    ///   refusal (barred wins over member), so it cannot open a door the records closed; the
-    ///   diagnostic chaos hook is its one caller.
-    func introductionRoster(additionalBarred: [Data] = []) -> MeshIntroductionRoster {
+    /// - Parameters:
+    ///   - additionalBarred: Keys to bar on top of the derived ones. Only ever ADDS a refusal
+    ///     (barred wins over member), so it cannot open a door the records closed; the diagnostic
+    ///     chaos hook is its one caller.
+    ///   - admitsStrangersProvisionally: Whether the owner's join doors are open right now (D-4.3
+    ///     Option 1). Records cannot answer this — it is posture, not membership — so it is passed
+    ///     through rather than derived, and it defaults to the fail-closed answer for every caller
+    ///     that has no door to consult.
+    func introductionRoster(
+        additionalBarred: [Data] = [],
+        admitsStrangersProvisionally: Bool = false
+    ) -> MeshIntroductionRoster {
         MeshIntroductionRoster(
             members: members.map(\.signingPublicKey),
-            barred: barred.map(\.signingPublicKey) + additionalBarred
+            barred: barred.map(\.signingPublicKey) + additionalBarred,
+            admitsStrangersProvisionally: admitsStrangersProvisionally
         )
     }
 

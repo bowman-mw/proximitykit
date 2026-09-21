@@ -277,6 +277,13 @@ nonisolated enum MeshRosterVerdict: Equatable, Sendable {
 ///
 /// **Bounded by construction** (Power of 10 rule 3): at most ``maxMembers`` members — the roster cap
 /// — and ``maxBarred`` barred keys, matching the record caps plan §8.1 puts on the session context.
+///
+/// **It also carries the one posture bit the roster cannot express as a key**
+/// (``admitsStrangersProvisionally``, D-4.3 Option 1). "Who is in" is a set; "are the join doors
+/// open right now" is not, and the owner is the only layer that knows. It rides here rather than as
+/// a seventh ``MeshIntroductionAuthority`` member because the roster is already derived fresh on
+/// every introduction, so the flag cannot go stale, and because nothing else about the transport
+/// has to change to read it.
 nonisolated struct MeshIntroductionRoster: Equatable, Sendable {
 
     /// Members retained. The roster cap (plan §9), so the transport can never be asked about a
@@ -289,14 +296,34 @@ nonisolated struct MeshIntroductionRoster: Equatable, Sendable {
     private let members: Set<Data>
     private let barred: Set<Data>
 
-    /// A roster with nobody in it. Every introduction against it is ``MeshRosterVerdict/stranger``,
-    /// which is the correct answer for a transport that has not been told who the members are.
+    /// Whether a ``MeshRosterVerdict/stranger`` may hold a tunnel *provisionally* right now, because
+    /// the owner's join doors are open (D-4.3 Option 1).
+    ///
+    /// **A tunnel, never a roster seat.** It admits a peer nobody has vouched for to the signed
+    /// introduction and to everything an uncommitted slot reaches — exactly what the
+    /// MultipeerConnectivity radio admits today while the doors are open, and with the stranger's
+    /// signing key proven-held rather than merely claimed. Membership is still decided one layer up,
+    /// at `MeshNetworkManager`'s three doors: the seat check at the identity introduction, the
+    /// 15 cm / QR commit, and the admission grant.
+    ///
+    /// **It never outranks `barred`.** ``MeshChannelIntroductionExchange/receive(_:roster:nonces:mayReconcileDivergentEpochs:)``
+    /// tests the barred list first and this flag cannot reach that arm, so a departed, removed,
+    /// revoked or blocked key is refused with the doors wide open.
+    ///
+    /// Default `false` everywhere, including ``empty``: a transport that has not been told the doors
+    /// are open must refuse, which is the same fail-closed direction the whole seam runs in.
+    let admitsStrangersProvisionally: Bool
+
+    /// A roster with nobody in it, and the doors shut. Every introduction against it is
+    /// ``MeshRosterVerdict/stranger`` and every stranger is refused, which is the correct answer for
+    /// a transport that has not been told who the members are.
     static let empty = MeshIntroductionRoster(members: [], barred: [])
 
     /// Builds a roster, dropping anything past the caps rather than growing without bound.
-    init(members: [Data], barred: [Data] = []) {
+    init(members: [Data], barred: [Data] = [], admitsStrangersProvisionally: Bool = false) {
         self.members = Set(members.prefix(Self.maxMembers))
         self.barred = Set(barred.prefix(Self.maxBarred))
+        self.admitsStrangersProvisionally = admitsStrangersProvisionally
     }
 
     /// What this roster says about one signing key.
@@ -418,7 +445,26 @@ nonisolated enum MeshChannelIntroductionOutcome: Equatable, Sendable {
 ///
 /// ## The two agreement rules
 ///
-/// **meshID must be equal.** A peer naming another mesh is refused (plan §7.2's "foreign meshID").
+/// **meshID must be equal — unless the peer is a stranger the open doors admit provisionally.**
+/// A *member* naming another mesh is refused (plan §7.2's "foreign meshID"): a key this roster names
+/// belongs to this mesh, and one arriving under another mesh's id is a branch this tunnel must not
+/// join. A stranger is a different question, and D-4.3 Option 1 answers it: a stranger is not
+/// claiming to be in this mesh, it is *asking into whatever mesh this is*, and the two cases the
+/// equality rule used to break are both first meetings — a mesh-less joiner dialing an established
+/// open mesh (it can only send ``MeshNetworkManager``'s all-zero `unboundMeshID`, because the
+/// authority's `meshID` is peer-less and the responder's hello is frozen before it hears the
+/// dialer's), and a founding pair whose two halves each minted their own `UUID()` at their own first
+/// commit. The second was a *deadlock*: with no MC radio to repair it, every re-dial after a drop
+/// between the two commits was refused for the rest of the session. So the roster verdict is taken
+/// before the mesh ids are compared, and a mismatch is tolerated only for
+/// ``MeshRosterVerdict/stranger`` on a roster whose
+/// ``MeshIntroductionRoster/admitsStrangersProvisionally`` is set.
+///
+/// The transcript then has to name **one** mesh id, because both ends derive it and neither receives
+/// it: it takes the **responder's**, on both sides. The dialer is the one asking into a mesh, so the
+/// mesh it is asking into is the answer, and it is a value both ends already hold. When the two
+/// hellos agree — every introduction that could complete before D-4.3 — the responder's id *is* the
+/// initiator's and not one byte of the signed bytes moves.
 ///
 /// **epochRef must converge, strictly** (plan §8.4, §20.1). Every non-empty reference must be a
 /// canonical ``MeshEpochRef`` — checked with the field widths, before any comparison — and two
@@ -449,9 +495,12 @@ nonisolated struct MeshChannelIntroductionExchange {
     ///
     /// - Parameters:
     ///   - hello: The peer's hello, straight off untrusted bytes.
-    ///   - roster: Who may connect right now. Asked **after** the epoch rule and never relaxed by
-    ///     it: a stranger, a departed member and a removed one are refused on a reconciling tunnel
-    ///     exactly as on a converged one.
+    ///   - roster: Who may connect right now, and whether the owner's join doors are open. Its
+    ///     verdict is *read* before the mesh ids are compared (see the two agreement rules) and
+    ///     *acted on* after the epoch rule, which never relaxes it: a departed member and a removed
+    ///     one are refused on a reconciling tunnel exactly as on a converged one, and a stranger is
+    ///     refused unless ``MeshIntroductionRoster/admitsStrangersProvisionally`` says the doors are
+    ///     open.
     ///   - nonces: The replay cache this session admits nonces into.
     ///   - mayReconcileDivergentEpochs: Whether this side may admit a peer on a divergent branch so
     ///     plan §10.3's merge can reconcile the two heads (P4 item 3). Defaults to `false` —
@@ -469,7 +518,13 @@ nonisolated struct MeshChannelIntroductionExchange {
               hello.protocolVersion == MeshChannelIntroductionFormat.protocolVersion else {
             return .unsupportedProtocolVersion
         }
-        guard hello.meshID == localHello.meshID else { return .foreignMesh }
+        // Read once, acted on twice: the mesh-id rule needs to know whether this peer is a stranger
+        // the open doors admit, and the roster arm below needs the same answer. A pure set lookup —
+        // it records nothing, so reading it early leaves a refused hello exactly as empty-handed as
+        // it was before (`derivedTranscript` stays nil either way).
+        let verdict = roster.verdict(for: hello.signingPublicKey)
+        let isProvisionalStranger = verdict == .stranger && roster.admitsStrangersProvisionally
+        guard hello.meshID == localHello.meshID || isProvisionalStranger else { return .foreignMesh }
         switch MeshEpochAcceptance.introductionVerdict(local: localHello.epochRef, peer: hello.epochRef) {
         case .converge: break
         case .malformed: return .malformedHello
@@ -483,10 +538,20 @@ nonisolated struct MeshChannelIntroductionExchange {
         }
         guard hello.signingPublicKey != localHello.signingPublicKey else { return .selfIntroduction }
         guard hello.nonce != localHello.nonce, nonces.admit(hello.nonce) else { return .replayedNonce }
-        switch roster.verdict(for: hello.signingPublicKey) {
-        case .barred: return .barredMember
-        case .stranger: return .unknownIdentity
-        case .member: break
+        switch verdict {
+        case .barred:
+            // Tested first and unconditionally: `barred` outranks the open doors, so the rotation
+            // that follows a removal (plan §8.3) keeps its assumption that the transport already
+            // stopped letting that key in.
+            return .barredMember
+        case .stranger:
+            // D-4.3 Option 1: a stranger holds a tunnel PROVISIONALLY while the owner's join doors
+            // are open, and only then. It becomes a member at the three doors above the transport,
+            // never here — `MeshNetworkManager.maySeatVerifiedPeer(signingPublicKey:)` at the
+            // identity introduction, the dwell or QR commit, then the admission grant.
+            guard roster.admitsStrangersProvisionally else { return .unknownIdentity }
+        case .member:
+            break
         }
         peerHello = hello
         return nil
@@ -505,7 +570,7 @@ nonisolated struct MeshChannelIntroductionExchange {
         let responder = role == .initiator ? peerHello : localHello
         let built = MeshChannelIntroductionTranscript(
             protocolVersion: initiator.protocolVersion,
-            meshID: initiator.meshID,
+            meshID: Self.agreedMeshID(initiator.meshID, responder.meshID),
             epochRef: Self.agreedEpoch(initiator.epochRef, responder.epochRef),
             initiatorSigningPublicKey: initiator.signingPublicKey,
             responderSigningPublicKey: responder.signingPublicKey,
@@ -564,6 +629,29 @@ nonisolated struct MeshChannelIntroductionExchange {
     /// Deterministic from values both sides hold, so both derive the same bytes.
     static func agreedEpoch(_ initiator: String, _ responder: String) -> String {
         initiator.isEmpty ? responder : initiator
+    }
+
+    /// The mesh id the transcript carries: the **responder's**, always.
+    ///
+    /// Before D-4.3 the two could not differ — ``receive(_:roster:nonces:mayReconcileDivergentEpochs:)``
+    /// refused an unequal pair outright — so this changes not one byte of any transcript that could
+    /// be signed before it. It exists because a provisionally-admitted stranger *is* allowed to
+    /// differ, and a transcript is derived on both sides and never received: unless the two ends
+    /// pick the same id by the same rule, the two signatures verify over different bytes and every
+    /// first meeting fails as ``MeshIntroductionRejection/signatureInvalid``.
+    ///
+    /// The responder's, rather than the initiator's, because the dialer is the side *asking into* a
+    /// mesh: on the two shapes the tolerance exists for — a mesh-less joiner dialing an established
+    /// open mesh, and a founding pair's double mint — the responder's id is the one the tunnel is
+    /// about. Taking it costs nothing in safety: the id is not a secret and not an authorization,
+    /// both ends sign whichever value is chosen, and the TLS-exporter hash in the same transcript is
+    /// what stops either signature being replayed anywhere else.
+    ///
+    /// Both ends are taken so the call site reads as the pair rule it is — the same shape
+    /// ``agreedEpoch(_:_:)`` has — and so a reader sees at the declaration that the initiator's id
+    /// is deliberately not consulted rather than accidentally dropped.
+    static func agreedMeshID(_ initiator: UUID, _ responder: UUID) -> UUID {
+        responder
     }
 }
 
