@@ -1169,13 +1169,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// have both of its edges in flight before that merge became the hub, which is why the hub was
     /// a different Simulator every run.
     ///
-    /// Once this device holds a mesh, the roster — not this flag — decides who may connect, and it
-    /// decides it where the peer's identity is actually known: the QUIC introduction is
-    /// members-only (``roster`` answers `stranger`/`barred` before any app frame), MC's slot
-    /// coordinator refuses at its identity introduction, and joining still needs an admission the
-    /// user grants. Closing a session also still evicts uncommitted slots
-    /// (``setSessionOpen(_:)``). So a link opened here can only ever reach a peer the roster would
-    /// admit anyway — and a mesh that cannot re-dial its own members cannot heal a dropped link.
+    /// Once this device holds a mesh, the roster — not this flag — decides who becomes a **member**,
+    /// and it decides it where the peer's identity is actually known: the QUIC introduction answers
+    /// `barred` before any app frame and answers `stranger` with a refusal too unless the join doors
+    /// are open (``mayAdmitStrangerProvisionally``, D-4.3 Option 1), MC's slot coordinator refuses
+    /// revoked and blocked keys at its identity introduction, and joining still needs an admission
+    /// the user grants. Closing a session also still evicts uncommitted slots
+    /// (``setSessionOpen(_:)``). So a link opened here reaches either a peer the roster would admit
+    /// anyway or a provisional one the seat gate below is about to judge — and a mesh that cannot
+    /// re-dial its own members cannot heal a dropped link.
     var mayLinkToDiscoveredPeers: Bool {
         isSessionOpen || currentMesh != nil
     }
@@ -1183,11 +1185,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Whether a slot whose peer identity has **just verified** may keep its seat.
     ///
     /// The other half of ``mayLinkToDiscoveredPeers``, and the half that keeps "closed" meaning
-    /// what it says. Relaxing the three link gates is safe on the QUIC radio because its signed
-    /// channel introduction is members-only *before any app frame*; **MC has no such stage** — it
-    /// is the shipping default (`MeshTransportFactory.shippingDefault`), its invitation carries no
-    /// identity, and the identity introduction one layer up is gated on revoked/blocked keys, not
-    /// on the roster. Without this check a stranger seated on a closed mesh would be sent this
+    /// what it says. **It is THE stage for a provisional peer, on either radio** (D-4.3 Option 1):
+    /// since the QUIC introduction admits a stranger while the join doors are open, this is where
+    /// that stranger's fate is decided, exactly as it always was for an MC peer — never a belt on
+    /// top of a transport that had already refused it. MC's invitation carries no identity at all,
+    /// and the identity introduction one layer up is gated on revoked/blocked keys, not on the
+    /// roster; QUIC's introduction proves the key and asks the roster, but answers `stranger` with a
+    /// tunnel rather than a refusal while the doors are open. Either way the peer arrives here
+    /// unvouched-for. Without this check a stranger seated on a closed mesh would be sent this
     /// device's signed identity introduction and then, on any ``broadcastMeshDescriptor()``, a
     /// **plaintext** descriptor naming the mesh, every member's fingerprint, display name and both
     /// public keys — and `setSessionOpen(false)`'s eviction of uncommitted slots would be undone by
@@ -2749,6 +2754,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // parked by name rather than mis-dispatched, but the transport they named retired with the
         // three `keyEpoch` gates. Photo content now rides the routed store.
         case .meshFriendVouchList:
+            // COMMITTED SLOTS ONLY since D-4.3's Option 1b half. A vouch list names the sender's
+            // whole trusted-peer graph, and it was the one frame in this switch that a
+            // merely-linked peer could push into `vouchCache` — where it composes "Friend of …"
+            // labels for people it has never been introduced to. Its own two senders have always
+            // been commit-side (`onSlotConnected`, `announcePromotedMesh`), so nothing honest
+            // targets an uncommitted slot; the gate only closes the receive half of that asymmetry.
+            guard slot?.fingerprint != nil else {
+                FernletAuditLog.log(
+                    "mesh.vouchList.droppedUncommittedSlot",
+                    context: heldMeshAuditContext(["type": payloadType.rawValue])
+                )
+                return
+            }
             if let payload = try? decoder.decode(MeshFriendVouchListPayload.self, from: plaintext) {
                 receiveVouchList(payload, senderFingerprint: peer?.fingerprint)
             }
@@ -10705,6 +10723,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The group-crypto family: sealed metadata, coordinator beacons, and the rotation/ack
     /// three-step (R4: one function per case family). Every handler is bound to the AUTHENTICATED
     /// sender fingerprint rather than to the fingerprint the payload claims (R5).
+    ///
+    /// **COMMITTED SLOTS ONLY** since D-4.3's Option 1b half — the same boundary the descriptor,
+    /// membership-event, removal, quorum, routed and registry families have always enforced, and the
+    /// one this family was missing. Group crypto is member business by definition: a beacon decides
+    /// who this device believes the rotation coordinator is and how fresh its liveness looks, a
+    /// rotation sync makes this device stop sending and answer with an ack, and a rotation itself is
+    /// the mesh's key changing hands. None of that is a question a peer that has not committed may
+    /// put.
+    ///
+    /// **Every sender was traced before the gate went in, and none targets an uncommitted slot.**
+    /// `broadcastCoordinatorBeacon`, `drainForRotation` and the rotation send walk `slots`, which
+    /// on the sending device contains uncommitted candidates — but a *receiver* only reaches this
+    /// door from a slot of its own, and the four senders' own recipients are committed by
+    /// construction: `wrappedGroupKey` wraps only for a handshake-verified key-agreement key, so an
+    /// uncommitted slot gets no copy and the frame was already inert to it. The one case worth
+    /// naming is a just-granted joiner: `grantAdmission` sends the grant through
+    /// `slots.first { $0.fingerprint == request.requesterFingerprint }`, a **committed** slot, so
+    /// the key wrap a joiner needs never depended on an uncommitted one and a rotation following
+    /// the grant lands on the same committed slot. `.meshEncryptedMetadata` has no production
+    /// sender at all (its send side retired with P5 item 13's pull protocol); it is kept for an
+    /// older peer's frame, and gating it changes only which of two refusals such a frame meets.
     private func dispatchGroupKeyPayload(
         _ type: PayloadType,
         plaintext: Data,
@@ -10712,6 +10751,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         peer: ProximityCoordinator.PeerIdentity?,
         slot: PeerSlot?
     ) {
+        guard slot?.fingerprint != nil else {
+            FernletAuditLog.log(
+                "mesh.groupKey.droppedUncommittedSlot",
+                context: heldMeshAuditContext(["type": type.rawValue])
+            )
+            return
+        }
         let senderFingerprint = peer?.fingerprint
         switch type {
         case .meshEncryptedMetadata:
@@ -11399,10 +11445,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    private func removeSlot(_ slot: PeerSlot) {
+    /// Drops one slot and frees its link.
+    ///
+    /// - Parameters:
+    ///   - slot: The slot to drop.
+    ///   - cause: Why. It reaches the radio and nothing else, and every caller but the pre-commit
+    ///     timeout sweep in ``checkCoordinatorStates()`` takes the default — which is the direction
+    ///     that CHARGES the QUIC radio's never-refilled re-propose budget, so a caller that forgets
+    ///     to think about it cannot loosen a bound (see ``MeshSlotEvictionCause``).
+    private func removeSlot(_ slot: PeerSlot, cause: MeshSlotEvictionCause = .ownerDecision) {
         // host-pin: exempt — coordinator/channel only, no `self`, no host read
         Task { await slot.coordinator.cancel() }
-        kickEvictedPeer(slot.peer)
+        kickEvictedPeer(slot.peer, cause: cause)
         clearActiveVerifyQRIfBound(to: slot.id)
         // Entries die with their slot (R3): a scanned-but-unanswered round would otherwise leak
         // one entry for the manager's lifetime, and survive into a reused slot id.
@@ -11467,11 +11521,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// as the sibling managers (see `MeshTransportSession.disconnectPeer`); a no-op for a peer the
     /// radio already reported gone. Records the endpoint so `onPeerDisconnected` does not treat the
     /// resulting `.notConnected` as a transient drop to retry.
-    private func kickEvictedPeer(_ peer: PeerHandle) {
+    private func kickEvictedPeer(_ peer: PeerHandle, cause: MeshSlotEvictionCause = .ownerDecision) {
         if locallyKickedEndpoints.count < Self.maxLocallyKickedPeers {
             locallyKickedEndpoints.insert(peer.endpoint)
         }
-        transport.disconnectPeer(peer)
+        transport.disconnectPeer(peer, cause: cause)
     }
 
     /// Slot eviction prunes the shop send-tracking so a REJOINING friend re-exchanges catalogs: the
@@ -14106,7 +14160,30 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             default: return false
             }
         }
-        for slot in stale { removeSlot(slot) }
+        // R2: bounded by the slot cap.
+        for slot in stale { removeSlot(slot, cause: Self.evictionCause(for: slot.coordinator.state)) }
+    }
+
+    /// What one coordinator's terminal state means to the radio's re-propose budget.
+    ///
+    /// The **pre-commit timeout** is the one end that is not this device refusing anything: the
+    /// deadline `handleChannelReady` set (`timeoutSeconds: isProximityJoin ? 25 : 60`) expired with
+    /// no dwell and no tap. Charging it to `MeshLinkTable.maxReproposalsPerEndpoint`, which is
+    /// never refilled, locks a pair who keep missing the 15 cm hold out of each other for the rest
+    /// of the session on the sixth try — and D-4.3 Option 1 makes that reachable far more often,
+    /// because a provisional stranger is seated and then timed out exactly this way.
+    ///
+    /// Every other terminal state keeps charging, deliberately: a peer whose link keeps ending in a
+    /// transport loss, a verification failure or a cancel is one re-offering cannot help, which is
+    /// the loop the budget exists to bound. `.completedSuccessfully` is charged too and costs
+    /// nothing — a completed session's slot is not re-offered while it is connected, and a fresh
+    /// search builds a fresh table.
+    ///
+    /// A static function over the state alone so the table is enumerable with no manager, no radio
+    /// and no twenty-five-second wait; the sweep's single call site above is what makes it the
+    /// shipping answer.
+    static func evictionCause(for state: ProximityCoordinator.State) -> MeshSlotEvictionCause {
+        state == .ended(reason: .timeout) ? .preCommitTimeout : .ownerDecision
     }
 
     // MARK: - Test seams
@@ -14755,12 +14832,24 @@ extension MeshNetworkManager: MeshContinuationRaising {}
 /// the roster. Nothing new is derived and nothing is stored — a removal takes effect on the next
 /// introduction because the roster is read fresh each time.
 ///
-/// **Scope, stated plainly.** A roster-authenticated transport can only ever admit a member. With no
-/// mesh yet — a first proximity-join meeting, where the two devices have never met — the roster is
-/// empty, every peer verdicts ``MeshRosterVerdict/stranger``, and the QUIC radio refuses. That is the
-/// fail-closed posture plan §7.2 asks for and one more reason MultipeerConnectivity remains the
-/// default: admission of a stranger is a membership question (plan §8), not a transport one, and the
-/// item that migrates the app's flows is where it gets answered.
+/// **Scope, stated plainly** (D-4.3 Option 1, 2026-09-21). A stranger is admitted **provisionally**
+/// while the join doors are open — the posture the MultipeerConnectivity radio ships, with the key
+/// proven — and becomes a member only at the same three doors. Concretely: with no mesh yet, or on
+/// an open one, ``mayAdmitStrangerProvisionally`` rides out on ``roster`` and the QUIC radio lets a
+/// peer nobody has vouched for complete the signed introduction; what it gets for that is a tunnel
+/// and an uncommitted slot, not a roster seat. Membership is still decided exactly where it was
+/// before this — ``maySeatVerifiedPeer(signingPublicKey:)`` at the identity introduction, the 15 cm
+/// dwell or the in-session QR commit, and the admission grant (auto-granted for a founding pair, a
+/// prompt for anyone else). With the doors shut, and on a **closed** mesh, the roster is the only
+/// answer and a stranger is refused before any app frame, as before.
+///
+/// Two things this is not. It is not weaker than the radio it replaces: MC's invitation carries no
+/// identity at all, while a peer that reaches this manager over QUIC has produced an Ed25519
+/// signature over a transcript bound to the live tunnel, so its key is proven-held. And it is not a
+/// relaxation of plan §7.2's reject list except in one named place — that bullet's "non-roster
+/// member" is **amended** by D-4.3 to mean the *roster*, not the *tunnel*; "unknown identity" now
+/// names a stranger arriving at shut doors, and hard-departed/removed, foreign meshID for a member,
+/// introduction failure and replayed nonces are untouched.
 extension MeshNetworkManager: MeshIntroductionAuthority {
 
     /// The mesh id used when this device holds no mesh descriptor: the all-zero UUID, so two peers
@@ -14806,14 +14895,22 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
     /// The relaxation is scoped three ways, and each one is what makes it safe rather than a
     /// widened door:
     ///
-    /// 1. **It is a link-layer relaxation on a members-only transport.** ``MeshChannelIntroductionExchange``
-    ///    is reached from ``NetworkMeshSession`` and nowhere else — MC never runs a signed channel
-    ///    introduction — which is exactly the distinction 0b's review drew and the reason
-    ///    ``maySeatVerifiedPeer(signingPublicKey:)`` exists for the other radio.
-    /// 2. **Only the epoch rule moved.** The hello still has to be well formed, name this mesh,
-    ///    carry a canonical epoch reference, present a fresh nonce, and — immediately after this
-    ///    check — be a `member` by ``roster``'s own verdict. A stranger, a departed member, a
-    ///    removed one and a foreign mesh are refused exactly as strictly as before.
+    /// 1. **It is a link-layer relaxation, and it is the epoch rule's alone.**
+    ///    ``MeshChannelIntroductionExchange`` is reached from ``NetworkMeshSession`` and nowhere
+    ///    else — MC never runs a signed channel introduction — which is exactly the distinction
+    ///    0b's review drew and the reason ``maySeatVerifiedPeer(signingPublicKey:)`` exists for the
+    ///    other radio. Since D-4.3 that radio is no longer members-only before any app frame, but
+    ///    nothing about *this* gate moved with it: what a provisional stranger is admitted by is
+    ///    ``mayAdmitStrangerProvisionally``, which is a different question asked in a different
+    ///    arm.
+    /// 2. **Only the epoch rule moved.** The hello still has to be well formed, carry a canonical
+    ///    epoch reference, present a fresh nonce, and — immediately after this check — be a `member`
+    ///    by ``roster``'s own verdict, or a stranger the open doors admit provisionally. A departed
+    ///    member, a removed one and a **member** naming a foreign mesh are refused exactly as
+    ///    strictly as before. A stranger on another mesh's branch can now reach this gate — the
+    ///    epoch rule runs before the roster arm — and passing it buys it the same tunnel any other
+    ///    provisional stranger gets: no merge runs over it, because plan §10.3's merge is driven by
+    ///    signed records from a committed slot, which a provisional peer does not have.
     /// 3. **Only when a merge can actually run.** A device with no mesh or no membership ledger has
     ///    nothing to reconcile *with*, so it keeps the old refusal
     ///    (``MeshIntroductionRejection/divergentEpoch``) rather than admitting a tunnel that could
@@ -14872,7 +14969,41 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
         guard let derived = membershipVerifier?.roster, !derived.members.isEmpty else {
             return legacyIntroductionRoster()
         }
-        return derived.introductionRoster(additionalBarred: MeshIntroductionChaos.additionalBarredKeys)
+        return derived.introductionRoster(
+            additionalBarred: MeshIntroductionChaos.additionalBarredKeys,
+            admitsStrangersProvisionally: mayAdmitStrangerProvisionally
+        )
+    }
+
+    /// Whether a peer nobody here has ever met may hold a QUIC tunnel *provisionally* right now
+    /// (D-4.3 Option 1) — the posture half of what ``makeTransportHandlers()``'s
+    /// `shouldAcceptInvitation` already answers for a stranger on the MC radio.
+    ///
+    /// It is exactly two conditions, and neither of them is new:
+    ///
+    /// 1. ``isAdmittingNewPeers`` — the ONE flag ``holdCommittedLinks()`` lowers. A held session
+    ///    admits nobody new on either radio, and `hasCommittedSlot`, the excuse that closure makes
+    ///    for a *committed* peer re-asking across a hold, cannot apply here by construction: a
+    ///    stranger has no slot to have committed.
+    /// 2. `currentMesh == nil || isSessionOpen` — the same half ``maySeatVerifiedPeer(signingPublicKey:)``
+    ///    tests one layer up. A device with no mesh is meeting somebody for the first time and an
+    ///    open mesh is one whose owner is inviting; a **closed** mesh refuses a stranger *at the
+    ///    transport* rather than seating it and evicting it a moment later at the seat gate. That is
+    ///    deliberately stronger than the MC radio, where the tunnel exists until the seat check
+    ///    runs, and it costs nothing: the seat check would refuse the same peer either way.
+    ///
+    /// **What it deliberately does not duplicate.** The slot cap and the proximity-join link rule
+    /// are the invitation gate's other two clauses, and the QUIC radio consults that very closure as
+    /// its `invitationGate` *after* the introduction completes
+    /// (``NetworkMeshSession``'s accept path). Re-testing them here would put two spellings of one
+    /// capacity rule on one tunnel, which is how the two drift apart.
+    ///
+    /// **Derived on every read, never stored.** It rides ``roster``, which the transport re-asks for
+    /// on every introduction, so closing the doors takes effect on the next tunnel with nothing to
+    /// invalidate — and it owes no row on the wipe ledger, because there is nothing to wipe.
+    var mayAdmitStrangerProvisionally: Bool {
+        guard isAdmittingNewPeers else { return false }
+        return currentMesh == nil || isSessionOpen
     }
 
     /// The pre-records answer: the gossiped descriptor's members, with nobody nameably barred.
@@ -14888,7 +15019,8 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
         }
         return MeshIntroductionRoster(
             members: currentMesh?.members.map(\.signingPublicKey) ?? [],
-            barred: MeshIntroductionChaos.additionalBarredKeys
+            barred: MeshIntroductionChaos.additionalBarredKeys,
+            admitsStrangersProvisionally: mayAdmitStrangerProvisionally
         )
     }
 

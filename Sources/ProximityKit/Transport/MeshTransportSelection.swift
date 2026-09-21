@@ -112,6 +112,34 @@ struct MeshTransportHandlers {
     var onTransportError: ((String) -> Void)?
 }
 
+// MARK: - MeshSlotEvictionCause
+
+/// Why the owner is freeing one peer's link — the one thing a radio cannot work out for itself.
+///
+/// Both arms look identical at the transport: the owner's slot goes away and
+/// ``MeshTransportSession/disconnectPeer(_:cause:)`` ends the tunnel as a `localEviction`. They are
+/// not identical to the bound that reads them. ``MeshLinkTable/maxReproposalsPerEndpoint`` is
+/// deliberately never refilled because its loop is *connect → the owner refuses the seat →
+/// disconnect → idle → re-offer*, and six of those is plenty. A pre-commit **timeout** produces the
+/// same shape and is not that loop: it is two people who did not get their phones close enough in
+/// twenty-five seconds, and spending a never-refilled budget on it strands a genuine friend for the
+/// rest of the session on the sixth try (D-4.3 Option 1's "two bounds to name").
+///
+/// Frozen automation tokens, never display text and never persisted.
+nonisolated enum MeshSlotEvictionCause: Equatable, Sendable {
+
+    /// This device decided the peer may not hold this slot — the seat gate refused it, the session
+    /// was held or closed, the slot lost an overflow race, or the owner tore the session down. The
+    /// re-propose budget is charged, because re-offering the same endpoint would re-run exactly
+    /// this decision.
+    case ownerDecision
+
+    /// The pre-commit deadline expired with no dwell and no tap
+    /// (`ProximityCoordinator.EndReason.timeout`). Nothing was refused and nothing is likely to be:
+    /// the re-propose booking that produced this tunnel is given back.
+    case preCommitTimeout
+}
+
 // MARK: - MeshTransportSession
 
 /// The shared radio `MeshNetworkManager` drives, with neither radio's name on it.
@@ -153,6 +181,14 @@ protocol MeshTransportSession: AnyObject {
     /// actually drives teardown.
     func disconnectPeer(_ peer: PeerHandle)
 
+    /// Frees one peer's link, telling the radio **why** the owner is doing it.
+    ///
+    /// Default-implemented as ``disconnectPeer(_:)``, so a radio that keeps no per-endpoint budget
+    /// need not know the cause exists: `MeshMultipeerSession` re-invites on its own timer and has
+    /// nothing to spend. `NetworkMeshSession` overrides it, because its never-refilled re-propose
+    /// budget is the one bound the distinction matters to (see ``MeshSlotEvictionCause``).
+    func disconnectPeer(_ peer: PeerHandle, cause: MeshSlotEvictionCause)
+
     /// Stops browsing and advertising while KEEPING the session and every live connection — the
     /// radio half of ``MeshNetworkManager/holdCommittedLinks()``.
     ///
@@ -167,6 +203,15 @@ protocol MeshTransportSession: AnyObject {
     /// It is also what ``startRadios(discoveryInfo:)`` does to a radio that is already running, so
     /// the owner's one re-arm funnel (`startSearching()`) undoes a hold without naming this verb.
     func resumeDiscovery()
+}
+
+extension MeshTransportSession {
+
+    /// The cause-blind default: a radio with no per-endpoint budget has nothing to spend it on, so
+    /// it frees the link and forgets why. Overridden by ``NetworkMeshSession`` alone.
+    func disconnectPeer(_ peer: PeerHandle, cause: MeshSlotEvictionCause) {
+        disconnectPeer(peer)
+    }
 }
 
 // MARK: - Conformances

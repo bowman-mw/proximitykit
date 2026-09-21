@@ -270,6 +270,19 @@ final class NetworkPeerChannel: PeerTransport {
 /// ``MeshChannelHello``s and then Ed25519 signatures over one ``MeshChannelIntroductionTranscript``
 /// bound to this tunnel's TLS exporter secret, and each verifies the other against the current
 /// roster. Failure tears the tunnel down; there is no degraded accept.
+///
+/// **Who the roster admits** (D-4.3 Option 1). A current member, always. A departed, removed,
+/// revoked or blocked key, never. A **stranger** holds a tunnel *provisionally* while — and only
+/// while — the owner's join doors are open, which is what
+/// ``MeshIntroductionRoster/admitsStrangersProvisionally`` carries and what `MeshNetworkManager`
+/// answers from the same posture its MC invitation gate answers. Provisional means a tunnel and
+/// nothing more: the peer arrives at the owner as a channel, exactly as a MultipeerConnectivity peer
+/// does, and it becomes a *member* only at the three doors above this radio — the seat check at the
+/// identity introduction, the 15 cm dwell or the QR commit, and the admission grant. The signature
+/// is still required of it, so its key is proven-held before any app frame, which is more than the
+/// MC radio ever asked of the same peer. Plan §7.2's "reject before any app frame … non-roster
+/// member" bullet is amended by this, and only by this: a non-roster peer may reach a *tunnel*,
+/// never a *roster*.
 /// `prohibitedInterfaceTypes` is `[.cellular]` on every listener, browser and connection, always: it
 /// is what turns the serverless/no-internet claim from an aspiration into something the OS enforces.
 ///
@@ -647,7 +660,20 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// arrives later, on a delegate callback the owner already knows to swallow. The peer's channel
     /// still publishes `.disconnected`: the coordinator on the other end of it must see the link die.
     func disconnectPeer(_ peer: PeerHandle) {
+        disconnectPeer(peer, cause: .ownerDecision)
+    }
+
+    /// The same eviction, with the one fact this radio cannot work out for itself.
+    ///
+    /// A ``MeshSlotEvictionCause/preCommitTimeout`` gives back the re-propose booking that produced
+    /// this tunnel, so the never-refilled budget is spent only by the loop it exists to stop — an
+    /// owner that keeps refusing the seat — and never by two people who did not get their phones
+    /// close enough inside the dwell deadline. Everything else about the teardown is identical, and
+    /// the tunnel still ends as a `localEviction`: the *reason the link died* is unchanged, only
+    /// what this side owes the endpoint afterwards.
+    func disconnectPeer(_ peer: PeerHandle, cause: MeshSlotEvictionCause) {
         guard let key = identities.key(for: peer) else { return }
+        if cause == .preCommitTimeout { links.refundRepropose(key) }
         endTunnel(
             key,
             cause: .localEviction,
