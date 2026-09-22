@@ -405,6 +405,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// name changed with the meaning so the retirement wall can pin the old one at zero.
     @ObservationIgnored var onTextSendForTesting: ((MeshTextSendOutcome) -> Void)?
     @ObservationIgnored private(set) var removedMemberFingerprints: Set<String> = []
+    /// The one peer the user asked to remove through the pairwise shortcut of
+    /// ``proposeRemoval(of:)``: refused by the session roster from the tap until the session is torn
+    /// down (2026-09-22). The shortcut prunes the roster and then leaves ASYNCHRONOUSLY, so without
+    /// this a re-dial committed during the leave re-recorded the peer and the teardown offered it on
+    /// the keep-as-friend prompt. Cleared by `leaveMesh()` — the teardown that leave ends in, in the
+    /// same synchronous step that removes the slots and promotes the roster, so no commit can land in
+    /// between — and by the next `startJoin()`. Deliberately not ``removedMemberFingerprints``: that
+    /// set also feeds key distribution, rotation recipients and admission, none of which a pair's
+    /// ending should re-derive.
+    @ObservationIgnored private(set) var askedToRemoveFingerprint: String?
     @ObservationIgnored private var approvedRemovalProposalIDs: Set<UUID> = []
     /// The live tally of signed removal proposals and votes (P4 item 5, plan §10.4).
     ///
@@ -1362,7 +1372,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) {
         // Belt-and-braces: a peer the session voted out (or the user asked to remove) is never
         // re-recorded, so it can never be offered by the keep-as-friend prompt.
-        guard !removedMemberFingerprints.contains(fingerprint) else { return }
+        guard !removedMemberFingerprints.contains(fingerprint), fingerprint != askedToRemoveFingerprint else { return }
         // Single ingest for the roster, so BOTH callers (the verified PeerIdentity path and
         // `announcePromotedMesh`'s raw `slot.peer.displayHint`) are covered by one coercion. Nothing keys
         // off the roster display name — lookups and removal key on fingerprint — so rewriting an
@@ -1551,6 +1561,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   transfer nor the push runs. The first and last are what
     ///   ``MeshDevelopmentPlan/handoffOutcome(finishedAt:)`` judges against the window.
     func leaveSessionAfterNotifyingPeers(clock: () -> Date) async {
+        // One leave at a time (review 2026-09-22): a second tap while the first is handing off —
+        // the pairwise "Ask to remove" now leaves asynchronously, and the termination's receipt
+        // wait keeps the review sheet up for up to its grace — would re-enter `handingOff`, sign a
+        // second record and repeat the transfer and the wait. The leave in flight owns the ending.
+        guard sessionState != .handingOff else {
+            FernletAuditLog.log("mesh.development.alreadyInFlight", context: heldMeshAuditContext())
+            return
+        }
         let plan = developmentPlan(startedAt: clock())
         lastDevelopmentPlan = plan
         let transition = applySessionEvent(plan.ending.requestedEvent)
@@ -1574,6 +1592,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // custodian sees the entitling record before or with the bytes.
             if emitted {
                 await pushCustodyToCustodians(handoff, plan: plan, clock: clock)
+                await awaitPartnerReceiptOfTermination(plan)
             } else {
                 handoff = handoff.notAnnounced()
                 FernletAuditLog.log(
@@ -1584,6 +1603,56 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         recordDevelopmentHandoffOutcome(plan, finishedAt: clock(), handoff: handoff)
         leaveSession()
+    }
+
+    /// How long a final pair's leaver gives its partner to read the termination before its own radio
+    /// goes down (2026-09-22). The radio clamps it to its own ceiling.
+    static let terminationReceiptGraceSeconds: TimeInterval = 1.5
+
+    /// Holds the teardown of a **termination** until every committed roster partner has closed its
+    /// end of the link — ordinarily its acknowledgement that it read the record — or until the grace
+    /// passes.
+    ///
+    /// Why a termination and nothing else: it is the one ending that must reach the other phone for
+    /// the other phone to leave. A partner that verifies it ends its own session at once
+    /// (`applyVerifiedTermination`), and that is what closes the link here; a partner that never
+    /// reads it keeps a mesh of one and a camera up until its five-minute give-up. The frame is
+    /// written before this runs, but the transport's `stop()` cancels the connection, and a frame
+    /// the stack had accepted but not yet delivered — or one whose packet was lost and not yet
+    /// retransmitted — went down with it. A departure is not waited on: the members it is sent to
+    /// keep the mesh (and their links) going, so there is no close to wait for, and a missed one is
+    /// recovered by the merge path (plan §10.3).
+    ///
+    /// Waited on: the committed slots of the other members on the signed roster — read off the
+    /// roster rather than the plan's reachability, which can lag a heal by a poll. An uncommitted
+    /// slot drops a membership frame unread, and a committed non-member (a stranger waiting on an
+    /// admission prompt) has no mesh to end, so neither's close would acknowledge anything. A radio
+    /// with no far end answers at once. The outcome is audited — including `nothingToWaitFor` when
+    /// no committed partner was there to watch — so "the link went down" and "the grace ran out" are
+    /// two different lines in a log rather than one silence. `closed` is not a read receipt: the
+    /// radio cannot tell the partner's close from a local link failure (``MeshRemoteCloseOutcome``).
+    ///
+    /// **A bounded best effort, not a delivery guarantee.** A partner that cannot answer — a
+    /// suspended phone — costs the grace and learns nothing; it ends by its own five-minute give-up.
+    ///
+    /// - Parameter plan: The development being carried out.
+    private func awaitPartnerReceiptOfTermination(_ plan: MeshDevelopmentPlan) async {
+        guard plan.ending == .termination else { return }
+        let members = Set(membershipVerifier?.roster.memberFingerprints ?? [])
+        let partners = slots.filter { slot in
+            guard let fingerprint = slot.fingerprint else { return false }
+            return fingerprint != identity.localFingerprint && members.contains(fingerprint)
+        }.map(\.peer)
+        // No committed partner is its own line, not a silence: the termination went out over no
+        // link this device could watch (the partner already gone, or never re-seated).
+        var outcome = MeshRemoteCloseOutcome.nothingToWaitFor
+        if !partners.isEmpty {
+            outcome = await transport.awaitRemoteClose(of: partners, within: Self.terminationReceiptGraceSeconds)
+        }
+        FernletAuditLog.log(
+            "mesh.development.partnerReceipt",
+            context: heldMeshAuditContext(["outcome": outcome.rawValue, "partners": String(partners.count)])
+        )
     }
 
     /// Derives plan §10.6's development decision from the merged roster and the branch view.
@@ -2091,6 +2160,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         resetSessionRosterForNewSession()
         pendingRemovalProposals.removeAll()
         removedMemberFingerprints.removeAll()
+        askedToRemoveFingerprint = nil
         approvedRemovalProposalIDs.removeAll()
         removalQuorum.removeAll()
         photoSessionStartedAt = Date()
@@ -2264,9 +2334,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// never re-links eventually ends" is only true when the user happens to bounce the tab.
     ///
     /// Refuses — and cancels any standing clock — for a session that is HELD (see below), has no
-    /// mesh (the ledgerless pairwise shape ends at slot loss, door 4), still has a peer, or has
-    /// already ended by another door. Idempotent: re-arming replaces the deadline rather than
-    /// stacking a second task.
+    /// mesh (the ledgerless pairwise shape ends at slot loss, door 4), still has a peer, has
+    /// already ended by another door, or is being ended by this device right now (`handingOff`:
+    /// a final pair's leaver sees its partner close while it waits for that very close, 2026-09-22).
+    /// Idempotent: re-arming replaces the deadline rather than stacking a second task.
     ///
     /// **The hold leg is load-bearing** (review finding F-1). `holdCommittedLinks()` takes the
     /// radios down, so a link lost while it holds would otherwise light a five-minute fuse toward
@@ -2276,7 +2347,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// - Parameter now: The injected instant the deadline is measured from.
     private func armSessionGiveUpClock(now: Date) {
-        guard isAdmittingNewPeers, currentMesh != nil, !hasCommittedPeer, isSessionLive else {
+        guard isAdmittingNewPeers, currentMesh != nil, !hasCommittedPeer, isSessionLive,
+              sessionState != .handingOff else {
             cancelSessionGiveUpClock()
             return
         }
@@ -2347,6 +2419,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         pendingAdmissionRequests.removeAll()
         pendingRemovalProposals.removeAll()
         removedMemberFingerprints.removeAll()
+        askedToRemoveFingerprint = nil
         approvedRemovalProposalIDs.removeAll()
         removalQuorum.removeAll()
         photosAddedThisSession = 0
@@ -2366,9 +2439,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if otherParticipants.count == 1, otherParticipants[0].fingerprint == participant.fingerprint {
             // Pairwise shortcut: asking to remove the only other peer just ends the session —
             // and a peer the user asked to remove must never be offered by the keep prompt, so
-            // drop them from the roster before the teardown promotes it into the review batch.
+            // drop them from the roster before the teardown promotes it into the review batch, and
+            // keep them out of it until the next session (the leave below is asynchronous).
+            askedToRemoveFingerprint = participant.fingerprint
             sessionRoster.removeAll { $0.fingerprint == participant.fingerprint }
-            leaveSession()
+            // Through the SIGNED ending, never the silent teardown (2026-09-22). A mesh of one has
+            // nothing left to keep, so the partner must be told it is over: for a final pair this
+            // signs the termination that ends the session on the partner's phone as well. The
+            // bare `leaveSession()` this used to call ended it on this phone only, and left the
+            // partner holding a mesh of one until its five-minute give-up.
+            spawnHostPinned { [weak self] in await self?.leaveSessionAfterNotifyingPeers() }
             return
         }
         let proposal = MeshRemovalProposalPayload(
@@ -2879,7 +2959,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Its durable half is ``MeshSessionContext/ledger`` (item 6), so it owes no wipe row of its
     /// own — the sealed context carries the disposition.
-    @ObservationIgnored private(set) var membershipVerifier: MeshMembershipRecordVerifier?
+    ///
+    /// Every change re-judges the slots waiting at a proximity gate (2026-09-22): a member admitted
+    /// by another member can reach this device's gate before its admission record does, and the
+    /// observation loop that otherwise drives ``reseatReturningMembers()`` cannot see this property.
+    @ObservationIgnored private(set) var membershipVerifier: MeshMembershipRecordVerifier? {
+        didSet { reseatReturningMembers() }
+    }
 
     /// The last inventory digest each peer told us it holds, keyed by fingerprint (plan §10.5).
     ///
@@ -9245,7 +9331,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Where this device is in plan §8.2's lifecycle. Memory-only — the DURABLE half is the sealed
     /// context, and a relaunch re-derives this from it (``restoreSessionContextAtLaunch(now:)``).
-    @ObservationIgnored private(set) var sessionState: MeshSessionState = .idle
+    ///
+    /// Every change re-judges the slots waiting at a proximity gate (2026-09-22): whether a
+    /// returning member is re-seated depends on the state (``reseatsReturningMembers(in:)``), and a
+    /// resume out of `localIdleStop` must not leave a member that re-dialed before it at the gate.
+    @ObservationIgnored private(set) var sessionState: MeshSessionState = .idle {
+        didSet { reseatReturningMembers() }
+    }
 
     /// The ONE predicate every decrypt of routed content consults (P5 item 10, D-10.12).
     ///
@@ -11173,8 +11265,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // P3 item 6 / invariant 1: **a disconnect is not a removal.** Losing the last committed
         // link moves the SESSION to `partitioned` and arms the idle window; it mints no record,
         // does not touch the ledger, and leaves the derived roster exactly as it was, so the peer
-        // that comes back needs no re-admission.
-        if wasCommitted, currentMesh != nil, !slots.contains(where: { $0.fingerprint != nil }) {
+        // that comes back needs no re-admission. Not while this device is HANDING OFF (2026-09-22):
+        // a final pair's leaver holds its radio up until the partner closes its end, so that close
+        // is the partner acknowledging the termination, not a partition — and the machine has no
+        // `.linksLost` edge out of `handingOff` to take anyway.
+        if wasCommitted, currentMesh != nil, sessionState != .handingOff,
+           !slots.contains(where: { $0.fingerprint != nil }) {
             applySessionEvent(.linksLost)
         }
         // In proximity join: if the link dropped before the peer committed and we are the
@@ -11632,13 +11728,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         shopCatalogRequestResponseAt.removeValue(forKey: slotID)
     }
 
+    /// The name the session roster records for a peer committing now.
+    ///
+    /// Option 1b withholds a peer's name until this side commits, so every commit arrives
+    /// name-withheld and the peer's first post-commit envelope discloses the name
+    /// (`onPeerDisplayNameDisclosed`). A returning member re-seated over a re-dial (2026-09-22) is a
+    /// commit like any other, but the roster already holds the name its first meeting disclosed:
+    /// overwriting that with the fingerprint would leave the keep-as-friend prompt naming a friend by
+    /// fingerprint whenever the link drops again before the disclosure repeats. So a withheld name
+    /// never replaces a known one, and a disclosed name always does.
+    private func rosterDisplayName(for peer: ProximityCoordinator.PeerIdentity) -> String {
+        guard peer.isDisplayNameWithheld else { return peer.displayName }
+        return sessionRoster.first { $0.fingerprint == peer.fingerprint }?.displayName ?? peer.fingerprint
+    }
+
     private func onSlotConnected(at index: Int, identity peerIdentity: ProximityCoordinator.PeerIdentity) {
         let slot = slots[index]
 
         // Phase 2: capture the handshake-verified identity into the session roster at slot
         // commit, so the post-session keep-as-friend prompt still has it after slot teardown.
         recordSessionParticipant(
-            displayName: peerIdentity.displayNameOrFingerprint,
+            displayName: rosterDisplayName(for: peerIdentity),
             fingerprint: peerIdentity.fingerprint,
             signingPublicKey: peerIdentity.signingPublicKey,
             keyAgreementPublicKey: peerIdentity.keyAgreementPublicKey
@@ -14245,6 +14355,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                         refused.append(slots[index])
                         continue
                     }
+                    if let reason = reseatRefusal(at: index, identity: peerIdentity) {
+                        FernletAuditLog.log(
+                            "mesh.slot.returningMemberRefusedAtSeat", context: heldMeshAuditContext(["reason": reason])
+                        )
+                        refused.append(slots[index])
+                        continue
+                    }
                     slots[index].fingerprint = fp
                     slots[index].verifiedSigningPublicKey = peerIdentity.signingPublicKey
                     // Store the handshake-verified KA key; used for group key wrapping (Phase 3).
@@ -14266,6 +14383,173 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         // R2: bounded by the slot cap.
         for slot in stale { removeSlot(slot, cause: Self.evictionCause(for: slot.coordinator.state)) }
+        reseatReturningMembers()
+    }
+
+    // MARK: - Returning members (2026-09-22)
+
+    /// Commits every re-dialed slot whose verified peer ``isReturningMember(signingPublicKey:)`` —
+    /// a member of this device's live mesh coming back after its link dropped.
+    ///
+    /// **The defect it closes.** Every channel — a first meeting and a re-dial alike — runs the
+    /// coordinator's friend handshake, and that handshake parks a verified peer at a proximity gate
+    /// (`awaitingProximityCommit` / `awaitingManualCommit`) until a 15 cm dwell or a tap. For a
+    /// first meeting that is the consent ceremony. For a member coming back it was a dead end: the
+    /// only controls that answer the gate are the Friends tab's pre-session slot rows, which the
+    /// session's camera covers, so nobody could answer it. The re-dialed slot stayed uncommitted
+    /// for good, and every frame the peer sent — chat, coordinator beacons, the merge that would
+    /// have drained what was queued — was dropped as coming from an uncommitted slot
+    /// (`mesh.groupKey.droppedUncommittedSlot` on the owner's phone ↔ Simulator run, 2026-09-22).
+    /// Every Lane C heal reported convergence only because `MeshFlowDriver` stood in for the tap on
+    /// re-dialed slots too.
+    ///
+    /// **What it does instead.** Plan §3's invariant 5 and §10.3 already say what a reconnect is:
+    /// an existing authenticated member of the current unexpired mesh, re-linked, is a merge. So a
+    /// slot whose verified peer is on the signed roster is committed through the coordinator's own
+    /// `commitManualProximity()` — the same commit the tap performs — and lands in
+    /// `checkCoordinatorStates()` exactly like a dwell: `onSlotConnected`, `.peerCommitted`,
+    /// ``openBlipMergeIfReconnected(_:from:peer:)`` or the partition heal's `.beginMerge`, and the
+    /// drain. Nothing about a first meeting changes: a stranger is not on the roster, so its gate
+    /// still waits for a person.
+    ///
+    /// **Two guards make skipping the gesture safe** (the blind review of 2026-09-22, both HIGH):
+    /// - **The identity must be the one the TUNNEL proved.** The coordinator's identity
+    ///   introduction is a signed envelope with no recipient on the QUIC radio and a five-minute
+    ///   lifetime, so a device that was sent a member's introduction (as a provisional stranger, say)
+    ///   can replay it over its own tunnel — and every frame it then signs with its own key would be
+    ///   credited to that member. The transport's channel introduction is bound to this connection's
+    ///   TLS exporter and cannot be replayed, so the gated identity's key must equal
+    ///   ``MeshTransportSession/verifiedSigningPublicKey(for:)``. A mismatch is refused for the life
+    ///   of the slot and audited once; a link with no proven key yet is simply judged again later.
+    /// - **A member this device voted out stays out** — see ``isReturningMember(signingPublicKey:)``.
+    ///
+    /// **Scope, decided:** a "returning member" is any member on the signed roster, including one
+    /// this device has never linked to because another member admitted it while this device was
+    /// away. Its admission was the consent — the mesh's roster decides who belongs — and linking two
+    /// members of one mesh is the same act as re-linking them. A first meeting with a stranger
+    /// always still needs a person.
+    ///
+    /// Runs on every coordinator-state change (so a slot is judged the moment it reaches its gate)
+    /// and whenever the roster or the session state moves (their `didSet`s), because a member
+    /// admitted elsewhere can reach this device's gate before its admission record does. The
+    /// decision is logged when the commit is ASKED for; it lands a hop later, and the seat checks it
+    /// again — ``reseatRefusal(at:identity:)`` — because the coordinator commits whatever identity it
+    /// holds by then.
+    func reseatReturningMembers() {
+        guard Self.reseatsReturningMembers(in: sessionState) else { return }
+        // R2: bounded by the slot cap.
+        for index in slots.indices
+            where slots[index].fingerprint == nil && slots[index].returningMemberReseat == .open {
+            guard let peer = Self.gatedPeer(of: slots[index].coordinator.state),
+                  isReturningMember(signingPublicKey: peer.signingPublicKey),
+                  let proven = transport.verifiedSigningPublicKey(for: slots[index].peer) else { continue }
+            guard proven == peer.signingPublicKey else {
+                slots[index].returningMemberReseat = .refusedMismatchedKey
+                FernletAuditLog.log(
+                    "mesh.slot.returningMemberRefusedMismatchedKey", context: heldMeshAuditContext()
+                )
+                continue
+            }
+            slots[index].returningMemberReseat = .commitRequested(signingPublicKey: proven)
+            FernletAuditLog.log(
+                "mesh.slot.returningMemberCommitted",
+                context: heldMeshAuditContext(["state": sessionState.rawValue])
+            )
+            commitManualProximity(slotID: slots[index].id)
+        }
+    }
+
+    /// Why the returning-member re-seat refuses to let `slots[index]` be seated as `peer`, or nil
+    /// when it does not — judged again at the seat, because the decision in
+    /// ``reseatReturningMembers()`` is only an ASK.
+    ///
+    /// The coordinator commits whatever identity it holds when the asked commit lands a main-actor
+    /// hop later, and it accepts a second identity introduction in any state and re-gates to it. A
+    /// member that replays another member's introduction on its own link, racing the ask, would
+    /// otherwise be seated as that other member with no gesture at all (the re-review of
+    /// 2026-09-22, F1). So a slot the re-seat committed is seated only as the key it judged, still
+    /// the key the tunnel proved, and still a returning member — which also refuses a seat whose
+    /// admission record rolled back between the ask and the seat because it could not be sealed
+    /// (F2). A slot the re-seat never asked for is not its business: that seat was a person's.
+    ///
+    /// The answer is the audit line's `reason`, a frozen English token, because most refusals are
+    /// honest — a link whose proven key moved under it, a session that lapsed or started leaving, an
+    /// admission that rolled back — and a log reader must be able to tell those from a swap.
+    ///
+    /// - Parameters:
+    ///   - index: The slot about to be seated.
+    ///   - peer: The identity its coordinator committed.
+    /// - Returns: `identityChanged`, `transportKeyChanged` or `notAReturningMember`; nil to seat.
+    private func reseatRefusal(at index: Int, identity peer: ProximityCoordinator.PeerIdentity) -> String? {
+        guard case .commitRequested(let judged) = slots[index].returningMemberReseat else { return nil }
+        guard peer.signingPublicKey == judged else { return "identityChanged" }
+        guard transport.verifiedSigningPublicKey(for: slots[index].peer) == judged else { return "transportKeyChanged" }
+        guard isReturningMember(signingPublicKey: judged) else { return "notAReturningMember" }
+        return nil
+    }
+
+    /// Whether `signingPublicKey` belongs to a member of THIS device's live mesh coming back — the
+    /// one peer a re-dialed slot commits for without the dwell or the tap (2026-09-22).
+    ///
+    /// Read off the **signed** derived roster only, never the gossiped descriptor's fallback, and
+    /// by key rather than fingerprint. Three facts make that enough, and none of them is new:
+    /// - the QUIC introduction already refused a key this roster calls a member when it named any
+    ///   other mesh id (`MeshChannelIntroductionExchange.receive` tolerates a mesh-id mismatch for a
+    ///   provisional *stranger* only), so a member key reached this slot over a tunnel that named
+    ///   this mesh;
+    /// - a departed or removed member is `barred` at that introduction and absent from `members`
+    ///   here, and a terminated roster has no members at all;
+    /// - the coordinator's identity introduction proved the key is held and refused a revoked or
+    ///   blocked one before the gate was ever reached — and ``reseatReturningMembers()`` then
+    ///   requires that key to be the one the tunnel itself proved.
+    ///
+    /// **And not voted out here.** The two-party "Ask to remove" + "Second" flow records its verdict
+    /// in ``removedMemberFingerprints`` and mints a removal record with two voters, which the signed
+    /// ledger refuses as `quorumNotMet` on a roster of four or more — so the removed member stays
+    /// on the signed roster. Without this leg the re-seat would quietly undo the vote the moment
+    /// that member re-dialed (the same guard ``recordSessionParticipant(displayName:fingerprint:signingPublicKey:keyAgreementPublicKey:)``
+    /// has always had).
+    ///
+    /// - Parameter signingPublicKey: The Ed25519 key the identity introduction verified.
+    func isReturningMember(signingPublicKey: Data) -> Bool {
+        guard currentMesh != nil, Self.reseatsReturningMembers(in: sessionState),
+              signingPublicKey != identity.localSigningPublicKey,
+              !removedMemberFingerprints.contains(IdentityService.fingerprint(of: signingPublicKey)),
+              let roster = membershipVerifier?.roster, roster.status == .active else { return false }
+        return roster.members.contains { $0.signingPublicKey == signingPublicKey }
+    }
+
+    /// Whether a session in `state` re-seats a returning member without asking for the proximity
+    /// gesture again.
+    ///
+    /// Yes in the four states in which this device is participating and a re-link means "the same
+    /// session, back": still `joining` its founding, live in the foreground or under a continued
+    /// background task, and `partitioned` — the state that exists for exactly this. No, by name,
+    /// everywhere else: `idle` has no session; `localIdleStop` resumes only through the
+    /// foreground's own offer (plan §8.2), and the machine refuses `.peerCommitted` there anyway;
+    /// `handingOff` is this device leaving; and the three terminal states can never be rejoined.
+    ///
+    /// - Parameter state: The session state to judge.
+    static func reseatsReturningMembers(in state: MeshSessionState) -> Bool {
+        switch state {
+        case .joining, .activeForeground, .continuingInBackground, .partitioned:
+            return true
+        case .idle, .localIdleStop, .handingOff, .departed, .terminated, .expired:
+            return false
+        }
+    }
+
+    /// The verified peer a coordinator is holding at a proximity gate, or nil when it is anywhere
+    /// else — before verification, already committed, or ended.
+    ///
+    /// - Parameter state: One slot coordinator's state.
+    static func gatedPeer(of state: ProximityCoordinator.State) -> ProximityCoordinator.PeerIdentity? {
+        switch state {
+        case .awaitingProximityCommit(let peer), .awaitingManualCommit(let peer):
+            return peer
+        default:
+            return nil
+        }
     }
 
     /// What one coordinator's terminal state means to the radio's re-propose budget.
@@ -14762,6 +15046,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// unit tests only.
     func holdsSessionHeartClaimForTesting(_ fingerprint: String) -> Bool {
         sessionHeartSendsInFlight.contains(fingerprint)
+    }
+
+    /// Runs one pass of the observation loop's check — seat what committed, sweep what ended,
+    /// re-seat returning members — exactly as a coordinator-state change drives it on a live radio.
+    ///
+    /// **Not a door.** The loop is armed by `startSearching()`, which starts real advertising and
+    /// browsing, so a unit test cannot let it run; this is the same private pass, called by hand.
+    /// `internal` for `@testable` unit tests only.
+    func checkCoordinatorStatesForTesting() {
+        checkCoordinatorStates()
     }
 
     /// Evicts a slot through the production removal funnel (`removeSlot` — the path

@@ -85,7 +85,18 @@ token, advertised capability tokens, and optionally a heart-drop prekey bundle),
 through a ``RangingProvider`` (``NIRangingSession`` in production), and gates the commit on
 physical closeness: a 15 cm / 0.8 s UWB dwell measured by ``ProximityCommitDetector``, a manual
 confirm on non-UWB hardware, or the QR verification ceremony (``ProximityVerifyQR``) which
-upgrades a manual commit to ceremony grade. Trust questions along the way go to a
+upgrades a manual commit to ceremony grade. That gate is the consent ceremony for a **first
+meeting**; a member of the live mesh coming back over a re-dialed link is not asked again
+(2026-09-22): ``MeshNetworkManager`` commits a gated slot whose verified signing key is on the signed
+roster **and** is the key the transport's channel introduction proved for that link
+(`reseatReturningMembers()`, judged whenever a coordinator's state, the roster or the session state
+moves), because the only controls that answer the gate are the pre-session slot rows the session's
+camera covers — a returning member used to sit uncommitted for good, with every frame it sent
+dropped. A member this device voted out is not re-seated, and an identity replayed over another
+key's link is refused once, audited (`mesh.slot.returningMemberRefusedMismatchedKey`). The decision is
+only an ask — the coordinator commits whatever identity it holds when the ask lands — so the seat
+checks it again and evicts a slot whose committed key is not the one judged
+(`mesh.slot.returningMemberRefusedAtSeat`). Trust questions along the way go to a
 ``ProximityTrustPolicy`` — ``FriendSessionTrustPolicy`` for friend radios (proximity *is* the
 authorization; only blocked keys ban), ``CoachSessionTrustPolicy`` for the future coach channel
 (only a remembered `.trainer` pairing auto-confirms), and ``ProximityTrustVault`` as the
@@ -137,7 +148,16 @@ sheet. It has exactly four doors: End Session, a termination or completed depart
 edge of the machine), the five-minute discovery timeout with no committed peer, and slot loss while
 no mesh is held (the legacy pairwise session). A link blip is none of them — it must not clear the
 transcript, promote the batch, open the shop window, or present a sheet whose primary action signs
-a termination on a mesh the pair can still resume.
+a termination on a mesh the pair can still resume. Ending a pair tells the partner (2026-09-22):
+"Ask to remove" on the only other person leaves through `leaveSessionAfterNotifyingPeers()` like
+End Session does, and when the signed roster is the final pair the leaver signs the termination and
+holds its radio up — bounded, 1.5 s — until the partner closes its end
+(`MeshTransportSession.awaitRemoteClose(of:within:)` — ordinarily the partner's close after reading
+the record, though a local link failure ends the link too; the outcome is audited as
+`mesh.development.partnerReceipt`). That is a bounded
+best effort, not a delivery guarantee: a partner suspended at that moment reads nothing and ends by
+its own five-minute give-up, and a pair whose roster is not yet two — the founding window before the
+admission grant lands — sends a departure, which is not waited on.
 Photo-library save failures surface through one shared mapping —
 ``FriendPhotoLibrarySaver``'s `userFacingFailure(for:photoCount:)` producing a
 ``PhotoSaveFailure`` rendered by the `photoSaveFailureAlert(_:failure:)` view modifier — so every

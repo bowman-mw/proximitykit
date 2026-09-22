@@ -30,6 +30,33 @@ public enum SlotKind {
     case lightweight // heartbeats only, up to 2
 }
 
+/// What the returning-member re-seat has concluded about one slot's gated peer (2026-09-22).
+///
+/// Two of the three answers are final for the life of the slot and one is not, which is why this
+/// is not a flag: a peer that is simply not (yet) a member stays ``open`` and is judged again when
+/// the roster or the session state moves — a member admitted by somebody else while this device
+/// was away becomes re-seatable the moment its admission lands here.
+enum MeshReturningMemberReseat: Equatable {
+
+    /// Not re-seated: never judged, or judged and not (yet) a returning member.
+    case open
+
+    /// The coordinator was asked to commit the peer whose signing key is `signingPublicKey` — the
+    /// key the re-seat judged, which was both the gated identity's and the one the tunnel proved.
+    /// The commit lands a main-actor hop later; nothing more is asked of this slot.
+    ///
+    /// The key is kept because the coordinator commits whatever identity it holds when the ask
+    /// lands, and a second identity introduction in between re-gates it: the slot is seated only as
+    /// this key (`MeshNetworkManager.reseatRefusal(at:identity:)`), or evicted.
+    case commitRequested(signingPublicKey: Data)
+
+    /// The identity the coordinator verified is not the key the transport's channel introduction
+    /// proved for this link — a replayed or borrowed identity introduction. Refused, and audited
+    /// once, for the life of the slot. (A link with no proven key YET stays ``open``: that is
+    /// "cannot tell", not "mismatched".)
+    case refusedMismatchedKey
+}
+
 /// One peer's seat in the live mesh session: the transport channel, its ``ProximityCoordinator``,
 /// and the handshake-verified identity captured at commit.
 ///
@@ -71,6 +98,9 @@ public struct PeerSlot: Identifiable {
     var distanceSamples: [MeshDistanceSample] = []
     var stableDistanceMeters: Double?
     var isOverflowCandidate = false
+    /// Where `MeshNetworkManager.reseatReturningMembers()` has got to with this slot's gated peer
+    /// (2026-09-22). Per slot, so it dies with the slot and a peer that re-dials is judged afresh.
+    var returningMemberReseat: MeshReturningMemberReseat = .open
 
     /// Phase 1 capability gate for room broadcasts, mirroring `ProximityCoordinator.PeerIdentity.supports`:
     /// a legacy peer with no advertised capabilities is photos-only.

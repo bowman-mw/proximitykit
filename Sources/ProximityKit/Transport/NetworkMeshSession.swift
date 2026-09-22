@@ -382,6 +382,21 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// enough that a room converges while people are still standing in it.
     nonisolated static let reproposeIntervalSeconds: TimeInterval = 5
 
+    /// The most ``awaitRemoteClose(of:within:)`` will wait, whatever the owner asks for.
+    ///
+    /// Long enough for QUIC to retransmit a lost final packet several times over a local link and for
+    /// a partner to verify a signature and tear down; short enough that a person who pressed "End"
+    /// on a partner who cannot answer — a suspended phone — is not kept waiting for it.
+    nonisolated static let maxRemoteCloseWaitSeconds: TimeInterval = 2
+
+    /// Milliseconds between two looks at the tunnel map while ``awaitRemoteClose(of:within:)`` waits.
+    nonisolated static let remoteClosePollMilliseconds = 50
+
+    /// The most looks one wait takes — a second bound beside the deadline, because Power of 10
+    /// rule 2 wants every loop bounded by a constant and not only by a clock that could stand still.
+    /// (A starved main actor makes each look slower, so it is the deadline that ends such a wait.)
+    nonisolated static let maxRemoteClosePolls = 60
+
     /// Bytes of per-session salt behind ``peerLabel(for:)`` — 256 bits, drawn once per session from
     /// the same CSPRNG this radio's instance name draws from.
     nonisolated static let peerLabelSaltByteCount = 32
@@ -793,6 +808,98 @@ final class NetworkMeshSession: NetworkChannelHost {
             reason: "This peer's slot was evicted locally.",
             notifyOwner: false
         )
+    }
+
+    /// Waits until every LIVE tunnel `peers` held when it was called has ended, or the bound passes —
+    /// whichever is first (2026-09-22). See ``MeshTransportSession/awaitRemoteClose(of:within:)``
+    /// for why a final pair's leaver waits at all.
+    ///
+    /// **It watches the tunnel, not the key.** When the far end closes an OUTBOUND link, this radio's
+    /// own tick re-dials it (``MeshLinkTable/dueRetries(now:)``) while the peer is still in the
+    /// browse table, and that puts a new in-flight tunnel under the same key within a second. A wait
+    /// that asked "is there a tunnel under this key" therefore read a partner that had already read
+    /// the termination and closed as still open, and ran to the bound every time the leaver had been
+    /// the dialer (the Simulator lanes of 2026-09-22: ≈1.5 s where the close had come in ≈50 ms).
+    /// So each live tunnel's channel instance is captured at the start, and a watched tunnel counts
+    /// as closed once it is no longer the activated tunnel under its key — whatever removed it: the
+    /// far end closing it, the link failing, or this radio retiring it (a duplicate collapse or a
+    /// replacement). The leaver calls ``stop()`` only after this returns, so the far end is by far
+    /// the common reason, and none of the others leaves a frame waiting to be read.
+    ///
+    /// A peer with no live tunnel has nothing to acknowledge and is not waited on. Bounded twice — by
+    /// the clamped deadline and by ``maxRemoteClosePolls``. The outcome is decided by the watched
+    /// tunnels' state AFTER the loop, never by which bound ended it, so a starved main actor that
+    /// looks late still answers ``MeshRemoteCloseOutcome/closed`` for a partner that closed in time
+    /// to be seen. The two console lines are the DEBUG mirror's (compiled to nothing in Release).
+    ///
+    /// - Parameters:
+    ///   - peers: The links whose far-end close would acknowledge what was just sent.
+    ///   - seconds: The most to wait, clamped between zero and ``maxRemoteCloseWaitSeconds``.
+    /// - Returns: how the wait ended.
+    func awaitRemoteClose(
+        of peers: [PeerHandle], within seconds: TimeInterval
+    ) async -> MeshRemoteCloseOutcome {
+        let bound = min(max(seconds, 0), Self.maxRemoteCloseWaitSeconds)
+        let started = Date()
+        let deadline = started.addingTimeInterval(bound)
+        let watched = watchedLiveChannels(of: peers)
+        MeshTransportConsoleLog.echo("remoteClose waiting peers=\(peers.count) live=\(watched.count)")
+        guard !watched.isEmpty else { return .nothingToWaitFor }
+        var cancelled = false
+        // R2: bounded by the poll cap as well as the deadline.
+        for _ in 0..<Self.maxRemoteClosePolls {
+            guard watched.contains(where: { isStillOpen($0) }), Date() < deadline else { break }
+            do {
+                try await Task.sleep(for: .milliseconds(Self.remoteClosePollMilliseconds))
+            } catch {
+                cancelled = true
+                break
+            }
+        }
+        let open = watched.filter { isStillOpen($0) }.count
+        let outcome: MeshRemoteCloseOutcome = open == 0 ? .closed : (cancelled ? .cancelled : .boundReached)
+        let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+        MeshTransportConsoleLog.echo("remoteClose done afterMs=\(elapsed) outcome=\(outcome.rawValue)")
+        return outcome
+    }
+
+    /// The signing key this radio's signed channel introduction proved for `peer`'s activated
+    /// tunnel, or nil when no activated tunnel is under its key (2026-09-22). See
+    /// ``MeshTransportSession/verifiedSigningPublicKey(for:)`` for why a caller asks.
+    ///
+    /// Read off `Tunnel.verified`, which activation records from an accepted
+    /// ``MeshChannelIntroductionExchange/review(_:)`` — a transcript bound to this connection's TLS
+    /// exporter, so the answer cannot have been replayed from another tunnel.
+    func verifiedSigningPublicKey(for peer: PeerHandle) -> Data? {
+        guard let key = identities.key(for: peer) else { return nil }
+        return tunnels[key]?.verified?.signingPublicKey
+    }
+
+    /// The activated tunnels `peers` hold right now, each with the channel object that carries it.
+    ///
+    /// The **channel instance** is what is watched, not the key. The link table re-dials a closed
+    /// outbound link on the next tick while the peer is still in the browse table, which opens a new
+    /// tunnel under the SAME key — and "a tunnel exists under this key" would then read the partner
+    /// that just closed as still open. Holding the channel strongly for the wait also keeps its
+    /// identity from being recycled by an allocation in between. "Activated" is read off
+    /// `Tunnel.verified`, which activation records together with the control stream; an in-flight
+    /// dial carries no frame anybody could acknowledge, so it is not waited on.
+    private func watchedLiveChannels(
+        of peers: [PeerHandle]
+    ) -> [(key: MeshLinkKey, channel: NetworkPeerChannel)] {
+        peers.compactMap { peer in
+            guard let key = identities.key(for: peer), let tunnel = tunnels[key],
+                  tunnel.verified != nil else { return nil }
+            return (key, tunnel.channel)
+        }
+    }
+
+    /// Whether the tunnel watched under `entry.key` is still the one that was live at the start, and
+    /// still activated — ``yieldSameKeyDuplicate(at:to:)`` leaves a husk under the key with the SAME
+    /// channel and no verified peer, and a husk carries nothing.
+    private func isStillOpen(_ entry: (key: MeshLinkKey, channel: NetworkPeerChannel)) -> Bool {
+        guard let tunnel = tunnels[entry.key] else { return false }
+        return tunnel.channel === entry.channel && tunnel.verified != nil
     }
 
     /// Hands a start failure to the owner's transport-error hook, with the same logging every other

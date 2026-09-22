@@ -216,14 +216,89 @@ protocol MeshTransportSession: AnyObject {
     /// It is also what ``startRadios(discoveryInfo:)`` does to a radio that is already running, so
     /// the owner's one re-arm funnel (`startSearching()`) undoes a hold without naming this verb.
     func resumeDiscovery()
+
+    /// Waits — bounded — until every one of `peers`' links has ended, returning the moment the last
+    /// one goes (2026-09-22).
+    ///
+    /// The nearest thing to an acknowledgement a final pair's signed termination can get without a
+    /// new wire frame: a partner that verified it tears its own session down, and that ends the
+    /// link here. It is not a read receipt — a local link failure ends the link too (see
+    /// ``MeshRemoteCloseOutcome/closed``) — but it is what the leaver can wait on. The
+    /// leaver waits for that — or for the bound — BEFORE ``stop()``, because `stop()` cancels the
+    /// connection, and a frame the stack had accepted but not yet delivered went down with it: the
+    /// partner never learned the mesh was over and was left holding a mesh of one.
+    ///
+    /// Default-implemented as an immediate ``MeshRemoteCloseOutcome/nothingToWaitFor``, so a radio
+    /// with no far end — the tier-1 fake — keeps every leaving cell exactly as fast as it was.
+    /// ``NetworkMeshSession`` is the one shipping override.
+    ///
+    /// - Parameters:
+    ///   - peers: The links whose far-end close would acknowledge what was just sent.
+    ///   - seconds: The most this may wait; the conformer clamps it to its own ceiling.
+    /// - Returns: how the wait ended — the leaver audits it, and a cell asserts it without a clock.
+    func awaitRemoteClose(of peers: [PeerHandle], within seconds: TimeInterval) async -> MeshRemoteCloseOutcome
+
+    /// The Ed25519 signing key this radio's own **signed channel introduction** proved for `peer`'s
+    /// live link, or nil when it proved none (2026-09-22).
+    ///
+    /// The transport's answer to "who is really on the other end of this link", and a different
+    /// fact from the identity a slot's `ProximityCoordinator` claims to have verified. The
+    /// coordinator's identity introduction is a signed envelope with no recipient on this radio (a
+    /// QUIC handle carries no advertised fingerprint) and a five-minute lifetime, so a device that
+    /// was sent one can replay it over its OWN tunnel. The channel introduction cannot be replayed:
+    /// its transcript binds the TLS exporter of this very connection. A caller that is about to act
+    /// on a claimed identity without a person's gesture — the returning-member re-seat — requires
+    /// the two to agree.
+    ///
+    /// Default-implemented as nil: a radio that proved nothing vouches for nobody, which fails the
+    /// caller closed. ``NetworkMeshSession`` is the one shipping override.
+    func verifiedSigningPublicKey(for peer: PeerHandle) -> Data?
+}
+
+// MARK: - MeshRemoteCloseOutcome
+
+/// How one ``MeshTransportSession/awaitRemoteClose(of:within:)`` ended (2026-09-22).
+///
+/// Frozen English tokens, logged verbatim by the leaver beside its development audit line — never
+/// display copy. The value exists so the answer is a fact rather than an inference from how long
+/// the wait took: a cell asserts the case, which no amount of main-actor starvation can move.
+nonisolated enum MeshRemoteCloseOutcome: String, Equatable, Sendable, CaseIterable {
+
+    /// Every watched link ended within the bound. Usually that is the partner closing its end
+    /// after reading the frame, but the radio cannot tell that from any other end of the link — a
+    /// local link failure, a duplicate-tunnel close, a concurrent `stop()` — so this records that
+    /// the link went down, never a read receipt.
+    case closed
+
+    /// The bound passed with at least one watched link still open: a partner that could not answer
+    /// (a suspended phone, a lost frame), or one that dropped the frame unread.
+    case boundReached
+
+    /// There was no live link to wait on, so nothing was waited for.
+    case nothingToWaitFor
+
+    /// The waiting task was cancelled. The teardown it guarded runs regardless.
+    case cancelled
 }
 
 extension MeshTransportSession {
 
     /// The cause-blind default: a radio with no per-endpoint budget has nothing to spend it on, so
-    /// it frees the link and forgets why. Overridden by ``NetworkMeshSession`` alone.
+    /// it frees the link and forgets why. ``NetworkMeshSession`` is the one shipping override.
     func disconnectPeer(_ peer: PeerHandle, cause: MeshSlotEvictionCause) {
         disconnectPeer(peer)
+    }
+
+    /// The far-end-free default: there is nothing to wait for, so it answers at once.
+    func awaitRemoteClose(
+        of peers: [PeerHandle], within seconds: TimeInterval
+    ) async -> MeshRemoteCloseOutcome {
+        .nothingToWaitFor
+    }
+
+    /// The fail-closed default: a radio that proved no key vouches for nobody.
+    func verifiedSigningPublicKey(for peer: PeerHandle) -> Data? {
+        nil
     }
 }
 
