@@ -92,6 +92,20 @@ authorization; only blocked keys ban), ``CoachSessionTrustPolicy`` for the futur
 persistent record store behind both, holding the friend/removed/blocked/reported lifecycle and
 the audit trail.
 
+**Invariant: no display name crosses before this side commits** (stranger-admission Option 1b, the
+owner's call of 2026-09-22). Every envelope a coordinator signs reads one private property,
+`disclosedDisplayName`, which is empty until ``ProximityCoordinator/confirmPeerIdentity()`` and the
+real name after — the introduction, the acknowledgement, both heartbeat directions and every
+payload, because a peer that commits first sends a heartbeat whose ack would otherwise have carried
+the name out early. The introduction's summary is `"Hello"`, never an interpolated name. On receipt,
+an identity built from an introduction carries NO name whatever the peer sent
+(``ProximityCoordinator/PeerIdentity/isDisplayNameWithheld``), so the guarantee does not depend on the
+peer's build; the name is adopted from the first verified post-commit envelope that discloses one
+(``FernletIdentityEnvelope/disclosedSenderDisplayName``), once, from the verified signing key only,
+and ``ProximityCoordinator/onPeerDisplayNameDisclosed`` tells the owning manager. Every surface that
+renders or persists a peer name reads ``ProximityCoordinator/PeerIdentity/displayNameOrFingerprint``,
+so a pre-commit peer is shown by its fingerprint. No wire shape moved: an empty name is a value.
+
 **What rides a committed session.** ``MeshNetworkManager`` owns the feature payloads: disposable
 camera photos (quota-capped, cached metadata-only through `PrivateMediaStore`, optionally
 AES-GCM-encrypted under the rotating ``MeshGroupKey``), the in-person clothing shop
