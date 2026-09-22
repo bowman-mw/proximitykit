@@ -636,7 +636,21 @@ nonisolated struct MeshLinkTable {
     /// ``refundRepropose(_:)``'s honesty: whatever ended this link, it was not a pre-commit timeout
     /// — the refund runs *before* the teardown that lands here — so the offer that paid for it is
     /// spent, and a later timeout on a re-dial has to have been paid for again.
+    ///
+    /// **An endpoint the cache does not hold keeps NO record** (owner-calls item 4, 2026-09-22). An
+    /// inbound tunnel from a peer this side never browsed is keyed by its pending key, which the
+    /// cache never holds and ``forget(_:)`` — driven by the browser's *lost* — never reaches, so the
+    /// idle record written here was the table's one unbounded growth path: one per inbound tunnel
+    /// ever closed, for the session's life. Dropping it changes no answer: an idle record with a
+    /// full budget, no retry and no booking is exactly what every reader already assumes for a key
+    /// it has never seen (``phase(of:)`` answers ``MeshLinkPhase/idle``, nothing is booked, nothing
+    /// is due). A cached endpoint still gets its idle record, bounded by the cache and reaped with
+    /// its entry (``evictOldestCachedEndpointIfFull()``, ``forget(_:)``).
     mutating func noteClosed(_ key: MeshLinkKey) {
+        guard cache[key] != nil else {
+            links.removeValue(forKey: key)
+            return
+        }
         links[key] = Link(phase: .idle, dialAttempts: 0, retryDueAt: nil, reproposeBooked: false)
     }
 
@@ -704,6 +718,11 @@ nonisolated struct MeshLinkTable {
         cache.count
     }
 
+    /// How many link records the table is holding — the value the bounded-growth cells read.
+    var linkRecordCount: Int {
+        links.count
+    }
+
     /// The cached endpoint advertising `sessionID`, if this session has browsed one.
     ///
     /// **This is what the signed channel introduction unlocks.** An inbound QUIC connection arrives
@@ -742,6 +761,12 @@ nonisolated struct MeshLinkTable {
         reproposals.removeValue(forKey: oldest)
         reproposalRefunds.removeValue(forKey: oldest)
         links[oldest]?.reproposeBooked = false
+        // Owner-calls item 4 (2026-09-22): the link record goes with its cache entry when it is
+        // IDLE — the one phase whose record is identical to having none, so the eviction loses
+        // nothing. A live link (dialing, connected) keeps its slot, and a backing-off or exhausted
+        // one keeps the retry state that stops a spent peer being hammered; both are reaped by
+        // `forget(_:)` when the browser loses the endpoint, as before.
+        if links[oldest]?.phase == .idle { links.removeValue(forKey: oldest) }
     }
 
     /// Refreshes an existing cache entry's `lastSeenAt` without inventing one for an endpoint the
