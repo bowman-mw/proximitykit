@@ -158,10 +158,21 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// radio from construction rather than from `start()`. It is an **optional closure resolved in
     /// the body** rather than a default argument because `NetworkRecipeShareSession` is
     /// `@MainActor` and a main-actor type cannot be a default-argument value.
-    init(store: any ProximityHost, makeSession: (() -> any RecipeShareRadioSession)?) {
+    ///
+    /// `identity` is the same seam `PresenceManager` and `MeshNetworkManager` already take (owner-calls
+    /// item 4c, 2026-09-22): nil is this device's own identity on the production keychain service,
+    /// and a test passes one on a service of its own. Without it a test that exercised
+    /// ``wipeIdentityForDeleteAll()`` would have wiped the TEST HOST's real identity — the test
+    /// bundle runs inside the app on that Simulator and shares its keychain — so the wipe's EFFECT
+    /// was untestable here and only its existence was pinned.
+    init(
+        store: any ProximityHost,
+        makeSession: (() -> any RecipeShareRadioSession)?,
+        identity injected: IdentityService? = nil
+    ) {
         self.session = makeSession?() ?? NetworkRecipeShareSession()
         self.store = store
-        let id = IdentityService()
+        let id = injected ?? IdentityService()
         do {
             try id.ensureProvisioned()
         } catch {

@@ -377,6 +377,13 @@ their own, and how many may be open at once) and `EphemeralMeshTLSIdentity` (a s
 identity minted per session and never persisted). `Tests/FernletTests/NetworkMeshTransportTests.swift`
 is the battery; the session actor itself is covered by the runbook's device lanes.
 
+**`MeshLinkTable`'s link records are bounded** (owner-calls item 4b, 2026-09-22): slot-holding links
+by the peer cap, and a closed link only while its endpoint is cached — `noteClosed(_:)` keeps no
+record for an uncached key (an inbound tunnel from a peer this side never browsed), and the cache's
+oldest-first eviction takes an idle record with its entry. Both are lossless: an idle record with a
+full budget is exactly what the table answers for a key it has never seen. A backing-off or
+exhausted record keeps its retry state until `forget(_:)` (the browser's *lost*) reaps it.
+
 **Bulk frames ride per-transfer streams** (plan §7.1). A reliable payload at or above
 `MeshTransferStreamTable.bulkFloorBytes` is written on a QUIC stream opened for it alone, so a friend
 photo cannot park a heartbeat or a chat message behind it on the control stream; everything smaller
