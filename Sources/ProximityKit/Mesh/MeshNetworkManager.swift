@@ -15055,8 +15055,11 @@ extension MeshNetworkManager {
     ///
     /// **Since D-4.3 (2026-09-21) the seed is a convenience, not the only way in.** A stranger is
     /// admitted provisionally while the join doors are open, so two *unseeded* Simulators now have
-    /// a path to a first meeting on this radio — a path **no radio has yet run**: the unseeded Lane
-    /// C row is the stranger-admission design's owed test (vi) and is still unobserved. What the
+    /// a path to a first meeting on this radio — **observed on 2026-09-22** (the deletion round's
+    /// item 0, the runbook's "Lane C — the deletion round's item 0"): two unseeded Simulators found
+    /// a mesh through it and converged to `derived=2`, and the double-mint re-dial converged too.
+    /// On that shape this call is inert: `promoteToMesh()` has already founded and armed the ledger
+    /// by the driver's next poll, so the guard below answers `false` (`armed=false`). What the
     /// seed still buys is a deterministic pair — byte-identical TXT records and a mesh id known
     /// before launch — which is what makes a matrix run comparable between runs, and it is still
     /// why ``startNewMesh(name:)``, which mints a random id and a one-member descriptor, is
