@@ -1386,6 +1386,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
+    /// Renames an EXISTING roster entry to the name its peer disclosed after commit (Option 1b) —
+    /// and does nothing for a fingerprint the roster does not hold.
+    ///
+    /// Deliberately not ``recordSessionParticipant(displayName:fingerprint:signingPublicKey:keyAgreementPublicKey:)``:
+    /// that one APPENDS a missing fingerprint, and the only legitimate appender is the seated commit
+    /// in `onSlotConnected`, which runs after `maySeatVerifiedPeer`. A disclosure is not a seat.
+    ///
+    /// - Parameters:
+    ///   - fingerprint: The committed peer's fingerprint.
+    ///   - name: The disclosed name; moderated here like every other roster ingest.
+    func renameSessionParticipant(fingerprint: String, to name: String) {
+        guard let index = sessionRoster.firstIndex(where: { $0.fingerprint == fingerprint }) else { return }
+        sessionRoster[index].displayName = ItemNameModeration.moderatedPeerDisplayName(name)
+    }
+
     /// Drops the whole live roster. Internal/test seam only — UI finalize paths must NOT call
     /// this (it clobbered entries belonging to the NEXT session's review): the scoped consumers
     /// are `completeFriendReview(_:)` for a promoted batch and `consumeRosterEntries(fingerprints:)`
@@ -11473,16 +11488,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         // Stranger-admission Option 1b (2026-09-22): a peer's introduction carries no display
         // name, so the roster entry `onSlotConnected` writes at commit holds the fingerprint. This
-        // is the SUBSCRIBER that repairs it when the peer discloses — `recordSessionParticipant` is
-        // last-write-wins by fingerprint, which is exactly this case, so the keep-as-friend prompt
-        // and the participant list carry the real name from the first post-commit frame onward.
+        // is the SUBSCRIBER that repairs it when the peer discloses, so the keep-as-friend prompt and
+        // the participant list carry the real name from the first post-commit frame onward. It only
+        // RENAMES an entry the seated commit already wrote — it never appends one: a stranger the
+        // closed-mesh check refused (`maySeatVerifiedPeer`) is torn down asynchronously, and a named
+        // frame processed in that window must not mint it a roster row (the verify's finding).
         coordinator.onPeerDisplayNameDisclosed = { [weak self] identity in
-            self?.recordSessionParticipant(
-                displayName: identity.displayNameOrFingerprint,
-                fingerprint: identity.fingerprint,
-                signingPublicKey: identity.signingPublicKey,
-                keyAgreementPublicKey: identity.keyAgreementPublicKey
-            )
+            self?.renameSessionParticipant(fingerprint: identity.fingerprint, to: identity.displayNameOrFingerprint)
         }
         // Away-hearts prekey gossip (Increment 3): ride our intro, ingest verified peers'.
         coordinator.heartDropPrekeyBundleProvider = { [weak self] in self?.heartDropBundleProvider?() }
@@ -13389,9 +13401,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         via slot: PeerSlot,
         auditSendFailure: Bool
     ) async -> Bool {
+        // Stranger-admission Option 1b (the owner's call, 2026-09-22), enforced HERE because this is
+        // the one door every mesh frame is signed at: a slot this device has not committed and
+        // seated (`fingerprint == nil` — set only by `checkCoordinatorStates` after the coordinator
+        // reached `.connected` AND `maySeatVerifiedPeer` agreed) receives no display name. Six
+        // broadcasts reach such slots (the coordinator beacon, the admission request, rotation sync,
+        // key rotation and ack, the removal votes, departure and termination frames), and the QR
+        // ceremony is pre-commit by design; gating the coordinator's own five sends left all of them
+        // naming this device to a stranger (the item's blind verify, BLOCKER). The payload is
+        // stripped too when it carries names — `MeshPeerNameRedactable` — which also stops a RELAYED
+        // vote from carrying other members' names to one.
+        let committed = slot.fingerprint != nil
+        let outgoing: any Encodable = committed
+            ? encodable
+            : ((encodable as? any MeshPeerNameRedactable)?.withNamesWithheld() ?? encodable)
         // Every failing stage is NAMED (R7) — an encode/seal/sign failure used to return `false`
         // with no trace at ~30 call sites that ignore the result.
-        guard let payloadData = try? JSONEncoder().encode(encodable) else {
+        guard let payloadData = try? JSONEncoder().encode(outgoing) else {
             logSendFailure(type, stage: "encode")
             return false
         }
@@ -13415,7 +13441,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         guard let envelope = try? FernletIdentityEnvelope.signed(
             identityService: identity,
-            senderDisplayName: displayName,
+            senderDisplayName: committed ? displayName : "",
             recipientFingerprint: fingerprint,
             payloadType: type,
             payloadEncryption: encryption,

@@ -183,8 +183,15 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
     /// The sender's display name **if it disclosed one**, and `nil` when it deliberately did not.
     ///
     /// Stranger-admission Option 1b: a sender withholds its name until it has committed, and an
-    /// empty `senderDisplayName` is how it says so on the wire — no new field, no shape change, so
-    /// every existing golden and every in-field peer is unaffected. ``sanitizedSenderDisplayName``
+    /// empty `senderDisplayName` is how it says so on the wire — no new field and no shape change,
+    /// so every existing golden verifies unchanged.
+    ///
+    /// **An older build is affected, and that is a known cost of the owner's call.** It reads the
+    /// name from the introduction only, has no adoption path, and floors the empty field at "A
+    /// friend" — so it shows a new peer as "A friend" for the whole session, and a pair that keeps
+    /// each other writes "A friend" into its roster and trust vault. The reverse is fine: this build
+    /// ignores an older peer's introduction name and adopts it from the first post-commit frame.
+    /// No install outside the owner's own devices exists (2026-09-22). ``sanitizedSenderDisplayName``
     /// cannot express this: its floor turns an empty name into "A friend", which is
     /// indistinguishable from a peer whose name sanitized away to nothing. Read THIS wherever the
     /// difference between "withheld" and "blank" decides what a person is shown.

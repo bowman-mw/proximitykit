@@ -979,9 +979,16 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     private func ensureRecipient(for connection: RecipeShareConnection, identity peerIdentity: ProximityCoordinator.PeerIdentity) {
+        // Option 1b: until the peer discloses its signed name, keep the row's own label — the name
+        // this radio's Bonjour record already advertised (by design: the picker shows it) — rather
+        // than swapping it for the fingerprint and back a moment later (the item's blind verify).
+        // The fingerprint is the label only for a row this radio never discovered.
+        let shownName = peerIdentity.isDisplayNameWithheld
+            ? (nearbyRecipients.first { $0.id == connection.id }?.displayName ?? peerIdentity.fingerprint)
+            : peerIdentity.displayName
         let recipient = ProximityRecipeShareRecipient(
             id: connection.id,
-            displayName: peerIdentity.displayNameOrFingerprint,
+            displayName: shownName,
             fingerprint: peerIdentity.fingerprint
         )
         nearbyRecipients.removeAll { $0.id == recipient.id || $0.fingerprint == recipient.fingerprint }

@@ -417,7 +417,11 @@ public final class ProximityCoordinator {
         }
 
         transition(to: .transferring(peer: identity, progress: 0.0))
-        defer { if case .transferring = state { transition(to: .connected(peer: identity)) } }
+        // Restore the CURRENT identity, never the one captured above: the peer may disclose its name
+        // during the `await` below (Option 1b's adoption runs on any verified inbound frame), and
+        // putting the captured, still-withheld identity back into `state` would undo it for good —
+        // `connectedPeerIdentity` is already named, so the adoption never runs again.
+        defer { if case .transferring = state { transition(to: .connected(peer: connectedPeerIdentity ?? identity)) } }
         let data = try JSONEncoder().encode(envelope)
         try await transport.send(data, to: peer, mode: .reliable)
         recordEnvelope(envelope, direction: .sent, byteCount: data.count, signatureVerified: true)
@@ -432,7 +436,7 @@ public final class ProximityCoordinator {
             message: "Sent \(envelope.payloadTypeToken)"
         ))
         lastTransferCompletedAt = now()
-        transition(to: .connected(peer: identity))
+        transition(to: .connected(peer: connectedPeerIdentity ?? identity))
     }
 
     /// Signs and sends one payload to the connected peer.
@@ -949,7 +953,7 @@ public final class ProximityCoordinator {
             trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
                 kind: .revokedPeerBlocked,
                 peerFingerprint: fingerprint,
-                peerDisplayName: envelope.sanitizedSenderDisplayName,
+                peerDisplayName: Self.auditName(of: envelope),
                 payloadType: envelope.payloadType,
                 message: "Blocked envelope from revoked key"
             ))
@@ -971,7 +975,7 @@ public final class ProximityCoordinator {
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .envelopeReceived,
             peerFingerprint: IdentityService.fingerprint(of: envelope.senderSigningPublicKey),
-            peerDisplayName: envelope.sanitizedSenderDisplayName,
+            peerDisplayName: Self.auditName(of: envelope),
             payloadType: envelope.payloadType,
             message: "Received \(envelope.payloadTypeToken)"
         ))
@@ -1389,6 +1393,13 @@ public final class ProximityCoordinator {
     /// Longest capability token retained — no real token is anywhere near this.
     static let maxCapabilityTokenLength = 32
 
+    /// The name an audit row records for an inbound envelope's sender: the name it disclosed, or its
+    /// fingerprint when it withheld one (Option 1b). Never the "A friend" floor, which would persist
+    /// a name nobody chose and hide who the row is about.
+    private static func auditName(of envelope: FernletIdentityEnvelope) -> String {
+        envelope.disclosedSenderDisplayName ?? IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
+    }
+
     /// Clamps a peer-supplied capability list at the boundary (count and per-token length), so a
     /// hostile intro cannot inflate a `PeerIdentity` that every later gate walks.
     private static func clamped(_ capabilities: [String]?) -> [String]? {
@@ -1495,7 +1506,7 @@ public final class ProximityCoordinator {
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .stateTransition,
             peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
-            peerDisplayName: connectedIdentity?.displayName ?? pendingPeerIdentity?.displayName ?? currentTransportPeer?.displayHint,
+            peerDisplayName: connectedIdentity?.displayNameOrFingerprint ?? pendingPeerIdentity?.displayNameOrFingerprint ?? currentTransportPeer?.displayHint,
             message: newState.debugLabel
         ))
     }
@@ -1510,7 +1521,7 @@ public final class ProximityCoordinator {
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .error,
             peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
-            peerDisplayName: connectedIdentity?.displayName ?? pendingPeerIdentity?.displayName ?? currentTransportPeer?.displayHint,
+            peerDisplayName: connectedIdentity?.displayNameOrFingerprint ?? pendingPeerIdentity?.displayNameOrFingerprint ?? currentTransportPeer?.displayHint,
             message: reason
         ))
         inspector?.endSession(endState: "failed")
@@ -1545,7 +1556,7 @@ public final class ProximityCoordinator {
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .sessionEnded,
             peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
-            peerDisplayName: connectedIdentity?.displayName ?? pendingPeerIdentity?.displayName ?? currentTransportPeer?.displayHint,
+            peerDisplayName: connectedIdentity?.displayNameOrFingerprint ?? pendingPeerIdentity?.displayNameOrFingerprint ?? currentTransportPeer?.displayHint,
             message: "\(reason)"
         ))
 
@@ -1667,7 +1678,7 @@ public final class ProximityCoordinator {
                 self.trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
                     kind: .sessionEnded,
                     peerFingerprint: self.connectedIdentity?.fingerprint ?? self.pendingPeerIdentity?.fingerprint ?? self.currentTransportPeer?.advertisedFingerprint,
-                    peerDisplayName: self.connectedIdentity?.displayName ?? self.pendingPeerIdentity?.displayName ?? self.currentTransportPeer?.displayHint,
+                    peerDisplayName: self.connectedIdentity?.displayNameOrFingerprint ?? self.pendingPeerIdentity?.displayNameOrFingerprint ?? self.currentTransportPeer?.displayHint,
                     message: "timeout"
                 ))
                 self.inspector?.recordCoordinatorEvent("ended: timeout")

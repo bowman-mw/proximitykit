@@ -523,3 +523,63 @@ extension MeshAdmissionToken {
         }
     }
 }
+
+// MARK: - Names withheld from an uncommitted slot (stranger-admission Option 1b)
+
+/// A mesh payload that carries display names, and the copy of it an UNCOMMITTED slot may receive.
+///
+/// The owner's call of 2026-09-22 — withhold the display name until commit — is enforced for mesh
+/// frames at the one door they are all signed at, `MeshNetworkManager.sendEnvelopeCore`: a frame for
+/// a slot this device has not committed and seated carries an empty envelope name, and a payload that
+/// conforms here is replaced by ``withNamesWithheld()`` first. Three payload types reach such a slot
+/// with names in them — the admission request (the requester's own), the removal proposal and the
+/// removal second (the proposer's and the target's, and on a relay OTHER members' names) — and each
+/// conforms. A type that starts carrying a name and can be broadcast to every slot must conform too;
+/// `MeshNameWithholdingTests` pins the three.
+///
+/// The names are the only fields touched: fingerprints, keys, ids and instants are what the protocol
+/// runs on and are not personal display text. None of the three is signed on its own (each hop's
+/// envelope signs it), so a blanked copy verifies exactly like the original.
+protocol MeshPeerNameRedactable: Encodable {
+
+    /// This payload with every display name it carries replaced by the empty string.
+    func withNamesWithheld() -> Self
+}
+
+extension MeshAdmissionRequestPayload: MeshPeerNameRedactable {
+
+    /// The request with the requester's name blanked; every key and id unchanged.
+    func withNamesWithheld() -> MeshAdmissionRequestPayload {
+        MeshAdmissionRequestPayload(
+            meshID: meshID,
+            requesterFingerprint: requesterFingerprint,
+            requesterDisplayName: "",
+            requesterSigningPublicKey: requesterSigningPublicKey,
+            requesterKeyAgreementPublicKey: requesterKeyAgreementPublicKey
+        )
+    }
+}
+
+extension MeshRemovalProposalPayload: MeshPeerNameRedactable {
+
+    /// The proposal with the proposer's and the target's names blanked; the vote itself unchanged.
+    func withNamesWithheld() -> MeshRemovalProposalPayload {
+        MeshRemovalProposalPayload(
+            id: id,
+            targetFingerprint: targetFingerprint,
+            targetDisplayName: "",
+            proposerFingerprint: proposerFingerprint,
+            proposerDisplayName: "",
+            createdAt: createdAt,
+            expiresAt: expiresAt
+        )
+    }
+}
+
+extension MeshRemovalSecondPayload: MeshPeerNameRedactable {
+
+    /// The second with its embedded proposal's names blanked.
+    func withNamesWithheld() -> MeshRemovalSecondPayload {
+        MeshRemovalSecondPayload(proposal: proposal.withNamesWithheld(), seconderFingerprint: seconderFingerprint)
+    }
+}

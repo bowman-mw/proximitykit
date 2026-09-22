@@ -1437,8 +1437,15 @@ public final class PresenceManager: ProximityPayloadHandling {
             return
         }
         // Wire boundary: the display name is peer-supplied — sanitize (control/zero-width/bidi
-        // scalars out, length-capped) before it is persisted.
-        let senderName = ItemNameModeration.moderatedPeerDisplayName(peer.displayNameOrFingerprint)
+        // scalars out, length-capped) before it is persisted. Option 1b (2026-09-22): a heart can land
+        // before this side's commit, while the sender's name is still withheld — and the sender is a
+        // KEPT friend (checked just above), so the name this device already filed for them is the
+        // right one to persist, never the fingerprint (the item's blind verify).
+        let filedName = store.trustedProximityPeers
+            .first { $0.signingPublicKey == peer.signingPublicKey }?.displayName
+        let senderName = ItemNameModeration.moderatedPeerDisplayName(
+            peer.isDisplayNameWithheld ? (filedName ?? peer.fingerprint) : peer.displayName
+        )
         // The ledger drops duplicates (same id) and enforces the 5-minute per-sender receive rate.
         if ledger.recordReceivedHeart(id: payload.id, senderDisplayName: senderName, senderFingerprint: peer.fingerprint) {
             onHeartReceived?(peer.fingerprint)
