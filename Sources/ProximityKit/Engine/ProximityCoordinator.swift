@@ -1372,6 +1372,10 @@ public final class ProximityCoordinator {
     private func serviceType(for mode: Mode) -> String {
         switch mode {
         case .trainer: return MultipeerServiceType.trainer
+        // Inert since the deletion round (2026-09-22): the `_fernlet-friend` plist pair left with the
+        // MultipeerConnectivity radio, and both surviving `MeshPeerChannel` conformers' discovery
+        // doors (`startAdvertising`/`startBrowsing`) are documented no-ops — the shared session owns
+        // discovery on its own service type. The string is a per-mode label with no reader on the air.
         case .friend: return "fernlet-friend"
         }
     }

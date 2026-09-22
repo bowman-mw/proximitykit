@@ -318,6 +318,17 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// identically.
     nonisolated static let maxInboundWireBytes = SealedPayloadFraming.maxInflatedByteCount
 
+    /// The one predicate both wire directions ask: a datagram that arrives over the ceiling is
+    /// DROPPED before it reaches a channel (`receiveDatagrams`), and a frame handed to `send` over
+    /// it is REFUSED before any byte goes out. A seam rather than two inline comparisons since the
+    /// deletion round (2026-09-22): the retired MultipeerConnectivity radio's suite pinned its
+    /// drop-before-channel behaviour by driving a delegate; tier 1 cannot build a live
+    /// `Network.QUIC.Datagrams`, so on this radio the predicate is pinned as a value and the two
+    /// call sites are pinned by source needle (`NetworkMeshWireTests`), which is the honest way in.
+    nonisolated static func withinWireCeiling(_ byteCount: Int) -> Bool {
+        byteCount <= maxInboundWireBytes
+    }
+
     /// QUIC datagram frame size requested in the parameters, and the UDP payload size beneath it.
     /// The probe's measured values on the feasibility lane.
     nonisolated static let datagramFrameSize = 1_024
@@ -805,7 +816,7 @@ final class NetworkMeshSession: NetworkChannelHost {
         guard let key = identities.key(for: peer), let tunnel = tunnels[key] else {
             throw PeerTransportError.unexpectedState
         }
-        guard data.count <= Self.maxInboundWireBytes else {
+        guard Self.withinWireCeiling(data.count) else {
             throw PeerTransportError.sendFailed(
                 reason: MeshTransportError.oversizedFrame(byteCount: data.count).diagnosticDescription
             )
@@ -1816,7 +1827,7 @@ private extension NetworkMeshSession {
                     noteHeartbeat("received", key: key, over: .datagram)
                     continue
                 }
-                guard payload.count <= Self.maxInboundWireBytes else {
+                guard Self.withinWireCeiling(payload.count) else {
                     FernletAuditLog.log(
                         "mesh.quic.droppedOversizedDatagram",
                         context: ["bytes": "\(payload.count)"]
