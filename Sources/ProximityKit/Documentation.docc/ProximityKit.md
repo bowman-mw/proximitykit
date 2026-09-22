@@ -30,8 +30,8 @@ list in the manifest is the truth.
 ``ProximityRecipeShareManager`` for recipe pairing, ``PresenceManager`` for presence hearts)
 runs one shared radio multiplexed into per-peer channels — one of the three `Network*Session`
 types, one per radio, since the MC→QUIC cutover (2026-09-21) took the friend mesh off
-`MeshMultipeerSession` (the friend mesh still *selects* its radio, but there is one shipping answer;
-see Transport below).
+MultipeerConnectivity and the deletion round (2026-09-22) took that radio out of the tree (see
+Transport below).
 The friend mesh has **three** discovery verbs, not two: ``MeshNetworkManager/startJoin()`` and
 ``MeshNetworkManager/stopJoin()``, and — since P8 item 3 —
 ``MeshNetworkManager/holdCommittedLinks()``, which stops browsing and closes the admission doors
@@ -164,7 +164,7 @@ disconnect, stale/parked sweeps, slot eviction) runs the dropped ``ProximityCoor
 kicks an evicted peer's link (`MeshTransportSession.disconnectPeer`) so no zombie link
 survives a slot (`Tests/FernletTests/MemoryLifecycleTests` + `MemoryLifecycleBoundaryTests` are
 the enforcement; see Docs/Memory-Leak-Review-2026-08-17.md). Framework delegate callbacks
-(MCSession, NearbyInteraction) transfer non-Sendable objects across the main-actor
+(NearbyInteraction; the retired MultipeerConnectivity radio's did too) transfer non-Sendable objects across the main-actor
 hop via documented `nonisolated(unsafe)` locals, as does the proximity Live Activity reaper's one
 remaining `end(_:dismissalPolicy:)` call. Signing inputs come from the deterministic
 binary serializer in `CanonicalSignatureSerializer.swift` (domain-tagged per signed type,
@@ -313,50 +313,45 @@ type has no local label). Senders keep emitting frozen English forever.
 
 ### Transport
 
-The protocol surface carries no framework peer type: `MeshMultipeerSession` keeps the
-MultipeerConnectivity half private behind ``PeerEndpointKey``, which is what let the
-Network.framework/QUIC conformer slot in beside it without changing anything here — and then, at the
-cutover, replace it as the default without changing anything here either. ``MCPeerIDStoring`` and
-``FileMCPeerIDStore`` are the two deliberate exceptions — they persist the MC peer identity itself,
-nothing on a shipping path writes one any more, and they retire with MC in the deletion round.
+The protocol surface carries no framework peer type. That is what let the Network.framework/QUIC
+conformer slot in beside the MultipeerConnectivity one in P2 without changing anything here, replace
+it as the default at the cutover without changing anything here either, and — in the deletion round
+of 2026-09-22 — leave the tree with the framework's last two files (`MeshMultipeerSession.swift`,
+`MCPeerIDStore.swift`) while this surface stayed as it was. `TransportNeutralityBoundaryTests` now
+asserts **zero** framework identifiers under the whole package.
 
-**Four sessions, one surface — and since the cutover, three that ship.** `NetworkMeshSession`
-(Network.framework/QUIC, **the friend mesh's radio** since `MeshTransportFactory.shippingDefault`
-flipped to `.quic` on 2026-09-21 — see
+**Three sessions, one surface.** `NetworkMeshSession` (Network.framework/QUIC, **the friend mesh's
+radio** since 2026-09-21 — see
 [the network migration plan](../../../../Docs/Plan-ProximityKit-Network-Migration-2026-08-27.md) §7),
-`MeshMultipeerSession` (MultipeerConnectivity, on no shipping path any more: a DEBUG-only
-`FERNLET_MESH_TRANSPORT=multipeer` bisect path, held with its files until the deletion round),
 `NetworkPresenceSession` (the same framework, the presence radio, §17.1) and
 `NetworkRecipeShareSession` (the recipe radio, same plan section) each multiplex into per-peer
-channels — `PeerChannelTransport` and `NetworkPeerChannel` — that conform to ``PeerTransport``. The
-three QUIC sessions share one channel type through `NetworkChannelHost` and one parameter factory
-through `ProximityQUICParameters`, which is where `prohibitedInterfaceTypes = [.cellular]`, the
-accept-any validator and the declared idle timeout live once rather than three times; what they do
-NOT share is the ALPN, so a recipe dial can never complete a handshake with a presence or mesh
-listener. They also share the **glare** rule: when both ends dial at the same moment, each collapses
-the duplicate with ``MeshTunnelConvergence`` — the mesh ranking two session ids, presence and recipe
-share ranking the two advertised instance names, each a pure function of values the two devices
-agree on, so the connection that survives is the same one on both. Refusing the second connection
-instead is what leaves a mutually-dialing pair with none. Neither channel ever publishes
-``PeerTransportState/discovered``: `ProximityCoordinator.shouldInviteDiscoveredPeer` is a dormant,
-opposite-direction inviter policy that wakes if one does, and two policies pointing opposite ways
-means neither side dials. Discovery reaches the owner through the sessions' closure hooks instead.
+channels — `NetworkPeerChannel` — that conform to ``PeerTransport``. The three share one channel
+type through `NetworkChannelHost` and one parameter factory through `ProximityQUICParameters`,
+which is where `prohibitedInterfaceTypes = [.cellular]`, the accept-any validator and the declared
+idle timeout live once rather than three times; what they do NOT share is the ALPN, so a recipe dial
+can never complete a handshake with a presence or mesh listener. They also share the **glare** rule:
+when both ends dial at the same moment, each collapses the duplicate with ``MeshTunnelConvergence``
+— the mesh ranking two session ids, presence and recipe share ranking the two advertised instance
+names, each a pure function of values the two devices agree on, so the connection that survives is
+the same one on both. Refusing the second connection instead is what leaves a mutually-dialing pair
+with none. The channel never publishes ``PeerTransportState/discovered``:
+`ProximityCoordinator.shouldInviteDiscoveredPeer` is a dormant, opposite-direction inviter policy
+that wakes if one does, and two policies pointing opposite ways means neither side dials. Discovery
+reaches the owner through the sessions' closure hooks instead.
 
-**The manager holds its radio through a seam, and `NetworkMeshSession` is the only conformer a
-shipping build constructs** (plan §7, P2 item 8; the cutover, 2026-09-21). `MeshNetworkManager`
-holds its radio as a `MeshTransportSession` — `wire(_:)` installs one `MeshTransportHandlers` value,
-and start/stop/republish/invite/disconnect are the whole surface — so the same manager runs on
-either conformer and, in the suite, on an in-memory fake. That seam was built to make the migration
-possible and is what the migration then travelled through: `MeshTransportFactory` still decides, but
-`shippingDefault` is `.quic` and is the only answer a Release build can produce. The
-MultipeerConnectivity conformer is now the opt-in one — reachable from an internal injection or the
-DEBUG-only `FERNLET_MESH_TRANSPORT=multipeer` launch variable, which is what makes a bisect across
-the cutover boundary possible — and **nothing about the choice is persisted**, in either direction:
-no setting, no UI, no `UserDefaults` key, so it owes no row on the wipe ledger. A slot's channel is
+**The manager holds its radio through a seam, and `NetworkMeshSession` is the only conformer any
+build constructs** (plan §7, P2 item 8; the cutover, 2026-09-21; the deletion, 2026-09-22).
+`MeshNetworkManager` holds its radio as a `MeshTransportSession` — `wire(_:)` installs one
+`MeshTransportHandlers` value, and start/stop/republish/invite/disconnect are the whole surface — so
+the same manager ran on either conformer while there were two and, in the suite, runs on an
+in-memory fake. That seam was built to make the migration possible and is what the migration then
+travelled through; with the second conformer gone there is no selection left (no kind, no factory,
+no launch variable), and **nothing about the radio is persisted**: no setting, no UI, no
+`UserDefaults` key, so it owes no row on the wipe ledger. A slot's channel is
 held as `MeshPeerChannel` for the same reason; `DetachedPeerChannel` is the radio-less one the
 manager's test seams use. The manager is attached to the QUIC radio as its `MeshIntroductionAuthority`
-(mesh id, epoch reference, roster, signing key), which the MC radio is handed and ignores by
-contract — it authenticates one layer up, inside the slot coordinator's identity introduction.
+(mesh id, epoch reference, roster, signing key); membership is decided one layer up, at the slot
+coordinator's identity introduction, the commit and the admission grant.
 
 Every decision the QUIC session makes is factored out of it so it can be enumerated at tier 1 with
 no radios and no wall clock: `MeshLinkTable` (peer cap, per-connection state machine, three-attempt
@@ -664,12 +659,11 @@ but never charged. The two digest doors stay outside it by D-5.12 / D-6.10.
 - ``InboundPeerFrame``
 - ``PeerTransportError``
 - ``MultipeerServiceType``
-- ``MCPeerIDStoring``
-- ``FileMCPeerIDStore``
 
-Internal to the module, and listed here because they are where the transport SELECTION lives:
-`MeshTransportSession`, `MeshTransportHandlers`, `MeshTransportKind`, `MeshTransportFactory`,
-`MeshPeerChannel`, `DetachedPeerChannel`.
+Internal to the module, and listed here because they are the transport SEAM the manager holds its
+radio through (the selection that used to live beside them — `MeshTransportKind`,
+`MeshTransportFactory` — left with the second radio in the deletion round): `MeshTransportSession`,
+`MeshTransportHandlers`, `MeshSlotEvictionCause`, `MeshPeerChannel`, `DetachedPeerChannel`.
 
 Internal to the module, and listed here because they are where the QUIC transports' behaviour
 actually lives: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkPeerChannel`,

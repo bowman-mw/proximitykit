@@ -58,8 +58,9 @@ private struct FriendPhotoWallPreferences: Codable, Equatable {
 /// live-session chat, in-session hearts, moderation relay, fuzzy friend state, Group Activities,
 /// the QR verification ceremony, and the post-session keep-as-friend review.
 ///
-/// Structure: one shared radio — held through `MeshTransportSession`, so it is the MC session on
-/// every shipping path and the QUIC one only when selected — feeds per-peer channels; each channel
+/// Structure: one shared radio — held through `MeshTransportSession`; `NetworkMeshSession` since
+/// the MC→QUIC cutover, and the only radio in the tree since the deletion round — feeds per-peer
+/// channels; each channel
 /// gets a ``PeerSlot`` with its own ``ProximityCoordinator`` and a
 /// retained ``FriendSessionTrustPolicy``. Slots are capped (3 active + 2 lightweight, ranked by
 /// stable UWB distance with hysteresis-guarded overflow eviction) and a symmetric `sid`
@@ -311,10 +312,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     @ObservationIgnored private unowned let store: any ProximityHost
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
-    /// its body. `MeshTransportFactory` picks it, and since the MC→QUIC cutover (2026-09-21) it has
-    /// one shipping answer: `NetworkMeshSession`. The MultipeerConnectivity conformer is reachable
-    /// only from an internal injection or the DEBUG-only launch variable, as the bisect path across
-    /// that boundary, and retires with its file in the deletion round; a test injects its own.
+    /// its body. `NetworkMeshSession` since the MC→QUIC cutover (2026-09-21), and the only radio a
+    /// build can construct since the deletion round (2026-09-22) took the MultipeerConnectivity
+    /// conformer and the selection seam with it; the initializer's default is the one place that
+    /// names it, and a test injects its own.
     @ObservationIgnored private let transport: any MeshTransportSession
     /// The callbacks installed on ``transport``. Kept so a unit test can fire the events a radio
     /// drives in production — `onPeerDisconnected` above all, whose retry and local-kick bookkeeping
@@ -529,14 +530,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Hard cap on outstanding removal proposals (backstop against spoofed proposer fingerprints).
     private static let maxPendingRemovalProposals = 16
 
-    /// The app's entry point: a manager over the radio this build selected.
+    /// The app's entry point: a manager over the radio.
     ///
-    /// That is `NetworkMeshSession` — Network.framework/QUIC on `_fernlet-mesh2._udp` — everywhere
-    /// it matters since the MC→QUIC cutover (2026-09-21): ``MeshTransportFactory/shippingDefault``
-    /// is the only answer a Release build can produce. A DEBUG build can be launched back onto the
-    /// retired MultipeerConnectivity radio with `FERNLET_MESH_TRANSPORT=multipeer` to bisect across
-    /// that boundary; nothing about the choice is stored, so it lasts one launch and owes no row on
-    /// the persisted-surface wipe ledger.
+    /// That is `NetworkMeshSession` — Network.framework/QUIC on `_fernlet-mesh2._udp` — since the
+    /// MC→QUIC cutover (2026-09-21), and since the deletion round (2026-09-22) the only radio the
+    /// tree contains: there is no selection, no launch variable and no bisect door left, so
+    /// nothing about the radio is stored and nothing owes a row on the persisted-surface wipe
+    /// ledger. `MeshTransportSelectionTests.theAppsInitializerRunsOnTheQUICRadio` pins it.
     public convenience init(store: any ProximityHost) {
         self.init(store: store, transport: nil)
     }
@@ -566,7 +566,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         identity: IdentityService? = nil
     ) {
         self.store = store
-        self.transport = transport ?? MeshTransportFactory.makeSession(MeshTransportFactory.resolvedKind())
+        self.transport = transport ?? NetworkMeshSession()
         let id = identity ?? IdentityService()
         // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
         // otherwise every later sign/seal on this identity fails with no visible cause.
@@ -13416,9 +13416,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// ran a PRE-flip build still holds that file, and **delete-all does not sweep it**. The owner
     /// took the pure retire over the survey's recommended legacy `FileManager` sweep knowing the
     /// only install in the world is their own phone, which has run pre-P9 builds and holds the
-    /// file until a reinstall. `FileMCPeerIDStore.clearForDeleteAll()` still exists and is still
-    /// tested; it simply has no caller on the wipe path. It retires with the radio's two files in
-    /// the deletion round.
+    /// file until a reinstall. The store that wrote it (`FileMCPeerIDStore`) left the tree with the
+    /// radio's two files in the deletion round (2026-09-22), so nothing could re-mint it now even
+    /// on a DEBUG build.
     ///
     /// - Throws: ``IdentityError/keychainDeleteFailed(_:)`` when the keypair rows survive — a wipe
     ///   the user is told is complete must not silently leave them behind.

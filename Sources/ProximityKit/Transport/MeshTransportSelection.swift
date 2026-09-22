@@ -7,12 +7,11 @@ import Foundation
 ///
 /// A ``PeerTransport`` that also knows which peer it carries and can be told to publish
 /// `.connected` / `.disconnected`. The protocol outlived the two-radio period it was introduced
-/// for (P2): it named the shape `PeerChannelTransport` (MultipeerConnectivity — no longer on any
-/// shipping path since the 2026-09-21 MC→QUIC cutover, kept as a DEBUG bisect path until the
-/// deletion round) and `NetworkPeerChannel` (QUIC, the one radio a shipping build constructs)
-/// share, so `MeshNetworkManager` can hold a slot's channel without knowing which radio minted it.
-/// It still earns its place — `DetachedPeerChannel` is the third conformer, and the manager's test
-/// seams are built on it.
+/// for (P2): it named the shape the retired MultipeerConnectivity radio's per-peer adapter and
+/// `NetworkPeerChannel` (QUIC) shared, so `MeshNetworkManager` could hold a slot's channel without
+/// knowing which radio minted it. The MC adapter left the tree in the deletion round (2026-09-22);
+/// the protocol still earns its place — `DetachedPeerChannel` is the second conformer, and the
+/// manager's test seams are built on it.
 ///
 /// `notifyConnected()` is the owner's call, never the radio's: the owner creates the slot's
 /// coordinator and awaits its `begin()` first, because publishing `.connected` before that returns
@@ -30,8 +29,6 @@ protocol MeshPeerChannel: PeerTransport {
     func notifyDisconnected(reason: String)
 }
 
-extension PeerChannelTransport: MeshPeerChannel {}
-
 extension NetworkPeerChannel: MeshPeerChannel {}
 
 // MARK: - DetachedPeerChannel
@@ -39,10 +36,10 @@ extension NetworkPeerChannel: MeshPeerChannel {}
 /// A channel with no radio behind it: it publishes state locally and refuses every send.
 ///
 /// The manager's `internal` test seams (`addSlotForTesting`, `makeRetainedSlotCoordinatorForTesting`)
-/// need a slot channel, and a unit test has no live radio to put behind one. They used to build a
-/// `PeerChannelTransport` over the manager's never-started `MeshMultipeerSession`, whose `send`
-/// throws ``PeerTransportError/unexpectedState`` for want of an MCSession — this is that same
-/// behaviour, said out loud, and it costs the manager one fewer reason to name a specific radio.
+/// need a slot channel, and a unit test has no live radio to put behind one. Before P1 they built a
+/// channel over a never-started radio, whose `send` threw ``PeerTransportError/unexpectedState``
+/// for want of a live session — this is that same behaviour, said out loud, and it costs the
+/// manager one fewer reason to name a specific radio.
 @MainActor
 final class DetachedPeerChannel: MeshPeerChannel {
 
@@ -88,10 +85,10 @@ final class DetachedPeerChannel: MeshPeerChannel {
 
 /// Everything a mesh radio calls back into its owner for, in one value.
 ///
-/// One struct rather than five settable properties on ``MeshTransportSession``: the two radios store
-/// their hooks under their own names and types (the MC session's channel hook is typed to
-/// `PeerChannelTransport`, the QUIC session's to `NetworkPeerChannel`), so a settable protocol
-/// property would need a getter that could not honestly answer. ``MeshTransportSession/wire(_:)``
+/// One struct rather than five settable properties on ``MeshTransportSession``: a radio stores its
+/// hooks under its own names and types (the QUIC session's channel hook is typed to
+/// `NetworkPeerChannel`; the retired MC session's was typed to its own adapter), so a settable
+/// protocol property would need a getter that could not honestly answer. ``MeshTransportSession/wire(_:)``
 /// takes the whole set instead, and each conformer forwards it to whatever it actually keeps.
 ///
 /// Every closure here is expected to capture its owner weakly; a radio holds this struct for its
@@ -108,7 +105,7 @@ struct MeshTransportHandlers {
     var onPeerDisconnected: ((PeerHandle, String) -> Void)?
 
     /// Whether to admit an inbound connection attempt. **Fail closed**: a radio with no gate wired
-    /// refuses, exactly as `MeshMultipeerSession`'s advertiser does (`?? false`).
+    /// refuses (`?? false`), exactly as the retired MultipeerConnectivity advertiser did.
     var shouldAcceptInvitation: ((PeerHandle) -> Bool)?
 
     /// Discovery failed to start — a declined Local Network prompt, or a service type missing from
@@ -156,16 +153,16 @@ nonisolated enum MeshSlotEvictionCause: Equatable, Sendable {
 
 // MARK: - MeshTransportSession
 
-/// The shared radio `MeshNetworkManager` drives, with neither radio's name on it.
+/// The shared radio `MeshNetworkManager` drives, with no radio's name on it.
 ///
-/// `MeshMultipeerSession` and `NetworkMeshSession` are the two conformers. The manager owns one of
-/// them through this protocol, so the suite can run the manager over an in-memory fake and the QUIC
-/// conformer can be selected without a second copy of the manager.
+/// `NetworkMeshSession` is the one conformer a shipping or a test build constructs since the
+/// deletion round (2026-09-22) took the MultipeerConnectivity one; the seam outlives the choice it
+/// was built to make because the suite runs the manager over an in-memory fake through it.
 ///
-/// `startRadios(discoveryInfo:)` rather than `start(discoveryInfo:)`: the MC session's own
-/// `start(serviceType:discoveryInfo:)` defaults its service type, so a same-named forwarder would
-/// read as direct recursion (Power of 10 rule 1) for no gain. The service type is each radio's own
-/// affair now — the owner never picks one.
+/// `startRadios(discoveryInfo:)` rather than `start(discoveryInfo:)`: the retired MC session's own
+/// `start(serviceType:discoveryInfo:)` defaulted its service type, so a same-named forwarder would
+/// have read as direct recursion (Power of 10 rule 1) for no gain. The service type is the radio's
+/// own affair — the owner never picks one.
 @MainActor
 protocol MeshTransportSession: AnyObject {
 
@@ -173,9 +170,10 @@ protocol MeshTransportSession: AnyObject {
     func wire(_ handlers: MeshTransportHandlers)
 
     /// Hands the radio the mesh id, epoch reference, roster and signing key its peer authentication
-    /// needs. A no-op on the MC radio, which authenticates inside the coordinator's identity
-    /// introduction instead; on the QUIC radio it is the difference between admitting a verified
-    /// roster member and refusing every tunnel.
+    /// needs — on the QUIC radio the difference between admitting a verified roster member (or a
+    /// provisional stranger while the join doors are open) and refusing every tunnel. (The retired
+    /// MC radio ignored it by contract; it authenticated inside the coordinator's identity
+    /// introduction instead.)
     func attachIntroductionAuthority(_ authority: any MeshIntroductionAuthority)
 
     /// Brings advertising and browsing up with the owner's discovery payload.
@@ -198,9 +196,10 @@ protocol MeshTransportSession: AnyObject {
     /// Frees one peer's link, telling the radio **why** the owner is doing it.
     ///
     /// Default-implemented as ``disconnectPeer(_:)``, so a radio that keeps no per-endpoint budget
-    /// need not know the cause exists: `MeshMultipeerSession` re-invites on its own timer and has
-    /// nothing to spend. `NetworkMeshSession` overrides it, because its never-refilled re-propose
-    /// budget is the one bound the distinction matters to (see ``MeshSlotEvictionCause``).
+    /// need not know the cause exists (the retired MC radio re-invited on its own timer and had
+    /// nothing to spend; a fake has nothing either). `NetworkMeshSession` overrides it, because its
+    /// never-refilled re-propose budget is the one bound the distinction matters to (see
+    /// ``MeshSlotEvictionCause``).
     func disconnectPeer(_ peer: PeerHandle, cause: MeshSlotEvictionCause)
 
     /// Stops browsing and advertising while KEEPING the session and every live connection — the
@@ -230,27 +229,6 @@ extension MeshTransportSession {
 
 // MARK: - Conformances
 
-extension MeshMultipeerSession: MeshTransportSession {
-
-    func wire(_ handlers: MeshTransportHandlers) {
-        onPeerDiscovered = handlers.onPeerDiscovered
-        onPeerChannelReady = { channel in handlers.onChannelReady?(channel) }
-        onPeerDisconnected = handlers.onPeerDisconnected
-        shouldAcceptInvitation = handlers.shouldAcceptInvitation
-        onTransportError = handlers.onTransportError
-    }
-
-    /// Deliberately empty. This radio's peers authenticate inside `ProximityCoordinator`'s signed
-    /// identity introduction, over an already-established MC link; it has no transport-level
-    /// admission decision to make and therefore no authority to consult. Holding a reference it
-    /// never reads would be the misleading half.
-    func attachIntroductionAuthority(_ authority: any MeshIntroductionAuthority) {}
-
-    func startRadios(discoveryInfo: [String: String]) {
-        start(serviceType: MeshMultipeerSession.friendServiceType, discoveryInfo: discoveryInfo)
-    }
-}
-
 extension NetworkMeshSession: MeshTransportSession {
 
     func wire(_ handlers: MeshTransportHandlers) {
@@ -265,20 +243,21 @@ extension NetworkMeshSession: MeshTransportSession {
         introductionAuthority = authority
     }
 
-    /// "Invite" is the MC word for it; on this radio it is a dial. Same decision, same owner, and
+    /// "Invite" was the MC word for it; on this radio it is a dial. Same decision, same owner, and
     /// the same refusal rules — ``MeshLinkTable`` still gets the last word on whether it happens.
     func invite(_ peer: PeerHandle) {
         dial(peer)
     }
 
     /// A failed listener is reported through the owner's transport-error hook rather than thrown:
-    /// the owner's start path is the same on both radios, and the MC one cannot throw. The symptom
-    /// a user sees — the discovery-failure banner — is identical either way.
+    /// that was the shape the retired MultipeerConnectivity radio forced (it could not throw), and
+    /// it is kept because the symptom a user sees — the discovery-failure banner — is the owner's
+    /// to render either way.
     func startRadios(discoveryInfo: [String: String]) {
         // A radio that is already running is, on this path, a PAUSED one: `start(discoveryInfo:)`
         // guards `!isRunning`, so without this arm the hold's inverse would be a silent no-op and
-        // this radio would stay dark for the rest of the session. The MC radio self-heals inside
-        // its own `start(serviceType:discoveryInfo:)`, which clears the pause and recreates both.
+        // this radio would stay dark for the rest of the session. (The retired MC radio self-healed
+        // inside its own start; this one needs the arm said out loud.)
         guard !isRunning else {
             // The caller's fields are not thrown away with the start (review finding F-5):
             // `resumeDiscovery()` re-mints the listener from the STORED advertisement, so a resume
@@ -293,96 +272,6 @@ extension NetworkMeshSession: MeshTransportSession {
             try start(discoveryInfo: discoveryInfo)
         } catch {
             reportTransportError("The QUIC mesh radio could not start: \(error.localizedDescription)")
-        }
-    }
-}
-
-// MARK: - MeshTransportKind
-
-/// Which radio the friend mesh runs on.
-///
-/// Frozen internal tokens: the raw values are parsed from a DEBUG-only environment variable and
-/// never localized, persisted, or put on a wire.
-///
-/// **The seam outlived the choice it was built for.** Since the MC→QUIC cutover (2026-09-21) there
-/// is one shipping answer, and the second case is kept for exactly one job: letting a DEBUG build
-/// be launched back onto MultipeerConnectivity to bisect a regression across the cutover boundary.
-/// It retires with `MeshMultipeerSession` in the deletion round that follows this flip.
-enum MeshTransportKind: String, Sendable, CaseIterable {
-
-    /// MultipeerConnectivity — off every shipping path since the cutover; opt-in under DEBUG with
-    /// `FERNLET_MESH_TRANSPORT=multipeer`, as the bisect path across that boundary, until the
-    /// deletion round removes the radio and this case with it.
-    case multipeer
-
-    /// Network.framework QUIC — ``MeshTransportFactory/shippingDefault`` since the cutover, so this
-    /// is what every launch that selects nothing gets.
-    case quic
-}
-
-/// Builds the friend mesh's radio, and decides which one a build gets.
-///
-/// **QUIC is the default in every shipping path** since the MC→QUIC cutover (2026-09-21).
-/// ``shippingDefault`` is the only answer a Release build can produce — the environment read is
-/// compiled out — and nothing about the choice is persisted: there is no setting, no UI, and no
-/// `UserDefaults` key, so the selection owes no row on the persisted-surface wipe ledger. A DEBUG
-/// build can opt BACK onto the retired MultipeerConnectivity radio for one launch with
-/// ``quicSelectionEnvironmentKey`` (`FERNLET_MESH_TRANSPORT=multipeer`), which is what makes a
-/// bisect across the cutover boundary possible; that arm, this type's `.multipeer` case and the MC
-/// radio itself retire together in the deletion round.
-@MainActor
-enum MeshTransportFactory {
-
-    /// What every shipping build uses, unconditionally.
-    ///
-    /// Flipped `.multipeer` → `.quic` by the cutover (2026-09-21). This is a VALUE two suites pin in
-    /// both directions — `MeshTransportSelectionTests.theShippingDefaultIsQUIC` and
-    /// `MeshP9McRetirementAcceptanceTests` — precisely so it cannot move back, or move again,
-    /// without a commit that argues for it.
-    static var shippingDefault: MeshTransportKind { .quic }
-
-    #if DEBUG
-    /// Launch environment key selecting the radio, e.g. `FERNLET_MESH_TRANSPORT=multipeer`. DEBUG
-    /// only, per-launch, never written anywhere. An unrecognized value falls back to
-    /// ``shippingDefault`` rather than failing to start a radio at all.
-    ///
-    /// The SYMBOL's name is a leftover from the period when the only thing worth selecting was QUIC;
-    /// since the cutover the only selection that changes anything is the retired radio. The name is
-    /// kept as it is because the VARIABLE's spelling — `FERNLET_MESH_TRANSPORT` — is what every
-    /// runbook recipe, Simulator lane and `SIMCTL_CHILD_` line passes, and that must not drift.
-    static let quicSelectionEnvironmentKey = "FERNLET_MESH_TRANSPORT"
-    #endif
-
-    /// The radio this build should use, given a launch environment.
-    ///
-    /// Takes the environment rather than reading `ProcessInfo` so the decision is a pure function a
-    /// test can enumerate, including the Release answer. Since the cutover every branch that is not
-    /// an explicit DEBUG opt-in answers ``shippingDefault``, i.e. QUIC — and no branch names a radio
-    /// literally, which is the invariant `MeshP9McRetirementAcceptanceTests` pins over this body
-    /// because a DEBUG test build cannot execute the `#else` arm at all.
-    static func resolvedKind(environment: [String: String]) -> MeshTransportKind {
-        #if DEBUG
-        guard let raw = environment[quicSelectionEnvironmentKey] else { return shippingDefault }
-        return MeshTransportKind(rawValue: raw) ?? shippingDefault
-        #else
-        return shippingDefault
-        #endif
-    }
-
-    /// The radio this process should use.
-    static func resolvedKind() -> MeshTransportKind {
-        resolvedKind(environment: ProcessInfo.processInfo.environment)
-    }
-
-    /// Builds one radio of the given kind.
-    ///
-    /// The `.multipeer` arm is the DEBUG bisect path's only construction site, and the last thing
-    /// that builds a `MeshMultipeerSession` on any launch since the cutover. It goes with the file
-    /// in the deletion round.
-    static func makeSession(_ kind: MeshTransportKind) -> any MeshTransportSession {
-        switch kind {
-        case .multipeer: return MeshMultipeerSession()
-        case .quic:      return NetworkMeshSession()
         }
     }
 }
