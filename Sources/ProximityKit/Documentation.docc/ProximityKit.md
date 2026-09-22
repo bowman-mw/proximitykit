@@ -2074,7 +2074,12 @@ answers `.reclaimed` for "this device holds no record", so a roster-wide claim a
 pass at every non-recipient for the wrong reason.
 
 **The save cadence extends the one writer**, `persistSessionContext(addingEpochHead:terminating:)` —
-there is deliberately no second door over a five-state load. It saves on founding, on a verified
+there is deliberately no second door over a five-state load, with one narrow exception:
+``MeshNetworkManager/acknowledgeSessionEndingPresented()`` (owner-calls item 3, 2026-09-22), the
+Friends tab's resume card's `.onAppear`, flips `MeshSessionContext.endingPresented` on a `.loaded`
+context of the same mesh the launch restored, for an ending only — so an ending is told once
+instead of at every cold start, while the rejoin bar (re-derived from the ending, not the mark) is
+untouched. A newly written ending clears the mark. It saves on founding, on a verified
 admission, on every verified record that moves the roster, on every merge, on every rotation, on a
 termination and on a departure; each caller treats a `false` as "the thing did not happen", which is
 why a refused seal abandons a founding, blocks a join acknowledgement, and **rolls a verified record

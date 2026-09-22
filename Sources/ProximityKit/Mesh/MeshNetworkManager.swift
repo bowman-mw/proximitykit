@@ -9081,7 +9081,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// side, before the new epoch is distributed or acknowledged. The general "who saves when"
     /// cadence (admission, heartbeat, develop, ceiling) is item 6's, and it extends this function
     /// rather than adding a second writer: two writers over one five-state load is how a refusal
-    /// becomes an overwrite.
+    /// becomes an overwrite. **The one exception** (owner-calls item 3, 2026-09-22) is
+    /// ``acknowledgeSessionEndingPresented()``, and it is narrow by construction: it writes only
+    /// on a `.loaded` state (a refusal, deferral or corrupt file writes nothing), only for the SAME
+    /// mesh the launch restored, only for an ending, and only the one `endingPresented` flag — it
+    /// cannot overwrite anything this function would have written.
     ///
     /// ## The save cadence (item 6, plan §3.6)
     ///
@@ -9203,6 +9207,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if let termination {
             context.localTermination = termination
             if termination.reason == .developed { context.developedLocally = true }
+            // A NEW ending is news, whatever an older mark said: the mark describes the ending that
+            // was shown, never a later one (owner-calls item 3's verify — with the endings-only guard
+            // a live context is never marked, so this is the belt that keeps it that way).
+            context.endingPresented = false
         }
         do {
             try sessionStore.save(context, token: token)
@@ -10151,13 +10159,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// the copy loaded at launch, so marking the FILE does not pull the card out from under the
     /// person reading it; a repeated appearance finds the mark already set and writes nothing.
     ///
+    /// **The second writer of the sealed context**, beside ``persistSessionContext(addingEpochHead:terminating:)``,
+    /// and deliberately narrow: it only ever flips this one Bool, only on a successful load of the
+    /// SAME mesh the launch restored, only for an ending, and synchronously on the main actor like
+    /// every other writer — so it cannot race a save or write a context for a live mesh.
+    ///
     /// Only an ENDING is marked: an offer to resume and a quarantined file are not news that goes
     /// stale the same way, and neither reaches the write. A load that is deferred, refused or
     /// corrupt, a file that now names another mesh, or a refused seal writes nothing and is
     /// audited — the cost is that the card is shown once more at the next launch, never lost.
     public func acknowledgeSessionEndingPresented() {
-        guard case .previousSessionEnded = sessionResumePresentation,
-              let restored = restoredSessionContext else { return }
+        guard case .previousSessionEnded = sessionResumePresentation else { return }
+        // Keyed on `lastSessionRestoreOutcome` — the SAME value the card is drawn from — and never on
+        // `restoredSessionContext`: opening the Friends tab runs the run policy's fresh-search entry,
+        // whose `startJoin()` resets the session state machine and nils `restoredSessionContext`
+        // BEFORE this card's `.onAppear`. Keyed on that, this returned early on every real launch and
+        // the nag survived every cold start while every unit pin stayed green (the item's blind
+        // verify, BLOCKER, reproduced over three cold starts on a Simulator).
+        guard let restored = lastSessionRestoreOutcome?.context else {
+            FernletAuditLog.log("mesh.sessionRestore.endingPresentedNotWritten", context: ["cause": "noRestoredContext"])
+            return
+        }
         let sessionStore = MeshSessionStore(scope: store.meshSessionStorage)
         guard case .loaded(var context, let token) = sessionStore.load(), context.meshID == restored.meshID else {
             FernletAuditLog.log("mesh.sessionRestore.endingPresentedNotWritten", context: ["cause": "load"])
