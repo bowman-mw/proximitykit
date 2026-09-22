@@ -120,10 +120,14 @@ so a pre-commit peer is shown by its fingerprint. No wire shape moved: an empty 
 `MeshNetworkManager.sendEnvelopeCore`, six broadcasts reach slots this device has not committed and
 seated (the coordinator beacon, the admission request, rotation sync, key rotation and ack, the
 removal votes, departure and termination frames) and the QR ceremony is pre-commit by design — so
-that door sends an empty envelope name to an uncommitted slot and strips any
-`MeshPeerNameRedactable` payload (the admission request, the removal proposal and second) of every
-name, a relayed member's included. The first build gated the coordinator only; the item's blind
-verify found the mesh door still naming this device to strangers.
+that door sends an empty envelope name to an uncommitted slot and strips a
+`MeshPeerNameRedactable` payload (the removal proposal and second) of every name, a relayed member's
+included. The first build gated the coordinator only; the item's blind verify found the mesh door
+still naming this device to strangers. The RECEIVING side is honest too (the re-verify): a vote that
+arrives with names withheld is filled from what this device already knows
+(`knownDisplayName(forFingerprint:)`: the descriptor, then the roster, then the fingerprint), and the
+join request is sent to COMMITTED slots only — a blanked request had made the admitter mint "A
+friend" into the descriptor, whose merge keeps the first entry.
 
 **What rides a committed session.** ``MeshNetworkManager`` owns the feature payloads: disposable
 camera photos (quota-capped, cached metadata-only through `PrivateMediaStore`, optionally

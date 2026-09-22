@@ -531,10 +531,12 @@ extension MeshAdmissionToken {
 /// The owner's call of 2026-09-22 — withhold the display name until commit — is enforced for mesh
 /// frames at the one door they are all signed at, `MeshNetworkManager.sendEnvelopeCore`: a frame for
 /// a slot this device has not committed and seated carries an empty envelope name, and a payload that
-/// conforms here is replaced by ``withNamesWithheld()`` first. Three payload types reach such a slot
-/// with names in them — the admission request (the requester's own), the removal proposal and the
-/// removal second (the proposer's and the target's, and on a relay OTHER members' names) — and each
-/// conforms. A type that starts carrying a name and can be broadcast to every slot must conform too;
+/// conforms here is replaced by ``withNamesWithheld()`` first. Two payload types reach such a slot
+/// with names in them — the removal proposal and the removal second (the proposer's and the
+/// target's, and on a relay OTHER members' names) — and the RECEIVER fills a withheld name from what
+/// it already knows (``MeshRemovalProposalPayload/fillingWithheldNames(_:)``). The admission request
+/// conforms too, as a belt only: since the owner-calls re-verify it is sent to committed slots alone
+/// (`sendAdmissionRequest(for:)`), because a blanked request made the admitter mint "A friend". A type that starts carrying a name and can be broadcast to every slot must conform too;
 /// `MeshNameWithholdingTests` pins the three.
 ///
 /// The names are the only fields touched: fingerprints, keys, ids and instants are what the protocol
@@ -570,6 +572,27 @@ extension MeshRemovalProposalPayload: MeshPeerNameRedactable {
             targetDisplayName: "",
             proposerFingerprint: proposerFingerprint,
             proposerDisplayName: "",
+            createdAt: createdAt,
+            expiresAt: expiresAt
+        )
+    }
+}
+
+extension MeshRemovalProposalPayload {
+
+    /// This vote with every WITHHELD (empty) name filled from `resolve` — the receiving side's half of
+    /// Option 1b. A name the sender did disclose is kept as sent; fingerprints, id and instants are
+    /// never touched, so the vote is the same vote.
+    ///
+    /// - Parameter resolve: What this device already shows for a fingerprint.
+    /// - Returns: The vote with no blank name.
+    func fillingWithheldNames(_ resolve: (String) -> String) -> MeshRemovalProposalPayload {
+        MeshRemovalProposalPayload(
+            id: id,
+            targetFingerprint: targetFingerprint,
+            targetDisplayName: targetDisplayName.isEmpty ? resolve(targetFingerprint) : targetDisplayName,
+            proposerFingerprint: proposerFingerprint,
+            proposerDisplayName: proposerDisplayName.isEmpty ? resolve(proposerFingerprint) : proposerDisplayName,
             createdAt: createdAt,
             expiresAt: expiresAt
         )

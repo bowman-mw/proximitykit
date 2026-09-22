@@ -11606,8 +11606,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         // Stranger-admission Option 1b (2026-09-22): a peer's introduction carries no display
         // name, so the roster entry `onSlotConnected` writes at commit holds the fingerprint. This
-        // is the SUBSCRIBER that repairs it when the peer discloses, so the keep-as-friend prompt and
-        // the participant list carry the real name from the first post-commit frame onward. It only
+        // is the SUBSCRIBER that repairs it when the peer discloses, so the session roster — and so
+        // the keep-as-friend prompt built from it — carries the real name from the first post-commit
+        // frame onward. (Not the participant list: `sessionParticipants` reads the descriptor and the
+        // slots, never the roster.) It only
         // RENAMES an entry the seated commit already wrote — it never appends one: a stranger the
         // closed-mesh check refused (`maySeatVerifiedPeer`) is torn down asynchronously, and a named
         // frame processed in that window must not mint it a roster row (the verify's finding).
@@ -12609,6 +12611,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: - Admission
 
+    /// Asks every slot this device has COMMITTED to admit it to `mesh`.
+    ///
+    /// **Committed slots only** (owner-calls round, 2026-09-22 — the re-verify's second FIX). The
+    /// request names this device, and under stranger-admission Option 1b a peer this side has not
+    /// committed gets no name: the signing door blanked the request for such a slot, and the
+    /// admitter then floored the blank to "A friend", prompted "A friend wants to join", and on
+    /// Allow wrote "A friend" into the descriptor, whose merge keeps the first entry — so the label
+    /// spread to every member. Asking only committed slots removes the blank at its source and
+    /// withholds nothing a committed admitter is owed. It cannot strand a join: every trigger holds a
+    /// committed slot — a descriptor is dropped from an uncommitted one
+    /// (`mesh.meshDescriptor.droppedUncommittedSlot`), and a rotation's rejoin arrives from the
+    /// coordinator this device was in session with — and ``requestAdmissionForHarness()`` already
+    /// documented exactly this contract ("asks every committed slot").
     private func sendAdmissionRequest(for mesh: MeshDescriptor) {
         let request = MeshAdmissionRequestPayload(
             meshID: mesh.meshID,
@@ -12617,7 +12632,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             requesterSigningPublicKey: identity.localSigningPublicKey,
             requesterKeyAgreementPublicKey: identity.localKeyAgreementPublicKey
         )
-        for slot in slots {
+        for slot in slots where slot.fingerprint != nil {
             // Record what we asked for, on the slot we asked it on: `handleAdmissionGrant` accepts
             // a grant ONLY as the answer to this. Bounded by the slot cap (R3).
             if outstandingAdmissionRequestBySlot.count < Self.maxOutstandingAdmissionRequests
@@ -12640,7 +12655,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard !pendingRemovalProposals.contains(where: { $0.id == proposal.id }) else { return }
         guard !pendingRemovalProposals.contains(where: { $0.proposerFingerprint == proposal.proposerFingerprint }) else { return }
         guard pendingRemovalProposals.count < Self.maxPendingRemovalProposals else { return }
-        pendingRemovalProposals.append(proposal)
+        // Option 1b's receiving half (the re-verify's first FIX): a peer that has not committed THIS
+        // device sends it a vote with both names withheld, and the card then read " asked to remove ."
+        // with a live "Second Removal" button — for 60 s, since dedup keeps the first copy. The vote
+        // runs on fingerprints and is unchanged; only a BLANK name is filled, from what this device
+        // already knows (``knownDisplayName(forFingerprint:)``), so nothing new is disclosed to it.
+        pendingRemovalProposals.append(proposal.fillingWithheldNames { self.knownDisplayName(forFingerprint: $0) })
         if rebroadcast {
             broadcastEnvelope(.meshRemovalProposal, encodable: proposal)
         }
@@ -12664,6 +12684,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             broadcastEnvelope(.meshRemovalSecond, encodable: second)
         }
         applyApprovedRemoval(proposal)
+    }
+
+    /// The name this device already shows for `fingerprint`, for a payload that arrived with it
+    /// withheld (Option 1b): this device's own name, else the descriptor member's (as admitted),
+    /// else the session roster's (disclosed after commit — or the fingerprint while withheld), else
+    /// the fingerprint itself. Never a blank, never the "A friend" floor.
+    ///
+    /// - Parameter fingerprint: The member's fingerprint.
+    /// - Returns: The name to show.
+    func knownDisplayName(forFingerprint fingerprint: String) -> String {
+        if fingerprint == identity.localFingerprint { return displayName }
+        if let member = currentMesh?.members.first(where: { $0.fingerprint == fingerprint }),
+           !member.displayName.isEmpty {
+            return member.displayName
+        }
+        return sessionRoster.first { $0.fingerprint == fingerprint }?.displayName ?? fingerprint
     }
 
     private func applyApprovedRemoval(_ proposal: MeshRemovalProposalPayload) {
@@ -14949,6 +14985,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Returns: what the founding answered.
     @discardableResult
     func promoteToMeshForTesting() -> Bool { promoteToMesh() }
+
+    /// Delivers `proposal` to the removal-vote ingest exactly as a received vote arrives there
+    /// (no rebroadcast) — the door `MeshNameWithholdingTests` drives a WITHHELD vote through.
+    func ingestRemovalProposalForTesting(_ proposal: MeshRemovalProposalPayload) {
+        handleRemovalProposal(proposal, rebroadcast: false)
+    }
 
     /// Drives the REAL dwell-commit path for one seated slot: the four handshake-verified fields
     /// `checkCoordinatorStates` writes, and then `onSlotConnected(at:identity:)` (P6 item 2).
