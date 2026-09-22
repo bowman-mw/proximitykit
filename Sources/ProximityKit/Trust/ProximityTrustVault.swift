@@ -101,7 +101,7 @@ public final class ProximityTrustVault: ProximityTrustPolicy {
     public func trust(_ peer: ProximityCoordinator.PeerIdentity, mode: ProximityCoordinator.Mode) {
         let fingerprint = IdentityService.fingerprint(of: peer.signingPublicKey)
         if let index = trustedPeers.firstIndex(where: { $0.signingPublicKey == peer.signingPublicKey }) {
-            trustedPeers[index].displayName = peer.displayName
+            trustedPeers[index].displayName = peer.displayNameOrFingerprint
             trustedPeers[index].fingerprint = fingerprint
             trustedPeers[index].keyAgreementPublicKey = peer.keyAgreementPublicKey
             trustedPeers[index].mode = mode
@@ -110,7 +110,7 @@ public final class ProximityTrustVault: ProximityTrustPolicy {
             trustedPeers[index].blockedAt = nil
         } else {
             trustedPeers.append(ProximityTrustedPeerRecord(
-                displayName: peer.displayName,
+                displayName: peer.displayNameOrFingerprint,
                 fingerprint: fingerprint,
                 signingPublicKey: peer.signingPublicKey,
                 keyAgreementPublicKey: peer.keyAgreementPublicKey,

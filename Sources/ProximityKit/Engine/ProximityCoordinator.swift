@@ -407,7 +407,7 @@ public final class ProximityCoordinator {
         startHeartbeatLoop()
         // Send one immediate ping so the peer can auto-commit without waiting 30 seconds.
         if currentMode == .friend { Task { [weak self] in await self?.heartbeatTick() } }
-        await foregroundAnchor.start(peerName: peer.displayName, startedAt: now())
+        await foregroundAnchor.start(peerName: peer.displayNameOrFingerprint, startedAt: now())
         inspector?.recordCoordinatorEvent("identity confirmed \(peer.fingerprint)")
     }
 
@@ -427,7 +427,7 @@ public final class ProximityCoordinator {
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .envelopeSent,
             peerFingerprint: identity.fingerprint,
-            peerDisplayName: identity.displayName,
+            peerDisplayName: identity.displayNameOrFingerprint,
             payloadType: envelope.payloadType,
             message: "Sent \(envelope.payloadTypeToken)"
         ))
@@ -449,7 +449,7 @@ public final class ProximityCoordinator {
         let sentAt = now()
         let envelope = try FernletIdentityEnvelope.signed(
             identityService: identity,
-            senderDisplayName: displayName,
+            senderDisplayName: disclosedDisplayName,
             recipientFingerprint: connectedIdentity?.fingerprint,
             payloadType: type,
             payloadEncryption: encryption,
@@ -804,19 +804,38 @@ public final class ProximityCoordinator {
         }
     }
 
+    /// The local display name **as this side is willing to disclose it right now**: the real name
+    /// once this side has committed, and nothing at all before that.
+    ///
+    /// Stranger-admission Option 1b, the owner's call of 2026-09-22. Every outbound envelope reads
+    /// this instead of ``displayName``, because the disclosure is not the introduction's alone: a
+    /// peer that commits first sends a heartbeat, and the ack this side owes it
+    /// (``sendHeartbeatAcknowledgement(for:to:)``) would have carried the name out before the
+    /// person here had tapped anything. One gate at one property covers the introduction, the
+    /// acknowledgement, both heartbeat directions and every payload, and it cannot be forgotten at
+    /// a send site added later — a reviewer sees `disclosedDisplayName` or a leak.
+    ///
+    /// `connectedPeerIdentity` is the commit: it is set by ``confirmPeerIdentity()`` and by nothing
+    /// else, so this reads the same instant `.connected` does.
+    private var disclosedDisplayName: String {
+        connectedPeerIdentity == nil ? "" : displayName
+    }
+
     private func sendIdentityIntroduction(to peer: PeerHandle) async {
         do {
             let sentAt = now()
             let envelope = try FernletIdentityEnvelope.signed(
                 identityService: identity,
-                senderDisplayName: displayName,
+                senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadType: .identityIntroduction,
                 // DO NOT LOCALIZE this title — it is signed wire bytes, and it is rendered in the
                 // RECEIVER's Connection Inspector, so a translated sender writes its own language
-                // into a stranger's audit log. (`displayName` is user-authored, not a UI string, so
-                // interpolating it is fine.) Full rationale: `FernletIdentityEnvelope.payloadSummary`.
-                payloadSummary: PayloadSummary(title: "Hello from \(displayName)"),
+                // into a stranger's audit log. Full rationale:
+                // `FernletIdentityEnvelope.payloadSummary`. Option 1b also took the NAME out of it:
+                // the summary is the one field a receiver renders verbatim, so interpolating the
+                // local name here would have disclosed it in the very frame that withholds it.
+                payloadSummary: PayloadSummary(title: "Hello"),
                 payload: try await makeIdentityRangingPayload(),
                 createdAt: sentAt,
                 expiresAt: sentAt.addingTimeInterval(5 * 60)
@@ -970,6 +989,7 @@ public final class ProximityCoordinator {
         from peer: PeerHandle,
         cameFromSealedWrapper: Bool
     ) async throws {
+        adoptDisclosedDisplayName(from: envelope)
         guard let payloadType = envelope.payloadType else {
             inspector?.recordCoordinatorEvent("parked unknown payload type \(envelope.payloadTypeToken)")
             return
@@ -987,6 +1007,62 @@ public final class ProximityCoordinator {
             payloadHandler?.proximityCoordinator(self, didReceive: envelope, plaintext: plaintext, from: connectedIdentity ?? pendingPeerIdentity)
         }
     }
+
+    /// Takes the peer's display name from the first VERIFIED envelope that discloses one, once
+    /// this side has committed — Option 1b's other half.
+    ///
+    /// **This is the subscriber, not a hook.** Option 1b asks for the name to follow on
+    /// `.connected`; it needs no new frame and no new payload type, because every envelope already
+    /// carries `senderDisplayName` and the peer's own ``disclosedDisplayName`` gate means the field
+    /// is populated exactly when that peer has committed. What was missing was something on this
+    /// side that READS it after the introduction — so a heartbeat (sent immediately on the peer's
+    /// commit, and again every interval after) or any payload delivers the name, and a lost
+    /// best-effort heartbeat costs a few seconds rather than the name.
+    ///
+    /// Four conditions, each load-bearing:
+    /// - **this side has committed** (`connectedPeerIdentity`), so a peer that commits first
+    ///   cannot put a name on the join screen before the person here has tapped;
+    /// - **the name is still withheld**, so this runs once and a later envelope cannot rename a
+    ///   peer mid-session;
+    /// - **the signing key matches** the identity the handshake verified, so a second peer on the
+    ///   same transport cannot name someone else;
+    /// - **the envelope disclosed a name at all** (``FernletIdentityEnvelope/disclosedSenderDisplayName``),
+    ///   which an introduction and a pre-commit peer's frames do not.
+    ///
+    /// The state is re-emitted with the named identity because `.connected(peer:)`'s associated
+    /// value is what every surface renders; leaving it holding the withheld identity would adopt
+    /// the name into a property nothing observes.
+    private func adoptDisclosedDisplayName(from envelope: FernletIdentityEnvelope) {
+        guard let peer = connectedPeerIdentity, peer.isDisplayNameWithheld,
+              peer.signingPublicKey == envelope.senderSigningPublicKey,
+              let disclosed = envelope.disclosedSenderDisplayName else { return }
+        let named = PeerIdentity(
+            id: peer.id,
+            displayName: disclosed,
+            signingPublicKey: peer.signingPublicKey,
+            keyAgreementPublicKey: peer.keyAgreementPublicKey,
+            fingerprint: peer.fingerprint,
+            rangingMode: peer.rangingMode,
+            firstSeenAt: peer.firstSeenAt,
+            capabilities: peer.capabilities
+        )
+        connectedPeerIdentity = named
+        switch state {
+        case .connected: transition(to: .connected(peer: named))
+        case .transferring(_, let progress): transition(to: .transferring(peer: named, progress: progress))
+        default: break
+        }
+        updateInspectorPeer(identity: named, transportPeer: currentTransportPeer)
+        onPeerDisplayNameDisclosed?(named)
+        inspector?.recordCoordinatorEvent("peer display name disclosed after commit")
+    }
+
+    /// Fires once per session when a committed peer discloses the display name its introduction
+    /// withheld (Option 1b). The owning manager re-records the roster entry it wrote at commit —
+    /// `MeshNetworkManager.recordSessionParticipant(displayName:…)` is last-write-wins by
+    /// fingerprint, which is exactly this case. Nil means nobody is listening and the name lives
+    /// only in the coordinator's state.
+    public var onPeerDisplayNameDisclosed: ((PeerIdentity) -> Void)?
 
     /// Heart-drop prekey gossip seams (bitchat adoptions Increment 3), set post-init by the
     /// owning manager — nil provider means no bundle rides our intro (consent off or feature
@@ -1016,7 +1092,7 @@ public final class ProximityCoordinator {
             let sentAt = now()
             let envelope = try FernletIdentityEnvelope.signed(
                 identityService: identity,
-                senderDisplayName: displayName,
+                senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadType: .identityAcknowledge,
                 // DO NOT LOCALIZE — signed wire bytes, rendered in the receiver's Inspector.
@@ -1121,7 +1197,7 @@ public final class ProximityCoordinator {
             )
             let envelope = try FernletIdentityEnvelope.signed(
                 identityService: identity,
-                senderDisplayName: displayName,
+                senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadType: .sessionHeartbeat,
                 // DO NOT LOCALIZE — signed wire bytes, rendered in the receiver's Inspector.
@@ -1179,7 +1255,11 @@ public final class ProximityCoordinator {
     }
 
     private func updateInspectorPeer(identity: PeerIdentity? = nil, transportPeer: PeerHandle? = nil) {
-        let displayName = identity?.displayName ?? transportPeer?.displayHint ?? "Unknown"
+        // Option 1b: a withheld name reads as the fingerprint, never as an empty label. This is
+        // also the Lane C witness — the Inspector's peer line shows the fingerprint before the
+        // commit and the name after it, from one device's own log.
+        let identityName = identity.map { $0.isDisplayNameWithheld ? $0.fingerprint : $0.displayName }
+        let displayName = identityName ?? transportPeer?.displayHint ?? "Unknown"
         let advertisedFingerprint = transportPeer?.advertisedFingerprint
         let confirmedFingerprint = identity?.fingerprint
         inspector?.updatePeer(ConnectionSessionLog.PeerInfo(
@@ -1250,9 +1330,15 @@ public final class ProximityCoordinator {
         let rangingPayload = try? JSONDecoder().decode(IdentityRangingPayload.self, from: plaintext)
         await startRangingIfPossible(with: rangingPayload, from: peer)
 
+        // Option 1b: an identity built here is PRE-COMMIT by construction, so it carries no
+        // display name — deliberately ignoring whatever the envelope claimed. Reading the peer's
+        // field instead would make the guarantee depend on the PEER's build: an older Fernlet
+        // still interpolates its name into the introduction, and the person on this phone would
+        // see a name for someone they have not yet admitted. The name is adopted later, from the
+        // first post-commit envelope, by `adoptDisclosedDisplayName(from:)`.
         let peerIdentity = PeerIdentity(
             id: peer.id,
-            displayName: envelope.sanitizedSenderDisplayName,
+            displayName: "",
             signingPublicKey: envelope.senderSigningPublicKey,
             keyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
             fingerprint: fingerprint,
@@ -1535,7 +1621,7 @@ public final class ProximityCoordinator {
             )
             let envelope = try FernletIdentityEnvelope.signed(
                 identityService: identity,
-                senderDisplayName: displayName,
+                senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadType: .sessionHeartbeat,
                 // DO NOT LOCALIZE — signed wire bytes, rendered in the receiver's Inspector.
@@ -1651,6 +1737,23 @@ extension ProximityCoordinator {
         /// Raw capability tokens the peer advertised in its identity intro/ack (Phase 1).
         /// `nil` = a legacy peer whose intro predates capability advertisement.
         public let capabilities: [String]?
+
+        /// Whether this peer has disclosed no display name yet — Option 1b's pre-commit state.
+        ///
+        /// An empty ``displayName`` means withheld and nothing else: every other ingest runs
+        /// through `ItemNameModeration.moderatedPeerDisplayName`, whose floor is "A friend", so a
+        /// peer whose name sanitizes away to nothing still arrives non-empty. A surface that shows
+        /// a name must read this first and show ``fingerprint`` instead — a fingerprint two people
+        /// can compare out loud is the honest thing to show for someone nobody has admitted yet.
+        public var isDisplayNameWithheld: Bool { displayName.isEmpty }
+
+        /// What to show for this peer: the disclosed name, or the ``fingerprint`` while it is
+        /// withheld. Every render and every persist site reads this rather than ``displayName``,
+        /// so a pre-commit peer is identified by something two people can compare out loud and
+        /// never by an empty label.
+        public var displayNameOrFingerprint: String {
+            isDisplayNameWithheld ? fingerprint : displayName
+        }
 
         public init(
             id: UUID,

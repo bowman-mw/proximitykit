@@ -179,6 +179,19 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
     public var sanitizedSenderDisplayName: String {
         ItemNameModeration.moderatedPeerDisplayName(senderDisplayName)
     }
+
+    /// The sender's display name **if it disclosed one**, and `nil` when it deliberately did not.
+    ///
+    /// Stranger-admission Option 1b: a sender withholds its name until it has committed, and an
+    /// empty `senderDisplayName` is how it says so on the wire — no new field, no shape change, so
+    /// every existing golden and every in-field peer is unaffected. ``sanitizedSenderDisplayName``
+    /// cannot express this: its floor turns an empty name into "A friend", which is
+    /// indistinguishable from a peer whose name sanitized away to nothing. Read THIS wherever the
+    /// difference between "withheld" and "blank" decides what a person is shown.
+    public var disclosedSenderDisplayName: String? {
+        guard !senderDisplayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return sanitizedSenderDisplayName
+    }
 }
 
 // MARK: - Schema versions

@@ -673,6 +673,16 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             displayName: displayName,
             timeoutSeconds: 25
         )
+        // Stranger-admission Option 1b (2026-09-22): the introduction carries no display name, so
+        // `ensureRecipient` first files this peer under its fingerprint. That call is guarded by a
+        // fingerprint change and runs once, so without this SUBSCRIBER the picker would show a
+        // fingerprint for the rest of the session even after the peer disclosed.
+        coordinator.onPeerDisplayNameDisclosed = { [weak self] identity in
+            guard let self,
+                  let connection = self.connections.first(where: { $0.fingerprint == identity.fingerprint })
+            else { return }
+            self.ensureRecipient(for: connection, identity: identity)
+        }
         let connection = RecipeShareConnection(
             id: channel.peer.id,
             peer: channel.peer,
@@ -747,7 +757,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
                     connections[index].fingerprint = fingerprint
                     connections[index].verifiedKeyAgreementPublicKey = peerIdentity.keyAgreementPublicKey
                     ensureRecipient(for: connections[index], identity: peerIdentity)
-                    recordDiagnostic("Verified \(peerIdentity.displayName).")
+                    recordDiagnostic("Verified \(peerIdentity.displayNameOrFingerprint).")
                 }
                 if let outgoing = pendingOutgoing, isSameDevice(connections[index], as: outgoing.recipient) {
                     applyTransfer(.peerVerified)
@@ -960,7 +970,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     private func ensureRecipient(for connection: RecipeShareConnection, identity peerIdentity: ProximityCoordinator.PeerIdentity) {
         let recipient = ProximityRecipeShareRecipient(
             id: connection.id,
-            displayName: peerIdentity.displayName,
+            displayName: peerIdentity.displayNameOrFingerprint,
             fingerprint: peerIdentity.fingerprint
         )
         nearbyRecipients.removeAll { $0.id == recipient.id || $0.fingerprint == recipient.fingerprint }

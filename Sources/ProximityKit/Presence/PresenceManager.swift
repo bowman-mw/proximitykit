@@ -1438,7 +1438,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         }
         // Wire boundary: the display name is peer-supplied — sanitize (control/zero-width/bidi
         // scalars out, length-capped) before it is persisted.
-        let senderName = ItemNameModeration.moderatedPeerDisplayName(peer.displayName)
+        let senderName = ItemNameModeration.moderatedPeerDisplayName(peer.displayNameOrFingerprint)
         // The ledger drops duplicates (same id) and enforces the 5-minute per-sender receive rate.
         if ledger.recordReceivedHeart(id: payload.id, senderDisplayName: senderName, senderFingerprint: peer.fingerprint) {
             onHeartReceived?(peer.fingerprint)

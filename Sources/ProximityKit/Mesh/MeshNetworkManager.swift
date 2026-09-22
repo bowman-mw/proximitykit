@@ -11430,6 +11430,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             capabilities: localCapabilities(),
             timeoutSeconds: isProximityJoin ? 25 : 60
         )
+        // Stranger-admission Option 1b (2026-09-22): a peer's introduction carries no display
+        // name, so the roster entry `onSlotConnected` writes at commit holds the fingerprint. This
+        // is the SUBSCRIBER that repairs it when the peer discloses — `recordSessionParticipant` is
+        // last-write-wins by fingerprint, which is exactly this case, so the keep-as-friend prompt
+        // and the participant list carry the real name from the first post-commit frame onward.
+        coordinator.onPeerDisplayNameDisclosed = { [weak self] identity in
+            self?.recordSessionParticipant(
+                displayName: identity.displayNameOrFingerprint,
+                fingerprint: identity.fingerprint,
+                signingPublicKey: identity.signingPublicKey,
+                keyAgreementPublicKey: identity.keyAgreementPublicKey
+            )
+        }
         // Away-hearts prekey gossip (Increment 3): ride our intro, ingest verified peers'.
         coordinator.heartDropPrekeyBundleProvider = { [weak self] in self?.heartDropBundleProvider?() }
         coordinator.onHeartDropPrekeyBundle = { [weak self] key, bundle in self?.onPeerPrekeyBundle?(key, bundle) }
@@ -11550,7 +11563,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Phase 2: capture the handshake-verified identity into the session roster at slot
         // commit, so the post-session keep-as-friend prompt still has it after slot teardown.
         recordSessionParticipant(
-            displayName: peerIdentity.displayName,
+            displayName: peerIdentity.displayNameOrFingerprint,
             fingerprint: peerIdentity.fingerprint,
             signingPublicKey: peerIdentity.signingPublicKey,
             keyAgreementPublicKey: peerIdentity.keyAgreementPublicKey
@@ -11752,7 +11765,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public var pendingManualCommits: [(slotID: UUID, peerName: String)] {
         slots.compactMap { slot in
             if case .awaitingManualCommit(let peer) = slot.coordinator.state {
-                return (slot.id, peer.displayName)
+                return (slot.id, peer.displayNameOrFingerprint)
             }
             return nil
         }
