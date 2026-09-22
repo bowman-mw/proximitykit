@@ -7,9 +7,9 @@ import FernletDomainModel
 /// minted once per remote endpoint per session, paired with that endpoint's `id` at the single
 /// mint point inside the transport, and handed to every handle built for it — so two handles from
 /// different discovery cycles for the same remote carry the same key, which is what lets a slot, a
-/// heart connection, or a device cap recognize a returning peer. Under MultipeerConnectivity it
-/// stands in for `MCPeerID` equality; under a QUIC transport it will be minted per authenticated
-/// connection endpoint.
+/// heart connection, or a device cap recognize a returning peer. Under the retired
+/// MultipeerConnectivity radio it stood in for `MCPeerID` equality; on the QUIC radio that ships it
+/// is minted per authenticated connection endpoint.
 ///
 /// **History worth keeping.** `id` used to be a per-discovery cache handle: it was minted inside
 /// the same dictionary discovery pruned, so a peer lost while holding no channel came back under a

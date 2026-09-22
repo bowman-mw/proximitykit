@@ -16,8 +16,8 @@ nonisolated public enum MultipeerServiceType {
 
 /// How reliably a frame must be delivered.
 ///
-/// The transport-neutral replacement for `MCSessionSendDataMode`, mapped to the framework's own
-/// mode inside the conformer that owns the framework. `reliable` is ordered and retransmitted;
+/// The transport-neutral replacement for the retired `MCSessionSendDataMode`, mapped onto the
+/// radio's own delivery mode inside the conformer that owns it. `reliable` is ordered and retransmitted;
 /// `bestEffort` may be dropped or reordered and is used only where loss is acceptable.
 public enum PeerDeliveryMode: Sendable {
     case reliable
@@ -30,7 +30,7 @@ public enum PeerDeliveryMode: Sendable {
 /// ``ProximityCoordinator`` subscribes to this stream and drives its own handshake state machine
 /// off the transitions (e.g. `.connected` triggers the identity introduction in friend mode).
 ///
-/// Note that the production conformer, `PeerChannelTransport`, only ever emits `.idle`,
+/// Note that the production conformer, `NetworkPeerChannel`, only ever emits `.idle`,
 /// `.connected` and `.disconnected` — the shared session owns discovery, so the discovery-shaped
 /// cases are reachable only from a test fake. Coordinator branches keyed on them are therefore
 /// exercised by tests alone; the live inviter decision is `MeshNetworkManager.shouldInitiateInvite`.
@@ -123,11 +123,13 @@ public struct InboundPeerFrame {
 /// reliable/best-effort send, and Combine streams of state + inbound data.
 ///
 /// No framework type appears anywhere on this surface — that is the whole point of it. The
-/// production conformer is `PeerChannelTransport`, a per-peer routing adapter over the shared
-/// `MeshMultipeerSession`, so a coordinator never manages MultipeerConnectivity lifecycle itself;
-/// tests inject scripted fakes. A second conformer over Network.framework QUIC slots in beside it
-/// in P2 without any change here. `@MainActor`: the coordinator and every conformer live on the
-/// main actor, with delegate callbacks hopped in.
+/// production conformer is `NetworkPeerChannel`, a per-peer routing adapter over the shared
+/// `NetworkMeshSession`, so a coordinator never manages transport lifecycle itself; tests inject
+/// scripted fakes. The retired MultipeerConnectivity radio carried the identical pair
+/// (`PeerChannelTransport` over `MeshMultipeerSession`), and this surface did not change when the
+/// QUIC conformer slotted in beside it in P2 or when the MC one left in the deletion round.
+/// `@MainActor`: the coordinator and every conformer live on the main actor, with delegate
+/// callbacks hopped in.
 @MainActor
 public protocol PeerTransport: AnyObject {
     var state: AnyPublisher<PeerTransportState, Never> { get }

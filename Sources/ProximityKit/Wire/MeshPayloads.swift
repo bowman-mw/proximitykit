@@ -5,8 +5,8 @@ import FernletDomainModel
 // WI-9: every wire payload below is marked `nonisolated, Sendable`. ProximityKit declares
 // `.defaultIsolation(MainActor.self)`, which would otherwise make these value types and their
 // synthesized `Codable` conformances MainActor-isolated — only legal under the `.v5` escape hatch,
-// and a hard error if these untrusted MCSession bytes were ever decoded off the main actor under
-// Swift 6. `nonisolated, Sendable` matches the FernletDomainModel wire types and makes decode +
+// and a hard error if these untrusted transport bytes (MCSession's then, the QUIC radio's now) were
+// ever decoded off the main actor under Swift 6. `nonisolated, Sendable` matches the FernletDomainModel wire types and makes decode +
 // signature verification safe from any isolation domain. `MeshAdmissionToken.signed` stays
 // `@MainActor` (it signs with the `@MainActor` IdentityService key); `.verify` is `nonisolated`
 // (pure signature math + canonical bytes).

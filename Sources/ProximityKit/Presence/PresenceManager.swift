@@ -177,10 +177,10 @@ public final class PresenceManager: ProximityPayloadHandling {
     @ObservationIgnored public var onHeartReceived: ((String) -> Void)?
     @ObservationIgnored private var session: (any PresenceRadioSession)?
     /// Test seam: the radio this manager brings up. The production default is the one QUIC
-    /// presence radio and nothing in shipping code writes this — the counterpart of
-    /// `MeshTransportFactory` for a manager that only ever has one answer. A test substitutes an
-    /// in-memory fake so the advertise, republish, dial and stand-down decisions are reachable
-    /// without starting Bonjour.
+    /// presence radio and nothing in shipping code writes this — the counterpart of the mesh's
+    /// retired `MeshTransportFactory` seam, for a manager that only ever has one answer. A test
+    /// substitutes an in-memory fake so the advertise, republish, dial and stand-down decisions
+    /// are reachable without starting Bonjour.
     @ObservationIgnored var makeSession: () -> any PresenceRadioSession = { NetworkPresenceSession() }
     @ObservationIgnored private(set) var isRunning = false
 

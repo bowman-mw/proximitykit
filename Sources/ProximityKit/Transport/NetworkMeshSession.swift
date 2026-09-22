@@ -17,9 +17,9 @@ import FernletFoundation
 /// stream is a byte pipe, so the frame boundaries `MCSession.send` gave for free have to be written
 /// back in. Four big-endian bytes of length, then that many bytes of payload.
 ///
-/// The ceiling is ``NetworkMeshSession/maxInboundWireBytes`` — the same value the MC transport
-/// enforces, deliberately, so the two transports refuse the same frame. Splitting them would mean a
-/// payload that rides one radio and is dropped by the other.
+/// The ceiling is ``NetworkMeshSession/maxInboundWireBytes`` — the same value the retired MC
+/// transport enforced, deliberately, so the two transports refused the same frame. Splitting them
+/// would have meant a payload that rode one radio and was dropped by the other.
 nonisolated enum NetworkMeshWire {
 
     /// Bytes of big-endian length prefix before every payload.
@@ -56,7 +56,7 @@ nonisolated enum NetworkMeshWire {
 
 /// One session-stable ``PeerHandle`` identity per remote endpoint.
 ///
-/// The exact rule `MeshMultipeerSession` established in P2 item 3, restated for the QUIC transport:
+/// The exact rule the retired `MeshMultipeerSession` established in P2 item 3, restated for QUIC:
 /// `id` and ``PeerEndpointKey`` are minted **together, at one point, once per endpoint**, so they
 /// can never disagree, and they live outside the caches discovery prunes — a peer lost and
 /// re-browsed comes back as the same peer to every owner holding a record for it (a slot, a QR
@@ -164,8 +164,8 @@ protocol NetworkChannelHost: AnyObject {
 /// are there — the shared session owns discovery — and `disconnect` signals idle locally without
 /// tearing down the shared radio.
 ///
-/// **This channel never publishes ``PeerTransportState/discovered``**, matching the MC conformer
-/// exactly. That is a constraint, not an omission: `ProximityCoordinator.shouldInviteDiscoveredPeer`
+/// **This channel never publishes ``PeerTransportState/discovered``**, as the retired MC conformer
+/// never did either. That is a constraint, not an omission: `ProximityCoordinator.shouldInviteDiscoveredPeer`
 /// is a *second*, dormant inviter policy that compares `sessionID < remoteSID` — the opposite
 /// direction to the live one in `MeshNetworkManager.shouldInitiateInvite` (`>`) — and it wakes the
 /// moment a conformer emits a discovered state. Two policies pointing opposite ways means neither
@@ -190,7 +190,7 @@ final class NetworkPeerChannel: PeerTransport {
         self.host = host
     }
 
-    // Discovery and admission belong to the shared session, exactly as they do under MC.
+    // Discovery and admission belong to the shared session, exactly as they did under MC.
     func startAdvertising(serviceType: String, discoveryInfo: [String: String]) async throws {}
     func startBrowsing(serviceType: String) async throws {}
     func invite(_ peer: PeerHandle) async throws {}
@@ -200,7 +200,7 @@ final class NetworkPeerChannel: PeerTransport {
     /// takes a per-transfer stream of its own (plan §7.1); everything else rides the tunnel's
     /// control stream or a datagram, exactly as it did before those streams existed. **No caller
     /// above this line can tell the difference**, which is the point: `MeshNetworkManager` sends a
-    /// friend photo the same way over MultipeerConnectivity and over QUIC.
+    /// friend photo the same way over QUIC as it did over the retired MultipeerConnectivity radio.
     func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws {
         guard let host else { throw PeerTransportError.unexpectedState }
         try await host.send(data, to: peer, mode: mode)
@@ -221,8 +221,9 @@ final class NetworkPeerChannel: PeerTransport {
 
     // MARK: - Called by NetworkMeshSession
 
-    /// Publishes `.connected`. Called after the owner's `begin()` has completed, matching the MC
-    /// ordering contract that keeps the coordinator out of the wrong handshake branch.
+    /// Publishes `.connected`. Called after the owner's `begin()` has completed, matching the
+    /// ordering contract the retired MC radio set — it keeps the coordinator out of the wrong
+    /// handshake branch.
     func notifyConnected() {
         stateSubject.send(.connected(peer))
     }
@@ -250,11 +251,12 @@ final class NetworkPeerChannel: PeerTransport {
 /// ``MeshLinkTable/maxConcurrentLinks`` authenticated tunnels, multiplexed into per-peer
 /// ``NetworkPeerChannel`` channels.
 ///
-/// The TN3213 counterpart of `MeshMultipeerSession`, and the second `PeerTransport` conformer plan
-/// §7 calls for. The mapping it implements: `MCNearbyServiceAdvertiser` → a `NetworkListener` over
-/// `.bonjour`; `MCNearbyServiceBrowser` → a `NetworkBrowser`; one `MCSession` with N peers → one
-/// QUIC `NetworkConnection` per peer; `.reliable` sends → a long-lived control stream;
-/// `.bestEffort` sends and heartbeats → QUIC datagrams.
+/// The TN3213 counterpart of the retired `MeshMultipeerSession`, and the second `PeerTransport`
+/// conformer plan §7 called for — the only one left, since the deletion round. The mapping it was
+/// built from, MultipeerConnectivity's shape on the left: `MCNearbyServiceAdvertiser` → a
+/// `NetworkListener` over `.bonjour`; `MCNearbyServiceBrowser` → a `NetworkBrowser`; one `MCSession`
+/// with N peers → one QUIC `NetworkConnection` per peer; `.reliable` sends → a long-lived control
+/// stream; `.bestEffort` sends and heartbeats → QUIC datagrams.
 ///
 /// **Every decision lives somewhere testable.** The peer cap, the per-connection state machine, the
 /// three-attempt dial budget, duplicate-tunnel suppression and the endpoint cache are
@@ -275,12 +277,12 @@ final class NetworkPeerChannel: PeerTransport {
 /// revoked or blocked key, never. A **stranger** holds a tunnel *provisionally* while — and only
 /// while — the owner's join doors are open, which is what
 /// ``MeshIntroductionRoster/admitsStrangersProvisionally`` carries and what `MeshNetworkManager`
-/// answers from the same posture its MC invitation gate answers. Provisional means a tunnel and
-/// nothing more: the peer arrives at the owner as a channel, exactly as a MultipeerConnectivity peer
-/// does, and it becomes a *member* only at the three doors above this radio — the seat check at the
-/// identity introduction, the 15 cm dwell or the QR commit, and the admission grant. The signature
-/// is still required of it, so its key is proven-held before any app frame, which is more than the
-/// MC radio ever asked of the same peer. Plan §7.2's "reject before any app frame … non-roster
+/// answers from the same posture its invitation gate has always answered from. Provisional means a
+/// tunnel and nothing more: the peer arrives at the owner as a channel, exactly as a
+/// MultipeerConnectivity peer did, and it becomes a *member* only at the three doors above this
+/// radio — the seat check at the identity introduction, the 15 cm dwell or the QR commit, and the
+/// admission grant. The signature is still required of it, so its key is proven-held before any app
+/// frame, which is more than the retired MC radio ever asked of the same peer. Plan §7.2's "reject before any app frame … non-roster
 /// member" bullet is amended by this, and only by this: a non-roster peer may reach a *tunnel*,
 /// never a *roster*.
 /// `prohibitedInterfaceTypes` is `[.cellular]` on every listener, browser and connection, always: it
@@ -292,14 +294,14 @@ final class NetworkPeerChannel: PeerTransport {
 /// selected (P2 item 8). A session with no authority cannot authenticate anyone, so it refuses every
 /// tunnel rather than admitting one unverified — as does one whose owner wired no ``invitationGate``.
 ///
-/// **The default, since the cutover.** `MeshTransportFactory.shippingDefault` is `.quic` as of
-/// 2026-09-21, so this radio is what the app's own initializer builds on every shipping path; the
-/// MultipeerConnectivity conformer is now the one reachable only from an internal injection or the
-/// DEBUG-only `FERNLET_MESH_TRANSPORT=multipeer` launch variable, as a bisect path across that
-/// boundary. Nothing about the choice is persisted, in either direction.
+/// **The only radio.** The cutover (2026-09-21) made this the shipping default, and the deletion
+/// round (2026-09-22) took everything else with it: the MultipeerConnectivity conformer, the factory
+/// that chose between the two, and the DEBUG-only launch variable that could force the other one as
+/// a bisect path all left the tree together. This radio is what the app's own initializer builds, on
+/// every path, and there is nothing left to select. Nothing about it is persisted.
 ///
 /// `@MainActor`; framework callbacks arrive `@Sendable` and hop in. Owners wire behaviour through
-/// the closure hooks, the same way they do for the MC session.
+/// the closure hooks, the same way they did for the retired MC session.
 @MainActor
 final class NetworkMeshSession: NetworkChannelHost {
 
@@ -312,7 +314,8 @@ final class NetworkMeshSession: NetworkChannelHost {
     nonisolated static let alpn = "fernlet-mesh-v1"
 
     /// Hard ceiling on one inbound frame, enforced before the bytes reach any channel or decoder.
-    /// Pinned to the same value `MeshMultipeerSession` uses so both transports refuse identically.
+    /// Pinned to the same value the retired `MeshMultipeerSession` used, so both transports refused
+    /// identically.
     nonisolated static let maxInboundWireBytes = SealedPayloadFraming.maxInflatedByteCount
 
     /// QUIC datagram frame size requested in the parameters, and the UDP payload size beneath it.
@@ -394,7 +397,7 @@ final class NetworkMeshSession: NetworkChannelHost {
     // MARK: Hooks
 
     /// A peer appeared in the browse results. The owner's dial policy reads it — this radio never
-    /// dials on its own, exactly as the MC session never invites on its own.
+    /// dials on its own, exactly as the MC session never invited on its own.
     var onPeerDiscovered: ((PeerHandle) -> Void)?
     /// A peer left the browse results.
     var onPeerLost: ((PeerHandle) -> Void)?
@@ -412,7 +415,7 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// The owner's admission gate, consulted once a peer has proved who it is and before its tunnel
     /// takes a roster slot (``admitVerifiedInbound(_:pendingKey:)``).
     ///
-    /// **Fail closed**, exactly like the MC advertiser's `shouldAcceptInvitation` (`?? false`): a
+    /// **Fail closed**, exactly like the retired MC advertiser's `shouldAcceptInvitation` (`?? false`): a
     /// radio nobody has wired admits nobody. It runs *after* the signed channel introduction rather
     /// than before, because there is no invitation moment here to gate — a peer dials and
     /// authenticates — so the earliest honest question is "this verified member: do you want it?".
@@ -514,8 +517,8 @@ final class NetworkMeshSession: NetworkChannelHost {
     private var listenerIsReady = false
     private var listenerIsAdvertised = false
     /// Whether ``pauseDiscovery()`` has stood the listener and browser down over a still-running
-    /// radio. Mirrors `MeshMultipeerSession.isDiscoveryPaused`, and for the same reason: a late
-    /// state callback must not bring browsing back up behind a hold.
+    /// radio. Mirrors what the retired `MeshMultipeerSession.isDiscoveryPaused` did, and for the
+    /// same reason: a late state callback must not bring browsing back up behind a hold.
     private var isDiscoveryPaused = false
     /// When the re-propose sweep last ran. Nil until the first sweep, so the **first** poll tick
     /// after the radio starts sweeps immediately and the interval governs every tick after it.
@@ -566,7 +569,7 @@ final class NetworkMeshSession: NetworkChannelHost {
     }
 
     /// Republishes the TXT record. The listener is recreated rather than mutated, matching the
-    /// stop-and-recreate pattern the MC advertiser needs; a no-op while stopped, and a **record
+    /// stop-and-recreate pattern the retired MC advertiser needed; a no-op while stopped, and a **record
     /// only** while ``pauseDiscovery()`` is holding.
     ///
     /// The fields are stored before either guard on purpose: ``resumeDiscovery()`` re-mints the
@@ -575,7 +578,7 @@ final class NetworkMeshSession: NetworkChannelHost {
     func updateDiscoveryInfo(_ discoveryInfo: [String: String]) {
         advertisedFields = MeshLinkAdvertisement.publishedFields(from: discoveryInfo)
         // Re-minting here would put the Bonjour registration and the accept path back up behind
-        // shut doors — the silent un-pause `MeshMultipeerSession` has always guarded against, and
+        // shut doors — the silent un-pause the retired `MeshMultipeerSession` always guarded, and
         // the reason a republish during a hold must only be remembered.
         guard !isDiscoveryPaused else { return }
         guard isRunning else { return }
@@ -589,7 +592,7 @@ final class NetworkMeshSession: NetworkChannelHost {
 
     /// "Closes" the radio: stops browsing AND advertising while KEEPING every tunnel, the link
     /// table, the heartbeat schedule and the TLS identity — the QUIC half of
-    /// ``MeshNetworkManager/holdCommittedLinks()``, and the counterpart of
+    /// ``MeshNetworkManager/holdCommittedLinks()``, and the counterpart of the retired
     /// `MeshMultipeerSession.pauseDiscovery()`.
     ///
     /// Standing the **listener** down is the only way to withdraw the Bonjour registration, and it
@@ -746,14 +749,14 @@ final class NetworkMeshSession: NetworkChannelHost {
         startOutboundTunnel(to: key)
     }
 
-    /// Frees one peer's tunnel — the QUIC counterpart of the MC session's targeted disconnect, and
+    /// Frees one peer's tunnel — the QUIC counterpart of the retired MC session's targeted disconnect,
     /// best-effort in the same way: the owner's record eviction is what actually drives teardown.
     ///
     /// `notifyOwner: false` is the load-bearing half. This is an eviction the owner *asked* for, and
     /// ``endTunnel(_:cause:reason:notifyOwner:)`` fires ``onPeerDisconnected`` synchronously — so
     /// reporting it back would re-enter the owner's disconnect path from inside its own removal
-    /// funnel. MC has the same shape and does not have the problem only because its `.notConnected`
-    /// arrives later, on a delegate callback the owner already knows to swallow. The peer's channel
+    /// funnel. MC had the same shape and escaped the problem only because its `.notConnected`
+    /// arrived later, on a delegate callback the owner already knew to swallow. The peer's channel
     /// still publishes `.disconnected`: the coordinator on the other end of it must see the link die.
     func disconnectPeer(_ peer: PeerHandle) {
         disconnectPeer(peer, cause: .ownerDecision)
@@ -783,7 +786,7 @@ final class NetworkMeshSession: NetworkChannelHost {
 
     /// Hands a start failure to the owner's transport-error hook, with the same logging every other
     /// radio failure gets. Internal so the ``MeshTransportSession`` conformance — whose
-    /// `startRadios(discoveryInfo:)` cannot throw, because the MC radio's cannot — can report one.
+    /// `startRadios(discoveryInfo:)` cannot throw, because the MC radio's could not — can report one.
     func reportTransportError(_ message: String) {
         report(message)
     }
@@ -793,7 +796,7 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// `.bestEffort` rides a QUIC datagram when the payload fits one. A `.reliable` frame at or above
     /// ``MeshTransferStreamTable/bulkFloorBytes`` — a friend photo, in practice — rides a stream
     /// opened for it alone, so it cannot park the rest of the tunnel behind itself. Everything else
-    /// rides the control stream, in order, as it does under MultipeerConnectivity.
+    /// rides the control stream, in order, as it did under MultipeerConnectivity.
     ///
     /// Every fallback runs the same direction: a payload too large for a datagram, and a bulk frame
     /// with no transfer slot free, both end up on the control stream. Delivering a frame more
@@ -1376,7 +1379,7 @@ private extension NetworkMeshSession {
     /// than admitting both sides.
     ///
     /// The owner's ``invitationGate`` is consulted here too, and fails closed: this is the moment
-    /// the MC advertiser's `shouldAcceptInvitation` answers, moved to the earliest point on this
+    /// the retired MC advertiser's `shouldAcceptInvitation` answered, moved to the earliest point on this
     /// radio where the question can honestly be asked (the peer has proved who it is; nothing has
     /// been admitted yet).
     ///
@@ -1572,7 +1575,7 @@ private extension NetworkMeshSession {
     ///
     /// `notifyConnected()` is deliberately NOT called here. The owner's `onPeerChannelReady` hook
     /// creates the coordinator and awaits its `begin()`, and publishing `.connected` before that
-    /// completes is what put the MC handshake into the wrong branch — the channel's owner makes the
+    /// completes is what put the retired MC radio's handshake into the wrong branch — the channel's owner makes the
     /// call once `begin()` returns. Same contract, same reason.
     ///
     /// ``admitActivation(at:role:verified:)`` runs **first**, before a single hook fires: a tunnel
@@ -1800,7 +1803,7 @@ private extension NetworkMeshSession {
     /// Reads datagrams: heartbeats are consumed here, everything else is a best-effort app frame.
     ///
     /// An oversized datagram is dropped rather than fatal — never disconnect at this layer, or any
-    /// peer could end any session with one malformed frame. Same rule the MC transport floor uses.
+    /// peer could end any session with one malformed frame. Same rule the MC transport floor used.
     func receiveDatagrams(
         for key: MeshLinkKey,
         from datagrams: Network.QUIC.Datagrams<QUICDatagram>
@@ -2008,9 +2011,9 @@ private extension NetworkMeshSession {
     /// no tunnel here, is refused, and never reaches a channel or a decoder.
     ///
     /// A refused or failed transfer is dropped rather than fatal, and the stream goes back un-acked
-    /// so the sender's write fails loudly. That is the MC photo path's own failure semantics, and it
-    /// is why neither branch touches the tunnel: never disconnect at this layer, or one malformed
-    /// transfer could end any session.
+    /// so the sender's write fails loudly. That was the retired MC photo path's own failure
+    /// semantics, and it is why neither branch touches the tunnel: never disconnect at this layer,
+    /// or one malformed transfer could end any session.
     func serveTransferStream(
         _ stream: Network.QUIC.Stream<QUICStream>,
         on connection: NetworkConnection<QUIC>

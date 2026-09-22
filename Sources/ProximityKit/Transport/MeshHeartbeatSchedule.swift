@@ -61,8 +61,8 @@ nonisolated enum MeshHeartbeatChannel: Equatable, Sendable {
 
 /// When each live QUIC link is next due a heartbeat datagram, with no timer inside it.
 ///
-/// Plan §7.1 maps MultipeerConnectivity's `.unreliable` sends onto QUIC datagrams and §7.3 asks for
-/// a 30 s heartbeat. The *scheduling* half is separated from the sending half for the same reason
+/// Plan §7.1 mapped MultipeerConnectivity's `.unreliable` sends onto QUIC datagrams, and §7.3 asked
+/// for a 30 s heartbeat. The *scheduling* half is separated from the sending half for the same reason
 /// ``MeshLinkTable`` is separated from ``NetworkMeshSession``: a per-link `Task.sleep` loop is
 /// untestable except by waiting, and this repository has a documented flake family whose root cause
 /// was exactly that. Here time is a `now:` argument, so a test advances a ``VirtualClock`` and reads

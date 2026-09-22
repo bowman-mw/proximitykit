@@ -5,7 +5,7 @@ import FernletDomainModel
 //
 // WI-9: marked `nonisolated, Sendable` so ProximityKit's `.defaultIsolation(MainActor.self)` does not
 // MainActor-isolate these value types and their synthesized `Codable`, which would block off-main decode
-// of untrusted MCSession bytes under Swift 6.
+// of untrusted transport bytes (MCSession's then, the QUIC radio's now) under Swift 6.
 //
 // A `CustomizationItem` is already a `nonisolated`, `Codable`, `Sendable` domain value type carrying
 // everything a shop entry needs — slot, texture, name, `price`, and its anonymous `designer.id` — so the

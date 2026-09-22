@@ -138,8 +138,8 @@ nonisolated enum MeshCertificateDER {
 /// Errors the QUIC mesh transport raises before any peer frame exists.
 ///
 /// Deliberately **not** a `LocalizedError`: none of these is user-facing copy. They surface through
-/// `NetworkMeshSession.onTransportError` as diagnostic English, exactly as the MC session's
-/// `didNotStart*` messages do, and the localization wall's rule G governs error types that *are*
+/// `NetworkMeshSession.onTransportError` as diagnostic English, exactly as the retired MC session's
+/// `didNotStart*` messages did, and the localization wall's rule G governs error types that *are*
 /// read by a person.
 nonisolated enum MeshTransportError: Error, Equatable {
     /// A `sec_identity_t` could not be built for this session's freshly minted key pair.

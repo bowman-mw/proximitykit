@@ -33,7 +33,7 @@ public enum SlotKind {
 /// One peer's seat in the live mesh session: the transport channel, its ``ProximityCoordinator``,
 /// and the handshake-verified identity captured at commit.
 ///
-/// Owned exclusively by ``MeshNetworkManager``, which appends a slot when an MC channel comes up
+/// Owned exclusively by ``MeshNetworkManager``, which appends a slot when a peer channel comes up
 /// and fills `fingerprint` / the verified key fields only when the coordinator reaches
 /// `.connected` — a nil `fingerprint` means an UNCOMMITTED candidate, which the feature-payload
 /// registry gate must drop. `verifiedKeyAgreementPublicKey` is the sealing target for every
@@ -49,9 +49,10 @@ public enum SlotKind {
 public struct PeerSlot: Identifiable {
     public let id: UUID  // == peer.id
     public let peer: PeerHandle
-    /// The peer's channel on whichever radio the manager is running — `PeerChannelTransport` under
-    /// MultipeerConnectivity, `NetworkPeerChannel` under QUIC, a detached one in unit tests. Held
-    /// as the neutral protocol so a slot never names a radio.
+    /// The peer's channel on whichever radio the manager is running — `NetworkPeerChannel` on the
+    /// QUIC radio that ships, a detached one in unit tests. (The retired MultipeerConnectivity
+    /// radio's `PeerChannelTransport` left the tree with it.) Held as the neutral protocol so a
+    /// slot never names a radio.
     let channel: any MeshPeerChannel
     public let coordinator: ProximityCoordinator
     public var kind: SlotKind

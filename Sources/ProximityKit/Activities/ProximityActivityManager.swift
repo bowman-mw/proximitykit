@@ -13,7 +13,7 @@
 //  * a device-local sidecar (App Support JSON, `.completeFileProtection`, NEVER synced — the
 //    HeartLedger/ClosenessLedger stance) so a hosted/joined activity survives launches until `expiresAt`.
 //
-// It does NOT touch `MCSession` directly. `MeshNetworkManager` wires two closures in:
+// It does NOT touch a radio or its session directly. `MeshNetworkManager` wires two closures in:
 //  * `send` — seal + sign + transmit a payload to one verified fingerprint's committed slot;
 //  * `committedActivityPeerFingerprints` — the fingerprints of currently-committed peers that advertise
 //    the `.activities` capability.
@@ -31,7 +31,7 @@ import FernletFoundation
 /// radio of its own.
 ///
 /// Owned by ``MeshNetworkManager`` (a sub-manager like ``MeshClothingShop``), which wires in the
-/// two seams this type uses instead of touching MCSession: `send` (seal + sign + transmit to one
+/// two seams this type uses instead of touching a radio: `send` (seal + sign + transmit to one
 /// verified fingerprint's committed slot) and `committedActivityPeerFingerprints`. Authorization
 /// is independent of the shared handshake: membership is carried by the host-signed,
 /// invitee-key-bound `ActivityJoinToken`, snapshots verify only under the host key PINNED at

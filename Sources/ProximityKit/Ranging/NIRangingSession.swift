@@ -116,7 +116,7 @@ extension NIRangingSession: NISessionDelegate {
     nonisolated public func session(_ session: NISession, didInvalidateWith error: Error) {
         // Transfer the NISession itself across the @MainActor hop via nonisolated(unsafe) and compare
         // by identity (===) after the hop — the established ProximityKit pattern for non-Sendable
-        // framework objects (see MeshMultipeerSession). Capturing the OBJECT (not just an
+        // framework objects (the retired MeshMultipeerSession set it). Capturing the OBJECT (not just an
         // ObjectIdentifier) keeps it ALIVE until the comparison runs, closing the address-reuse window:
         // with only the identifier captured, the invalidated session could deallocate and a freshly
         // created session be allocated at the same address before the Task runs, aliasing the

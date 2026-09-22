@@ -11,7 +11,8 @@ import FernletDomainModel
 //
 // WI-9: marked `nonisolated, Sendable` so ProximityKit's `.defaultIsolation(MainActor.self)` does not
 // MainActor-isolate this value type and its synthesized `Codable`, which would block off-main decode of
-// untrusted MCSession bytes under Swift 6. The receiver sanitizes + length-caps `text` (via
+// untrusted transport bytes (MCSession's then, the QUIC radio's now) under Swift 6. The receiver
+// sanitizes + length-caps `text` (via
 // `SessionMessageStore`) before it is stored or rendered — never trust the wire.
 
 /// A single session-scoped chat message on the wire — **frozen and parked** (network migration P6

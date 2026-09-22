@@ -12,8 +12,8 @@
 //
 // WI-9: every wire payload is `public nonisolated struct … : Codable, Equatable, Sendable`. ProximityKit
 // sets `.defaultIsolation(MainActor.self)`, which would otherwise MainActor-isolate these value types and
-// their synthesized `Codable` — a hard error when the coordinator decodes untrusted MCSession bytes off
-// the main actor. `signed(...)` stays `@MainActor` (it signs with the `@MainActor` key); `verify(...)` is
+// their synthesized `Codable` — a hard error when the coordinator decodes untrusted transport bytes
+// (MCSession's then, the QUIC radio's now) off the main actor. `signed(...)` stays `@MainActor` (it signs with the `@MainActor` key); `verify(...)` is
 // `nonisolated` (pure signature math + canonical bytes).
 
 import Foundation

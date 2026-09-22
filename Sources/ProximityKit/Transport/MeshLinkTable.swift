@@ -326,7 +326,7 @@ nonisolated struct MeshLinkTable {
 
     /// Dial attempts per endpoint before this session stops trying on its own — the initial dial
     /// plus two retries. Matches the DEBUG probe's `maxOutboundTunnelAttempts`, which is the bound
-    /// the feasibility lane actually ran under, and the MC re-invite budget it replaces.
+    /// the feasibility lane actually ran under, and the MC re-invite budget it replaced.
     static let maxDialAttempts = 3
 
     /// Backoff between dial attempts, in seconds. Flat, not exponential: the mesh is a room, not a

@@ -49,8 +49,8 @@ nonisolated enum MeshLinkAdvertisement {
     /// developer sees in a `dns-sd` listing, so it stays stable and stays English.
     static let instanceNamePrefix = "fernlet-mesh-"
 
-    /// Random hex characters after the prefix. Twelve is the same width the MC presence radio's
-    /// ephemeral display name uses.
+    /// Random hex characters after the prefix. Twelve is the same width the retired MC presence
+    /// radio's ephemeral display name used.
     static let instanceNameTokenLength = 12
 
     /// The TXT fields to publish for a given `discoveryInfo`.

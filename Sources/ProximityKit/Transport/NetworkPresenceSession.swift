@@ -138,8 +138,8 @@ protocol PresenceRadioSession: AnyObject {
 /// presence connection and a mesh connection can never negotiate.
 ///
 /// **Fail closed without an owner.** A session whose owner wired no ``resolveDialer`` resolves
-/// nobody and therefore accepts nobody, mirroring the MC advertiser's `shouldAcceptInvitation`
-/// (`?? false`).
+/// nobody and therefore accepts nobody, mirroring the retired MC advertiser's
+/// `shouldAcceptInvitation` (`?? false`).
 ///
 /// `@MainActor`; framework callbacks arrive `@Sendable` and hop in. Owners wire behaviour through
 /// the closure hooks, the same way they do for the other two radios.
@@ -149,10 +149,11 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     /// The presence radio's QUIC service type. A frozen wire token: it must also appear in the
     /// app's Info.plist `NSBonjourServices` or discovery is silently dead on device.
     ///
-    /// Deliberately **not** a reuse of the MC radio's `_fernlet-near._udp`. That entry survives
-    /// until P9 item 4 deletes it, and reusing the name during the migration window would put this
-    /// listener and the MC advertiser on one service type where each would browse the other's
-    /// registrations as a peer.
+    /// Deliberately **not** a reuse of the retired MC radio's `_fernlet-near._udp`. That entry
+    /// survived in the app's plist for the length of the migration window, and reusing the name
+    /// then would have put this listener and the MC advertiser on one service type, where each
+    /// would have browsed the other's registrations as a peer. The old entry is gone; this token
+    /// is the one that stayed.
     nonisolated static let serviceType = "_fernlet-near2._udp"
 
     /// ALPN for the presence protocol. A frozen wire token, distinct from the mesh's
@@ -314,8 +315,8 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     /// Re-advertises under `posture`, carrying `discoveryInfo`.
     ///
     /// The listener is torn down and re-minted rather than mutated — the same stop-and-recreate the
-    /// mesh radio and the MC advertiser both need, and the **only** way to withdraw a Bonjour
-    /// registration. That is what makes an epoch boundary total: the old instance name stops being
+    /// mesh radio needs and the retired MC advertiser needed, and the **only** way to withdraw a
+    /// Bonjour registration. That is what makes an epoch boundary total: the old instance name stops being
     /// advertised before the new one starts, so there is no instant at which both are on the air.
     ///
     /// Every live tunnel survives, deliberately and necessarily: an inbound tunnel is owned by its

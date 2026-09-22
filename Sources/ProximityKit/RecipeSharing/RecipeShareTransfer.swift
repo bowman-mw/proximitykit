@@ -144,11 +144,11 @@ nonisolated enum RecipeShareDiscoveryGate {
 /// ``Event/discoveryPaused`` and ``Event/discoveryResumed`` are accepted in **every** phase,
 /// terminal included, and move the phase **not at all** — they only set ``radioIsQuiet``. Closing
 /// the radio to new peers is not pausing a transfer in flight, and the two must never be confused:
-/// under MultipeerConnectivity `pauseDiscovery()` stops the advertiser and browser while the
-/// MCSession and every live connection keep flowing, so a share in progress is untouched by the very
-/// event that closes the door behind it. A QUIC session that implemented "pause" as standing the
-/// connection down would break a send MC keeps alive, and the regression would look like a flaky
-/// share rather than a transport change. This row is the wall against that.
+/// under MultipeerConnectivity `pauseDiscovery()` stopped the advertiser and browser while the
+/// MCSession and every live connection kept flowing, so a share in progress was untouched by the very
+/// event that closed the door behind it. A QUIC session that implemented "pause" as standing the
+/// connection down would break a send the retired radio kept alive, and the regression would look
+/// like a flaky share rather than a transport change. This row is the wall against that.
 ///
 /// Pure, `nonisolated`, clock-free and driven by no radio.
 nonisolated struct RecipeShareTransfer: Equatable, Sendable {

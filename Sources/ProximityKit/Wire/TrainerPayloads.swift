@@ -16,7 +16,8 @@
 //
 // WI-9: `public nonisolated struct … : Codable, Equatable, Sendable` — ProximityKit's
 // `.defaultIsolation(MainActor.self)` would otherwise MainActor-isolate the synthesized `Codable`, a hard
-// error when the coordinator decodes these untrusted MCSession bytes off the main actor.
+// error when the coordinator decodes these untrusted transport bytes (MCSession's then, the QUIC
+// radio's now) off the main actor.
 
 import Foundation
 

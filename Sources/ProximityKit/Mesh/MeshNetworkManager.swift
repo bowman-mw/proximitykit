@@ -245,9 +245,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// only thing between a held background session and the next stranger to dial in.
     ///
     /// Read by all three doors and by nothing else: ``handlePeerDiscovered(_:)`` (the outbound
-    /// half), the `shouldAcceptInvitation` gate in ``makeTransportHandlers()`` — MC's invitation
-    /// gate *and* the QUIC radio's `invitationGate` — and ``channelAdmission(for:)``, the seat
-    /// decision a freshly connected channel enters through.
+    /// half), the `shouldAcceptInvitation` gate in ``makeTransportHandlers()`` — the QUIC radio's
+    /// `invitationGate`, and the retired MC radio's invitation gate before it — and
+    /// ``channelAdmission(for:)``, the seat decision a freshly connected channel enters through.
     ///
     /// It is deliberately **not** ``isSearching``. No door reads that flag, and `mayLinkToDiscoveredPeers`
     /// is `isSessionOpen || currentMesh != nil` — true in exactly the state a hold runs in — so
@@ -366,9 +366,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Devices this manager kicked itself (`kickEvictedPeer`) whose `.notConnected` has not arrived yet.
     /// `onPeerDisconnected` reads that event as our own eviction — never as the transient socket loss
     /// its re-invite retry exists for. Consumed on the disconnect callback, cleared in
-    /// `stopSearching()`; bounded by MC's 8-peer cap in practice and hard-capped by
-    /// ``maxLocallyKickedPeers`` (R3). Keyed by endpoint for the same reason as `peerRetryCount`:
-    /// a deliberate eviction that stopped being recognized would be re-invited by its own retry.
+    /// `stopSearching()`; bounded in practice by the QUIC radio's eight-link slot cap (the retired
+    /// MC radio's 8-peer cap before it) and hard-capped by ``maxLocallyKickedPeers`` (R3). Keyed by
+    /// endpoint for the same reason as `peerRetryCount`: a deliberate eviction that stopped being
+    /// recognized would be re-invited by its own retry.
     @ObservationIgnored private var locallyKickedEndpoints: Set<PeerEndpointKey> = []
     /// Slots the local shop catalog was already sent to (belt-and-braces once-per-slot guard — the
     /// commit transition in checkCoordinatorStates fires once per fingerprint change already). Pruned
@@ -389,7 +390,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var hasFormedShopSession = false
     /// Test seam: fires with the slot ID whenever a shop-catalog send is initiated (commit offer or
     /// request response) and the provider produced a catalog — unit tests can't observe the real
-    /// channel (no live MCSession behind the test slots).
+    /// channel (no live radio behind the test slots).
     @ObservationIgnored var onShopCatalogSendForTesting: ((UUID) -> Void)?
     /// Test seam: fires AFTER a `clothingCatalogRequest` send completes — i.e. after the commit
     /// task's last touch of manager state. Tests that drive commits await this so the async send
@@ -1176,9 +1177,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Once this device holds a mesh, the roster — not this flag — decides who becomes a **member**,
     /// and it decides it where the peer's identity is actually known: the QUIC introduction answers
     /// `barred` before any app frame and answers `stranger` with a refusal too unless the join doors
-    /// are open (``mayAdmitStrangerProvisionally``, D-4.3 Option 1), MC's slot coordinator refuses
-    /// revoked and blocked keys at its identity introduction, and joining still needs an admission
-    /// the user grants. Closing a session also still evicts uncommitted slots
+    /// are open (``mayAdmitStrangerProvisionally``, D-4.3 Option 1), the slot coordinator's identity
+    /// introduction refuses revoked and blocked keys — the stage the retired MC radio leaned on
+    /// entirely — and joining still needs an admission the user grants. Closing a session also
+    /// still evicts uncommitted slots
     /// (``setSessionOpen(_:)``). So a link opened here reaches either a peer the roster would admit
     /// anyway or a provisional one the seat gate below is about to judge — and a mesh that cannot
     /// re-dial its own members cannot heal a dropped link.
@@ -1192,7 +1194,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// what it says. **It is THE stage for a provisional peer, on either radio** (D-4.3 Option 1):
     /// since the QUIC introduction admits a stranger while the join doors are open, this is where
     /// that stranger's fate is decided, exactly as it always was for an MC peer — never a belt on
-    /// top of a transport that had already refused it. MC's invitation carries no identity at all,
+    /// top of a transport that had already refused it. MC's invitation carried no identity at all,
     /// and the identity introduction one layer up is gated on revoked/blocked keys, not on the
     /// roster; QUIC's introduction proves the key and asks the roster, but answers `stranger` with a
     /// tunnel rather than a refusal while the doors are open. Either way the peer arrives here
@@ -1309,7 +1311,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Descriptor members are listed first, so the dedup below keeps the IDENTITY display name over
     /// the slot's transport hint for a peer that is both; the slot branch moderates the hint
-    /// (`MCPeerID` display names have no other ingest point, R5) and members were moderated at
+    /// (peer display names had no other ingest point than the transport peer, R5) and members were moderated at
     /// `sanitizedDescriptor` / `allowAdmission`, so every name here has been through the same
     /// coercion.
     public var sessionParticipants: [MeshSessionParticipant] {
@@ -11028,8 +11030,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// itself, hands it the introduction authority.
     ///
     /// Both halves go through ``MeshTransportSession``, so the wiring reads the same whichever
-    /// conformer is behind it. `attachIntroductionAuthority` is a documented no-op on the MC radio,
-    /// whose peers authenticate one layer up inside the slot coordinator's identity introduction.
+    /// conformer is behind it. `attachIntroductionAuthority` was a documented no-op on the retired
+    /// MC radio, whose peers authenticated one layer up inside the slot coordinator's identity
+    /// introduction.
     private func setupMeshSession() {
         transportHandlers = makeTransportHandlers()
         transport.wire(transportHandlers)
@@ -11050,8 +11053,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         handlers.shouldAcceptInvitation = { [weak self] peer in
             guard let self else { return false }
-            // Door 2. A held session admits nobody NEW on either radio — this closure is MC's
-            // invitation gate and the QUIC radio's `invitationGate` — but it excuses a peer whose
+            // Door 2. A held session admits nobody NEW — this closure is the QUIC radio's
+            // `invitationGate`, and was the retired MC radio's invitation gate — but it excuses one whose
             // slot is COMMITTED, so a committed link that re-asks across a hold is healed rather
             // than refused (review finding F-4). An uncommitted slot is not excused: the hold
             // disconnected it.
@@ -11228,12 +11231,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         transport.updateDiscoveryInfo(currentDiscoveryInfo())
     }
 
-    /// Decides which half of a mutually-discovered pair sends the MC invitation.
+    /// Decides which half of a mutually-discovered pair dials the other (the MC invitation, once).
     ///
     /// Both peers browse AND advertise, so both discover each other; without a tie-break both
-    /// invite simultaneously and the NW/MC layer fails the pair with errno 61 ("no clist for
-    /// remoteID"). The comparison must therefore be SYMMETRIC — the same two values compared on
-    /// both devices, so that exactly one side evaluates true.
+    /// dial simultaneously and the transport fails the pair with errno 61 ("no clist for
+    /// remoteID") — the failure the retired MC layer produced, and why this tie-break exists. The
+    /// comparison must therefore be SYMMETRIC — the same two values compared on both devices, so
+    /// that exactly one side evaluates true.
     ///
     /// The previous guard compared OUR fingerprint against THEIR display name, which is not a
     /// comparison of like with like, and in practice deadlocked the mesh outright:
@@ -11348,8 +11352,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     enum ChannelAdmission: Equatable {
         /// Seat the peer: build the coordinator and append a slot.
         case seat
-        /// Refuse and free the MC link. A connected peer with no slot holds a zombie link — a
-        /// channel with no owner, one of the 8 MC peer slots — until the search stops.
+        /// Refuse and free the link. A connected peer with no slot holds a zombie link — a
+        /// channel with no owner, one of the eight peer slots — until the search stops.
         case kick
         /// This device already holds a live slot. Leave it entirely alone: kicking here would drop
         /// the good connection, and seating would break the slot cap from the inside.
@@ -11515,10 +11519,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         armSessionGiveUpClock(now: Date())
     }
 
-    /// Frees the MC link of a peer whose slot this manager is evicting itself. `removeSlot` /
+    /// Frees the link of a peer whose slot this manager is evicting itself. `removeSlot` /
     /// `disconnectSlot` drop the record and cancel the coordinator, but nothing in that chain
     /// touches the shared radio (a channel's `disconnect()` only publishes `.idle` locally),
-    /// so the link lingered as a zombie until `stopSearching()`: it held one of the 8 MC peer slots
+    /// so the link lingered as a zombie until `stopSearching()`: it held one of the eight peer slots
     /// on both devices, kept the peer's channel in the transport's `channels`, and —
     /// because `invite` refuses connected peers and `.connected` never re-fires — made re-forming a
     /// slot with that peer impossible for the rest of the search. Best-effort with the same caveat
@@ -11722,7 +11726,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let committed = slots.filter { $0.fingerprint != nil }
         // Phase 2 belt-and-braces: every committed slot already passed through onSlotConnected
         // (which recorded its verified identity), so this is insert-only — `slot.peer.displayHint`
-        // is the MC transport name and must not overwrite the identity display name.
+        // is the transport's own name hint and must not overwrite the identity display name.
         for slot in committed {
             guard let fingerprint = slot.fingerprint,
                   !sessionRoster.contains(where: { $0.fingerprint == fingerprint }),
@@ -14193,7 +14197,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     // MARK: - Test seams
 
     /// Appends a slot for the given coordinator so unit tests can drive the registry dispatch path —
-    /// the production slot path is driven by a live `MCSession` a unit test cannot fake. A non-nil
+    /// the production slot path is driven by a live radio a unit test cannot fake. A non-nil
     /// `fingerprint` models a COMMITTED slot (post-dwell); nil models a pre-commit candidate, which the
     /// Phase-3a registry gate must drop. `internal` for `@testable` unit tests only.
     ///
@@ -14535,7 +14539,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The callbacks this manager installed on its radio, so a unit test can fire the events a live
     /// radio drives in production (`onPeerDisconnected` above all — the retry and local-kick
     /// bookkeeping has no other entry point). Transport-neutral by construction: the same set is
-    /// what the MC session, the QUIC session and the fake are each handed.
+    /// what the QUIC session and the fake are each handed, and was what the retired MC session got.
     var transportHandlersForTesting: MeshTransportHandlers { transportHandlers }
 
     /// Enters proximity-join mode WITHOUT starting the radios. `startJoin()` calls
@@ -14660,7 +14664,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Evicts a slot through the production removal funnel (`removeSlot` — the path
     /// `onPeerDisconnected` and the stale-coordinator sweep share), so unit tests can drive
-    /// transient-drop teardown + shop send-tracking pruning without the private MC callbacks.
+    /// transient-drop teardown + shop send-tracking pruning without the radio's own private callbacks.
     /// `internal` for `@testable` unit tests only.
     func evictSlotForTesting(peerID: UUID) {
         guard let slot = slots.first(where: { $0.id == peerID }) else { return }
@@ -14831,9 +14835,9 @@ extension MeshNetworkManager: MeshContinuationRaising {}
 
 /// What the QUIC radio must be told before it can authenticate a peer (P2 item 8's wiring).
 ///
-/// The manager answers from exactly the state the MC path already trusts: the identity service for
-/// the signing key and the signature, and the live ``MeshDescriptor`` for the mesh id, the epoch and
-/// the roster. Nothing new is derived and nothing is stored — a removal takes effect on the next
+/// The manager answers from exactly the state the retired MC path already trusted: the identity
+/// service for the signing key and the signature, and the live ``MeshDescriptor`` for the mesh id,
+/// the epoch and the roster. Nothing new is derived and nothing is stored — a removal takes effect on the next
 /// introduction because the roster is read fresh each time.
 ///
 /// **Scope, stated plainly** (D-4.3 Option 1, 2026-09-21). A stranger is admitted **provisionally**
@@ -14848,7 +14852,7 @@ extension MeshNetworkManager: MeshContinuationRaising {}
 /// anyone else). With the session closed — whether or not a descriptor exists yet — and under a
 /// hold, the roster is the only answer and a stranger is refused before any app frame, as before.
 ///
-/// Two things this is not. It is not weaker than the radio it replaces: MC's invitation carries no
+/// Two things this is not. It is not weaker than the radio it replaced: MC's invitation carried no
 /// identity at all, while a peer that reaches this manager over QUIC has produced an Ed25519
 /// signature over a transcript bound to the live tunnel, so its key is proven-held. And it is not a
 /// relaxation of plan §7.2's reject list except in one named place — that bullet's "non-roster
@@ -14902,10 +14906,11 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
     ///
     /// 1. **It is a link-layer relaxation, and it is the epoch rule's alone.**
     ///    ``MeshChannelIntroductionExchange`` is reached from ``NetworkMeshSession`` and nowhere
-    ///    else — MC never runs a signed channel introduction — which is exactly the distinction
-    ///    0b's review drew and the reason ``maySeatVerifiedPeer(signingPublicKey:)`` exists for the
-    ///    other radio. Since D-4.3 that radio is no longer members-only before any app frame, but
-    ///    nothing about *this* gate moved with it: what a provisional stranger is admitted by is
+    ///    else — MC never ran a signed channel introduction — which is exactly the distinction
+    ///    0b's review drew and the reason ``maySeatVerifiedPeer(signingPublicKey:)`` exists; the
+    ///    retired MC radio is what it was written for. Since D-4.3 the QUIC radio is no longer
+    ///    members-only before any app frame, but nothing about *this* gate moved with it: what a
+    ///    provisional stranger is admitted by is
     ///    ``mayAdmitStrangerProvisionally``, which is a different question asked in a different
     ///    arm.
     /// 2. **Only the epoch rule moved.** The hello still has to be well formed, carry a canonical
@@ -14999,7 +15004,7 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
     ///    "I am not forming a session with anybody" has to keep meaning that before a descriptor
     ///    exists as well as after — the rule
     ///    `MeshClosedMeshStarTopologyTests.aClosedSessionWithNoMeshStillRefusesEveryLink` pins for
-    ///    the three MC gates. It costs a first meeting nothing: `isSessionOpen` defaults `true` and
+    ///    the three link gates. It costs a first meeting nothing: `isSessionOpen` defaults `true` and
     ///    ``startJoin()`` sets it `true`, so a phone that has met nobody has this door open.
     ///
     /// **What it deliberately does not duplicate.** The slot cap and the proximity-join link rule

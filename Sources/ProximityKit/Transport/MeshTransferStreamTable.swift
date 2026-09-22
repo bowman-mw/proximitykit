@@ -47,19 +47,20 @@ nonisolated struct MeshTransferID: Hashable, Sendable {
 ///
 /// **The behaviour above the transport is unchanged.** A transfer stream carries exactly one
 /// length-framed payload, delivered as exactly one `InboundPeerFrame`, with the same
-/// ``NetworkMeshSession/maxInboundWireBytes`` ceiling both radios enforce. There is no chunking, no
+/// ``NetworkMeshSession/maxInboundWireBytes`` ceiling both radios enforced. There is no chunking, no
 /// resume, no ack for the *application* to see, and no new envelope **the transport is aware of**:
-/// `MeshNetworkManager` sends a photo the same way it sends a chat message, over MC and over QUIC
-/// alike, and cannot tell which pipe carried it. (`MeshChunkPayload` is a new envelope *above* this
-/// layer — routing here is still purely by size, and the transport still cannot tell which pipe
-/// carried what.) The only thing that moved is which stream the bytes travelled on.
+/// `MeshNetworkManager` sends a photo the same way it sends a chat message — as it did over the
+/// retired MC radio, and does over QUIC — and cannot tell which pipe carried it. (`MeshChunkPayload`
+/// is a new envelope *above* this layer — routing here is still purely by size, and the transport
+/// still cannot tell which pipe carried what.) The only thing that moved is which stream the bytes
+/// travelled on.
 ///
 /// ## What ordering this gives up
 ///
 /// Frames on separate streams are not ordered against each other. That is why the floor is set high
 /// enough that only photo-, manifest- and routed-chunk-shaped payloads reach it: the coordinator's
 /// identity handshake, the chat/heart/capability/moderation traffic and every membership record stay
-/// on the control stream, in order, exactly as they are under MultipeerConnectivity.
+/// on the control stream, in order, exactly as they were under MultipeerConnectivity.
 ///
 /// Two of the three payloads that cross the floor are idempotent and causally gated by a round trip
 /// already — a photo is only ever sent in answer to a `FriendPhotoRequestPayload`, and a manifest is
@@ -78,8 +79,9 @@ nonisolated struct MeshTransferID: Hashable, Sendable {
 ///   not — the same rule ``NetworkMeshSession/send(_:to:mode:)`` already applies when a best-effort
 ///   payload will not fit a datagram.
 /// - **Inbound.** No free slot means the stream is not served, so it is released un-acked and the
-///   sender's write fails loudly. That is the MC photo path's own failure semantics (no ack, no
-///   retry, no partial state; recovery is the next manifest sync), reached by a different route.
+///   sender's write fails loudly. That was the retired MC photo path's own failure semantics (no
+///   ack, no retry, no partial state; recovery is the next manifest sync), reached by a different
+///   route.
 ///
 /// And a budget can never outlive the tunnel that owns it: the table is stored **in** the tunnel
 /// record, so `endTunnel` dropping that record drops the budget with it, and a transfer whose peer
