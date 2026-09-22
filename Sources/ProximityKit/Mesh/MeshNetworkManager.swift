@@ -10120,6 +10120,47 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return outcome
     }
 
+    /// Records that the person has now been SHOWN the restored context's ending, so the next cold
+    /// start stays silent about it (owner-calls item 3, 2026-09-22) — called by the Friends tab's
+    /// resume card when it appears.
+    ///
+    /// **The finding it closes.** The context of an ended session is never reaped — the durable
+    /// rejoin bar is re-derived from it at every launch — so every cold start restored
+    /// `terminated:own-departure` (or an expiry) and presented the same "previous session ended"
+    /// card again, until a new session overwrote the file. This writes
+    /// ``MeshSessionContext/endingPresented`` into that same sealed file; the presentation answers
+    /// `.nothing` for it from the next launch on, while ``rejoinBar`` — read from the ending itself,
+    /// not from this mark — is untouched.
+    ///
+    /// **This launch's card stays up.** The presentation is derived from ``lastSessionRestoreOutcome``,
+    /// the copy loaded at launch, so marking the FILE does not pull the card out from under the
+    /// person reading it; a repeated appearance finds the mark already set and writes nothing.
+    ///
+    /// Only an ENDING is marked: an offer to resume and a quarantined file are not news that goes
+    /// stale the same way, and neither reaches the write. A load that is deferred, refused or
+    /// corrupt, a file that now names another mesh, or a refused seal writes nothing and is
+    /// audited — the cost is that the card is shown once more at the next launch, never lost.
+    public func acknowledgeSessionEndingPresented() {
+        guard case .previousSessionEnded = sessionResumePresentation,
+              let restored = restoredSessionContext else { return }
+        let sessionStore = MeshSessionStore(scope: store.meshSessionStorage)
+        guard case .loaded(var context, let token) = sessionStore.load(), context.meshID == restored.meshID else {
+            FernletAuditLog.log("mesh.sessionRestore.endingPresentedNotWritten", context: ["cause": "load"])
+            return
+        }
+        guard !context.endingPresented else { return }
+        context.endingPresented = true
+        do {
+            try sessionStore.save(context, token: token)
+            FernletAuditLog.log("mesh.sessionRestore.endingPresented")
+        } catch {
+            FernletAuditLog.log(
+                "mesh.sessionRestore.endingPresentedNotWritten",
+                context: ["cause": "seal", "error": String(describing: error)]
+            )
+        }
+    }
+
     /// Puts the sealed ledger back on this device after a process death, so the reconnect that
     /// follows is a **merge** rather than a fresh session (plan §10.3's fourth entry).
     ///

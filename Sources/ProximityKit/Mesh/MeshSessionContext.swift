@@ -274,6 +274,28 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
     /// 7 gives joiners a real ledger.
     var localTermination: MeshSessionLocalTermination?
 
+    /// Whether the person has already been SHOWN this context's ending — the one-shot mark behind
+    /// the Friends tab's "previous session ended" card (owner-calls item 3, 2026-09-22).
+    ///
+    /// **Why it exists.** The context of a session this device left, was removed from, or outlived
+    /// is deliberately never reaped: it is where the durable rejoin bar is re-derived from at every
+    /// launch (``recordedEndingReason(selfFingerprint:)``), and deleting it would let a relaunch
+    /// rejoin a mesh it left. But the launch restore reads it on EVERY cold start, and
+    /// `MeshSessionResumePresentation` turned every one of those reads into the same card — "You
+    /// left the previous session" at every launch until a new session overwrote the file, with only
+    /// a per-view-instance dismissal to hide it. This mark is what lets the bar stay durable while
+    /// the NEWS is told once: `MeshNetworkManager.acknowledgeSessionEndingPresented()` sets it when
+    /// the card appears, and the presentation answers `.nothing` for an ending already shown.
+    ///
+    /// **Additive, and it did not bump the schema** — ``localTermination``'s precedent exactly. A
+    /// context written before this field existed decodes `false`, which is the conservative
+    /// direction: an old ending is presented once more and then marked, never silently swallowed.
+    /// It lives inside the sealed file rather than in `UserDefaults` so it shares the context's
+    /// whole lifecycle: delete-all already wipes it with the file (`MeshSessionStore.wipeForDeleteAll`),
+    /// a new session's context replaces it along with the ending it described, and it is sealed
+    /// like everything beside it — no new surface and no new disposition row.
+    var endingPresented: Bool
+
     /// Builds a context, stamping the current schema version and clamping ``epochHeads``.
     ///
     /// - Parameters:
@@ -287,6 +309,7 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
     ///   - developedLocally: Whether this device has developed the mesh.
     ///   - keyAdvertisements: The verified key advertisements folded so far; defaults to empty.
     ///   - localTermination: The durable ending mark, if this device's participation has ended.
+    ///   - endingPresented: Whether the person has been shown this context's ending; defaults to not.
     init(
         meshID: UUID,
         protocolVersion: Int,
@@ -297,7 +320,8 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         lastExternalHeartbeat: Date? = nil,
         developedLocally: Bool = false,
         keyAdvertisements: MeshKeyAgreementAdvertisementSet = .empty,
-        localTermination: MeshSessionLocalTermination? = nil
+        localTermination: MeshSessionLocalTermination? = nil,
+        endingPresented: Bool = false
     ) {
         self.schemaVersion = MeshSessionContextSchema.current
         self.meshID = meshID
@@ -310,6 +334,7 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         self.developedLocally = developedLocally
         self.keyAdvertisements = keyAdvertisements
         self.localTermination = localTermination
+        self.endingPresented = endingPresented
     }
 
     /// The ending this context already records, or nil while this device is still a member.
@@ -359,5 +384,6 @@ nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
         localTermination = try container.decodeIfPresent(
             MeshSessionLocalTermination.self, forKey: .localTermination
         )
+        endingPresented = try container.decodeIfPresent(Bool.self, forKey: .endingPresented) ?? false
     }
 }

@@ -17,7 +17,10 @@
 // ⇒ an offer; `corrupt` ⇒ the previous session could not be reopened and nothing already saved was
 // lost; `deferred` and `refused` ⇒ SILENT (the routed re-entry retries them at the next
 // protected-data rise, and a launch on a locked device is not news); an ending ⇒ the mesh ENDED,
-// named by how, never "failed". Nothing modal, and nothing at all while a session surface is up.
+// named by how, never "failed" — ONCE: an ending the context records as already shown
+// (`MeshSessionContext.endingPresented`, owner-calls item 3) is `.nothing`, because the context is
+// never reaped (the rejoin bar is re-derived from it) and every cold start re-reads it. Nothing
+// modal, and nothing at all while a session surface is up.
 //
 // What a resume IS, so the copy does not overclaim: the restore arms no radio (invariant 5) — it
 // makes the ledger, the roster, the restored key advertisements and the routed store addressable —
@@ -57,8 +60,8 @@ public nonisolated enum MeshSessionEndingPresentation: Hashable, Sendable, CaseI
 public nonisolated enum MeshSessionResumePresentation: Hashable, Sendable {
 
     /// Nothing to say: no restore attempted, a green field, a deferral or refusal the re-entry will
-    /// retry, a resumable context whose offer has since been consumed, or a session surface already
-    /// up.
+    /// retry, a resumable context whose offer has since been consumed, an ending the person has
+    /// already been shown, or a session surface already up.
     case nothing
 
     /// A live context inside its ceiling, with the foreground offer raised: keep the tab open and
@@ -88,10 +91,10 @@ public nonisolated enum MeshSessionResumePresentation: Hashable, Sendable {
         switch outcome {
         case .resumable:
             return offersForegroundResume ? .offerResume : .nothing
-        case .terminated(_, let reason):
-            return .previousSessionEnded(reason.presentation)
-        case .expired:
-            return .previousSessionEnded(.expired)
+        case .terminated(let context, let reason):
+            return context.endingPresented ? .nothing : .previousSessionEnded(reason.presentation)
+        case .expired(let context):
+            return context.endingPresented ? .nothing : .previousSessionEnded(.expired)
         case .noSession, .retryAfterUnlock, .retryAfterRefusal:
             return .nothing
         case .quarantineCorruptFile:
