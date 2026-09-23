@@ -54,6 +54,11 @@ enum MeshReturningMemberReseat: Equatable {
     /// proved for this link — a replayed or borrowed identity introduction. Refused, and audited
     /// once, for the life of the slot. (A link with no proven key YET stays ``open``: that is
     /// "cannot tell", not "mismatched".)
+    ///
+    /// The re-seat's refusal only: the gated identity is left where only a gesture could commit
+    /// it, and a gesture that does is refused one step later at the seat, whose transport check
+    /// every commit answers to (`MeshNetworkManager.seatTransportRefusal(at:identity:)`,
+    /// 2026-09-23) — the link is then evicted.
     case refusedMismatchedKey
 }
 

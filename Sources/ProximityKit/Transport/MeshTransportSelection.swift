@@ -246,12 +246,26 @@ protocol MeshTransportSession: AnyObject {
     /// coordinator's identity introduction is a signed envelope with no recipient on this radio (a
     /// QUIC handle carries no advertised fingerprint) and a five-minute lifetime, so a device that
     /// was sent one can replay it over its OWN tunnel. The channel introduction cannot be replayed:
-    /// its transcript binds the TLS exporter of this very connection. A caller that is about to act
-    /// on a claimed identity without a person's gesture — the returning-member re-seat — requires
-    /// the two to agree.
+    /// its transcript binds the TLS exporter of this very connection.
+    ///
+    /// **Three readers, and nil means something different to each** (2026-09-23):
+    /// - **every seat** (`MeshNetworkManager.checkCoordinatorStates()`), whoever asked for the
+    ///   commit — a tap on a slot row, a dwell, the QR ceremony or the returning-member re-seat. A
+    ///   committed key that is not this answer is refused and the link evicted, and so is a nil:
+    ///   a seat is where an identity is ADOPTED, so it needs a proof, not the absence of a
+    ///   contradiction. On ``NetworkMeshSession`` every activated tunnel has an answer, so a nil
+    ///   there means the slot's tunnel is gone and the seat was dead anyway; on an in-memory radio
+    ///   it means "proved nothing", and a cell that seats through the production seat proves the
+    ///   key it seats;
+    /// - **the returning-member re-seat**, which acts with no gesture at all: nil is "cannot tell
+    ///   YET", and the slot is judged again when the answer arrives;
+    /// - **the payload door** (`MeshNetworkManager.proximityCoordinator(_:didReceive:plaintext:from:)`),
+    ///   which refuses a frame whose signer, or the identity it would be credited to, contradicts
+    ///   this answer. A nil contradicts nothing, so the frame is judged against the slot's seated
+    ///   key alone.
     ///
     /// Default-implemented as nil: a radio that proved nothing vouches for nobody, which fails the
-    /// caller closed. ``NetworkMeshSession`` is the one shipping override.
+    /// seat and the re-seat closed. ``NetworkMeshSession`` is the one shipping override.
     func verifiedSigningPublicKey(for peer: PeerHandle) -> Data?
 }
 
@@ -296,7 +310,8 @@ extension MeshTransportSession {
         .nothingToWaitFor
     }
 
-    /// The fail-closed default: a radio that proved no key vouches for nobody.
+    /// The fail-closed default: a radio that proved no key vouches for nobody, so nothing seats
+    /// over it and nothing is re-seated.
     func verifiedSigningPublicKey(for peer: PeerHandle) -> Data? {
         nil
     }

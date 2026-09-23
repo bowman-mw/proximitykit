@@ -103,6 +103,37 @@ authorization; only blocked keys ban), ``CoachSessionTrustPolicy`` for the futur
 persistent record store behind both, holding the friend/removed/blocked/reported lifecycle and
 the audit trail.
 
+**Invariant: a link is seated — and its frames credited — only as the key its own tunnel proved**
+(2026-09-23, closing a hole the blind reviews of 31fafd6 found and which predates it). Two
+identities describe one mesh link: the coordinator's identity introduction, a signed envelope that
+on the QUIC radio has no recipient, a five-minute expiry and no advertised fingerprint to check it
+against — so it can be replayed over any tunnel — and the transport's signed channel introduction,
+bound to this connection's TLS exporter, which cannot
+(`MeshTransportSession.verifiedSigningPublicKey(for:)`). The coordinator accepts a second
+introduction in any state, `.connected` included, and re-gates to it, and a commit takes whatever
+identity it holds; the re-seat above judged the transport only for the slots it asked to commit. So
+a tap on a slot row, the QR ceremony or a 15 cm dwell could seat a link as an identity the transport
+had proven false — a stranger's replay, a member's introduction the re-seat had already refused, or a
+seated link re-committed as somebody else — and every frame on it was then credited to that
+identity (removal votes cast "as" another member). Now **every** seat, whoever asked for it, must
+commit the key the tunnel proved, and a link with no proven key is refused too: a seat adopts an
+identity, so it needs a proof rather than the absence of a contradiction
+(`seatTransportRefusal(at:identity:)`, evicted and audited once as
+`mesh.slot.refusedUnprovenIdentityAtSeat`, `reason` = `transportKeyMismatch` / `noTransportKey`).
+It never refuses an honest first meeting: a device's channel introduction and every envelope its
+coordinator signs carry the same Ed25519 key, one `IdentityService` signing both, so a provisional
+stranger proves exactly the key it introduces. And the **payload door**
+(``MeshNetworkManager/proximityCoordinator(_:didReceive:plaintext:from:)``) credits nothing against
+those proofs: the coordinator verifies each envelope against the key the envelope itself names and
+credits it to its current identity without comparing the two, so the door drops a frame whose
+signer, or the identity it would be credited to, is not the slot's seated key or the tunnel's proven
+key — the re-commit window before the next seat pass evicts, a replayed identity before any seat
+(an admission request in someone else's name), a relayed envelope — and a frame from a coordinator
+that no longer holds a slot (`mesh.dispatch.droppedUnattributable`, `reason` = `signerNotSeated` /
+`creditedNotSeated` / `signerNotProven` / `creditedNotProven` / `noSlot`). Nothing honest fails it:
+every envelope on a link is signed by the link peer's own key, and the mesh relays content inside its
+own envelopes, never another device's envelope.
+
 **Invariant: no display name crosses before this side commits** (stranger-admission Option 1b, the
 owner's call of 2026-09-22). Every envelope a coordinator signs reads one private property,
 `disclosedDisplayName`, which is empty until ``ProximityCoordinator/confirmPeerIdentity()`` and the
@@ -139,7 +170,8 @@ in-session hearts, the one-hop moderation relay (``ModerationReportRelay`` →
 ``ModerationLedger`` → ``ModerationBanStore``), fuzzy friend state (``FriendStateCache``), and
 Group Activities (``ProximityActivityManager``, whose authorization is a host-signed,
 invitee-key-bound token rather than the shared handshake). Feature payloads dispatch through a
-registry whose committed-slot gate is the security boundary; the session end promotes the roster
+registry whose committed-slot gate is the security boundary — behind the payload door's attribution
+rule, which every frame of every family passes first (see the seat invariant above); the session end promotes the roster
 into the keep-as-friend review (``FriendMintingReview``, ``KeepFriendsPromptSheet``,
 ``FriendPhotoReviewSheet``). **"The session end" is the MESH ending — ``MeshNetworkManager/isSessionLive``
 going false — and never a lost link** (P6 item 2 and its fix): a proximity-join pair now FOUNDS a
@@ -401,7 +433,8 @@ coordinator's identity introduction, the commit and the admission grant.
 
 Every decision the QUIC session makes is factored out of it so it can be enumerated at tier 1 with
 no radios and no wall clock: `MeshLinkTable` (peer cap, per-connection state machine, three-attempt
-dial budget, duplicate-tunnel suppression, endpoint cache), `MeshHeartbeatSchedule` (the 30 s
+dial budget, duplicate-tunnel suppression, endpoint cache, and — since 2026-09-23 — which key a dial
+proved answers each advertisement, the one thing a claimed `sid` must not contradict), `MeshHeartbeatSchedule` (the 30 s
 heartbeat's due times), `MeshLinkAdvertisement` (the Bonjour TXT vocabulary — `sid` carried, `fp`
 withheld), `MeshSessionIdentityMap` (one session-stable ``PeerHandle`` identity per endpoint),
 `NetworkMeshWire` (control-stream framing), `MeshTransferStreamTable` (which frames earn a stream of
@@ -450,6 +483,28 @@ short-circuit that skipped the comparison. `MeshIntroductionAuthority` is the se
 epoch reference, roster and signing key; a session without one authenticates nobody and therefore
 admits nobody. The verified `sid` it yields is what lets an inbound tunnel be matched to the browsed
 advertisement it came from, so duplicate-tunnel suppression ranks the pair instead of admitting both.
+
+**A `sid` is a claim, and a claim may not displace anybody** (2026-09-23, a reviewer's note on
+31fafd6). The `sid` is not in the signed transcript, and every advertisement's `sid` is public in its
+TXT record, so a verified peer — a member, or a stranger while the join doors are open — could claim
+an ABSENT member's `sid`, take that member's browsed key, and hold it until its own tunnel ended:
+the member's re-link was refused as a duplicate of the claimant's tunnel, this device's dial to it
+was refused as already connected, and the re-dial sweep passed it over because a live tunnel carried
+its `sid`. Signing the field would not help — nothing binds an advertisement to a key (the TXT
+withholds `fp` on purpose), so a signature would only prove the claimant chose the claim. What this
+device CAN verify is its own dial: a tunnel it opened to an advertisement's endpoint proves who
+answers there (`MeshLinkTable.noteProvenOwner(_:signingPublicKey:)`, recorded at activation, before
+the duplicate collapse). So an inbound claim resolves to a browsed key only when no dial proved a
+different key answers it and no live tunnel verified as a different key holds it
+(`claimResolves(_:to:heldBy:)`) — otherwise the tunnel keeps its own connection key, which is what an
+inbound tunnel whose `sid` matches nothing browsed has always done — and the sweep asks whether the
+proven owner is among the live tunnels rather than whether its `sid` is
+(`sweepSkips(_:liveSessionIDs:liveSigningKeys:)`). A member can therefore always re-link by dialing,
+and a member this device has dialed before is re-dialed however its `sid` is claimed. **The residual,
+stated rather than implied:** an advertisement no dial of this device's has proven, and no tunnel
+holds, can still be named first by a claimant; when this device is the preferred dialer toward it —
+so its owner waits to be dialed — the claimant then holds that key until its own tunnel ends. It
+costs availability, never identity: the claimant is seated only as the key its own tunnel proved.
 
 Verification is also where a pair that ended up with **two** tunnels is collapsed back to one.
 `MeshDialPreference` deliberately admits on both sides when it cannot rank — zero tunnels is the

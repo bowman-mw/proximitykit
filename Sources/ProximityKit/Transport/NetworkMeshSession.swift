@@ -999,6 +999,16 @@ final class NetworkMeshSession: NetworkChannelHost {
         links.admitRepropose(key)
     }
 
+    /// Records a browsed advertisement in the link table's endpoint cache exactly as
+    /// ``noteBrowsed(_:key:at:)`` records one, minus the framework endpoint a unit test cannot build
+    /// and the owner's discovery announcement — the half the inbound `sid` resolution reads
+    /// (2026-09-23).
+    func rememberBrowsedForTesting(_ key: MeshLinkKey, instanceName: String, advertisement: [String: String]) {
+        links.remember(MeshEndpointRecord(
+            key: key, instanceName: instanceName, advertisement: advertisement, lastSeenAt: Date()
+        ))
+    }
+
     /// Which endpoints hold a tunnel right now, in sorted key order — the read that lets a test say
     /// *which* tunnel of a collapsed pair survived, not merely how many did.
     var tunnelKeysForTesting: [MeshLinkKey] {
@@ -1010,13 +1020,15 @@ final class NetworkMeshSession: NetworkChannelHost {
     ///
     /// `verified: nil` is a tunnel mid-introduction — precisely what sits in the map at the instant
     /// the duplicate-collapse gate is asked about it. A non-nil one is an activated tunnel, holding
-    /// a roster slot and a running heartbeat.
+    /// a roster slot and a running heartbeat — and, booked as the `.initiator`, a dial that proved
+    /// who answers `key`, recorded exactly as `activate` records it (2026-09-23).
     func bookTunnelForTesting(_ key: MeshLinkKey, role: MeshChannelRole, verified: MeshVerifiedPeer?) {
         let channel = prepareChannel(for: key)
         var tunnel = Tunnel(peer: channel.peer, channel: channel, role: role)
         tunnel.verified = verified
         tunnels[key] = tunnel
-        guard verified != nil else { return }
+        guard let verified else { return }
+        if role == .initiator { links.noteProvenOwner(key, signingPublicKey: verified.signingPublicKey) }
         let now = Date()
         links.noteReady(key, now: now)
         heartbeats.start(key, now: now)
@@ -1346,9 +1358,13 @@ private extension NetworkMeshSession {
     ///
     /// * **A peer already reachable under another key.** The losing half of a collapsed duplicate is
     ///   returned to ``MeshLinkPhase/idle`` deliberately, so re-offering that key would re-dial a
-    ///   device this session is already connected to, every interval, forever. The comparison is the
-    ///   advertised `sid` against the `sid` on each live tunnel's ``MeshVerifiedPeer`` — the same
-    ///   value the inbound path resolves keys by.
+    ///   device this session is already connected to, every interval, forever. When a dial of this
+    ///   device's has proven who answers the advertisement, the comparison is that identity against
+    ///   each live tunnel's verified key; otherwise it is the advertised `sid` against the `sid` on
+    ///   each live tunnel's ``MeshVerifiedPeer`` — the same value the inbound path resolves keys by
+    ///   (``MeshLinkTable/sweepSkips(_:liveSessionIDs:liveSigningKeys:)``, 2026-09-23: a `sid` is a
+    ///   claim, and a peer claiming an absent member's used to keep that member from ever being
+    ///   re-dialed).
     /// * **Every peer, while any inbound introduction is in flight.** A pending inbound is keyed by
     ///   its *connection id*, not by a browsed key — the peer has not said who it is yet — so this
     ///   radio cannot tell whether the connection mid-introduction is from the very peer the sweep
@@ -1376,12 +1392,12 @@ private extension NetworkMeshSession {
             return
         }
         lastReproposedAt = now
-        let live = Set(tunnels.values.compactMap { $0.verified?.sessionID })
+        let liveSessionIDs = Set(tunnels.values.compactMap { $0.verified?.sessionID })
+        let liveSigningKeys = Set(tunnels.values.compactMap { $0.verified?.signingPublicKey })
         for key in browsedEndpoints.keys.sorted(by: { $0.rawValue < $1.rawValue })
         where tunnels[key] == nil && links.phase(of: key) == .idle {
-            let advertised = links.cachedEndpoint(key)?.advertisement[MeshLinkAdvertisement.sessionIDKey]
-            guard let advertised, !live.contains(advertised) else { continue }
-            guard links.admitRepropose(key) else { continue }
+            guard !links.sweepSkips(key, liveSessionIDs: liveSessionIDs, liveSigningKeys: liveSigningKeys),
+                  links.admitRepropose(key) else { continue }
             onPeerDiscovered?(handle(for: key))
         }
     }
@@ -1508,9 +1524,16 @@ private extension NetworkMeshSession {
     /// the two ends can differ on that. One rule at both sites is what stops the pair from closing
     /// one connection each and ending with none.
     ///
+    /// **The `sid` is a claim, and a claim may not displace anybody** (2026-09-23). It is not in
+    /// the signed transcript and nothing binds an advertisement to a key, so a verified peer can
+    /// name another member's `sid`. Resolving it blindly let that peer take an absent member's
+    /// browsed key, and the member's own re-link was then refused as a duplicate of the squatter's
+    /// tunnel. ``inboundKey(for:pendingKey:)`` resolves it only when nothing this device verified
+    /// contradicts it; the owner's gate is asked about the key the tunnel will actually live under.
+    ///
     /// - Returns: the key to build the tunnel under, or nil when the table or the owner refused it.
     func admitVerifiedInbound(_ verified: MeshVerifiedPeer, pendingKey: MeshLinkKey) -> MeshLinkKey? {
-        let key = links.key(advertisingSessionID: verified.sessionID) ?? pendingKey
+        let key = inboundKey(for: verified, pendingKey: pendingKey)
         guard invitationGate?(handle(for: key)) ?? false else {
             noteInboundRefusal("owner", key: key)
             return nil
@@ -1524,6 +1547,26 @@ private extension NetworkMeshSession {
             return nil
         }
         return key
+    }
+
+    /// The link key a verified inbound tunnel lives under: the browsed advertisement its claimed
+    /// `sid` names, unless a dial of this device's proved a different key answers that
+    /// advertisement or a live tunnel verified as a different key already holds it — then its own
+    /// connection key (``MeshLinkTable/claimResolves(_:to:heldBy:)``, 2026-09-23).
+    ///
+    /// The one residual, stated rather than implied: an advertisement no dial of this device's has
+    /// reached yet and no tunnel holds can still be named first by a claimant. When this device is
+    /// the preferred dialer toward it — so its owner waits to be dialed — the claimant's tunnel
+    /// then holds that key until it ends. Once any dial has proven the owner, it cannot happen
+    /// again, and the owner can always re-link by dialing this device.
+    func inboundKey(for verified: MeshVerifiedPeer, pendingKey: MeshLinkKey) -> MeshLinkKey {
+        guard let claimed = links.key(advertisingSessionID: verified.sessionID),
+              links.claimResolves(
+                claimed,
+                to: verified.signingPublicKey,
+                heldBy: tunnels[claimed]?.verified?.signingPublicKey
+              ) else { return pendingKey }
+        return claimed
     }
 
     /// The single place the link table is asked about an inbound tunnel, so the `sid` that drives
@@ -1705,6 +1748,11 @@ private extension NetworkMeshSession {
     /// transfer stream can never carry a frame from an unverified peer" structural rather than a
     /// matter of call order (``serveTransferStream(_:on:)`` resolves its tunnel *through* it). The
     /// dialing side also starts its transfer acceptor here — the listening side already has one.
+    ///
+    /// A DIAL's verified key is recorded as the proven owner of the advertisement it dialed
+    /// (``MeshLinkTable/noteProvenOwner(_:signingPublicKey:)``, 2026-09-23) BEFORE the duplicate
+    /// collapse, because the proof is the introduction over a connection to that advertisement's
+    /// own endpoint, and it holds whether or not this tunnel is the one the pair keeps.
     func activate(
         _ key: MeshLinkKey,
         connection: NetworkConnection<QUIC>,
@@ -1712,6 +1760,9 @@ private extension NetworkMeshSession {
         datagrams: Network.QUIC.Datagrams<QUICDatagram>,
         verified: MeshVerifiedPeer
     ) {
+        if tunnels[key]?.role == .initiator {
+            links.noteProvenOwner(key, signingPublicKey: verified.signingPublicKey)
+        }
         guard let role = tunnels[key]?.role,
               admitActivation(at: key, role: role, verified: verified),
               var tunnel = tunnels[key] else { return }

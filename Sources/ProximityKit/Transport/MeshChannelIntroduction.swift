@@ -113,9 +113,19 @@ nonisolated struct MeshChannelHello: Codable, Equatable, Sendable {
     /// **Not covered by the introduction signature** (plan §7.2 fixes the transcript's fields and
     /// this is not one of them). It is a dial-preference hint only: it lets an inbound tunnel be
     /// matched to the browsed advertisement it came from, so duplicate-tunnel suppression can rank
-    /// the pair instead of falling through to ``MeshDialPreference/unranked``. A verified roster
-    /// member that lied about it could at worst cost itself a link — refusing on both sides is the
-    /// unrecoverable direction, and admitting is what an unranked pair already does.
+    /// the pair instead of falling through to ``MeshDialPreference/unranked``.
+    ///
+    /// **A lie about it could cost somebody ELSE a link, not only the liar** (corrected
+    /// 2026-09-23; this used to say "at worst cost itself a link"). Every advertisement's `sid` is
+    /// public in its TXT record, so a verified peer — a member, or a stranger while the join doors
+    /// are open — could claim an absent member's `sid`, take that member's browsed key, and hold
+    /// it until its own tunnel ended, refusing the member's re-link as a duplicate. Signing the
+    /// field would not help: nothing binds an advertisement to a key (the TXT withholds `fp` on
+    /// purpose), so a signature would only prove the claimant chose the claim. The claim is
+    /// therefore used only where nothing verified contradicts it — see
+    /// ``MeshLinkTable/claimResolves(_:to:heldBy:)`` and ``MeshLinkTable/sweepSkips(_:liveSessionIDs:liveSigningKeys:)``
+    /// — and it never decides WHO a peer is: the slot is seated only as the key this tunnel's own
+    /// introduction proved (`MeshNetworkManager`'s seat check).
     let sessionID: String
 
     /// Whether every field has the exact width the format fixes. Checked before anything else, on

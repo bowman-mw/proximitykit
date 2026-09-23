@@ -2828,6 +2828,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: - ProximityPayloadHandling
 
+    /// The payload door: every verified frame on every mesh link arrives here, credited by its
+    /// slot's coordinator to `peer` — the coordinator's connected identity, or its pending one
+    /// before a commit.
+    ///
+    /// **Nothing is credited to an identity the link's own proofs contradict** (2026-09-23). The
+    /// coordinator verifies each envelope against the key the envelope itself names, then hands this
+    /// door `connectedIdentity ?? pendingPeerIdentity` without comparing the two. So a frame signed
+    /// by one key was credited to another, and the identity it was credited to could be one the
+    /// transport never proved: a replayed introduction before any commit, or — in the hop before the
+    /// seat evicts it — a seated link whose coordinator a replayed introduction and a second commit
+    /// had moved to somebody else. ``attributableSlot(for:envelope:credited:type:)`` refuses every
+    /// such frame before any family sees it; ``frameAttributionRefusal(signer:credited:seated:proven:)``
+    /// is the rule.
     public func proximityCoordinator(
         _ coordinator: ProximityCoordinator,
         didReceive envelope: FernletIdentityEnvelope,
@@ -2836,8 +2849,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) {
         // Unknown (newer-build) payload types are parked by the coordinator and never dispatched
         // here; the guard is belt-and-braces for any future direct caller.
-        guard let payloadType = envelope.payloadType else { return }
-        let slot = slots.first { $0.coordinator === coordinator }
+        guard let payloadType = envelope.payloadType,
+              let slot = attributableSlot(for: coordinator, envelope: envelope, credited: peer, type: payloadType)
+        else { return }
         let decoder = JSONDecoder()
 
         switch payloadType {
@@ -2861,7 +2875,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // labels for people it has never been introduced to. Its own two senders have always
             // been commit-side (`onSlotConnected`, `announcePromotedMesh`), so nothing honest
             // targets an uncommitted slot; the gate only closes the receive half of that asymmetry.
-            guard slot?.fingerprint != nil else {
+            guard slot.fingerprint != nil else {
                 FernletAuditLog.log(
                     "mesh.vouchList.droppedUncommittedSlot",
                     context: heldMeshAuditContext(["type": payloadType.rawValue])
@@ -2888,13 +2902,88 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // link is going away" — `MeshMembershipGoodbyeInterop` is where that rule is stated and
             // where it is proven that no departure record can be derived from one. Membership is
             // untouched: the peer stays on the derived roster and may reconnect.
-            if case .disconnected = MeshMembershipGoodbyeInterop.outcome(forGoodbyeFrom: peer?.fingerprint),
-               let slot {
+            if case .disconnected = MeshMembershipGoodbyeInterop.outcome(forGoodbyeFrom: peer?.fingerprint) {
                 removeSlot(slot)
             }
         default:
             dispatchRegistryPayload(payloadType, envelope: envelope, plaintext: plaintext, peer: peer, slot: slot)
         }
+    }
+
+    /// The slot a verified frame may be credited on — or nil, with the frame dropped and audited,
+    /// when it may be credited to nobody (2026-09-23).
+    ///
+    /// Two refusals, named in the audit line's `reason`:
+    /// - **`noSlot`** — the coordinator is not one this manager seats any more. A slot is removed
+    ///   synchronously while its coordinator is cancelled a hop later, so a frame already queued
+    ///   behind an eviction reached the door slotless; the admission request, the one family that
+    ///   accepts a slotless frame, then took it as the identity the slot had been evicted for —
+    ///   including an identity the seat had just refused as unproven.
+    /// - **a contradiction** — ``frameAttributionRefusal(signer:credited:seated:proven:)``.
+    ///
+    /// One line per refused frame, like every other drop at this door: each costs its sender a
+    /// signature, and the radio's per-connection frame budget bounds the rest. The line names the
+    /// payload type and the reason, never a key, and carries `held` so a cell can read it per rig.
+    private func attributableSlot(
+        for coordinator: ProximityCoordinator,
+        envelope: FernletIdentityEnvelope,
+        credited peer: ProximityCoordinator.PeerIdentity?,
+        type: PayloadType
+    ) -> PeerSlot? {
+        let slot = slots.first { $0.coordinator === coordinator }
+        let reason: String?
+        if let slot {
+            reason = Self.frameAttributionRefusal(
+                signer: envelope.senderSigningPublicKey,
+                credited: peer?.signingPublicKey,
+                seated: slot.fingerprint == nil ? nil : slot.verifiedSigningPublicKey,
+                proven: transport.verifiedSigningPublicKey(for: slot.peer)
+            )
+        } else {
+            reason = "noSlot"
+        }
+        guard let reason else { return slot }
+        FernletAuditLog.log(
+            "mesh.dispatch.droppedUnattributable",
+            context: heldMeshAuditContext(["type": type.rawValue, "reason": reason])
+        )
+        return nil
+    }
+
+    /// The payload door's attribution rule over the four keys it compares, so a cell can enumerate
+    /// it with no slot, no coordinator and no radio (2026-09-23).
+    ///
+    /// A frame is credited only when neither its **signer** nor the identity it would be
+    /// **credited** to contradicts a key this device holds a proof for:
+    /// - the slot's **seated** key, once the slot is committed — which the seat accepts only when
+    ///   the tunnel proved it (``seatTransportRefusal(at:identity:)``);
+    /// - the **proven** key the tunnel's signed channel introduction bound to this link.
+    ///
+    /// Each anchor that exists must equal the signer, and the credited identity when there is one.
+    /// Only a frame no honest peer sends can fail: every envelope on a link is signed by the link
+    /// peer's own identity key, the key its introduction, its channel introduction and its seat all
+    /// carry, and the mesh relays CONTENT inside its own envelopes (a routed item keeps its author's
+    /// signature inside the forwarder's frame) — never another device's envelope. With no anchor at
+    /// all (an uncommitted slot over a radio that proved nothing) nothing is judged here, and each
+    /// family's own gate stands as it did.
+    ///
+    /// - Parameters:
+    ///   - signer: The key the envelope names and verified under.
+    ///   - credited: The key of the identity the coordinator credits the frame to, or nil.
+    ///   - seated: The slot's seated key when the slot is committed, else nil.
+    ///   - proven: The key the transport proved for the slot's link, or nil.
+    /// - Returns: `signerNotSeated`, `creditedNotSeated`, `signerNotProven`, `creditedNotProven`,
+    ///   or nil when the frame may be credited.
+    static func frameAttributionRefusal(signer: Data, credited: Data?, seated: Data?, proven: Data?) -> String? {
+        if let seated {
+            guard signer == seated else { return "signerNotSeated" }
+            guard credited == nil || credited == seated else { return "creditedNotSeated" }
+        }
+        if let proven {
+            guard signer == proven else { return "signerNotProven" }
+            guard credited == nil || credited == proven else { return "creditedNotProven" }
+        }
+        return nil
     }
 
     /// `.meshDescriptor` / `.meshAdmissionRequest` / `.meshAdmissionGrant` — the membership family
@@ -2930,10 +3019,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             }
         case .meshAdmissionGrant:
             if let payload = try? decoder.decode(MeshAdmissionGrantPayload.self, from: plaintext) {
-                // `peer?.signingPublicKey`, NOT `slot?.verifiedSigningPublicKey`: a grant answers
-                // our join request, which by design arrives BEFORE our slot commits, so the slot's
-                // verified key is still nil on the legitimate path. `peer` is set only from a
-                // signature-verified intro, so it is envelope-authenticated either way.
+                // `peer?.signingPublicKey`: the identity the frame is credited to. It was chosen over
+                // `slot?.verifiedSigningPublicKey` while a join request could cross before the
+                // commit; since the owner-calls round the request goes to committed slots only, and
+                // since 2026-09-23 the door refuses a frame whose signer or credited identity is not
+                // the slot's seated key (`attributableSlot`), so on the legitimate path the two are
+                // one key. (Before that gate, "envelope-authenticated" overstated it: `peer` was
+                // the coordinator's identity, never compared to the envelope's signer.)
                 handleAdmissionGrant(payload, slot: slot, senderSigningPublicKey: peer?.signingPublicKey)
             }
         default:
@@ -14398,6 +14490,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                         refused.append(slots[index])
                         continue
                     }
+                    // EVERY seat, whoever asked for the commit — see ``seatTransportRefusal(at:identity:)``.
+                    if let reason = seatTransportRefusal(at: index, identity: peerIdentity) {
+                        FernletAuditLog.log(
+                            "mesh.slot.refusedUnprovenIdentityAtSeat", context: heldMeshAuditContext(["reason": reason])
+                        )
+                        refused.append(slots[index])
+                        continue
+                    }
                     slots[index].fingerprint = fp
                     slots[index].verifiedSigningPublicKey = peerIdentity.signingPublicKey
                     // Store the handshake-verified KA key; used for group key wrapping (Phase 3).
@@ -14457,6 +14557,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   TLS exporter and cannot be replayed, so the gated identity's key must equal
     ///   ``MeshTransportSession/verifiedSigningPublicKey(for:)``. A mismatch is refused for the life
     ///   of the slot and audited once; a link with no proven key yet is simply judged again later.
+    ///   The refusal only stops THIS path from committing it: a person who taps the row anyway (or
+    ///   a dwell) is refused one step later, at the seat, by ``seatTransportRefusal(at:identity:)``.
     /// - **A member this device voted out stays out** — see ``isReturningMember(signingPublicKey:)``.
     ///
     /// **Scope, decided:** a "returning member" is any member on the signed roster, including one
@@ -14506,7 +14608,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// 2026-09-22, F1). So a slot the re-seat committed is seated only as the key it judged, still
     /// the key the tunnel proved, and still a returning member — which also refuses a seat whose
     /// admission record rolled back between the ask and the seat because it could not be sealed
-    /// (F2). A slot the re-seat never asked for is not its business: that seat was a person's.
+    /// (F2). A slot the re-seat never asked for is not its business: that seat was a person's (or a
+    /// dwell's), and it answers to ``seatTransportRefusal(at:identity:)``, which every seat does
+    /// (2026-09-23) — this check runs first only so a re-seat's refusal keeps its more specific name.
     ///
     /// The answer is the audit line's `reason`, a frozen English token, because most refusals are
     /// honest — a link whose proven key moved under it, a session that lapsed or started leaving, an
@@ -14522,6 +14626,54 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard transport.verifiedSigningPublicKey(for: slots[index].peer) == judged else { return "transportKeyChanged" }
         guard isReturningMember(signingPublicKey: judged) else { return "notAReturningMember" }
         return nil
+    }
+
+    /// Why the seat refuses `slots[index]`'s committed identity on the transport's word, or nil to
+    /// seat it — asked of EVERY seat, whoever asked for the commit (2026-09-23).
+    ///
+    /// **The hole it closes.** ``reseatRefusal(at:identity:)`` judges only the slots the re-seat
+    /// itself asked to commit, and answers nil for every other one: the `.open` slots and the ones
+    /// it had already flagged ``MeshReturningMemberReseat/refusedMismatchedKey``. But the
+    /// coordinator's identity introduction is replayable over any tunnel (no recipient on the QUIC
+    /// radio, a five-minute expiry, no advertised fingerprint to check it against), it accepts a
+    /// second introduction in ANY state — `.connected` included — and re-gates to it, and
+    /// `commitManualProximity()` commits whatever identity it holds when it runs. So a tap on a
+    /// slot row, the QR ceremony, a 15 cm dwell or a heartbeat ratified by local ranging could seat
+    /// a link as an identity the transport had proven FALSE — a stranger's replay, a member's
+    /// introduction the re-seat had already refused, or a seated link re-committed as somebody
+    /// else — and every frame on it was then credited to that identity (removal votes cast "as"
+    /// another member, for one).
+    ///
+    /// **The rule.** The committed key must be the key the tunnel's own signed channel
+    /// introduction proved for this link (``MeshTransportSession/verifiedSigningPublicKey(for:)``),
+    /// and a link with no proven key is refused too: a seat ADOPTS an identity, so it needs a
+    /// proof, not the absence of a contradiction. It never refuses an honest peer: a device's
+    /// channel introduction and every envelope its coordinator signs carry the same key — the
+    /// manager signs the one and hands its coordinators the other from one `IdentityService` — so a
+    /// first meeting's provisional stranger proves exactly the key it introduces. On the QUIC radio
+    /// a nil answer means the slot's tunnel is gone, so that seat was dead anyway.
+    ///
+    /// - Parameters:
+    ///   - index: The slot about to be seated.
+    ///   - peer: The identity its coordinator committed.
+    /// - Returns: A frozen reason token for the audit line, or nil to seat.
+    private func seatTransportRefusal(at index: Int, identity peer: ProximityCoordinator.PeerIdentity) -> String? {
+        Self.seatTransportRefusal(
+            committedKey: peer.signingPublicKey,
+            provenKey: transport.verifiedSigningPublicKey(for: slots[index].peer)
+        )
+    }
+
+    /// The seat's transport rule over the two keys it compares, so a cell can enumerate it with no
+    /// slot, no coordinator and no radio.
+    ///
+    /// - Parameters:
+    ///   - committedKey: The signing key the slot's coordinator committed.
+    ///   - provenKey: The key the channel introduction proved for the slot's link, or nil.
+    /// - Returns: `noTransportKey`, `transportKeyMismatch`, or nil when the two agree.
+    static func seatTransportRefusal(committedKey: Data, provenKey: Data?) -> String? {
+        guard let provenKey else { return "noTransportKey" }
+        return provenKey == committedKey ? nil : "transportKeyMismatch"
     }
 
     /// Whether `signingPublicKey` belongs to a member of THIS device's live mesh coming back — the
@@ -15011,6 +15163,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// it cannot seat a stranger onto a CLOSED mesh either: without the gate this seam was a strictly
     /// wider door than the path it stands in for.
     ///
+    /// The seat's transport leg runs too (``seatTransportRefusal(committedKey:provenKey:)``,
+    /// 2026-09-23), with one reading of its own: the seam stands in for the WHOLE handshake, the
+    /// channel introduction included, so a radio that proved nothing for this slot — the in-memory
+    /// rigs' — is read as having proved `peer`'s own key. A radio that proved a DIFFERENT key is
+    /// refused exactly as the production seat refuses it, so the seam is never the wider door.
+    ///
     /// - Parameters:
     ///   - index: The slot's index in ``slots``.
     ///   - peer: The peer's identity, whose signing and key-agreement keys stand in for the ones the
@@ -15025,6 +15183,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let fingerprint = IdentityService.fingerprint(of: peer.localSigningPublicKey)
         guard maySeatVerifiedPeer(signingPublicKey: peer.localSigningPublicKey) else {
             FernletAuditLog.log("mesh.slot.refusedClosedMeshStranger")
+            removeSlot(slots[index])
+            return
+        }
+        let proven = transport.verifiedSigningPublicKey(for: slots[index].peer) ?? peer.localSigningPublicKey
+        if let reason = Self.seatTransportRefusal(committedKey: peer.localSigningPublicKey, provenKey: proven) {
+            FernletAuditLog.log(
+                "mesh.slot.refusedUnprovenIdentityAtSeat", context: heldMeshAuditContext(["reason": reason])
+            )
             removeSlot(slots[index])
             return
         }

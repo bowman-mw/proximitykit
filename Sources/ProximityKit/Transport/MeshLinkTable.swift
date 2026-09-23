@@ -406,6 +406,11 @@ nonisolated struct MeshLinkTable {
     private var cache: [MeshLinkKey: MeshEndpointRecord] = [:]
     /// First-seen order, for the cache's oldest-first eviction.
     private var cacheOrder: [MeshLinkKey] = []
+    /// The signing key a dial of this device's proved for a browsed endpoint (2026-09-23) — see
+    /// ``noteProvenOwner(_:signingPublicKey:)``. Bounded by the endpoint cache: a key is added only
+    /// for a cached endpoint and dies with its cache entry in ``forget(_:)``, the oldest-first
+    /// eviction and ``removeAll()``.
+    private var provenOwners: [MeshLinkKey: Data] = [:]
 
     /// An empty table. A session owns exactly one for its whole run.
     init() {}
@@ -676,6 +681,7 @@ nonisolated struct MeshLinkTable {
         reproposalRefunds.removeValue(forKey: key)
         cache.removeValue(forKey: key)
         cacheOrder.removeAll { $0 == key }
+        provenOwners.removeValue(forKey: key)
     }
 
     /// Drops everything. The teardown call: link state and endpoint cache both die with the
@@ -686,6 +692,7 @@ nonisolated struct MeshLinkTable {
         reproposalRefunds.removeAll()
         cache.removeAll()
         cacheOrder.removeAll()
+        provenOwners.removeAll()
     }
 
     // MARK: - Endpoint cache
@@ -736,6 +743,11 @@ nonisolated struct MeshLinkTable {
     /// be resolved to the same ``MeshLinkKey`` an outbound dial to that peer uses, and the two
     /// collide in this table instead of coexisting as a duplicate pair.
     ///
+    /// **Attributable is not bound** (2026-09-23). The `sid` is the verified peer's unsigned CLAIM,
+    /// and nothing ties an advertisement to a key, so the answer here is only a candidate: the
+    /// radio keys an inbound tunnel under it only when ``claimResolves(_:to:heldBy:)`` finds nothing
+    /// this device verified that contradicts the claim.
+    ///
     /// An empty id never matches: `MeshLinkAdvertisement` drops empty values, so a cached
     /// advertisement cannot hold one, and treating "no id" as a match would attach a tunnel to an
     /// arbitrary endpoint.
@@ -751,6 +763,96 @@ nonisolated struct MeshLinkTable {
         return nil
     }
 
+    // MARK: - Advertisement ownership (2026-09-23)
+
+    /// Records that a dial of this device's to `key` reached a listener that proved
+    /// `signingPublicKey` in the signed channel introduction — the one fact about who answers a
+    /// browsed advertisement that is not a peer's own word.
+    ///
+    /// **Why a dial, and nothing else.** An INBOUND tunnel is tied to a browsed advertisement only
+    /// by the `sid` its hello claims (``key(advertisingSessionID:)``), and that claim is unsigned
+    /// and unbindable: the TXT record that publishes a `sid` withholds `fp` on purpose, so nothing
+    /// ties an advertisement to a key, and signing the claim would only prove the claimant chose to
+    /// make it (``MeshChannelHello/sessionID``). A dial is opened to the advertisement's own
+    /// endpoint, so the key its introduction proves is the key of whoever answers there — as far
+    /// as the local link's Bonjour resolution can be trusted, which is the trust every dial already
+    /// places in it. The owner is bound to the endpoint, not to the `sid` it happens to carry.
+    ///
+    /// A key the cache does not hold is not recorded, so the map is bounded by the cache.
+    mutating func noteProvenOwner(_ key: MeshLinkKey, signingPublicKey: Data) {
+        guard cache[key] != nil else { return }
+        provenOwners[key] = signingPublicKey
+    }
+
+    /// The key a dial of this device's proved for `key`, or nil when no dial has.
+    func provenOwner(of key: MeshLinkKey) -> Data? {
+        provenOwners[key]
+    }
+
+    /// How many advertisements have a proven owner — the read the bounded-growth cells use.
+    var provenOwnerCount: Int {
+        provenOwners.count
+    }
+
+    /// Whether an inbound tunnel that proved `signingPublicKey` may live under `key`, the browsed
+    /// advertisement its unsigned `sid` names (the reviewer's squat, 2026-09-23).
+    ///
+    /// No when something this device verified contradicts the claim:
+    /// * a dial of this device's proved a DIFFERENT key answers that advertisement
+    ///   (``provenOwner(of:)``) — the claimant is naming somebody else's `sid`;
+    /// * a live tunnel verified as a different key already holds `key` (`holder`) — two identities
+    ///   claim one advertisement, and at most one of them is telling the truth.
+    ///
+    /// The tunnel then keeps its own connection key, which is what an inbound tunnel whose `sid`
+    /// matches nothing browsed has always done. Before this, the first case let a verified peer
+    /// take an absent member's key, and the second REFUSED that member's own re-link as a duplicate
+    /// of the squatter's tunnel — locked out until the squatter's tunnel ended. Neither answer can
+    /// move an honest peer: a `sid` is a per-launch random UUID, so no honest device claims one
+    /// another device advertises.
+    ///
+    /// - Parameters:
+    ///   - key: The browsed endpoint the claimed `sid` resolved to.
+    ///   - signingPublicKey: The key the inbound tunnel's own introduction proved.
+    ///   - holder: The key a live tunnel under `key` was verified as, or nil when none holds it.
+    /// - Returns: `true` when the tunnel may take `key`.
+    func claimResolves(_ key: MeshLinkKey, to signingPublicKey: Data, heldBy holder: Data?) -> Bool {
+        if let owner = provenOwners[key], owner != signingPublicKey { return false }
+        if let holder, holder != signingPublicKey { return false }
+        return true
+    }
+
+    /// Whether the re-propose sweep must pass over the idle browsed endpoint `key`, because the
+    /// device behind it is already connected under ANOTHER key — or because nothing can say.
+    ///
+    /// The losing half of a collapsed duplicate returns to idle on purpose, and re-offering it would
+    /// re-dial a device this session already holds a tunnel to, every interval, forever. The test
+    /// used to be the advertised `sid` against the `sid` on each live tunnel — a peer's own unsigned
+    /// claim, so a peer claiming an absent member's `sid` on its own tunnel made that member read as
+    /// connected, and it was never re-dialed (2026-09-23). When a dial of this device's has proven
+    /// who answers `key` (``provenOwner(of:)``), the test is that IDENTITY among the live tunnels,
+    /// which no claim can fake; the `sid` test is the fallback for an advertisement no dial has
+    /// proven yet.
+    ///
+    /// An advertisement with no `sid` at all is passed over, exactly as the sweep always passed
+    /// over it.
+    ///
+    /// - Parameters:
+    ///   - key: An idle browsed endpoint holding no tunnel.
+    ///   - liveSessionIDs: The `sid` every live verified tunnel claimed.
+    ///   - liveSigningKeys: The key every live verified tunnel proved.
+    /// - Returns: `true` when the sweep must not offer `key` to the owner.
+    func sweepSkips(
+        _ key: MeshLinkKey,
+        liveSessionIDs: Set<String>,
+        liveSigningKeys: Set<Data>
+    ) -> Bool {
+        guard let advertised = cache[key]?.advertisement[MeshLinkAdvertisement.sessionIDKey] else {
+            return true
+        }
+        guard let owner = provenOwners[key] else { return liveSessionIDs.contains(advertised) }
+        return liveSigningKeys.contains(owner)
+    }
+
     /// Makes room for one more cache entry, dropping the oldest when the cache is full.
     private mutating func evictOldestCachedEndpointIfFull() {
         guard cacheOrder.count >= Self.maxCachedEndpoints, let oldest = cacheOrder.first else {
@@ -763,6 +865,7 @@ nonisolated struct MeshLinkTable {
         // goes with the counters so the two cannot disagree about an endpoint whose budget is gone.
         reproposals.removeValue(forKey: oldest)
         reproposalRefunds.removeValue(forKey: oldest)
+        provenOwners.removeValue(forKey: oldest)
         links[oldest]?.reproposeBooked = false
         // Owner-calls item 4 (2026-09-22): the link record goes with its cache entry when it is
         // IDLE — the one phase whose record answers every reachable reader as having none (only
