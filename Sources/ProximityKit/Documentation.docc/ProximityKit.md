@@ -2370,6 +2370,14 @@ records rather than app-visible state.
 
 ### Recipe sharing
 
+The `.recipeShare` body (``ProximityRecipeSharePayload``) grows only by OPTIONAL keys on `version` 1:
+the saved arm's steps, the picture, and a multipart recipe's `components` partition on the local arm
+(2026-09-24; the rule is documented in `FernletDomainModel`'s `RecipeComponentWire.swift`). An older
+peer's synthesized decode ignores them and still reads a whole recipe. The "Include notes" strip
+(``ProximityRecipeSharePayload/omittingShareNotes()``) withholds a local recipe's steps through
+`SharedRecipePayload.withoutSteps()`, which rewrites the partition to match. A hand-edited strip that
+only cleared `steps` would leave a partition the receiver's strict decode refuses.
+
 - ``ProximityRecipeShareManager``
 - ``RecipeShareDiscoveryGate``
 - ``RecipeShareTransfer``
