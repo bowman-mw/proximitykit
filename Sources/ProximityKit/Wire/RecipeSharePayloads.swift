@@ -122,14 +122,16 @@ public nonisolated struct ProximityRecipeSharePayload: Codable, Equatable, Ident
     /// Returns a copy with the sender's free text removed. For a LOCAL recipe this clears BOTH `notes`
     /// and the user-authored `steps` (F5: step text is free-form and can carry the same personal remarks
     /// the notes toggle exists to withhold). For a SAVED recipe it clears only the `summary` — its steps
-    /// come from a public source, so they ride along even when notes are omitted.
+    /// come from a public source, so they ride along even when notes are omitted. A multipart local
+    /// recipe's partition is rewritten by `SharedRecipePayload.withoutSteps()` so it still matches the
+    /// flat arrays. Part NAMES stay: like the recipe's own name they are its structure, not remarks.
     public func omittingShareNotes() -> ProximityRecipeSharePayload {
         var copy = self
         switch copy.recipe.kind {
         case .local:
             if var local = copy.recipe.local {
                 local.notes = ""
-                local.steps = nil
+                local = local.withoutSteps()
                 copy.recipe.local = local
             }
         case .saved:
