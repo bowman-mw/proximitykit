@@ -199,6 +199,21 @@ Photo-library save failures surface through one shared mapping —
 ``PhotoSaveFailure`` rendered by the `photoSaveFailureAlert(_:failure:)` view modifier — so every
 save surface (review sheets and the album carousel) shows identical wording.
 
+**Store bans answer to their evidence (2026-09-24).** ``ModerationBanStore/reconcile(rows:localSigningKey:)``
+runs in both directions. It applies the 30-day ban the one-hop report set warrants, recording the
+evidence the ban rests on as `BanEvidence` — reporter TAGS (salted digests under
+`FernletCryptoPurpose.Hash.moderationBanReporterTagV1`, never keys, because the self-ban row outlives
+"Delete everything"), artwork hashes and report seqs. And it LIFTS an active ban once the reporters
+themselves have positively withdrawn enough of that evidence — a relayed `retract` superseding their
+report — that what is left no longer reaches the threshold (`ModerationBanRecovery`, counted without
+the per-reporter cap so the test is monotone and can only err towards keeping a ban). The invariant
+the recovery hangs off: **only a positive withdrawal counts.** An absent row (a wiped ledger, a
+reinstall, an evicted row, a blocked or removed reporter), a decayed row and every clock move leave
+the evidence where it was, and the self-ban ignores the banned device's own rows, so nothing the
+banned person does alone can lift it. A record written without evidence — before this change, or by
+the direct `applySelfBan` path — can only serve out. Policy note:
+`Docs/Moderation-SelfBan-Recovery-2026-09-23.md`.
+
 **Presence and hearts.** ``PresenceManager`` runs a standing radio that broadcasts only rotating
 pairwise-DH tags — no names, no stable identifiers — so kept friends recognize each other nearby
 without connecting. The posture behind that rotation is an

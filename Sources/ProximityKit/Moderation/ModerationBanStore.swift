@@ -21,10 +21,19 @@
 //
 // Enforcement is at LIST + BROADCAST time in FernletStore. This self-enforcement is honest-client
 // compliance; the load-bearing enforcement is receiver-side (peers hide/peer-ban) — see the memo.
+//
+// Recovery (2026-09-24, tracker §3.5; policy: Docs/Moderation-SelfBan-Recovery-2026-09-23.md): a ban
+// records the evidence it rests on — reporter TAGS (salted digests, never keys), artwork hashes and
+// report seqs — and `reconcile` LIFTS an active ban once the reporters themselves have withdrawn
+// enough of it (a `retract` superseding their report) that what is left no longer reaches the
+// threshold. Only a positive withdrawal counts: a wiped ledger, a reinstall, a blocked or removed
+// reporter, an evicted or decayed row and every clock move leave the evidence exactly where it was.
 
 import Foundation
 import Observation
 import Security
+import CryptoKit
+import FernletCrypto
 import FernletFoundation
 import FernletDomainModel
 
@@ -49,6 +58,20 @@ nonisolated struct BanRecord: Codable {
     /// `reconcile` re-arm only on a NEW qualifying artwork — the same still-non-decayed reports can't
     /// silently re-mint the 30-day ban. Optional so records written before this field decode cleanly.
     var handledContentHashes: [String]? = nil
+    /// The reports this ban rests on (``ModerationBanRecovery``): reporter tags, artwork hashes and
+    /// the seq a withdrawal must beat. Nil on a record written before 2026-09-24 or by a direct
+    /// `applySelfBan` / `applyPeerBan` — such a ban has nothing to withdraw and can only serve out.
+    var evidence: [BanEvidence]? = nil
+    /// This record's random salt for ``ModerationBanStore/reporterTagger(salt:)`` — fresh per ban,
+    /// so two records' reporter tags cannot be linked to each other.
+    var evidenceSalt: Data? = nil
+    /// `handledContentHashes` as it stood BEFORE this ban was written. A ban lifted by withdrawals
+    /// never answered for its artworks, so the lift hands this back: the same reports, re-filed,
+    /// must be able to re-arm a ban rather than being waved through as "already served".
+    var priorHandledContentHashes: [String]? = nil
+    /// When reporters' withdrawals lifted this ban (wall clock; informational). Non-nil means over:
+    /// the credited-time countdown is not consulted again for this record.
+    var liftedAtWall: Double? = nil
 }
 
 /// The tamper-resistant 30-day store-ban clock for repeatedly-reported clothing designers —
@@ -60,9 +83,11 @@ nonisolated struct BanRecord: Codable {
 /// clock changes (a credited-time countdown over `mach_continuous_time` plus a wall-clock
 /// high-water ratchet: rollback voids wall credit and flags tampering; a forward jump credits
 /// almost nothing, and the reboot-gap credit is capped). `reconcile` applies bans the verified
-/// report set warrants, re-arming a served ban only on a NEW qualifying artwork. Enforcement
-/// here is honest-client compliance at list/broadcast time; the load-bearing enforcement is
-/// receiver-side.
+/// report set warrants, re-arming a served ban only on a NEW qualifying artwork — and LIFTS an
+/// active ban whose reporters positively withdrew enough of its recorded evidence that the rest no
+/// longer reaches the threshold (never on absence, decay or a clock move; see
+/// ``reconcile(rows:localSigningKey:)``). Enforcement here is honest-client compliance at
+/// list/broadcast time; the load-bearing enforcement is receiver-side.
 ///
 /// "Delete everything" splits the two record kinds: the SELF-ban is deliberately NOT cleared
 /// (2026-07-17 decision — a device ban must survive a wipe or the wipe is a ban-evasion tool),
@@ -128,29 +153,96 @@ public final class ModerationBanStore {
 
     // MARK: - Escalation reconcile (fed by the moderation ledger; Phase 3b adds peers' reports)
 
-    /// Applies self/peer bans that the verified report set now warrants. Idempotent — and a served ban is
-    /// re-armed only by a NEW qualifying artwork, never by the same still-non-decayed reports (so a 30-day
-    /// ban stays 30 days instead of re-minting every reconcile for the reports' full 180-day lifetime).
+    /// Re-evaluates every ban the verified report set touches, in BOTH directions.
+    ///
+    /// **Apply.** A ban the evidence now warrants is written. Idempotent — and a served ban is re-armed
+    /// only by a NEW qualifying artwork, never by the same still-non-decayed reports (so a 30-day ban
+    /// stays 30 days instead of re-minting every reconcile for the reports' full 180-day lifetime).
+    ///
+    /// **Lift** (2026-09-24, tracker §3.5). An ACTIVE ban whose reporters have since POSITIVELY
+    /// withdrawn part of its recorded evidence — a `retract` superseding their report — is lifted once
+    /// what is left no longer reaches the ban threshold. Nothing the banned party can do alone produces
+    /// a withdrawal: an absent row (a wiped ledger, a reinstall, an evicted row, a blocked or removed
+    /// reporter whose rows stop arriving) and a decayed row (the wall clock) are never withdrawals, and
+    /// the self-ban ignores the banned device's own rows entirely. See ``ModerationBanRecovery``.
     public func reconcile(rows: [ModerationLedgerEntry], localSigningKey: Data) {
         let now = date()
-        if let hashes = evidenceWarrantingBan(account: Self.selfAccount, subjectKey: localSigningKey, rows: rows, now: now) {
-            applySelfBan(handledContentHashes: hashes)
-        }
+        reconcileBan(BanSubject(account: Self.selfAccount, label: "self", key: localSigningKey,
+                                ignoredReporter: localSigningKey), rows: rows, now: now)
         let subjects = Set(rows.map { $0.subjectSigningPublicKey }).subtracting([localSigningKey, Data()])
+        // Bounded: one pass over the distinct subjects of the finite (ledger-capped) row set.
         for subject in subjects {
             let fingerprint = IdentityService.fingerprint(of: subject)
-            if let hashes = evidenceWarrantingBan(account: Self.peerAccount(fingerprint), subjectKey: subject, rows: rows, now: now) {
-                applyPeerBan(fingerprint: fingerprint, handledContentHashes: hashes)
-            }
+            reconcileBan(BanSubject(account: Self.peerAccount(fingerprint), label: "peer:\(fingerprint)",
+                                    key: subject, ignoredReporter: nil), rows: rows, now: now)
         }
     }
 
-    /// The currently-qualifying artwork hashes to record IF a (re)ban should fire now, else nil. Returns
-    /// nil when a ban is already active, when the designer is below the ban threshold, or when a prior
-    /// (served) ban already covered every currently-qualifying artwork — the last case is what stops a
-    /// served ban from re-minting off unchanged evidence.
+    /// One ban's identity for a reconcile pass: its keychain account, its audit label, the signing
+    /// key the reports name, and the reporter whose own rows must not count either way — the banned
+    /// device itself, for the self-ban (it may neither report nor withdraw its way out).
+    private struct BanSubject {
+        let account: String
+        let label: String
+        let key: Data
+        let ignoredReporter: Data?
+    }
+
+    /// Applies OR reviews one ban — never both: an active ban can only be reviewed for withdrawals,
+    /// an inactive one only (re)armed. A (re)armed ban records the live evidence it rests on under a
+    /// fresh salt, which is what a later withdrawal is measured against.
+    private func reconcileBan(_ subject: BanSubject, rows: [ModerationLedgerEntry], now: Date) {
+        guard remainingSeconds(account: subject.account) <= 0 else {
+            reviewActiveBan(subject, rows: rows, now: now)
+            return
+        }
+        guard let hashes = evidenceWarrantingBan(account: subject.account, subjectKey: subject.key,
+                                                 rows: rows, now: now) else { return }
+        let salt = Self.newEvidenceSalt()
+        let live = ModerationBanRecovery.liveEvidence(
+            against: subject.key, in: rows, excludingReporter: subject.ignoredReporter, now: now,
+            tag: Self.reporterTagger(salt: salt))
+        writeBan(account: subject.account, subject: subject.label,
+                 durationDays: ClothingModerationLimits.banDurationDays, handledContentHashes: hashes,
+                 evidence: ModerationBanRecovery.merged([], with: live), salt: salt)
+    }
+
+    /// Folds the current rows into an ACTIVE ban's recorded evidence — positive withdrawals out, new
+    /// live reports in — and lifts the ban when the withdrawals have taken what is left below the
+    /// threshold. A record without evidence (written before 2026-09-24, or by a direct
+    /// `applySelfBan` / `applyPeerBan`) can only serve out: there is nothing on it to withdraw.
+    ///
+    /// Withdrawals are written back even when they do not lift: the ledger row that proved one can be
+    /// evicted or wiped later, and a reporter's withdrawal must not quietly un-happen with it. New live
+    /// reports are folded in for the mirror-image reason — so a report that arrived during the ban
+    /// still stands behind it after a wipe empties the ledger.
+    private func reviewActiveBan(_ subject: BanSubject, rows: [ModerationLedgerEntry], now: Date) {
+        guard var record = load(account: subject.account), let recorded = record.evidence,
+              let salt = record.evidenceSalt else { return }
+        let tag = Self.reporterTagger(salt: salt)
+        let withdrawn = ModerationBanRecovery.withdrawn(
+            recorded, in: rows, excludingReporter: subject.ignoredReporter, tag: tag)
+        let live = ModerationBanRecovery.liveEvidence(
+            against: subject.key, in: rows, excludingReporter: subject.ignoredReporter, now: now, tag: tag)
+        let standing = ModerationBanRecovery.merged(recorded.filter { !withdrawn.contains($0) }, with: live)
+        guard standing != recorded else { return }   // nothing moved: no keychain write
+        record.evidence = standing
+        let lifts = !withdrawn.isEmpty && !ModerationBanRecovery.reachesBanThreshold(standing)
+        if lifts {
+            record.liftedAtWall = now.timeIntervalSinceReferenceDate
+            record.handledContentHashes = record.priorHandledContentHashes
+        }
+        guard save(record, account: subject.account) else { return }   // R7: an unwritten lift lifted nothing
+        guard lifts else { return }
+        FernletAuditLog.log("storeBan.liftedByWithdrawal",
+                            context: ["subject": subject.label, "withdrawn": "\(withdrawn.count)"])
+    }
+
+    /// The currently-qualifying artwork hashes to record IF a (re)ban should fire now, else nil. The
+    /// caller has already established that no ban is active. Returns nil when the designer is below
+    /// the ban threshold, or when a prior (served) ban already covered every currently-qualifying
+    /// artwork — the last case is what stops a served ban from re-minting off unchanged evidence.
     private func evidenceWarrantingBan(account: String, subjectKey: Data, rows: [ModerationLedgerEntry], now: Date) -> Set<String>? {
-        guard remainingSeconds(account: account) <= 0 else { return nil }
         guard ModerationEconomy.shouldBanDesigner(subjectKey: subjectKey, in: rows, now: now) else { return nil }
         let currentHex = Set(ModerationEconomy.unlistableContentHashes(ofDesigner: subjectKey, in: rows, now: now)
             .map { ModerationLedgerEntry.hex($0) })
@@ -226,25 +318,63 @@ public final class ModerationBanStore {
 
     private static func peerAccount(_ fingerprint: String) -> String { peerAccountPrefix + fingerprint }
 
+    /// The public apply path: a ban with no recorded evidence (so it can only serve out), written only
+    /// when none is active — never resets or extends an in-flight ban.
     private func writeBanIfNotActive(account: String, subject: String, durationDays: Int,
                                      handledContentHashes: Set<String>) {
         guard remainingSeconds(account: account) <= 0 else { return }
-        // Carry forward the artworks any prior (served) ban already covered, so the high-water mark only grows.
-        let merged = Set(load(account: account)?.handledContentHashes ?? []).union(handledContentHashes)
+        writeBan(account: account, subject: subject, durationDays: durationDays,
+                 handledContentHashes: handledContentHashes, evidence: nil, salt: nil)
+    }
+
+    /// Writes a FRESH ban record; the caller has established that no ban is active. Carries forward
+    /// the artworks any prior (served) ban already covered, so the high-water mark only grows while
+    /// bans serve out — and remembers that prior set, so a ban later lifted by withdrawals hands it
+    /// back instead of claiming artwork it never answered for.
+    private func writeBan(account: String, subject: String, durationDays: Int,
+                          handledContentHashes: Set<String>, evidence: [BanEvidence]?, salt: Data?) {
+        let prior = load(account: account)?.handledContentHashes
+        let merged = Set(prior ?? []).union(handledContentHashes)
         let nowWall = date().timeIntervalSinceReferenceDate
-        let record = BanRecord(
+        var record = BanRecord(
             banID: UUID(), subject: subject, durationSeconds: Double(durationDays) * 86_400,
             startedAtWall: nowWall, creditedMonotonic: 0, creditedWall: 0,
             lastCheckMonotonic: clock.seconds, lastCheckWall: nowWall,
             maxObservedWall: nowWall, tamperCount: 0,
             handledContentHashes: merged.isEmpty ? nil : Array(merged))
+        record.evidence = evidence
+        record.evidenceSalt = salt
+        record.priorHandledContentHashes = prior
         guard save(record, account: account) else { return }   // R7: never report an unwritten ban as applied
         FernletAuditLog.log("storeBan.applied", context: ["subject": subject, "days": "\(durationDays)"])
     }
 
-    /// The credited-time countdown. Returns remaining ban seconds (0 = not banned / served).
+    /// The opaque tag a reporter's signing key is recorded under in ONE ban record's evidence:
+    /// SHA-256 over the registered domain (`FernletCryptoPurpose.Hash.moderationBanReporterTagV1`),
+    /// the record's 32-byte salt, then the key — fixed-length fields first, so the concatenation is
+    /// unambiguous. It lets the record recognize the same reporter's later withdrawal and nothing
+    /// more: the keychain row that survives "Delete everything" never holds another person's key,
+    /// and a per-record salt keeps two records' tags unlinkable.
+    nonisolated static func reporterTagger(salt: Data) -> @Sendable (Data) -> Data {
+        { key in
+            var hasher = SHA256()
+            hasher.update(data: FernletCryptoPurpose.Hash.moderationBanReporterTagV1.data)
+            hasher.update(data: salt)
+            hasher.update(data: key)
+            return Data(hasher.finalize())
+        }
+    }
+
+    /// A fresh 32-byte evidence salt. `UInt8.random` rides `SystemRandomNumberGenerator` — the
+    /// platform CSPRNG — so there is no failure status to mishandle.
+    private static func newEvidenceSalt() -> Data {
+        Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
+    }
+
+    /// The credited-time countdown. Returns remaining ban seconds (0 = not banned / served / lifted).
     private func remainingSeconds(account: String) -> Double {
         guard var record = load(account: account) else { return 0 }
+        guard record.liftedAtWall == nil else { return 0 }   // lifted by withdrawals: over, whatever the clock says
         let nowWall = date().timeIntervalSinceReferenceDate
         let nowMono = clock.seconds
 
