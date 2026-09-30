@@ -216,7 +216,17 @@ the session with the mesh (and so the camera and its open review) still up, and 
 from under it (``MeshNetworkManager/photosAwaitingAnswer(among:)`` is what that review renders).
 `leaveSession()` used to empty it first, so the last device left in a mesh was offered no photo
 review and kept everything; every ending now reaches the review. `completeFriendReview(_:)` answers
-only the candidate half, so a batch with photos still pending stays up.
+only the candidate half, so a batch with photos still pending stays up. **The app presents it first**
+(session photos U3): one app-level presenter shows the session-end review in its own overlay window,
+above every tab and sheet, from these observable facts — `pendingFriendReview`, `isSessionLive`,
+`heldPhotosCanBeShown`, `isInSession` — never over a live session and never under a duress decoy.
+The package's half is ``FriendPhotoReviewSheet``'s: an optional `notNow` (the overlay's "Not now",
+which answers nothing and is also VoiceOver's escape gesture there; the camera's Develop sheet
+passes nil and keeps its own swipe-down), the title as a heading, spoken tile labels naming the
+sender through ``PeerNameDisplay``, and an "Ending the session..." working line
+(``FriendPhotoReviewWorkingMessage/endingSession``) while the host waits for the ended mesh to be
+left. The sheet reads `\.scenePhase` for its snapshot cover; a host outside the SwiftUI scene (the
+overlay window) injects it.
 **"The session end" is the MESH ending — ``MeshNetworkManager/isSessionLive``
 going false — and never a lost link** (P6 item 2 and its fix): a proximity-join pair now FOUNDS a
 mesh — descriptor, membership ledger, founder admission, ceiling, state machine — at its FIRST
