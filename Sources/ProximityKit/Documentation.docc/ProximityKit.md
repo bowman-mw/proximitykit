@@ -2385,7 +2385,20 @@ peer's synthesized decode ignores them and still reads a whole recipe. The "Incl
 `SharedRecipePayload.withoutSteps()`, which rewrites the partition to match. A hand-edited strip that
 only cleared `steps` would leave a partition the receiver's strict decode refuses.
 
+**Sent is not received.** Every share the user begins ends in exactly one
+``ProximityRecipeShareManager/lastShareOutcome``: a ``RecipeShareOutcome`` that is either `sent` or
+`notSent` with a frozen ``RecipeShareFailure`` (seven causes, including a pairing that came up and
+died before the send, and a teardown that cut a share off). It sits beside `SendState`, which stays
+the status line's English, auto-clearing copy. `sent` means the sealed payload was handed to the
+transport. A text recipe's control-stream send completed; only a picture recipe also reads a
+one-byte transport ack. There is no application receipt and no queued or routed path, so the app's
+confirmation may say "sent" and never "delivered", and there is no "will arrive later" to report.
+`sendIncomplete` is the one cause where the other person may still have it; every other cause means
+nothing left this device. The causes are tokens: the app maps them to localized copy.
+
 - ``ProximityRecipeShareManager``
+- ``RecipeShareOutcome``
+- ``RecipeShareFailure``
 - ``RecipeShareDiscoveryGate``
 - ``RecipeShareTransfer``
 - ``RecipeShareAdvertisedName``

@@ -23,6 +23,21 @@ private struct RecipeShareConnection: Identifiable {
     var verifiedKeyAgreementPublicKey: Data?
 }
 
+/// The share the user is making, as its outcome will name it: the row they tapped, the recipe's
+/// title, the ``RecipeShareTransfer`` token it was minted under, and whether its pairing ever came up.
+///
+/// Kept beside the transfer record rather than inside it because the record is a pure, identity-free
+/// state machine and this is display context. `pairingSeen` is what lets a connection-record
+/// eviction fail THIS share as `couldNotConnect` without failing a share whose dial is still
+/// legitimately in flight. It is set when a connection record for this recipient's device is
+/// registered, or already exists when the share is minted.
+private struct LiveRecipeShare {
+    let recipient: ProximityRecipeShareRecipient
+    let recipeTitle: String
+    let token: UUID
+    var pairingSeen: Bool
+}
+
 // Pure diagnostics value type + a stateless ring-buffer helper — explicitly
 // `nonisolated` so they are NOT swept into the target's `defaultIsolation(MainActor.self)`.
 // They hold no main-actor state, so keeping them nonisolated preserves their off-main
@@ -80,11 +95,24 @@ public enum ProximityRecipeShareDiagnostics {
 /// budget, and a parked-connection sweep for coordinators stalled pre-verification. Inbound
 /// shares are rate-limited per sender and capped at 8 pending. Lifecycle is owned by the app
 /// (ContentView gates on tab/scene/lock). `@MainActor @Observable`.
+///
+/// Every share the user begins ends in exactly one ``lastShareOutcome``
+/// (``RecipeShareOutcome``): `sent`, or `notSent` with a frozen ``RecipeShareFailure``, including a
+/// pairing that came up and died before the send (`couldNotConnect`) and a teardown that cut a share
+/// off (`interrupted` / `sendIncomplete`). **Sent is not received**: `sent` means the sealed payload
+/// was handed to the transport, and nothing ever comes back from the other device, so no outcome
+/// here can say "delivered", "accepted" or "saved".
 @MainActor
 @Observable
 public final class ProximityRecipeShareManager: ProximityPayloadHandling {
-    /// The observable send pipeline the share sheet renders: connecting → sending → sent, or a
-    /// failure message; `idle` between sends (auto-cleared after 2.5 s).
+    /// The observable send pipeline's STATUS LINE: connecting → sending → sent, or a failure
+    /// message; `idle` between sends.
+    ///
+    /// Display copy, not a record: every terminal state is reset to `.idle` 2.5 s later
+    /// (`scheduleStatusClear`), and `failed`'s message is an English sentence composed here. A
+    /// surface that has to stay up until the user dismisses it, or has to be translated, reads
+    /// ``lastShareOutcome`` instead. `sent` carries the same meaning as
+    /// ``RecipeShareOutcome/Result/sent``: handed to the transport, never "delivered".
     public enum SendState: Equatable {
         case idle
         case connecting(recipientName: String)
@@ -95,6 +123,17 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     public private(set) var nearbyRecipients: [ProximityRecipeShareRecipient] = []
     public private(set) var sendState: SendState = .idle
+    /// How the most recent share the user began ended — the value the share sheet's confirmation
+    /// is built from.
+    ///
+    /// Published exactly once per share, at its terminal moment, through `finishShare(_:token:)`
+    /// (or directly, for the outbound-cap refusal that happens before a share is minted). Unlike
+    /// ``sendState`` it is never auto-cleared, carries a frozen cause instead of English, and gets a
+    /// fresh ``RecipeShareOutcome/id`` every time. Cleared at the start of each send and by
+    /// ``wipeIdentityForDeleteAll()``. A teardown (`stop()`, a search restart) that ends a share
+    /// still in flight publishes `interrupted` or `sendIncomplete` here, so an observer that was
+    /// NOT waiting on that share (the sheet that is itself closing) must ignore it.
+    public private(set) var lastShareOutcome: RecipeShareOutcome?
     public private(set) var diagnosticEvents: [ProximityRecipeShareDiagnosticEvent] = []
     /// R6: read-only outside this file — the cap (`maxPendingShares`) and the dedup live in this
     /// file's writers, and the two `dismissRecipeShare` methods cover the external mutation need.
@@ -125,6 +164,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// `sendRecipeShare`, cleared by `stop()`/`refreshDiscovery()`. Its one production effect is the
     /// once-only send start in `sendPendingPayload`.
     @ObservationIgnored private var transfer: RecipeShareTransfer?
+    /// What ``lastShareOutcome`` will name for the share in flight, minted beside ``transfer`` and
+    /// cleared the moment that share's outcome is published or discarded.
+    @ObservationIgnored private var liveShare: LiveRecipeShare?
     @ObservationIgnored private var isRunning = false
     private var connectionObservationRevision = 0
 
@@ -187,7 +229,12 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     /// Delete-all seam (Docs/PrivacyWipeCoverage.md): clears THIS instance's in-memory identity
     /// key cache; keychain rows are shared with the mesh/presence instances (idempotent).
+    ///
+    /// Also drops the last share's outcome and the live share's context first, whatever the
+    /// keychain answers, so no recipe title or peer name outlives the wipe in memory.
     public func wipeIdentityForDeleteAll() throws {
+        lastShareOutcome = nil
+        liveShare = nil
         try identity.wipe()
     }
 
@@ -224,6 +271,13 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         startObserving()
     }
 
+    /// Stands the whole radio down: tasks, coordinators, the session, every recipient, connection
+    /// and the live share.
+    ///
+    /// A share still in flight is not dropped silently: it is published to ``lastShareOutcome`` as
+    /// `interrupted` (nothing had been handed over yet) or `sendIncomplete` (the send had begun), so
+    /// a sheet that is still open (the run seam stops the radio when the scene goes inactive or the
+    /// lock engages) can say so. A sheet that is closing ignores it.
     public func stop() {
         if isRunning {
             recordDiagnostic("Recipe share discovery stopped.")
@@ -246,7 +300,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         connections.removeAll()
         // The record is DISCARDED here, not cancelled: an `applyTransfer(.cancelled)` before this
         // line would move a value nothing can read afterwards. The one path that leaves a cancelled
-        // record behind is the pre-connect timeout, which keeps it.
+        // record behind is the pre-connect timeout, which keeps it. Its outcome is published first,
+        // while the phase that decides `interrupted` versus `sendIncomplete` is still readable.
+        finishShareEndedByTeardown()
         transfer = nil
         engagedRecipientID = nil
         sendState = .idle
@@ -278,6 +334,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         pendingOutgoing = nil
         discoveredPeers.removeAll()
         connections.removeAll()
+        finishShareEndedByTeardown()
         transfer = nil   // discarded, not cancelled — see `stop()`
         engagedRecipientID = nil
         sendState = .idle
@@ -287,23 +344,33 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         }
     }
 
+    /// Sends `payload` to the picked row: reuses a verified pairing, or dials the device and lets
+    /// the handshake carry the send.
+    ///
+    /// Every way this share can end publishes exactly one ``lastShareOutcome``: the outbound-cap
+    /// refusal here (before a share is minted, so it never touches a live share), and every later
+    /// end through `finishShare(_:token:)`. The previous outcome is cleared first.
     public func sendRecipeShare(_ payload: ProximityRecipeSharePayload, to recipient: ProximityRecipeShareRecipient) {
         connectTimeoutTask?.cancel()
+        lastShareOutcome = nil
 
         // Hard 2-device cap (outbound): refuse — visibly, never silently — while a connection
         // to a DIFFERENT peer exists. The radio is paused while paired, so an invite could not
         // go out anyway (see RecipeShareRadioSession.pauseDiscovery's contract).
         if let connection = connections.first, !isSameDevice(connection, as: recipient) {
-            let name = displayName(for: connection)
-            sendState = .failed(message: "Still sharing with \(name) — recipe sharing links two Fernlets at a time.")
-            recordDiagnostic("Refused share to \(recipient.displayName): already paired with \(name).")
-            scheduleStatusClear()
+            refuseWhilePaired(with: connection, payload: payload, recipient: recipient)
             return
         }
 
         start()
         pendingOutgoing = (payload, recipient)
-        mintTransfer(for: recipient.id)
+        let token = mintTransfer(for: recipient.id)
+        liveShare = LiveRecipeShare(
+            recipient: recipient,
+            recipeTitle: payload.recipe.title,
+            token: token,
+            pairingSeen: connection(with: recipient) != nil
+        )
         sendState = .connecting(recipientName: recipient.displayName)
         engagedRecipientID = recipient.id
         recordDiagnostic("Connecting to \(recipient.displayName).")
@@ -318,27 +385,44 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         }
 
         guard let peer = peer(for: recipient) else {
-            pendingOutgoing = nil
-            applyTransfer(.cancelled)
-            sendState = .failed(message: "That nearby Fernlet is no longer available.")
-            recordDiagnostic("Recipe share failed: \(recipient.displayName) is no longer available.")
-            updateEngagedRecipient()
-            scheduleStatusClear()
+            failLiveShare(
+                .recipientUnavailable,
+                statusMessage: "That nearby Fernlet is no longer available.",
+                diagnostic: "Recipe share failed: \(recipient.displayName) is no longer available.")
             return
         }
         // Hard 2-device cap (connecting window): an attempt to a different peer is already in
         // flight — inviting a second one could race two connections past the cap.
         if session.hasConnectingPeers(besides: peer) {
-            pendingOutgoing = nil
-            applyTransfer(.cancelled)
-            sendState = .failed(message: "Still connecting to another Fernlet — recipe sharing links two Fernlets at a time.")
-            recordDiagnostic("Refused share to \(recipient.displayName): another connection attempt is in flight.")
-            updateEngagedRecipient()
-            scheduleStatusClear()
+            failLiveShare(
+                .connectingToAnother,
+                statusMessage: "Still connecting to another Fernlet — recipe sharing links two Fernlets at a time.",
+                diagnostic: "Refused share to \(recipient.displayName): another connection attempt is in flight.")
             return
         }
         session.dial(peer, helloSID: session.advertisedSessionID)
         armConnectTimeout(for: recipient)
+    }
+
+    /// The outbound-cap refusal: this device is paired with a different Fernlet, so the share is
+    /// refused before it is minted. Publishes its own outcome directly (naming who holds the link)
+    /// and leaves the live pairing, and any live share on it, untouched.
+    private func refuseWhilePaired(
+        with connection: RecipeShareConnection,
+        payload: ProximityRecipeSharePayload,
+        recipient: ProximityRecipeShareRecipient
+    ) {
+        let name = displayName(for: connection)
+        sendState = .failed(message: "Still sharing with \(name) — recipe sharing links two Fernlets at a time.")
+        recordDiagnostic("Refused share to \(recipient.displayName): already paired with \(name).")
+        scheduleStatusClear()
+        lastShareOutcome = RecipeShareOutcome(
+            recipientID: recipient.id,
+            recipientName: recipient.displayName,
+            recipeTitle: payload.recipe.title,
+            otherPeerName: name,
+            result: .notSent(.pairedWithAnother)
+        )
     }
 
     public func dismissRecipeShare(_ share: PendingProximityRecipeShare) {
@@ -726,6 +810,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         if let outgoing = pendingOutgoing, isSameDevice(connection, as: outgoing.recipient) {
             connectTimeoutTask?.cancel()
             connectTimeoutTask = nil
+            // …and from here a record eviction before the send is this share's failure to
+            // connect (`failLiveShareIfItsPairingWasLost`), not a pre-connect miss.
+            liveShare?.pairingSeen = true
         }
         applyDiscoveryGate(.connectionRegistered)
         recordDiagnostic("Recipe sharing closed to others while paired with \(displayName(for: connection)).")
@@ -832,9 +919,15 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// forever with no connection — the deadlock class the redesign closes. Covered removal
     /// paths: `onPeerDisconnected` (via removeConnections), the stale-coordinator sweep
     /// (.ended/.failed) in checkCoordinatorStates, and the parked-.discovering sweep.
+    ///
+    /// It is also where a share whose pairing came up and then died before the send is failed
+    /// (`failLiveShareIfItsPairingWasLost`). Before that, nothing here touched the send pipeline,
+    /// so a handshake that failed after the channel opened left "Connecting to …" on screen, and
+    /// every other row locked, until the sheet closed.
     private func finalizeConnectionRemovals(previousCount: Int) {
         guard connections.count != previousCount else { return }
         connectionObservationRevision += 1
+        failLiveShareIfItsPairingWasLost()
         updateEngagedRecipient()
         guard connections.isEmpty else { return }
         parkedSweepTask?.cancel()
@@ -908,18 +1001,92 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             // connection record means the connect stage succeeded — never fail or kick a
             // handshake in progress from here.
             guard self.connection(with: recipient) == nil else { return }
-            self.pendingOutgoing = nil
-            self.applyTransfer(.cancelled)
-            self.sendState = .failed(message: "No answer from \(recipient.displayName) — that Fernlet may be busy sharing with someone else.")
-            self.recordDiagnostic("Connect timeout: \(recipient.displayName) did not answer.")
+            self.failLiveShare(
+                .noAnswer,
+                statusMessage: "No answer from \(recipient.displayName) — that Fernlet may be busy sharing with someone else.",
+                diagnostic: "Connect timeout: \(recipient.displayName) did not answer.")
             // End the half-open attempt so it doesn't linger in the connecting window and
             // block the next accepted dial.
             if let peer = self.peer(for: recipient) {
                 self.session.endTunnel(peer)
             }
-            self.updateEngagedRecipient()
-            self.scheduleStatusClear()
         }
+    }
+
+    // MARK: - Share outcome
+
+    /// The one tail every failure of the live share before its send takes: drop the queued
+    /// payload, cancel the exchange record, show the (English, auto-clearing) status line, record
+    /// the diagnostic, release the engaged row, and publish the frozen cause.
+    ///
+    /// The four copies of this tail it replaces (recipient unavailable, connecting window, connect
+    /// timeout, and the new lost-pairing path) differed only in their two strings and — now — their
+    /// cause, so they are one function and cannot drift apart.
+    private func failLiveShare(_ reason: RecipeShareFailure, statusMessage: String, diagnostic: String) {
+        pendingOutgoing = nil
+        applyTransfer(.cancelled)
+        sendState = .failed(message: statusMessage)
+        recordDiagnostic(diagnostic)
+        updateEngagedRecipient()
+        scheduleStatusClear()
+        finishShare(.notSent(reason), token: nil)
+    }
+
+    /// Fails the live share as `couldNotConnect` when its pairing had come up and has now been
+    /// evicted before the send began.
+    ///
+    /// Three conditions, and each is load-bearing. `pairingSeen`: a share whose dial has not been
+    /// answered yet is still legitimately in flight (the 12 s connect timeout owns it), and an
+    /// eviction of some OTHER device's record must not fail it. A pre-send phase: once the send has
+    /// begun, its own `catch` owns the failure (`sendIncomplete`). No remaining connection with the
+    /// recipient's device: the record that went may not have been this share's.
+    ///
+    /// The pairing is recognized by the `pairingSeen` latch rather than by matching the evicted
+    /// records, because `onPeerDisconnected` removes the discovered handle before the record, which
+    /// defeats `isSameDevice`'s endpoint arm for a device that answered under a churned handle.
+    private func failLiveShareIfItsPairingWasLost() {
+        guard let live = liveShare, live.pairingSeen,
+              let record = transfer, record.token == live.token,
+              record.phase == .connecting || record.phase == .verified,
+              connection(with: live.recipient) == nil else { return }
+        let name = live.recipient.displayName
+        failLiveShare(
+            .couldNotConnect,
+            statusMessage: "Could not connect securely to \(name).",
+            diagnostic: "Recipe share to \(name) ended before sending: the connection closed during setup.")
+    }
+
+    /// Publishes the outcome of a share a teardown (`stop()`, a search restart) ended while it was
+    /// still in flight — `sendIncomplete` if its send had begun, `interrupted` if not — then forgets
+    /// the live share either way. Must run BEFORE the teardown discards the transfer record, since
+    /// the record's phase is what tells the two apart.
+    private func finishShareEndedByTeardown() {
+        defer { liveShare = nil }
+        guard let phase = transfer?.phase, !phase.isTerminal else { return }
+        finishShare(.notSent(phase == .sending ? .sendIncomplete : .interrupted), token: nil)
+    }
+
+    /// Publishes the live share's terminal outcome to ``lastShareOutcome`` — the one writer for a
+    /// share that was minted.
+    ///
+    /// `token` attributes an outcome a SEND produced (`sendPendingPayload`) to the share that began
+    /// it, exactly as `applyTransfer(_:token:)` does: a completion that belongs to a superseded share
+    /// is recorded as a diagnostic and never shown, and one that arrives after a teardown (no live
+    /// share) is dropped, because the teardown already published that share's outcome. Outcomes that
+    /// belong to whatever share is live (a refusal, a timeout, a lost pairing, a teardown) pass nil.
+    private func finishShare(_ result: RecipeShareOutcome.Result, token: UUID?) {
+        guard let live = liveShare else { return }
+        guard token == nil || token == live.token else {
+            recordDiagnostic("A share outcome arrived for a superseded share — not shown.")
+            return
+        }
+        liveShare = nil
+        lastShareOutcome = RecipeShareOutcome(
+            recipientID: live.recipient.id,
+            recipientName: live.recipient.displayName,
+            recipeTitle: live.recipeTitle,
+            result: result
+        )
     }
 
     // MARK: - Parked-connection sweep
@@ -1022,7 +1189,10 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             let payloadData = try JSONEncoder().encode(outgoing.payload)
             // The exchange's once-only start. `pendingOutgoing = nil` above already makes a second
             // entry return, so this is belt-and-braces — but it is the half a pass-2 session cannot
-            // quietly lose, and a refusal is surfaced rather than swallowed.
+            // quietly lose, and a refusal is surfaced rather than swallowed. It publishes NO share
+            // outcome: every way to reach it (a superseding share, a record a teardown or failure
+            // already ended, a duplicate while the first send is still going) leaves the outcome to
+            // the path that owns it, and publishing here would drop that one.
             guard applyTransfer(.sendBegan(wireByteCount: payloadData.count), token: token) else {
                 sendState = .failed(message: "Could not send that recipe.")
                 recordDiagnostic("Refused a second send of \(outgoing.payload.recipe.title).")
@@ -1049,10 +1219,14 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             }
             sendState = .sent(recipientName: outgoing.recipient.displayName)
             recordDiagnostic("Sent \(outgoing.payload.recipe.title) to \(outgoing.recipient.displayName).")
+            finishShare(.sent, token: token)
         } catch {
+            // Whether anything had been handed over: the encode above can throw before `sendBegan`.
+            let hadBegun = transfer?.phase == .sending
             applyTransfer(.sendFailed, token: token)
             sendState = .failed(message: "Could not send that recipe.")
             recordDiagnostic("Recipe share failed while sending to \(outgoing.recipient.displayName).")
+            finishShare(.notSent(hadBegun ? .sendIncomplete : .interrupted), token: token)
         }
         scheduleStatusClear()
     }
@@ -1122,8 +1296,14 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// read from the radio rather than defaulted because a second share to an ALREADY-PAIRED peer
     /// is minted while discovery is already standing down and fires no gate transition of its own:
     /// a record born `radioIsQuiet == false` would claim an open radio for that whole share.
-    private func mintTransfer(for recipientID: UUID) {
-        transfer = RecipeShareTransfer(recipientID: recipientID, radioIsQuiet: session.isDiscoveryPaused)
+    ///
+    /// - Returns: the new record's token, which `sendRecipeShare` also files on the live share so
+    ///   its outcome is attributed exactly as its send events are.
+    @discardableResult
+    private func mintTransfer(for recipientID: UUID) -> UUID {
+        let record = RecipeShareTransfer(recipientID: recipientID, radioIsQuiet: session.isDiscoveryPaused)
+        transfer = record
+        return record.token
     }
 
     /// Applies one event to the live exchange record.
@@ -1230,6 +1410,14 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     /// The live exchange record — the read the state-table cells assert against.
     var transferForTesting: RecipeShareTransfer? { transfer }
+
+    /// Publishes a share outcome through the PRODUCTION `finishShare(_:token:)`, attributed to
+    /// `token` exactly as `sendPendingPayload` attributes a send's result. A unit test cannot drive a
+    /// real verified send (that needs a live coordinator over a real channel), so this is how the
+    /// token gate — a live share publishes, a superseded or torn-down one does not — is reachable.
+    func finishShareForTesting(_ result: RecipeShareOutcome.Result, token: UUID?) {
+        finishShare(result, token: token)
+    }
 
     /// Mints the exchange record exactly as `sendRecipeShare` does — through the SAME private
     /// helper, not through a second copy of its expression — with no radio and no recipient row,

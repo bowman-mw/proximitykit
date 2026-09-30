@@ -115,8 +115,8 @@ nonisolated enum RecipeShareDiscoveryGate {
 
 // MARK: - RecipeShareTransfer
 
-/// One recipe share, from the moment the user picks a recipient to the moment the payload has
-/// landed — as a state machine with an exactly-once completion.
+/// One recipe share, from the moment the user picks a recipient to the moment the payload has been
+/// handed to the transport — as a state machine with an exactly-once completion.
 ///
 /// ## What this pins that the manager could not
 ///
@@ -165,7 +165,13 @@ nonisolated struct RecipeShareTransfer: Equatable, Sendable {
         /// The sealed payload is on its way.
         case sending
 
-        /// The peer acknowledged the sealed payload. Terminal.
+        /// `sendPayload` returned: the sealed payload was handed to the QUIC transport. Terminal.
+        ///
+        /// A transport hand-off, **not an application receipt**. A text recipe rides the control
+        /// stream and this means its `send` completed; only a recipe carrying a picture rides a
+        /// stream of its own, which also waits for the peer's one-byte transport ack. Either way the
+        /// other device can still drop the share (rate limit, full review queue, decode refusal)
+        /// and nothing is ever sent back, so no copy built on this phase may say "delivered".
         case sent
 
         /// The send threw, or the pairing failed before it. Terminal.
