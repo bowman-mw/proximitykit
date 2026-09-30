@@ -85,6 +85,30 @@
         }
       }
     },
+    "proximity.peer.someoneNearby" : {
+      "comment" : "Stands in for a nearby person whose name has not been shared yet: the connect rows on the Friends tab, the session's participant list, a join request, a recipe recipient. A plain phrase, shown where a name would be.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Someone nearby"
+          }
+        }
+      }
+    },
+    "proximity.peer.someoneYouMet" : {
+      "comment" : "Stands in for a person met in person whose name never arrived before the connection ended: the keep-as-friend rows at the end of a session and the Friends & Blocks list.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Someone you met"
+          }
+        }
+      }
+    },
     "proximity.review.alsoSaveToPhotos" : {
       "comment" : "Secondary button copying the selected pictures out to the system Photos library, in addition to keeping them inside Fernlet.",
       "extractionState" : "extracted_with_value",
