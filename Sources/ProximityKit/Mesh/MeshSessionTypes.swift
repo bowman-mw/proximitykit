@@ -186,22 +186,45 @@ public nonisolated struct MeshSessionRosterEntry: Identifiable, Equatable, Senda
     }
 }
 
-/// A promoted, unconsumed session-end friend review (Phase 2, "Session-end review is
-/// model-state, not view-events" — Docs/Proximity-Mesh-Redesign-2026-07-10.md). The manager
-/// moves the live `sessionRoster` into one of these whenever the last committed slot disappears;
-/// views present off this observable state instead of `isInSession` view-events (the Social-tab
-/// layout swap destroys the presenting view in the same transaction as the `isInSession` flip).
-/// Like the roster entries it carries, this is deliberately NOT Codable: memory-only key
-/// material — never persisted, never synced. It survives `startJoin`/`startNewMesh` so an
-/// unreviewed batch from the previous session re-presents (merged) after the next teardown.
+/// A promoted, unconsumed session-end review (Phase 2, "Session-end review is model-state, not
+/// view-events" — Docs/Proximity-Mesh-Redesign-2026-07-10.md): the ended session's keep-as-friend
+/// candidates **and the photos the user has not yet chosen between**.
+///
+/// The manager moves the live `sessionRoster` AND the live `sessionPhotos` into one of these at the
+/// session-end moment (`MeshNetworkManager.isSessionLive` going false — every ending, including
+/// this device being the last member left when the others end the mesh); views present off this
+/// observable state instead of `isInSession` view-events (the Social-tab layout swap destroys the
+/// presenting view in the same transaction as the `isInSession` flip).
+///
+/// **The photos half is what makes "nothing is kept without asking" true** (2026-09-30). Every
+/// session photo is already on the persisted friend wall from the moment it was taken or received,
+/// so a session list dropped without the user's answer is a silent keep-all. Photos therefore leave
+/// the live list only two ways: through the user's choice (`finishSessionPhotos(keeping:)` in the
+/// camera, ``MeshNetworkManager/finishReviewedPhotos(_:keeping:in:)`` here), or by being promoted
+/// into this batch — never by being dropped. They are **metadata only** (no image bytes), exactly
+/// as `sessionPhotos` holds them; the bytes stay sealed in `PrivateMediaStore`.
+///
+/// Like the roster entries it carries, this is deliberately NOT Codable: memory-only — never
+/// persisted, never synced — so a process kill before the answer leaves the photos on the wall
+/// (the pre-2026-09-30 behavior) and the candidates unoffered. It survives `startJoin` /
+/// `startNewMesh` so an unreviewed batch from the previous session re-presents (merged) after the
+/// next teardown.
 public nonisolated struct MeshFriendReviewBatch: Identifiable, Equatable, Sendable {
     public let id: UUID
     public internal(set) var entries: [MeshSessionRosterEntry]
+    /// The ended session's photos still awaiting the user's keep/discard choice, newest first,
+    /// metadata-only. Every one is already on the friend wall; the review is a prune, never an
+    /// admission.
+    public internal(set) var photos: [FriendPhotoPayload]
 
-    public init(id: UUID = UUID(), entries: [MeshSessionRosterEntry]) {
+    public init(id: UUID = UUID(), entries: [MeshSessionRosterEntry], photos: [FriendPhotoPayload] = []) {
         self.id = id
         self.entries = entries
+        self.photos = photos
     }
+
+    /// Whether nothing is left for the user to answer — no candidate and no photo.
+    public var isEmpty: Bool { entries.isEmpty && photos.isEmpty }
 }
 
 /// Display row for one member of the current session (mesh members or committed pairwise slots),

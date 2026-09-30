@@ -179,8 +179,18 @@ Group Activities (``ProximityActivityManager``, whose authorization is a host-si
 invitee-key-bound token rather than the shared handshake). Feature payloads dispatch through a
 registry whose committed-slot gate is the security boundary — behind the payload door's attribution
 rule, which every frame of every family passes first (see the seat invariant above); the session end promotes the roster
-into the keep-as-friend review (``FriendMintingReview``, ``KeepFriendsPromptSheet``,
-``FriendPhotoReviewSheet``). **"The session end" is the MESH ending — ``MeshNetworkManager/isSessionLive``
+AND the session's unreviewed photos into the keep-as-friend review (``FriendMintingReview``,
+``KeepFriendsPromptSheet``, ``FriendPhotoReviewSheet``). **Photos are never dropped at an ending**
+(2026-09-30): every session photo is on the persisted wall from the moment it is taken or received,
+so `sessionPhotos` is the user's pending choice, and it empties only through that choice
+(`finishSessionPhotos(keeping:)` in the camera, ``MeshNetworkManager/finishReviewedPhotos(_:keeping:in:)``
+for a promoted batch) or by moving into ``MeshFriendReviewBatch/photos``. `leaveSession()` used to
+empty it first, so the last device left in a mesh — ended by the other side's development through a
+verified termination, with no Develop tap of its own — was offered no photo review and kept
+everything; a removal, the ceiling, epoch exhaustion, the pairwise "Ask to remove" and a hard stop
+did the same. `completeFriendReview(_:)` answers only the candidate half, so a batch with photos
+still pending stays up; the batch is memory-only, so a process kill before the answer leaves the
+photos on the wall. **"The session end" is the MESH ending — ``MeshNetworkManager/isSessionLive``
 going false — and never a lost link** (P6 item 2 and its fix): a proximity-join pair now FOUNDS a
 mesh — descriptor, membership ledger, founder admission, ceiling, state machine — at its FIRST
 commit, so `currentMesh != nil` outlives every link and three predicates that used to agree now

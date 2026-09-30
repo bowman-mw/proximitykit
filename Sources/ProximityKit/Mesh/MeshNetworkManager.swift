@@ -73,8 +73,10 @@ private struct FriendPhotoWallPreferences: Codable, Equatable {
 /// which fires on every Social-tab entry); the SESSION-END moment — ``isSessionLive`` going false,
 /// which since P6 item 2 means the **mesh** ending (End Session, a termination or completed
 /// departure, the five-minute discovery timeout with no peer, or slot loss while no mesh is held)
-/// and never a link blip — promotes the roster into `pendingFriendReview`, opens the clothing-shop
-/// window, and clears the chat transcript. `isInSession` is the surface question, ``hasCommittedPeer``
+/// and never a link blip — promotes the roster AND the session's unreviewed photos into
+/// `pendingFriendReview`, opens the clothing-shop window, and clears the chat transcript. Photos are
+/// never dropped at an ending: they are on the wall from capture, so dropping the review list would
+/// keep them all without asking (2026-09-30). `isInSession` is the surface question, ``hasCommittedPeer``
 /// the "is there a peer right now" question, and ``isSessionLive`` the lifecycle one; all three are
 /// read and they are not interchangeable. Phase-3 group crypto: a lowest-fingerprint coordinator election, a 20 s beacon,
 /// and a 15-minute key rotation distribute the ``MeshGroupKey`` pairwise-wrapped to
@@ -97,22 +99,32 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public var pendingAdmissionRequests: [MeshAdmissionRequestPayload] = []
     public var pendingRemovalProposals: [MeshRemovalProposalPayload] = []
     public var meshPhotos: [FriendPhotoPayload] = []
-    /// Photos taken/received during the current proximity-join session (cleared on leaveSession).
+    /// Photos taken/received during the current proximity-join session, metadata-only — the list
+    /// the in-camera Develop review reads.
+    ///
+    /// Every entry is ALREADY on the persisted wall (`cachePhoto` writes it there at capture or
+    /// arrival), so this list is the user's pending choice, not a staging area. It is emptied only
+    /// by that choice (`finishSessionPhotos(keeping:)`) or by the session-end promotion, which
+    /// MOVES what is left into `pendingFriendReview.photos` for the post-session review
+    /// (`promoteSessionToPendingReviewIfSessionEnded()`; `startJoin()` runs the photo half
+    /// unconditionally). Never dropped: a drop here is a silent keep-all (2026-09-30).
     public private(set) var sessionPhotos: [FriendPhotoPayload] = []
     /// Every peer whose handshake COMMITTED during the current session, for the post-session
     /// keep-as-friend prompt (Phase 2, Docs/Proximity-Mesh-Redesign-2026-07-10.md). Unlike
     /// `slots`, entries survive slot teardown — the review fires after the slots are gone: when
     /// the last committed slot disappears the roster PROMOTES into `pendingFriendReview` (see
-    /// promoteRosterToPendingReviewIfSessionEnded). Reset when a NEW session begins
+    /// promoteSessionToPendingReviewIfSessionEnded). Reset when a NEW session begins
     /// (startJoin/startNewMesh via resetSessionRosterForNewSession) or consumed scoped by the
     /// in-session camera review (consumeRosterEntries). Memory-only key material; never
     /// persisted/synced.
     public private(set) var sessionRoster: [MeshSessionRosterEntry] = []
-    /// The promoted, unconsumed session-end friend review. Set by
-    /// `promoteRosterToPendingReviewIfSessionEnded()` when the last committed slot disappears;
-    /// cleared only by `completeFriendReview(_:)`. Views present off this observable state
-    /// (`onChange` + `onAppear`) — never off `isInSession` view-events. Survives
-    /// startJoin/startNewMesh by design.
+    /// The promoted, unconsumed session-end review: keep-as-friend candidates plus the ended
+    /// session's photos still awaiting the keep/discard choice. Set by
+    /// `promoteSessionToPendingReviewIfSessionEnded()` at the session-end moment; cleared only once
+    /// BOTH halves are answered — the candidates by `completeFriendReview(_:)`, the photos by
+    /// ``finishReviewedPhotos(_:keeping:in:)`` (or a per-photo delete). Views present off this
+    /// observable state (`onChange` + `onAppear` + scene activation) — never off `isInSession`
+    /// view-events. Survives startJoin/startNewMesh by design. Memory-only, like the roster.
     public private(set) var pendingFriendReview: MeshFriendReviewBatch?
     /// The friend-mesh clothing shop (Phase 3a): catalogs exchanged during the session + the 1-hour
     /// post-session browse window. Registered on the payload registry in `init`; lifecycle hooks fire
@@ -1260,7 +1272,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// negation of, and the **only** thing the session-end ceremony may key on (P6 item 2 fix).
     ///
     /// **Session end means MESH end, never slot loss.** The three hooks
-    /// (``promoteRosterToPendingReviewIfSessionEnded()``, ``openShopWindowIfSessionEnded()``,
+    /// (``promoteSessionToPendingReviewIfSessionEnded()``, ``openShopWindowIfSessionEnded()``,
     /// ``clearSessionMessagesIfSessionEnded()``) and the app's review presentation
     /// (`ConnectView.presentDisconnectReviewIfNeeded()`) read this and nothing else, so the four
     /// doors below are the whole list of ways a session can end:
@@ -1439,20 +1451,84 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         sessionRoster.removeAll { fingerprints.contains($0.fingerprint) }
     }
 
-    /// Consumes the promoted friend-review batch iff `id` matches the outstanding one. The UI
-    /// calls this once its review flow completes (kept, skipped, dismissed = skip all, or
+    /// Answers the promoted batch's CANDIDATE half iff `id` matches the outstanding one. The UI
+    /// calls this once its keep-as-friend flow completes (kept, skipped, dismissed = skip all, or
     /// auto-consumed when nothing was eligible).
+    ///
+    /// **It never answers the photo half** (2026-09-30). A batch still carrying photos the user has
+    /// not chosen between keeps them and stays up — the keep-friends prompt, or the `.none`
+    /// auto-consume, must never be what throws a pending photo choice away — and is cleared only
+    /// once they are answered too (``finishReviewedPhotos(_:keeping:in:)``). A photo no longer on
+    /// the wall (deleted, or aged out by its FIFO cap) is no longer a choice, so it goes here.
     public func completeFriendReview(_ id: UUID) {
-        guard pendingFriendReview?.id == id else { return }
-        pendingFriendReview = nil
+        guard var batch = pendingFriendReview, batch.id == id else { return }
+        batch.entries.removeAll()
+        batch.photos = reviewablePhotos(of: batch)
+        pendingFriendReview = batch.isEmpty ? nil : batch
+    }
+
+    /// The pending batch's photos that are still on the wall — exactly what the session-end review
+    /// can offer, newest first. Empty when no batch is pending.
+    public var pendingReviewPhotos: [FriendPhotoPayload] {
+        guard let batch = pendingFriendReview else { return [] }
+        return reviewablePhotos(of: batch)
+    }
+
+    /// `batch`'s photos filtered to the ids the wall still holds. Every pending photo was cached
+    /// into `meshPhotos` when it was taken or received, so the only ones this drops are photos a
+    /// per-photo delete or the wall's FIFO cap has already removed.
+    private func reviewablePhotos(of batch: MeshFriendReviewBatch) -> [FriendPhotoPayload] {
+        let onWall = Set(meshPhotos.map(\.id))
+        return batch.photos.filter { onWall.contains($0.id) }
+    }
+
+    /// Answers the promoted batch's PHOTO half: of the `reviewed` photos — the ones the session-end
+    /// review actually showed — the ones not in `kept` leave the wall, and all of them leave the
+    /// batch. The post-session twin of ``finishSessionPhotos(keeping:)``, with the same wall effects
+    /// (the index save sweeps the dropped files; the wall preferences are pruned).
+    ///
+    /// **Scoped to what was shown, never to the whole batch.** A photo promoted while the sheet was
+    /// up — a late arrival, a second ending merged into the same batch — was never offered, so it is
+    /// neither discarded nor counted as kept: it stays pending and the review re-presents for it. A
+    /// stale `batchID` changes nothing, which leaves every photo on the wall — the conservative side
+    /// of an answer that can no longer be matched to its question. The batch clears once neither
+    /// half has anything left.
+    ///
+    /// - Parameters:
+    ///   - reviewed: The photo ids the review presented.
+    ///   - kept: The ids the user chose to keep; ids outside `reviewed` are ignored.
+    ///   - batchID: The batch the review was presented from.
+    public func finishReviewedPhotos(_ reviewed: Set<UUID>, keeping kept: Set<UUID>, in batchID: UUID) {
+        guard var batch = pendingFriendReview, batch.id == batchID else { return }
+        let answered = Set(batch.photos.map(\.id)).intersection(reviewed)
+        let discarded = answered.subtracting(kept)
+        meshPhotos.removeAll { discarded.contains($0.id) }
+        batch.photos.removeAll { answered.contains($0.id) }
+        pendingFriendReview = batch.isEmpty ? nil : batch
+        persistPhotoIndex(meshPhotos)
+        prunePhotoWallPreferences()
+        FernletAuditLog.log(
+            "mesh.session.photoReviewAnswered",
+            context: ["kept": String(answered.count - discarded.count), "discarded": String(discarded.count),
+                      "stillPending": String(batch.photos.count)]
+        )
     }
 
     /// Phase 2 ("Session-end review is model-state, not view-events"): when the session has ENDED
-    /// (``isSessionLive``) and the live roster is non-empty, move the roster into
-    /// `pendingFriendReview`, merging by fingerprint into any existing unconsumed batch —
-    /// candidates are never dropped. Idempotent and cheap; called after every slot-removal path
+    /// (``isSessionLive``), move the live roster AND the live session photos into
+    /// `pendingFriendReview`, merging into any existing unconsumed batch — neither candidates nor
+    /// photos are ever dropped. Idempotent and cheap; called after every slot-removal path
     /// (removeSlot, disconnectSlot — which the checkCoordinatorStates stale eviction funnels
     /// through) and on leaveSession/stopSearching teardown.
+    ///
+    /// **The photo half is the 2026-09-30 fix.** The last device left in a mesh ends through a
+    /// verified termination (`applyVerifiedTermination()` → `leaveSession()`), with no Develop tap
+    /// and so no review of its own; `leaveSession()` used to empty `sessionPhotos` in the same
+    /// synchronous turn, so by the time the app's presenter ran it saw no photos and offered at most
+    /// the keep-friends prompt — and every photo, already on the wall since capture, was kept
+    /// without asking. Every other ending the user did not choose (a removal, the ceiling, epoch
+    /// exhaustion, "Ask to remove" on the only other person, a hard stop) took the same shortcut.
+    /// Moving the photos here covers them all at once, because each reaches this funnel.
     ///
     /// The predicate is ``isSessionLive`` — neither `isInSession` nor ``hasCommittedPeer``, and the
     /// P6 item 2 fix is where the last of those three stopped being right. On `isInSession` this
@@ -1461,8 +1537,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// promoted the batch mid-session and the sheet that presents it terminates the live mesh. The
     /// call sites are unchanged: they are still every slot-removal path, and slot loss still ends
     /// the session when there is no mesh to outlive it.
-    private func promoteRosterToPendingReviewIfSessionEnded() {
-        guard !isSessionLive, !sessionRoster.isEmpty else { return }
+    private func promoteSessionToPendingReviewIfSessionEnded() {
+        guard !isSessionLive else { return }
+        promoteRosterIntoPendingReview()
+        movePhotosIntoPendingReview()
+    }
+
+    /// The roster half of the promotion: merges the live roster into the pending batch by
+    /// fingerprint (last write wins, capped at the roster's own bound) and empties it.
+    private func promoteRosterIntoPendingReview() {
+        guard !sessionRoster.isEmpty else { return }
         if var batch = pendingFriendReview {
             for entry in sessionRoster {
                 if let index = batch.entries.firstIndex(where: { $0.fingerprint == entry.fingerprint }) {
@@ -1476,6 +1560,30 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             pendingFriendReview = MeshFriendReviewBatch(entries: sessionRoster)
         }
         sessionRoster.removeAll()
+    }
+
+    /// The photo half of the promotion: MOVES whatever is still in `sessionPhotos` into the
+    /// pending batch, newest first, and empties the live list — never a drop.
+    ///
+    /// Not gated on ``isSessionLive`` itself: the ending caller gates it, and `startJoin()` runs it
+    /// bare, because a new search is a new session by definition and a photo still listed then
+    /// belongs to one that ended without an answer. The ended session's final metadata is stamped
+    /// first, while its photo-session id is still set — what the Develop flow's
+    /// ``finishSessionPhotos(keeping:)`` does before it prunes. R3: the merged list is capped at the
+    /// wall's own bound, which already bounds every photo that can exist to be pending.
+    private func movePhotosIntoPendingReview() {
+        guard !sessionPhotos.isEmpty else { return }
+        finalizeCurrentPhotoSessionMetadata()
+        var batch = pendingFriendReview ?? MeshFriendReviewBatch(entries: [])
+        let alreadyPending = Set(batch.photos.map(\.id))
+        let arriving = sessionPhotos.filter { !alreadyPending.contains($0.id) }
+        batch.photos = Array((arriving + batch.photos).prefix(PrivateMediaStore.maxCachedPhotos))
+        pendingFriendReview = batch
+        sessionPhotos.removeAll()
+        FernletAuditLog.log(
+            "mesh.session.photosPendingReview",
+            context: ["moved": String(arriving.count), "pending": String(batch.photos.count)]
+        )
     }
 
     /// Pushes the three lock facts in, and runs the re-entry pass whichever legs moved owe (P5 item
@@ -1515,13 +1623,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return runRoutedReentry(edge, now: now)
     }
 
-    /// End the current session (pairwise or mesh) and clear session photos.
-    /// Call this after the develop/review flow completes.
+    /// Ends the current session (pairwise or mesh) on this device — the local teardown every ending
+    /// reaches. It tells nobody; the signed ending is ``leaveSessionAfterNotifyingPeers()``'s.
+    ///
+    /// **It decides nothing about the session's photos** (2026-09-30). It used to say "call this
+    /// after the develop/review flow completes" and empty `sessionPhotos` first — but most of its
+    /// callers are endings nobody reviewed: a verified termination on the last device left in a
+    /// mesh, a removal naming this device, the ceiling, epoch exhaustion, the pairwise "Ask to
+    /// remove", a hard stop. Every session photo is on the wall from capture, so that line kept
+    /// them all without asking. Now the teardown's `stopSearching()` moves whatever is still
+    /// listed into `pendingFriendReview` (``finishReviewedPhotos(_:keeping:in:)`` answers it); a
+    /// Develop flow that already had the user choose (``finishSessionPhotos(keeping:)``) emptied
+    /// the list first, so nothing is offered twice. The photo-session ids are cleared only AFTER
+    /// the teardown, because the promotion stamps the ended session's metadata with them.
     public func leaveSession() {
-        sessionPhotos.removeAll()
+        leaveMesh()
         photoSessionStartedAt = nil
         activePhotoSessionID = nil
-        leaveMesh()
     }
 
     /// Ends the session, telling every peer why first.
@@ -1879,6 +1997,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
     }
 
+    /// The in-camera Develop review's answer for the LIVE session's photos: the listed photos not in
+    /// `keptPhotoIDs` leave the wall, and the list empties — so the teardown that follows has
+    /// nothing left to promote. A photo the session ended without an answer for is answered through
+    /// ``finishReviewedPhotos(_:keeping:in:)`` instead.
     public func finishSessionPhotos(keeping keptPhotoIDs: Set<UUID>) {
         finalizeCurrentPhotoSessionMetadata()
         let sessionPhotoIDs = Set(sessionPhotos.map(\.id))
@@ -1901,6 +2023,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let existed = meshPhotos.contains { $0.id == photoID }
         meshPhotos.removeAll { $0.id == photoID }
         sessionPhotos.removeAll { $0.id == photoID }
+        // A photo that is gone is no longer a choice the session-end review can offer.
+        if var batch = pendingFriendReview, batch.photos.contains(where: { $0.id == photoID }) {
+            batch.photos.removeAll { $0.id == photoID }
+            pendingFriendReview = batch.isEmpty ? nil : batch
+        }
         // Drops the favorite / aggregated-cover entries that pointed at the photo (and any other
         // entry the cache no longer backs).
         prunePhotoWallPreferences()
@@ -2154,7 +2281,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         photosAddedThisSession = 0
         photosKeptOnThisPhone = 0
         sessionQuotaMeshID = nil
-        sessionPhotos.removeAll()
+        // A new search is a new session: a photo still listed belongs to one that ended without an
+        // answer, so it joins the pending review rather than being dropped (a drop keeps it
+        // silently — the wall already holds it). Before the ids below are re-minted.
+        movePhotosIntoPendingReview()
         // Live-roster reset only (new session). pendingFriendReview is deliberately untouched:
         // an unreviewed batch from the previous session survives into this search cycle.
         resetSessionRosterForNewSession()
@@ -2270,9 +2400,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// only escape was End Session.
     ///
     /// It deliberately does **not** call ``startJoin()``, and that is the whole reason it exists:
-    /// `startJoin` clears `sessionPhotos`, `photosAddedThisSession`, `sessionQuotaMeshID` and
-    /// `removedMemberFingerprints` and resets the session state machine — so it would drop this
-    /// session's photos, hand back a free film quota, forget who was voted out, and **nil the
+    /// `startJoin` empties `sessionPhotos` (into the pending review, since 2026-09-30),
+    /// `photosAddedThisSession`, `sessionQuotaMeshID` and `removedMemberFingerprints` and resets the
+    /// session state machine — so it would take this live session's photos out of its own Develop
+    /// review, hand back a free film quota, forget who was voted out, and **nil the
     /// session ceiling** on a mesh that can never re-found (``promoteToMesh()`` fires only on
     /// `currentMesh == nil`), leaving a session that can no longer expire. The mesh, the membership
     /// ledger, the ceiling, the advertisement set and the state machine are all kept exactly as they
@@ -11460,9 +11591,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // rotation timer kept waking for the manager's lifetime after a stopJoin-ended session.
         clearGroupKeyState()
         // Teardown path (leaveSession/leaveMesh/stopJoin funnel through here): the last committed
-        // slot is gone, so any unreviewed roster promotes into the pending friend-review batch and
-        // any held shop catalogs open the post-session shop window (Phase 3a).
-        promoteRosterToPendingReviewIfSessionEnded()
+        // slot is gone, so any unreviewed roster and any unreviewed session photos promote into the
+        // pending review batch and any held shop catalogs open the post-session shop window
+        // (Phase 3a).
+        promoteSessionToPendingReviewIfSessionEnded()
         openShopWindowIfSessionEnded()
         clearSessionMessagesIfSessionEnded()
     }
@@ -11758,7 +11890,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // the moment it changes rather than at the next inbound frame. `rerankSlots()` is NOT an
         // evaluation site and must not become one: it moves `kind`, which the rule never reads.
         concludeMergeIfConverged()
-        promoteRosterToPendingReviewIfSessionEnded()
+        promoteSessionToPendingReviewIfSessionEnded()
         openShopWindowIfSessionEnded()
         clearSessionMessagesIfSessionEnded()
         // Door 3's clock starts HERE for a founded session (fix review P2-1): the hooks above just
@@ -11791,7 +11923,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // the moment it changes rather than at the next inbound frame. `rerankSlots()` is NOT an
         // evaluation site and must not become one: it moves `kind`, which the rule never reads.
         concludeMergeIfConverged()
-        promoteRosterToPendingReviewIfSessionEnded()
+        promoteSessionToPendingReviewIfSessionEnded()
         openShopWindowIfSessionEnded()
         clearSessionMessagesIfSessionEnded()
         armSessionGiveUpClock(now: Date())
@@ -12805,7 +12937,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         sessionRoster.removeAll { $0.fingerprint == proposal.targetFingerprint }
         if var batch = pendingFriendReview {
             batch.entries.removeAll { $0.fingerprint == proposal.targetFingerprint }
-            pendingFriendReview = batch.entries.isEmpty ? nil : batch
+            // Never on entries alone: a batch still carrying unanswered photos stays up.
+            pendingFriendReview = batch.isEmpty ? nil : batch
         }
 
         if proposal.targetFingerprint == identity.localFingerprint {
@@ -13396,7 +13529,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Phase 3a: the shop window opens at the same last-committed-slot-gone moment that promotes
-    /// `pendingFriendReview` — call sites mirror `promoteRosterToPendingReviewIfSessionEnded()` exactly.
+    /// `pendingFriendReview` — call sites mirror `promoteSessionToPendingReviewIfSessionEnded()` exactly.
     /// The same moment ends the formed-session epoch: the NEXT slot commit is a new formation.
     ///
     /// ``isSessionLive``, not `isInSession` and not ``hasCommittedPeer`` — same reason as the review
