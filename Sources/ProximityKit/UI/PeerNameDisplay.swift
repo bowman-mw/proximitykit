@@ -79,6 +79,25 @@ public nonisolated enum PeerNameDisplay {
         personName(raw, fingerprint: fingerprint) ?? text(for: placeholder)
     }
 
+    /// The first word of the peer's chosen name for warm copy ("Aisha" from "Aisha Bloom"), or the
+    /// WHOLE placeholder when there is no name to take it from.
+    ///
+    /// Taking the first word of ``shown(_:fingerprint:placeholder:)`` instead would turn "Someone
+    /// you met" into "Someone", which is why the rule is applied before the split, here.
+    /// `PresenceManager.firstName(of:)` delegates to this, so the hearts copy composed inside the
+    /// package (the presence path's refusals) can never interpolate a fingerprint filed as a name.
+    ///
+    /// - Parameters:
+    ///   - raw: The name as received or stored.
+    ///   - fingerprint: The peer's fingerprint, when the caller has it.
+    ///   - placeholder: Which phrase stands in when there is no name. Defaults to ``Placeholder/nearby``.
+    /// - Returns: A string safe to show, already localized. Render it verbatim.
+    public static func firstName(_ raw: String, fingerprint: String?, placeholder: Placeholder = .nearby) -> String {
+        guard let name = personName(raw, fingerprint: fingerprint) else { return text(for: placeholder) }
+        // `personName` collapsed every whitespace run to one space and trimmed the ends.
+        return name.split(separator: " ", maxSplits: 1).first.map(String.init) ?? name
+    }
+
     /// The localized phrase for a placeholder, resolved against this module's catalog.
     ///
     /// - Parameter placeholder: Which phrase.

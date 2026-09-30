@@ -150,7 +150,10 @@ persists a peer name (rosters, the trust vault, audits) reads
 through ``PeerNameDisplay`` instead (owner decision 2026-09-29, reversing the fingerprint title the
 first build showed): a pre-commit peer reads "Someone nearby", never its fingerprint, and the same
 filter turns a fingerprint filed as a name, or the QUIC transport's `fernlet-mesh-…` instance name,
-into the placeholder. No wire shape moved: an empty name is a value.
+into the placeholder. Hearts copy that uses a first name goes through
+``PeerNameDisplay/firstName(_:fingerprint:placeholder:)``, which
+``PresenceManager/firstName(of:)`` delegates to, so a sentence composed in this package cannot
+interpolate a fingerprint either. No wire shape moved: an empty name is a value.
 **The mesh has a door of its own** and the invariant holds there too: every mesh frame is signed in
 `MeshNetworkManager.sendEnvelopeCore`, six broadcasts reach slots this device has not committed and
 seated (the coordinator beacon, the admission request, rotation sync, key rotation and ack, the

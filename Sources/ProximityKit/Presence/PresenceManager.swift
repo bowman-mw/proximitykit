@@ -792,12 +792,16 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     // MARK: - Hearts: reachability + send
 
-    /// First word of a display name for warm copy ("Aisha" from "Aisha Bloom"). Pure, so
+    /// First word of a friend's display name for warm copy ("Aisha" from "Aisha Bloom"). Pure, so
     /// `nonisolated`. Moved here from the deleted ProximityHeartManager.
+    ///
+    /// Delegates to ``PeerNameDisplay/firstName(_:fingerprint:placeholder:)`` (2026-09-29): a friend
+    /// kept before their name arrived has their fingerprint filed AS the name, and every heart
+    /// sentence built on this (this manager's own refusals, the app's session and Home copy) used to
+    /// interpolate it. It now reads "Someone you met", which also replaces the English-only
+    /// "your friend" this answered for an empty name.
     public nonisolated static func firstName(of displayName: String) -> String {
-        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let first = trimmed.split(separator: " ").first, !first.isEmpty else { return "your friend" }
-        return String(first)
+        PeerNameDisplay.firstName(displayName, fingerprint: nil, placeholder: .met)
     }
 
     /// A friend is heart-reachable when their pairwise tag is in the presence nearby set right now.
