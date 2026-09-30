@@ -96,6 +96,36 @@ enum ProximityUICopy {
                    comment: "Notice on the photo review sheet after an answer, when some photos the person chose to keep could not be opened and were removed instead. The count is how many.")
         }
 
+        /// The header's text button on the session-end review (the app's overlay): hides the review
+        /// and answers nothing — every photo stays waiting, unsaved, and the review comes back.
+        static var notNow: String {
+            String(localized: "proximity.review.notNow", defaultValue: "Not now", bundle: .module,
+                   comment: "Text button at the top of the review shown when an in-person photo session ends. Hides the review without keeping or deleting anything; the photos keep waiting, unsaved, and the review comes back the next time Fernlet opens.")
+        }
+
+        /// The working line while the review waits for the ended session to be left (its buttons are
+        /// disabled meanwhile).
+        static var endingSession: String {
+            String(localized: "proximity.review.endingSession", defaultValue: "Ending the session...", bundle: .module,
+                   comment: "Status line on the photo review while Fernlet finishes leaving the in-person session that just ended; the buttons are disabled meanwhile. Takes at most a few seconds.")
+        }
+
+        /// A photo tile's spoken label, naming who took it.
+        ///
+        /// - Parameter name: The sender, already through `PeerNameDisplay` (a withheld name reads as
+        ///   the placeholder, never a fingerprint).
+        /// - Returns: "Photo from Sam".
+        static func tileLabel(_ name: String) -> String {
+            String(localized: "proximity.review.tile.label", defaultValue: "Photo from \(name)", bundle: .module,
+                   comment: "VoiceOver label of one photo in the session review grid. The argument is the name of the person who took it, or a plain phrase such as 'Someone you met' when their name is not known.")
+        }
+
+        /// A photo tile's spoken hint: what a double-tap does.
+        static var tileHint: String {
+            String(localized: "proximity.review.tile.hint", defaultValue: "Double-tap to keep or not keep.", bundle: .module,
+                   comment: "VoiceOver hint on one photo in the session review grid: double-tapping ticks or unticks it for keeping. Its selected state is announced separately.")
+        }
+
         /// The accessibility label of the opaque cover drawn over the review while the app is not
         /// frontmost (the app-switcher snapshot must not hold a photo nobody chose yet).
         static var snapshotCover: String {

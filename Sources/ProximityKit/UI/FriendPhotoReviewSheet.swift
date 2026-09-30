@@ -77,6 +77,8 @@ struct FriendPhotoTile: View {
 public enum FriendPhotoReviewWorkingMessage: Equatable, Sendable {
     /// The kept photos are being copied to the system Photos library (after the keep landed).
     case savingToPhotos
+    /// The host is waiting for the ended session to be left before it hides the review.
+    case endingSession
 }
 
 /// The session-end photo review sheet: pick which session pictures to keep — nothing is saved,
@@ -92,7 +94,10 @@ public enum FriendPhotoReviewWorkingMessage: Equatable, Sendable {
 ///
 /// Two host-driven states: ``answerFailure`` keeps an unapplied answer on screen with an inline line
 /// (the photos are still offered; nothing was lost), and ``canKeep`` false disables Keep with the
-/// reason while Delete all still works. While the scene is not `.active` the sheet draws an opaque
+/// reason while Delete all still works. A host that passes ``notNow`` (the app's session-end overlay)
+/// gets a "Not now" text button in the header, and VoiceOver's escape gesture performs it; the
+/// camera's Develop sheet passes nil and keeps the sheet's own swipe-down and escape (cancel back to
+/// the camera). While the scene is not `.active` the sheet draws an opaque
 /// cover INSTEAD of the grid, so the app-switcher snapshot never holds a photo nobody chose (the
 /// switcher can be entered without a background transition, hence `!= .active`).
 ///
@@ -122,6 +127,9 @@ public struct FriendPhotoReviewSheet: View {
     let tileReloadToken: Int
     let keepSelected: @MainActor () async -> Void
     let discardAll: @MainActor () async -> Void
+    /// Hides the review WITHOUT answering anything (the overlay's "Not now"); nil where the host's
+    /// own dismissal is the way out (the camera's Develop sheet).
+    let notNow: (@MainActor () -> Void)?
     /// Loads a held photo's bytes for its tile (the host's gated seam); nil draws a placeholder.
     var loadImageData: ((FriendPhotoPayload) -> Data?)? = nil
     @State private var isSaving = false
@@ -157,6 +165,7 @@ public struct FriendPhotoReviewSheet: View {
     ///   - tileReloadToken: Changes when tiles should load again.
     ///   - keepSelected: Keeps the ticked photos.
     ///   - discardAll: Deletes every shown photo (after the sheet's own confirmation).
+    ///   - notNow: Hides the review answering nothing; nil hides the header button.
     ///   - loadImageData: The tile loader.
     public init(
         photos: [FriendPhotoPayload],
@@ -171,6 +180,7 @@ public struct FriendPhotoReviewSheet: View {
         tileReloadToken: Int = 0,
         keepSelected: @escaping @MainActor () async -> Void,
         discardAll: @escaping @MainActor () async -> Void,
+        notNow: (@MainActor () -> Void)? = nil,
         loadImageData: ((FriendPhotoPayload) -> Data?)? = nil
     ) {
         self.photos = photos
@@ -185,15 +195,14 @@ public struct FriendPhotoReviewSheet: View {
         self.tileReloadToken = tileReloadToken
         self.keepSelected = keepSelected
         self.discardAll = discardAll
+        self.notNow = notNow
         self.loadImageData = loadImageData
     }
 
     /// The explainer, the selectable photo grid, and the keep-friends section.
     private var reviewScrollContent: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(verbatim: ProximityUICopy.Review.title)
-                .font(.fernlet(.displayMedium))
-                .foregroundStyle(Color.bark)
+            header
 
             Text(verbatim: ProximityUICopy.Review.explainerPending)
                 .font(.fernlet(.body))
@@ -213,6 +222,12 @@ public struct FriendPhotoReviewSheet: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    // Who took it (a withheld name reads as the placeholder, never a fingerprint)
+                    // and what a double-tap does; the tile carries `.isSelected` itself.
+                    .accessibilityLabel(Text(verbatim: ProximityUICopy.Review.tileLabel(
+                        PeerNameDisplay.shown(photo.senderName, fingerprint: photo.senderFingerprint, placeholder: .met)
+                    )))
+                    .accessibilityHint(Text(verbatim: ProximityUICopy.Review.tileHint))
                 }
             }
 
@@ -226,6 +241,25 @@ public struct FriendPhotoReviewSheet: View {
         }
         .padding(20)
         .padding(.bottom, 10)
+    }
+
+    /// The title — a VoiceOver heading — and, when the host offers it, the "Not now" text button.
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(verbatim: ProximityUICopy.Review.title)
+                .font(.fernlet(.displayMedium))
+                .foregroundStyle(Color.bark)
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 8)
+            if let notNow {
+                Button(ProximityUICopy.Review.notNow) { notNow() }
+                    .font(.fernlet(.label))
+                    .foregroundStyle(Color.mossInk)
+                    .frame(minHeight: 44)
+                    .disabled(isBusy)
+                    .accessibilityIdentifier("friends.review.notNow")
+            }
+        }
     }
 
     /// The pinned action bar: the status line (when there is one), the opt-in camera-roll toggle,
@@ -277,10 +311,17 @@ public struct FriendPhotoReviewSheet: View {
     /// The one status line under the grid, most urgent first: what the host is doing, why Keep is
     /// off, why the last answer did not land, and what the last answer could not open.
     private var statusLine: FriendPhotoReviewStatusLine? {
-        if workingMessage == .savingToPhotos {
+        switch workingMessage {
+        case .savingToPhotos:
             return FriendPhotoReviewStatusLine(
                 text: ProximityUICopy.Review.savingToPhotos, identifier: "friends.review.working", isFailure: false
             )
+        case .endingSession:
+            return FriendPhotoReviewStatusLine(
+                text: ProximityUICopy.Review.endingSession, identifier: "friends.review.working", isFailure: false
+            )
+        case nil:
+            break
         }
         if !keepAvailable {
             return FriendPhotoReviewStatusLine(
@@ -323,6 +364,7 @@ public struct FriendPhotoReviewSheet: View {
             }
         }
         .background(Color.parchment)
+        .modifier(EscapePerformsNotNow(notNow: isBusy ? nil : notNow))
         .onChange(of: statusLine?.text) { _, line in
             // The working line and the inline failure are announced, not only drawn.
             guard let line else { return }
@@ -370,6 +412,23 @@ public struct FriendPhotoReviewSheet: View {
             selectedIDs.remove(id)
         } else {
             selectedIDs.insert(id)
+        }
+    }
+}
+
+/// VoiceOver's escape gesture (the two-finger scrub) as "Not now" on the host that offers it.
+///
+/// Attached only when there is a `notNow` to run: an `.accessibilityAction(.escape)` hung on the
+/// camera's Develop sheet would replace the sheet's own escape, which is its cancel back to the
+/// camera. Nil while the review is busy, so a scrub cannot run past a disabled button.
+private struct EscapePerformsNotNow: ViewModifier {
+    let notNow: (@MainActor () -> Void)?
+
+    func body(content: Content) -> some View {
+        if let notNow {
+            content.accessibilityAction(.escape) { notNow() }
+        } else {
+            content
         }
     }
 }
