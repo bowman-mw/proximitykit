@@ -100,11 +100,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public var pendingRemovalProposals: [MeshRemovalProposalPayload] = []
     public var meshPhotos: [FriendPhotoPayload] = []
     /// Photos taken/received during the current proximity-join session, metadata-only — the list
-    /// the in-camera Develop review reads.
+    /// the in-camera Develop review snapshots its ids from (and renders through
+    /// ``photosAwaitingAnswer(among:)``, so a photo moved out from under it is still offered).
     ///
     /// Every entry is ALREADY on the persisted wall (`cachePhoto` writes it there at capture or
     /// arrival), so this list is the user's pending choice, not a staging area. It is emptied only
-    /// by that choice (`finishSessionPhotos(keeping:)`) or by the session-end promotion, which
+    /// by that choice (``finishSessionPhotos(keeping:of:)``) or by the session-end promotion, which
     /// MOVES what is left into `pendingFriendReview.photos` for the post-session review
     /// (`promoteSessionToPendingReviewIfSessionEnded()`; `startJoin()` runs the photo half
     /// unconditionally). Never dropped: a drop here is a silent keep-all (2026-09-30).
@@ -1474,6 +1475,26 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return reviewablePhotos(of: batch)
     }
 
+    /// The photos among `ids` that still await the user's keep/discard answer, wherever each one is
+    /// held right now: listed live in `sessionPhotos`, or moved into the pending batch (and still on
+    /// the wall). Live ones first, each list in its own order.
+    ///
+    /// **What the in-camera Develop review renders** (2026-09-30 fix round, findings C-F1/L-F1). That
+    /// review snapshots the ids it offers at Develop and must keep offering them if the session ends
+    /// under it: door 3's five-minute give-up raises ``isSessionLive`` false while the mesh is still
+    /// held, so the camera — and its open review — stays on screen while the ending MOVES the live
+    /// list into `pendingFriendReview`. Reading `sessionPhotos` alone, the grid went empty and the
+    /// person's answer acted on nothing.
+    ///
+    /// - Parameter ids: The photo ids the review snapshotted.
+    /// - Returns: The ones still unanswered, as metadata-only payloads.
+    public func photosAwaitingAnswer(among ids: Set<UUID>) -> [FriendPhotoPayload] {
+        guard !ids.isEmpty else { return [] }
+        let live = sessionPhotos.filter { ids.contains($0.id) }
+        let liveIDs = Set(live.map(\.id))
+        return live + pendingReviewPhotos.filter { ids.contains($0.id) && !liveIDs.contains($0.id) }
+    }
+
     /// `batch`'s photos filtered to the ids the wall still holds. Every pending photo was cached
     /// into `meshPhotos` when it was taken or received, so the only ones this drops are photos a
     /// per-photo delete or the wall's FIFO cap has already removed.
@@ -1571,6 +1592,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// first, while its photo-session id is still set — what the Develop flow's
     /// ``finishSessionPhotos(keeping:)`` does before it prunes. R3: the merged list is capped at the
     /// wall's own bound, which already bounds every photo that can exist to be pending.
+    ///
+    /// **It can run under an open Develop review.** Door 3's give-up ends the session while the mesh
+    /// is held, so the camera and any review it has up stay on screen through this move. That
+    /// review renders and answers by the ids it snapshotted (``photosAwaitingAnswer(among:)``,
+    /// ``finishSessionPhotos(keeping:of:)``), so the move changes where its photos are held and
+    /// nothing about the person's answer (2026-09-30 fix round, findings C-F1/L-F1).
     private func movePhotosIntoPendingReview() {
         guard !sessionPhotos.isEmpty else { return }
         finalizeCurrentPhotoSessionMetadata()
@@ -1633,8 +1660,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// remove", a hard stop. Every session photo is on the wall from capture, so that line kept
     /// them all without asking. Now the teardown's `stopSearching()` moves whatever is still
     /// listed into `pendingFriendReview` (``finishReviewedPhotos(_:keeping:in:)`` answers it); a
-    /// Develop flow that already had the user choose (``finishSessionPhotos(keeping:)``) emptied
-    /// the list first, so nothing is offered twice. The photo-session ids are cleared only AFTER
+    /// Develop flow that already had the user choose (``finishSessionPhotos(keeping:of:)``) took
+    /// its answered photos out of the list first, so nothing is offered twice. The photo-session ids are cleared only AFTER
     /// the teardown, because the promotion stamps the ended session's metadata with them.
     public func leaveSession() {
         leaveMesh()
@@ -1997,17 +2024,48 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
     }
 
-    /// The in-camera Develop review's answer for the LIVE session's photos: the listed photos not in
-    /// `keptPhotoIDs` leave the wall, and the list empties — so the teardown that follows has
-    /// nothing left to promote. A photo the session ended without an answer for is answered through
-    /// ``finishReviewedPhotos(_:keeping:in:)`` instead.
+    /// The answer for the whole LIVE roll: every listed photo not in `keptPhotoIDs` leaves the wall,
+    /// and the list empties — so the teardown that follows has nothing left to promote.
+    /// ``finishSessionPhotos(keeping:of:)`` over every listed id. A photo the session ended without
+    /// an answer for is answered by the post-session review through
+    /// ``finishReviewedPhotos(_:keeping:in:)``.
     public func finishSessionPhotos(keeping keptPhotoIDs: Set<UUID>) {
+        finishSessionPhotos(keeping: keptPhotoIDs, of: Set(sessionPhotos.map(\.id)))
+    }
+
+    /// The in-camera Develop review's answer, scoped to the photos it SHOWED (`reviewed`, snapshotted
+    /// at Develop) and applied wherever each one is held now: of those still unanswered, the ones not
+    /// in `kept` leave the wall, and all of them leave the live list AND the pending batch.
+    ///
+    /// **Held anywhere, not just live** (2026-09-30 fix round, findings C-F1/L-F1). Door 3's
+    /// five-minute give-up ends the session while the mesh is still held, so the camera and its open
+    /// review stay up while the ending moves the live list into `pendingFriendReview`. Answering
+    /// only `sessionPhotos` then pruned nothing: a confirmed "Delete all" left every photo on the
+    /// wall. The ids make the answer independent of where the photo sits.
+    ///
+    /// **First answer wins.** An id already answered — by the post-session review, a per-photo
+    /// delete, or an earlier call — is no longer held, so it is ignored rather than discarded
+    /// again. A photo listed after the snapshot (a late arrival while the sheet was up) was never
+    /// shown, so it stays listed and reaches the post-session review at the teardown.
+    ///
+    /// - Parameters:
+    ///   - kept: The ids the user chose to keep; ids outside `reviewed` are ignored.
+    ///   - reviewed: The ids the review presented.
+    public func finishSessionPhotos(keeping kept: Set<UUID>, of reviewed: Set<UUID>) {
         finalizeCurrentPhotoSessionMetadata()
-        let sessionPhotoIDs = Set(sessionPhotos.map(\.id))
-        meshPhotos.removeAll { photo in
-            sessionPhotoIDs.contains(photo.id) && !keptPhotoIDs.contains(photo.id)
+        let pendingIDs = Set(pendingFriendReview?.photos.map(\.id) ?? [])
+        let answered = reviewed.intersection(Set(sessionPhotos.map(\.id)).union(pendingIDs))
+        let discarded = answered.subtracting(kept)
+        meshPhotos.removeAll { discarded.contains($0.id) }
+        sessionPhotos.removeAll { answered.contains($0.id) }
+        if var batch = pendingFriendReview, !pendingIDs.isDisjoint(with: answered) {
+            batch.photos.removeAll { answered.contains($0.id) }
+            pendingFriendReview = batch.isEmpty ? nil : batch
+            FernletAuditLog.log(
+                "mesh.session.developAnsweredPendingPhotos",
+                context: ["answered": String(answered.intersection(pendingIDs).count)]
+            )
         }
-        sessionPhotos.removeAll()
         persistPhotoIndex(meshPhotos)
         prunePhotoWallPreferences()
     }

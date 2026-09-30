@@ -183,8 +183,11 @@ AND the session's unreviewed photos into the keep-as-friend review (``FriendMint
 ``KeepFriendsPromptSheet``, ``FriendPhotoReviewSheet``). **Photos are never dropped at an ending**
 (2026-09-30): every session photo is on the persisted wall from the moment it is taken or received,
 so `sessionPhotos` is the user's pending choice, and it empties only through that choice
-(`finishSessionPhotos(keeping:)` in the camera, ``MeshNetworkManager/finishReviewedPhotos(_:keeping:in:)``
-for a promoted batch) or by moving into ``MeshFriendReviewBatch/photos``. `leaveSession()` used to
+(`finishSessionPhotos(keeping:of:)` in the camera, ``MeshNetworkManager/finishReviewedPhotos(_:keeping:in:)``
+for a promoted batch) or by moving into ``MeshFriendReviewBatch/photos``. The camera's answer is by
+the ids its review snapshotted at Develop, applied wherever each photo is held — door 3's give-up
+ends the session with the mesh (and so the camera and its open review) still up, and moves the list
+out from under it (``MeshNetworkManager/photosAwaitingAnswer(among:)`` is what that review renders). `leaveSession()` used to
 empty it first, so the last device left in a mesh — ended by the other side's development through a
 verified termination, with no Develop tap of its own — was offered no photo review and kept
 everything; a removal, the ceiling, epoch exhaustion, the pairwise "Ask to remove" and a hard stop

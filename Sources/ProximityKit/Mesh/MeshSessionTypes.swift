@@ -199,7 +199,7 @@ public nonisolated struct MeshSessionRosterEntry: Identifiable, Equatable, Senda
 /// **The photos half is what makes "nothing is kept without asking" true** (2026-09-30). Every
 /// session photo is already on the persisted friend wall from the moment it was taken or received,
 /// so a session list dropped without the user's answer is a silent keep-all. Photos therefore leave
-/// the live list only two ways: through the user's choice (`finishSessionPhotos(keeping:)` in the
+/// the live list only two ways: through the user's choice (`finishSessionPhotos(keeping:of:)` in the
 /// camera, ``MeshNetworkManager/finishReviewedPhotos(_:keeping:in:)`` here), or by being promoted
 /// into this batch — never by being dropped. They are **metadata only** (no image bytes), exactly
 /// as `sessionPhotos` holds them; the bytes stay sealed in `PrivateMediaStore`.
