@@ -108,8 +108,8 @@ nonisolated enum MeshSessionSealKeyOutcome: Sendable {
 /// The keychain-backed content key that seals ``MeshSessionContext``.
 ///
 /// A **sibling custody row beside the friend photo wall's `friendWall` key**, and deliberately not
-/// a third case inside `KeychainPrivateMediaKeyProvider.Role`: that provider vends the two at-rest
-/// MEDIA keys, and its contract is that NEITHER is deleted by "delete everything". This row's
+/// another case inside `KeychainPrivateMediaKeyProvider.Role`: that provider vends the at-rest
+/// MEDIA keys, and its contract is that NONE is deleted by "delete everything". This row's
 /// contract is the opposite — a mesh session is ephemeral state (6-hour ceiling) that a wipe must
 /// take with it — so it gets its own service, its own accessibility, and its own wipe row rather
 /// than contradicting that one in place.
