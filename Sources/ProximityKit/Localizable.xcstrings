@@ -13,6 +13,18 @@
         }
       }
     },
+    "proximity.camera.holdFailed" : {
+      "comment" : "Alert on the in-person camera when a photo just taken could not be saved securely on this phone. No film was used and nothing was shared.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't keep that photo. Try again."
+          }
+        }
+      }
+    },
     "proximity.keepFriends.done" : {
       "comment" : "Button that closes the end-of-session sheet and saves the keep-as-friend choices.",
       "extractionState" : "extracted_with_value",
@@ -109,14 +121,26 @@
         }
       }
     },
-    "proximity.review.alsoSaveToPhotos" : {
-      "comment" : "Secondary button copying the selected pictures out to the system Photos library, in addition to keeping them inside Fernlet.",
+    "proximity.review.alsoSaveToPhotos.toggle" : {
+      "comment" : "Toggle on the photo review sheet, off each time. When on, the photos the person keeps are also copied to the system Photos library after they are kept in Fernlet.",
       "extractionState" : "extracted_with_value",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Also save to Photos"
+            "value" : "Also save kept photos to Photos"
+          }
+        }
+      }
+    },
+    "proximity.review.answerFailed" : {
+      "comment" : "Inline message on the photo review sheet when the person's keep/delete answer could not be applied. The photos are still waiting, untouched.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't save your choice. Nothing was lost. Try again."
           }
         }
       }
@@ -156,32 +180,32 @@
         }
       }
     },
-    "proximity.review.explainer.keep" : {
-      "comment" : "Explainer under the review sheet's title when the primary action only keeps pictures inside Fernlet. The cache deletion is the important half — say it plainly.",
+    "proximity.review.endingSession" : {
+      "comment" : "Status line on the photo review while Fernlet finishes leaving the in-person session that just ended; the buttons are disabled meanwhile. Takes at most a few seconds.",
       "extractionState" : "extracted_with_value",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Choose which shared pictures to keep. Everything else is deleted from this device's temporary cache."
+            "value" : "Ending the session..."
           }
         }
       }
     },
-    "proximity.review.explainer.save" : {
-      "comment" : "Explainer under the review sheet's title on the legacy single-action bar, where the primary action saves.",
+    "proximity.review.explainer.pending" : {
+      "comment" : "Explainer under the photo review sheet's title. Two promises, both load-bearing: nothing is saved (not to Fernlet, not to the camera roll) until the person chooses, and unkept photos are deleted from this phone.",
       "extractionState" : "extracted_with_value",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Choose which shared pictures to save. Everything else is deleted from this device's temporary cache."
+            "value" : "Nothing from this session is saved until you choose. Photos you don't keep are deleted from this phone."
           }
         }
       }
     },
     "proximity.review.keepSelected" : {
-      "comment" : "Affirmative button of the photo review sheet when a separate 'Also save to Photos' button exists: this one only keeps pictures inside Fernlet.",
+      "comment" : "Affirmative button of the photo review sheet: keeps the ticked pictures inside Fernlet. Copying them to the Photos library is a separate toggle, applied only after the keep.",
       "extractionState" : "extracted_with_value",
       "localizations" : {
         "en" : {
@@ -192,14 +216,74 @@
         }
       }
     },
-    "proximity.review.saveSelected" : {
-      "comment" : "Affirmative button of the photo review sheet on the legacy single-action bar, where saving is the host's whole flow.",
+    "proximity.review.keepUnavailable" : {
+      "comment" : "Line on the photo review sheet shown when the Keep button is disabled because the saved photo album cannot be read right now. Delete all still works.",
       "extractionState" : "extracted_with_value",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Save selected"
+            "value" : "Keeping isn't possible right now because your saved photos can't be read. You can delete these, or choose later."
+          }
+        }
+      }
+    },
+    "proximity.review.notNow" : {
+      "comment" : "Text button at the top of the review shown when an in-person photo session ends. Hides the review without keeping or deleting anything; the photos keep waiting, unsaved, and the review comes back the next time Fernlet opens.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Not now"
+          }
+        }
+      }
+    },
+    "proximity.review.savingToPhotos" : {
+      "comment" : "Status line on the photo review sheet while kept photos are copied to the system Photos library; the buttons are disabled meanwhile.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Saving to Photos..."
+          }
+        }
+      }
+    },
+    "proximity.review.snapshotCover" : {
+      "comment" : "Label on the opaque cover over the photo review while the app is not frontmost, so the app switcher never shows photos that have not been chosen yet.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Photos hidden"
+          }
+        }
+      }
+    },
+    "proximity.review.tile.hint" : {
+      "comment" : "VoiceOver hint on one photo in the session review grid: double-tapping ticks or unticks it for keeping. Its selected state is announced separately.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Double-tap to keep or not keep."
+          }
+        }
+      }
+    },
+    "proximity.review.tile.label" : {
+      "comment" : "VoiceOver label of one photo in the session review grid. The argument is the name of the person who took it, or a plain phrase such as 'Someone you met' when their name is not known.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Photo from %@"
           }
         }
       }
@@ -212,6 +296,29 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Review pictures"
+          }
+        }
+      }
+    },
+    "proximity.review.unreadable" : {
+      "comment" : "Notice on the photo review sheet after an answer, when some photos the person chose to keep could not be opened and were removed instead. The count is how many.",
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "1 photo couldn't be opened and was removed."
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld photos couldn't be opened and were removed."
+                }
+              }
+            }
           }
         }
       }
