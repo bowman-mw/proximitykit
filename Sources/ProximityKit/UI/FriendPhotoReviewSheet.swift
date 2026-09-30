@@ -97,7 +97,9 @@ public enum FriendPhotoReviewWorkingMessage: Equatable, Sendable {
 /// reason while Delete all still works. A host that passes ``notNow`` (the app's session-end overlay)
 /// gets a "Not now" text button in the header, and VoiceOver's escape gesture performs it; the
 /// camera's Develop sheet passes nil and keeps the sheet's own swipe-down and escape (cancel back to
-/// the camera). While the scene is not `.active` the sheet draws an opaque
+/// the camera) — except while an answer runs, when the sheet cannot be swiped away
+/// (`interactiveDismissDisabled`), so the working line and a failed export's alert stay in front of
+/// the person until the answer ends. While the scene is not `.active` the sheet draws an opaque
 /// cover INSTEAD of the grid, so the app-switcher snapshot never holds a photo nobody chose (the
 /// switcher can be entered without a background transition, hence `!= .active`).
 ///
@@ -364,6 +366,9 @@ public struct FriendPhotoReviewSheet: View {
             }
         }
         .background(Color.parchment)
+        // An answer that has started is finished in front of the person: no swipe-away mid-answer
+        // (the Develop sheet's host would otherwise lose its working line and its failure alert).
+        .interactiveDismissDisabled(isBusy)
         .modifier(EscapePerformsNotNow(notNow: isBusy ? nil : notNow))
         .onChange(of: statusLine?.text) { _, line in
             // The working line and the inline failure are announced, not only drawn.
