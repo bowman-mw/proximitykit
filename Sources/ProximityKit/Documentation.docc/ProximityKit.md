@@ -222,7 +222,7 @@ above every tab and sheet, from these observable facts — `pendingFriendReview`
 `heldPhotosCanBeShown`, `isInSession` — never over a live session and never under a duress decoy.
 The package's half is ``FriendPhotoReviewSheet``'s: an optional `notNow` (the overlay's "Not now",
 which answers nothing and is also VoiceOver's escape gesture there; the camera's Develop sheet
-passes nil and keeps its own swipe-down), the title as a heading, spoken tile labels naming the
+passes nil and keeps its own swipe-down, which is disabled while an answer runs), the title as a heading, spoken tile labels naming the
 sender through ``PeerNameDisplay``, and an "Ending the session..." working line
 (``FriendPhotoReviewWorkingMessage/endingSession``) while the host waits for the ended mesh to be
 left. The sheet reads `\.scenePhase` for its snapshot cover; a host outside the SwiftUI scene (the
