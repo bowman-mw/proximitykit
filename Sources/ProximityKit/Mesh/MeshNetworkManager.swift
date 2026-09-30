@@ -2564,9 +2564,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///    still unreadable refuses the keeps (`keepUnavailable`) while the DISCARDS proceed.
     /// 3. Kept photos are hydrated from the pending corpus and committed to the wall with
     ///    `PrivateMediaStore.commitKept(_:onto:)`, which reports exactly which ones landed; the
-    ///    wall mirror is REPLACED with the committed wall. A kept photo whose bytes do not open is
-    ///    `unreadable` and treated as discarded; one the wall did not take stays held
-    ///    (`wallWriteFailed`) and nothing of its is swept.
+    ///    wall mirror is REPLACED with the committed wall. A kept photo whose bytes are gone for
+    ///    good (missing, or not opening under a present key) is `unreadable` and treated as
+    ///    discarded; one whose bytes cannot be read RIGHT NOW (no key, a file read that failed)
+    ///    stays held (`unavailable`), as does one the wall did not take (`wallWriteFailed`) —
+    ///    nothing of theirs is swept.
     /// 4. ONE pending index write removes and tombstones every answered photo — only after the wall
     ///    commit, so a kill in between leaves a photo both kept and held, which the launch
     ///    reconcile repairs; never the reverse.
@@ -2631,37 +2633,65 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Step 3: copies the kept photos to the wall through the per-photo keep commit, re-sealing
     /// them under the wall key (no file ever moves between corpora). Each carries the finalized
     /// session metadata its memory list holds, falling back to what was stamped at hold.
+    ///
+    /// A ticked photo is removed as `unreadable` ONLY when its held bytes are gone for good (the
+    /// file is missing, or they do not open under a present key). A read that may succeed later —
+    /// no key right now, or a file that exists and could not be read — leaves it held and the answer
+    /// `unavailable` (fix round 1, U2-C-U2-R1 / U2-L-U2-R3): "a photo the person ticked is never
+    /// lost" (§0 item 2, I22).
     private func keepHeldPhotosOnWall(_ held: [HeldSessionPhoto]) -> HeldKeepOutcome {
         guard !held.isEmpty else { return HeldKeepOutcome() }
         guard !photoIndexDeferred else {
             FernletAuditLog.log("mesh.heldPhotos.keepRefused", context: ["reason": "wallDeferred"])
             return HeldKeepOutcome(notLanded: held, failure: .keepUnavailable)
         }
-        var hydrated: [FriendPhotoPayload] = []
-        var unreadable: [HeldSessionPhoto] = []
-        // R2: bounded by the held-photo cap.
-        for photo in held {
-            guard let data = heldPhotoStore.imageData(for: photo) else {
-                unreadable.append(photo)
-                continue
-            }
-            hydrated.append(listedPayload(for: photo).withDecryptedImageData(data))
-        }
-        let result = photoCacheStore.commitKept(hydrated, onto: meshPhotos)
+        let read = readHeldPhotosForKeep(held)
+        let result = photoCacheStore.commitKept(read.hydrated, onto: meshPhotos)
         if result.indexCommitted { meshPhotos = result.committedWall }
-        let unreadableIDs = Set(unreadable.map(\.localID))
+        let unreadableIDs = Set(read.gone.map(\.localID))
         let landed = held.filter { result.keptOnWall.contains($0.localID) }
         let notLanded = held.filter { !result.keptOnWall.contains($0.localID) && !unreadableIDs.contains($0.localID) }
-        if !unreadable.isEmpty {
-            FernletAuditLog.log("mesh.heldPhotos.unreadableAtKeep", context: ["count": String(unreadable.count)])
+        if !read.gone.isEmpty {
+            FernletAuditLog.log("mesh.heldPhotos.unreadableAtKeep", context: ["count": String(read.gone.count)])
         }
         if !notLanded.isEmpty {
-            FernletAuditLog.log("mesh.heldPhotos.keepNotLanded", context: ["count": String(notLanded.count)])
+            FernletAuditLog.log("mesh.heldPhotos.keepNotLanded", context: [
+                "count": String(notLanded.count), "unavailable": String(read.unavailableCount)
+            ])
         }
         return HeldKeepOutcome(
-            landed: landed, unreadable: unreadable, notLanded: notLanded,
-            failure: notLanded.isEmpty ? nil : .wallWriteFailed, wallChanged: result.indexCommitted
+            landed: landed, unreadable: read.gone, notLanded: notLanded,
+            failure: Self.keepFailure(notLanded: notLanded.count, unavailable: read.unavailableCount),
+            wallChanged: result.indexCommitted
         )
+    }
+
+    /// The first half of step 3: each kept photo's held bytes, read with the reason when there are
+    /// none. Bounded by the held-photo cap (R2).
+    private func readHeldPhotosForKeep(
+        _ held: [HeldSessionPhoto]
+    ) -> (hydrated: [FriendPhotoPayload], gone: [HeldSessionPhoto], unavailableCount: Int) {
+        var hydrated: [FriendPhotoPayload] = []
+        var gone: [HeldSessionPhoto] = []
+        var unavailableCount = 0
+        for photo in held {
+            switch heldPhotoStore.readImage(for: photo) {
+            case .opened(let data):
+                hydrated.append(listedPayload(for: photo).withDecryptedImageData(data))
+            case .gone:
+                gone.append(photo)
+            case .unavailable:
+                unavailableCount += 1
+            }
+        }
+        return (hydrated, gone, unavailableCount)
+    }
+
+    /// Why a keep left photos held: a read that may succeed later says `unavailable` (retry once the
+    /// device can read them); otherwise the wall did not take them.
+    private static func keepFailure(notLanded: Int, unavailable: Int) -> SessionPhotoAnswerFailure? {
+        guard notLanded > 0 else { return nil }
+        return unavailable > 0 ? .unavailable : .wallWriteFailed
     }
 
     /// The payload a kept photo goes to the wall with: the memory list's copy (it carries the

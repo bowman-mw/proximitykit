@@ -237,7 +237,9 @@ public nonisolated struct MeshFriendReviewBatch: Identifiable, Equatable, Sendab
 public nonisolated enum SessionPhotoAnswerFailure: Equatable, Sendable {
     /// Nothing could be applied: the device is locked or the app backgrounded, a duress session is
     /// in force (the answer reads plaintext, so it runs only where the routed gate is open), or the
-    /// pending index cannot be read right now.
+    /// pending index cannot be read right now. Also a KEEP whose held bytes could not be read right
+    /// now (no key, or a file read that failed): those photos stay held for a retry, while the rest
+    /// of the answer applied.
     case unavailable
     /// The friend wall's index cannot be read, so no photo can be KEPT; the discards were applied,
     /// because they need only the pending index.

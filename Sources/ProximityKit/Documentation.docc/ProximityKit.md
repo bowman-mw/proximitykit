@@ -191,7 +191,10 @@ projections of that corpus's index, and the session-end move between them writes
 answer — ``MeshNetworkManager/finishReviewedPhotos(_:keeping:in:)`` for a promoted batch,
 `finishSessionPhotos(keeping:of:)` in the camera, both through one engine — copies kept photos to the
 wall with a per-photo keep commit that reports exactly which ones landed (``SessionPhotoAnswer``),
-deletes the rest for good, and tombstones every answered photo by its origin and item id for 24
+deletes the rest for good — a ticked photo is removed as unreadable only when its held bytes are
+gone for good, never on a read that may succeed later (no key right now, a file read that failed:
+it stays held and the answer says ``SessionPhotoAnswerFailure/unavailable``) — and tombstones every
+answered photo by its origin and item id for 24
 hours, so the routed projection refuses a custody copy of it before decrypt and before the quota —
 across a restart too, which the old wall-only `photo.id` dedup could not. Identity is origin + item
 id, never the id alone: a member reusing another's item id is held separately under a fresh local id
