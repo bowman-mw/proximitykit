@@ -144,9 +144,13 @@ an identity built from an introduction carries NO name whatever the peer sent
 (``ProximityCoordinator/PeerIdentity/isDisplayNameWithheld``), so the guarantee does not depend on the
 peer's build; the name is adopted from the first verified post-commit envelope that discloses one
 (``FernletIdentityEnvelope/disclosedSenderDisplayName``), once, from the verified signing key only,
-and ``ProximityCoordinator/onPeerDisplayNameDisclosed`` tells the owning manager. Every surface that
-renders or persists a peer name reads ``ProximityCoordinator/PeerIdentity/displayNameOrFingerprint``,
-so a pre-commit peer is shown by its fingerprint. No wire shape moved: an empty name is a value.
+and ``ProximityCoordinator/onPeerDisplayNameDisclosed`` tells the owning manager. Every site that
+persists a peer name (rosters, the trust vault, audits) reads
+``ProximityCoordinator/PeerIdentity/displayNameOrFingerprint``. Every site that RENDERS one goes
+through ``PeerNameDisplay`` instead (owner decision 2026-09-29, reversing the fingerprint title the
+first build showed): a pre-commit peer reads "Someone nearby", never its fingerprint, and the same
+filter turns a fingerprint filed as a name, or the QUIC transport's `fernlet-mesh-…` instance name,
+into the placeholder. No wire shape moved: an empty name is a value.
 **The mesh has a door of its own** and the invariant holds there too: every mesh frame is signed in
 `MeshNetworkManager.sendEnvelopeCore`, six broadcasts reach slots this device has not committed and
 seated (the coordinator beacon, the admission request, rotation sync, key rotation and ack, the
@@ -356,7 +360,7 @@ and a new manager in this subsystem inherits all three:
 
 ### Localization: nothing on the wire is display copy
 
-The module owns a `Localizable.xcstrings` (added by the 2026-08-22 accessibility review's §4.0) and one copy vault, `ProximityUICopy`, for the three SwiftUI surfaces it ships — the friend-photo review sheet, the keep-friends prompt, and the photo-save failure alert. Those were bare literals, and a `LocalizedStringKey` literal inside an SPM module resolves against `Bundle.main`, which never consults this module's catalog: untranslatable English with a clean build. Six of them were hiding inside ternaries (`Button(isKept ? "Keeping" : "Keep")`) or in `LocalizedStringKey`-typed properties, where no call-site scan could see them; `LocalizationBoundaryTests.packageDisplayLiteralsPassModuleBundle()` now catches both shapes. **The vault is display copy only.** Nothing below may go in it.
+The module owns a `Localizable.xcstrings` (added by the 2026-08-22 accessibility review's §4.0) and one copy vault, `ProximityUICopy`, for the three SwiftUI surfaces it ships — the friend-photo review sheet, the keep-friends prompt, and the photo-save failure alert — plus the two name placeholders ``PeerNameDisplay`` hands the app's in-person surfaces ("Someone nearby", "Someone you met"; `ProximityUICopy.Peer`, nonisolated because the helper is). A placeholder is resolved display text and never a token: it must not be persisted, put in a roster or vault row, or sent. Those were bare literals, and a `LocalizedStringKey` literal inside an SPM module resolves against `Bundle.main`, which never consults this module's catalog: untranslatable English with a clean build. Six of them were hiding inside ternaries (`Button(isKept ? "Keeping" : "Keep")`) or in `LocalizedStringKey`-typed properties, where no call-site scan could see them; `LocalizationBoundaryTests.packageDisplayLiteralsPassModuleBundle()` now catches both shapes. **The vault is display copy only.** Nothing below may go in it.
 
 This module ships English sentences that a bulk localization pass will read as UI strings and that
 must never become `String(localized:)`. Every ``PayloadSummary`` title — "Recipe share",
@@ -2432,6 +2436,7 @@ the retired wire payload, **frozen and parked** (decoded, never dispatched, neve
 
 ### Review UI
 
+- ``PeerNameDisplay``
 - ``KeepFriendsPromptSheet``
 - ``FriendPhotoReviewSheet``
 - ``FriendPhotoLibrarySaver``

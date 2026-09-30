@@ -20,7 +20,8 @@
 import Foundation
 
 /// Display copy owned by ProximityKit's own UI (the friend-photo review sheet, the keep-friends
-/// prompt, and the photo-save failure alert).
+/// prompt, the photo-save failure alert, and the name placeholders ``PeerNameDisplay`` hands the
+/// app's in-person surfaces).
 ///
 /// Members are computed, not stored, so each lookup happens under the locale in force when the
 /// surface renders. Resolved `String`s rather than `LocalizedStringKey`s, deliberately: a key
@@ -129,6 +130,23 @@ enum ProximityUICopy {
         static var done: String {
             String(localized: "proximity.keepFriends.done", defaultValue: "Done", bundle: .module,
                    comment: "Button that closes the end-of-session sheet and saves the keep-as-friend choices.")
+        }
+    }
+
+    /// The plain phrases that stand in for a person whose name is not known, read through
+    /// ``PeerNameDisplay``. `nonisolated` because that helper is: a resolved display string has no
+    /// actor to protect, and `Bundle.module` is itself nonisolated.
+    nonisolated enum Peer {
+        /// Someone on the connect path whose name has not been shared yet.
+        static var someoneNearby: String {
+            String(localized: "proximity.peer.someoneNearby", defaultValue: "Someone nearby", bundle: .module,
+                   comment: "Stands in for a nearby person whose name has not been shared yet: the connect rows on the Friends tab, the session's participant list, a join request, a recipe recipient. A plain phrase, shown where a name would be.")
+        }
+
+        /// Someone met in an earlier session whose name never arrived.
+        static var someoneYouMet: String {
+            String(localized: "proximity.peer.someoneYouMet", defaultValue: "Someone you met", bundle: .module,
+                   comment: "Stands in for a person met in person whose name never arrived before the connection ended: the keep-as-friend rows at the end of a session and the Friends & Blocks list.")
         }
     }
 

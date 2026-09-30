@@ -1,23 +1,28 @@
 import SwiftUI
 import FernletUI
 
-/// A peer's identity fingerprint, rendered identically everywhere one is shown.
+/// A peer's identity fingerprint, for the one place a person may deliberately look one up.
 ///
-/// Fingerprints appear on four surfaces — the friend detail card, the join prompt (where two people
-/// read them off each other's screens), the activity roster, and the keep-as-friend rows — and each
-/// had hand-rolled its own `.system(.caption, design: .monospaced)`, which is a system font in an app
-/// whose type is entirely bundled. This centralizes the treatment on the design system's `stat` role
-/// (DM Sans Medium, tabular figures), with a little extra tracking so a hex string still reads
-/// character by character.
+/// Since 2026-09-29 that place is the friend detail card's collapsed "Safety code" disclosure in
+/// Friends & Blocks, and nowhere else (owner decision: an identifier string is a debugging aid, not
+/// part of the connect experience). The join prompt, the activity roster, the keep-as-friend rows
+/// and the Friends-tab connect row used to render it too; they now show the person's name, or a
+/// plain placeholder, through ``PeerNameDisplay``, and the row-bound QR ceremony is the verification
+/// path on the connect side. `PeerNameDisplayTests` pins that no connect-path file renders this view.
+///
+/// The treatment was centralized when four surfaces had each hand-rolled
+/// `.system(.caption, design: .monospaced)`, a system font in an app whose type is entirely bundled:
+/// the design system's `stat` role (DM Sans Medium, tabular figures), with a little extra tracking
+/// so a hex string still reads character by character.
 ///
 /// Middle truncation is deliberate: the head and tail of a fingerprint are what people compare, so a
 /// clipped tail would defeat the only thing the string is for.
 ///
 /// The same argument decides the speech treatment (accessibility review T2-20): hex read as words
 /// ("ad be" for `adbe`) is unintelligible and unverifiable, so the view carries
-/// `.speechSpellsOutCharacters()`. It lives here, on the component, rather than at the four call
-/// sites, for exactly the reason the font treatment does — every place a fingerprint is shown is a
-/// place two people are reading it to each other character by character. Braille needs nothing: a
+/// `.speechSpellsOutCharacters()`. It lives here, on the component, rather than at the call site,
+/// for exactly the reason the font treatment does: a fingerprint is only ever read to compare it,
+/// character by character. Braille needs nothing: a
 /// braille display already mirrors the string literally, which is the one place the two assistive
 /// technologies genuinely diverge.
 public struct FingerprintText: View {

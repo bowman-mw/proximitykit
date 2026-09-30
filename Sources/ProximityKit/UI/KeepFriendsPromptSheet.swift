@@ -45,29 +45,28 @@ struct KeepFriendsSection: View {
     }
 }
 
-/// One keep-as-friend row: sanitized display name, fingerprint, and the Keep/Keeping chip.
+/// One keep-as-friend row: the person's name and the Keep/Keeping chip.
 ///
 /// Private child of ``KeepFriendsSection``; the toggle closure flips membership in the shared
-/// kept-fingerprints binding.
+/// kept-fingerprints binding. No fingerprint (owner decision 2026-09-29): an identifier string
+/// is not a name, and the roster files the fingerprint AS the name when the link dropped before
+/// the name arrived, so that case reads "Someone you met" instead.
 private struct KeepFriendRow: View {
     let candidate: MeshSessionRosterEntry
     let isKept: Bool
     let toggle: () -> Void
 
-    /// The display name is peer-supplied wire input — sanitize for display (control/zero-width/
-    /// bidi scalars out) via the shared coercion the heart manager also renders peer names with.
+    /// The display name is peer-supplied wire input: ``PeerNameDisplay`` sanitizes it (control,
+    /// zero-width and bidi scalars out) and turns an identifier filed as a name into the placeholder.
     private var displayName: String {
-        ItemNameModeration.moderatedPeerDisplayName(candidate.displayName)
+        PeerNameDisplay.shown(candidate.displayName, fingerprint: candidate.fingerprint, placeholder: .met)
     }
 
     var body: some View {
         HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(displayName)
-                    .font(.fernlet(.headerMedium))
-                    .foregroundStyle(Color.bark)
-                FingerprintText(candidate.fingerprint)
-            }
+            Text(verbatim: displayName)
+                .font(.fernlet(.headerMedium))
+                .foregroundStyle(Color.bark)
 
             Spacer(minLength: 12)
 
