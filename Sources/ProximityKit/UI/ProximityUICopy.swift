@@ -37,39 +37,70 @@ enum ProximityUICopy {
                    comment: "Title of the sheet shown after a shared photo session, where the user picks which pictures taken of them to keep.")
         }
 
-        /// The optional export button, above the decisive keep/discard pair.
-        static var alsoSaveToPhotos: String {
-            String(localized: "proximity.review.alsoSaveToPhotos", defaultValue: "Also save to Photos",
-                   bundle: .module,
-                   comment: "Secondary button copying the selected pictures out to the system Photos library, in addition to keeping them inside Fernlet.")
-        }
-
-        /// Affirmative button when the split bar is in use — the primary keeps to the in-app wall.
+        /// The affirmative button: copies the ticked pictures to the in-app wall. Photos-library
+        /// export is never this button's job — it is the separate toggle, applied after the keep.
         static var keepSelected: String {
             String(localized: "proximity.review.keepSelected", defaultValue: "Keep selected", bundle: .module,
-                   comment: "Affirmative button of the photo review sheet when a separate 'Also save to Photos' button exists: this one only keeps pictures inside Fernlet.")
+                   comment: "Affirmative button of the photo review sheet: keeps the ticked pictures inside Fernlet. Copying them to the Photos library is a separate toggle, applied only after the keep.")
         }
 
-        /// Affirmative button on the legacy single-action bar, where the host owns the save flow.
-        static var saveSelected: String {
-            String(localized: "proximity.review.saveSelected", defaultValue: "Save selected", bundle: .module,
-                   comment: "Affirmative button of the photo review sheet on the legacy single-action bar, where saving is the host's whole flow.")
-        }
-
-        /// Explainer under the title on the split bar (the primary only keeps).
-        static var explainerKeep: String {
-            String(localized: "proximity.review.explainer.keep",
-                   defaultValue: "Choose which shared pictures to keep. Everything else is deleted from this device's temporary cache.",
+        /// Explainer under the title: nothing is saved before the choice, and what is not kept is
+        /// deleted. A NEW key, not a reworded `explainer.keep`: the promise changed, and a
+        /// translation of the old sentence must not be shown for the new one.
+        static var explainerPending: String {
+            String(localized: "proximity.review.explainer.pending",
+                   defaultValue: "Nothing from this session is saved until you choose. Photos you don't keep are deleted from this phone.",
                    bundle: .module,
-                   comment: "Explainer under the review sheet's title when the primary action only keeps pictures inside Fernlet. The cache deletion is the important half — say it plainly.")
+                   comment: "Explainer under the photo review sheet's title. Two promises, both load-bearing: nothing is saved (not to Fernlet, not to the camera roll) until the person chooses, and unkept photos are deleted from this phone.")
         }
 
-        /// Explainer under the title on the legacy single-action bar.
-        static var explainerSave: String {
-            String(localized: "proximity.review.explainer.save",
-                   defaultValue: "Choose which shared pictures to save. Everything else is deleted from this device's temporary cache.",
+        /// The opt-in toggle row: export the KEPT photos to the system Photos library, only after the
+        /// keep has landed.
+        static var alsoSaveToPhotosToggle: String {
+            String(localized: "proximity.review.alsoSaveToPhotos.toggle", defaultValue: "Also save kept photos to Photos",
                    bundle: .module,
-                   comment: "Explainer under the review sheet's title on the legacy single-action bar, where the primary action saves.")
+                   comment: "Toggle on the photo review sheet, off each time. When on, the photos the person keeps are also copied to the system Photos library after they are kept in Fernlet.")
+        }
+
+        /// The working line while the kept photos are being copied to the Photos library.
+        static var savingToPhotos: String {
+            String(localized: "proximity.review.savingToPhotos", defaultValue: "Saving to Photos...", bundle: .module,
+                   comment: "Status line on the photo review sheet while kept photos are copied to the system Photos library; the buttons are disabled meanwhile.")
+        }
+
+        /// The inline failure when an answer could not be saved (nothing was lost; the photos are
+        /// still offered).
+        static var answerFailed: String {
+            String(localized: "proximity.review.answerFailed",
+                   defaultValue: "Couldn't save your choice. Nothing was lost. Try again.",
+                   bundle: .module,
+                   comment: "Inline message on the photo review sheet when the person's keep/delete answer could not be applied. The photos are still waiting, untouched.")
+        }
+
+        /// Why Keep is disabled: the saved wall cannot be read right now.
+        static var keepUnavailable: String {
+            String(localized: "proximity.review.keepUnavailable",
+                   defaultValue: "Keeping isn't possible right now because your saved photos can't be read. You can delete these, or choose later.",
+                   bundle: .module,
+                   comment: "Line on the photo review sheet shown when the Keep button is disabled because the saved photo album cannot be read right now. Delete all still works.")
+        }
+
+        /// The notice for kept photos whose held bytes could not be opened (they were removed).
+        ///
+        /// - Parameter count: How many photos could not be opened.
+        /// - Returns: The notice; the key carries `one`/`other` plural variations in the catalog.
+        static func unreadable(_ count: Int) -> String {
+            String(localized: "proximity.review.unreadable",
+                   defaultValue: "\(count) photos couldn't be opened and were removed.",
+                   bundle: .module,
+                   comment: "Notice on the photo review sheet after an answer, when some photos the person chose to keep could not be opened and were removed instead. The count is how many.")
+        }
+
+        /// The accessibility label of the opaque cover drawn over the review while the app is not
+        /// frontmost (the app-switcher snapshot must not hold a photo nobody chose yet).
+        static var snapshotCover: String {
+            String(localized: "proximity.review.snapshotCover", defaultValue: "Photos hidden", bundle: .module,
+                   comment: "Label on the opaque cover over the photo review while the app is not frontmost, so the app switcher never shows photos that have not been chosen yet.")
         }
 
         /// The destructive button when exactly one picture is under review.
@@ -89,6 +120,17 @@ enum ProximityUICopy {
         static func deleteAll(_ count: Int) -> String {
             String(localized: "proximity.review.deleteAll", defaultValue: "Delete all \(count)", bundle: .module,
                    comment: "Destructive button of the photo review sheet. The count is deliberate: it turns a mis-tap into a visible amount of loss.")
+        }
+    }
+
+    /// Copy the disposable camera's session surfaces read from the manager.
+    enum Camera {
+        /// The capture refusal when this phone could not seal its own copy (no film is spent and
+        /// nothing is shared). Rendered by the camera's session alert through `meshError`.
+        static var holdFailed: String {
+            String(localized: "proximity.camera.holdFailed", defaultValue: "Couldn't keep that photo. Try again.",
+                   bundle: .module,
+                   comment: "Alert on the in-person camera when a photo just taken could not be saved securely on this phone. No film was used and nothing was shared.")
         }
     }
 

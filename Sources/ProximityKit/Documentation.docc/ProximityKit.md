@@ -168,8 +168,8 @@ join request is sent to COMMITTED slots only — a blanked request had made the 
 friend" into the descriptor, whose merge keeps the first entry.
 
 **What rides a committed session.** ``MeshNetworkManager`` owns the feature payloads: disposable
-camera photos (quota-capped, cached metadata-only through `PrivateMediaStore`, optionally
-AES-GCM-encrypted under the rotating ``MeshGroupKey``), the in-person clothing shop
+camera photos (quota-capped, HELD in the sealed pending corpus until the person chooses, then
+cached metadata-only on the `PrivateMediaStore` wall), the in-person clothing shop
 (``MeshClothingShop``, with its 1-hour post-session browse window), vanish-at-session-end chat
 (``SessionMessageStore`` — deliberately not Codable so a message can never enter a snapshot, and
 since P6 item 4 a *projection* over routed ciphertext rather than the only copy),
@@ -180,20 +180,41 @@ invitee-key-bound token rather than the shared handshake). Feature payloads disp
 registry whose committed-slot gate is the security boundary — behind the payload door's attribution
 rule, which every frame of every family passes first (see the seat invariant above); the session end promotes the roster
 AND the session's unreviewed photos into the keep-as-friend review (``FriendMintingReview``,
-``KeepFriendsPromptSheet``, ``FriendPhotoReviewSheet``). **Photos are never dropped at an ending**
-(2026-09-30): every session photo is on the persisted wall from the moment it is taken or received,
-so `sessionPhotos` is the user's pending choice, and it empties only through that choice
-(`finishSessionPhotos(keeping:of:)` in the camera, ``MeshNetworkManager/finishReviewedPhotos(_:keeping:in:)``
-for a promoted batch) or by moving into ``MeshFriendReviewBatch/photos``. The camera's answer is by
-the ids its review snapshotted at Develop, applied wherever each photo is held — door 3's give-up
-ends the session with the mesh (and so the camera and its open review) still up, and moves the list
-out from under it (``MeshNetworkManager/photosAwaitingAnswer(among:)`` is what that review renders). `leaveSession()` used to
-empty it first, so the last device left in a mesh — ended by the other side's development through a
-verified termination, with no Develop tap of its own — was offered no photo review and kept
-everything; a removal, the ceiling, epoch exhaustion, the pairwise "Ask to remove" and a hard stop
-did the same. `completeFriendReview(_:)` answers only the candidate half, so a batch with photos
-still pending stays up; the batch is memory-only, so a process kill before the answer leaves the
-photos on the wall. **"The session end" is the MESH ending — ``MeshNetworkManager/isSessionLive``
+``KeepFriendsPromptSheet``, ``FriendPhotoReviewSheet``). **Nothing is on the wall until the person
+chooses** (2026-09-30, the owner: "None of the photos should be saved to the camera roll until this
+selection has been made", and the review must survive a process kill). Every session photo — taken
+here or received from a peer — is HELD from the moment it exists in the sealed pending corpus
+(`PendingSessionPhotoStore`: its own `PendingSessionPhotos/` directory, excluded from backup, under a
+device-bound key of its own), through `holdSessionPhoto(_:key:live:)` for both
+producers; `sessionPhotos` (live) and ``MeshFriendReviewBatch/photos`` (awaiting) are memory
+projections of that corpus's index, and the session-end move between them writes nothing. The
+answer — ``MeshNetworkManager/finishReviewedPhotos(_:keeping:in:)`` for a promoted batch,
+`finishSessionPhotos(keeping:of:)` in the camera, both through one engine — copies kept photos to the
+wall with a per-photo keep commit that reports exactly which ones landed (``SessionPhotoAnswer``),
+deletes the rest for good, and tombstones every answered photo by its origin and item id for 24
+hours, so the routed projection refuses a custody copy of it before decrypt and before the quota —
+across a restart too, which the old wall-only `photo.id` dedup could not. Identity is origin + item
+id, never the id alone: a member reusing another's item id is held separately under a fresh local id
+and can neither suppress nor tombstone the genuine photo. "Live" is the SIGNED `manifest.meshID`'s
+call, never the optional peer-supplied `header.session`, and a late arrival is held awaiting and
+re-triggers the review. A manager built after a kill rebuilds a photos-only awaiting batch (the
+candidates are memory-only key material and are lost — owner question Q5), once a reconcile over a
+READABLE wall has dropped any photo a kill left both kept and held; the unlock/foreground edge
+re-reads a wall or pending index a locked launch could not. **No timer ever removes a held photo**: it
+leaves only through an answer, delete-all (``MeshNetworkManager/purgeHeldSessionPhotosForDeleteAll()``,
+which takes the whole batch and the live roster too), the duress crypto-erase, or an index whose
+AEAD open fails under a present key. Pending bytes have exactly one reader,
+``MeshNetworkManager/reviewThumbnailData(for:)`` / `reviewImageData(for:)`, gated on the routed
+access gate (unlocked, foreground, no duress); the wall's byte doors never read them, so a
+Photos-library export — an opt-in toggle the hosts apply only AFTER the answer, over its
+``SessionPhotoAnswer/keptOnWall`` — can never reach an unchosen photo. The camera's answer is by the
+ids its review snapshotted at Develop, applied wherever each photo is listed — door 3's give-up ends
+the session with the mesh (and so the camera and its open review) still up, and moves the list out
+from under it (``MeshNetworkManager/photosAwaitingAnswer(among:)`` is what that review renders).
+`leaveSession()` used to empty it first, so the last device left in a mesh was offered no photo
+review and kept everything; every ending now reaches the review. `completeFriendReview(_:)` answers
+only the candidate half, so a batch with photos still pending stays up.
+**"The session end" is the MESH ending — ``MeshNetworkManager/isSessionLive``
 going false — and never a lost link** (P6 item 2 and its fix): a proximity-join pair now FOUNDS a
 mesh — descriptor, membership ledger, founder admission, ceiling, state machine — at its FIRST
 commit, so `currentMesh != nil` outlives every link and three predicates that used to agree now
@@ -2067,7 +2088,8 @@ The RECEIVER is unchanged down to and including the recipient receipt — the ph
 durable ciphertext — and the plaintext is a later, separate pass over already-final bytes:
 ``MeshRoutedItemDelivery/openPhotoBody(_:manifest:identity:mayDecryptRoutedContent:)`` behind
 `mayDecryptRoutedContent`, then the canonical dispatch behind
-`mayMutateCanonicalStoreWithRoutedContent`, into the same `cachePhoto` the legacy handler fed. Two
+`mayMutateCanonicalStoreWithRoutedContent`, into the pending corpus's hold (since 2026-09-30; the
+wall only after the person's answer), with the answered-tombstone refusal ahead of the open. Two
 policy checks keep their positions: the origin is resolved from the **admission ledger** and the
 block list is applied **before** the content key is unwrapped, and the per-origin quota is spent at
 the dispatch, 1:1 with a wall entry. "Admission ledger" is exact and is the same set
@@ -2336,6 +2358,8 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshSessionParticipant``
 - ``MeshSessionRosterEntry``
 - ``MeshFriendReviewBatch``
+- ``SessionPhotoAnswer``
+- ``SessionPhotoAnswerFailure``
 - ``FriendPhotoWallPost``
 
 ### Mesh wire payloads
@@ -2468,6 +2492,7 @@ the retired wire payload, **frozen and parked** (decoded, never dispatched, neve
 - ``PeerNameDisplay``
 - ``KeepFriendsPromptSheet``
 - ``FriendPhotoReviewSheet``
+- ``FriendPhotoReviewWorkingMessage``
 - ``FriendPhotoLibrarySaver``
 - ``PhotoSaveFailure``
 - ``FingerprintText``

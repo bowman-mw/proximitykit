@@ -74,20 +74,24 @@ private struct FriendPhotoWallPreferences: Codable, Equatable {
 /// which since P6 item 2 means the **mesh** ending (End Session, a termination or completed
 /// departure, the five-minute discovery timeout with no peer, or slot loss while no mesh is held)
 /// and never a link blip — promotes the roster AND the session's unreviewed photos into
-/// `pendingFriendReview`, opens the clothing-shop window, and clears the chat transcript. Photos are
-/// never dropped at an ending: they are on the wall from capture, so dropping the review list would
-/// keep them all without asking (2026-09-30). `isInSession` is the surface question, ``hasCommittedPeer``
+/// `pendingFriendReview`, opens the clothing-shop window, and clears the chat transcript. Session
+/// photos are never on the wall before the person chooses (2026-09-30): each one — taken here or
+/// received — is HELD in the sealed pending corpus (`PendingSessionPhotoStore`) from the moment it
+/// exists, the ending moves it in memory only, a relaunch rebuilds the review from that corpus, and
+/// only the answer copies kept photos to the wall. `isInSession` is the surface question, ``hasCommittedPeer``
 /// the "is there a peer right now" question, and ``isSessionLive`` the lifecycle one; all three are
 /// read and they are not interchangeable. Phase-3 group crypto: a lowest-fingerprint coordinator election, a 20 s beacon,
 /// and a 15-minute key rotation distribute the ``MeshGroupKey`` pairwise-wrapped to
 /// handshake-verified KA keys; closed-mode metadata and epoch ≥ 1 photos ride AES-GCM under it.
-/// Photos persist metadata-only in the `PrivateMediaStore`-backed cache (bytes on disk,
-/// rehydrated on demand) with per-sender send/receive quotas.
+/// Chosen photos persist metadata-only in the `PrivateMediaStore`-backed wall (bytes on disk,
+/// rehydrated on demand) with per-sender send/receive quotas; unchosen ones only in the pending
+/// corpus, whose answered tombstones (origin + item id) refuse a routed re-delivery before decrypt.
 ///
 /// Capabilities (`localCapabilities()`) gate every optional feature per peer, including the 13+
 /// chat age gate — enforced at advertisement, send, AND receive. `wipeIdentityForDeleteAll` is
-/// this manager's leg of the delete-all seam. Memory-only session state everywhere except the
-/// photo cache, wall preferences, and the activity sidecar — none of it synced.
+/// this manager's leg of the delete-all seam, and `purgeHeldSessionPhotosForDeleteAll` the pending
+/// corpus's. Memory-only session state everywhere except the photo wall, the pending corpus, wall
+/// preferences, and the activity sidecar — none of it synced.
 /// `@MainActor @Observable`; the app owns start/stop via tab/scene/lock gating.
 @MainActor
 @Observable
@@ -99,16 +103,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public var pendingAdmissionRequests: [MeshAdmissionRequestPayload] = []
     public var pendingRemovalProposals: [MeshRemovalProposalPayload] = []
     public var meshPhotos: [FriendPhotoPayload] = []
-    /// Photos taken/received during the current proximity-join session, metadata-only — the list
-    /// the in-camera Develop review snapshots its ids from (and renders through
+    /// Photos taken/received during the current (LIVE) proximity-join session, metadata-only — the
+    /// list the in-camera Develop review snapshots its ids from (and renders through
     /// ``photosAwaitingAnswer(among:)``, so a photo moved out from under it is still offered).
     ///
-    /// Every entry is ALREADY on the persisted wall (`cachePhoto` writes it there at capture or
-    /// arrival), so this list is the user's pending choice, not a staging area. It is emptied only
-    /// by that choice (``finishSessionPhotos(keeping:of:)``) or by the session-end promotion, which
-    /// MOVES what is left into `pendingFriendReview.photos` for the post-session review
-    /// (`promoteSessionToPendingReviewIfSessionEnded()`; `startJoin()` runs the photo half
-    /// unconditionally). Never dropped: a drop here is a silent keep-all (2026-09-30).
+    /// A memory projection of the sealed pending corpus (2026-09-30): every entry is HELD there
+    /// (``holdSessionPhoto(_:key:live:)``), never on the wall, and its id is the photo's local id.
+    /// It is emptied only by the person's choice (``finishSessionPhotos(keeping:of:)``), by the
+    /// session-end promotion, which MOVES what is left into `pendingFriendReview.photos` without a
+    /// disk write (`promoteSessionToPendingReviewIfSessionEnded()`; `startJoin()` runs the photo
+    /// half unconditionally), and by delete-all (``purgeHeldSessionPhotosForDeleteAll()``).
     public private(set) var sessionPhotos: [FriendPhotoPayload] = []
     /// Every peer whose handshake COMMITTED during the current session, for the post-session
     /// keep-as-friend prompt (Phase 2, Docs/Proximity-Mesh-Redesign-2026-07-10.md). Unlike
@@ -121,12 +125,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public private(set) var sessionRoster: [MeshSessionRosterEntry] = []
     /// The promoted, unconsumed session-end review: keep-as-friend candidates plus the ended
     /// session's photos still awaiting the keep/discard choice. Set by
-    /// `promoteSessionToPendingReviewIfSessionEnded()` at the session-end moment; cleared only once
+    /// `promoteSessionToPendingReviewIfSessionEnded()` at the session-end moment, by a held photo
+    /// arriving while no session is live, and — photos only — by the launch rebuild from the
+    /// pending corpus (a process kill loses the candidates, never the photos). Cleared only once
     /// BOTH halves are answered — the candidates by `completeFriendReview(_:)`, the photos by
-    /// ``finishReviewedPhotos(_:keeping:in:)`` (or a per-photo delete). Views present off this
+    /// ``finishReviewedPhotos(_:keeping:in:)`` — or by delete-all. Views present off this
     /// observable state (`onChange` + `onAppear` + scene activation) — never off `isInSession`
-    /// view-events. Survives startJoin/startNewMesh by design. Memory-only, like the roster.
+    /// view-events. Survives startJoin/startNewMesh by design.
     public private(set) var pendingFriendReview: MeshFriendReviewBatch?
+    /// Whether a held photo may be drawn and answered right now: the routed access gate is open
+    /// (unlocked, foreground, no duress — the decrypt seam ``reviewThumbnailData(for:)`` obeys), the
+    /// pending index is readable, and the launch reconcile has run (so no photo already kept on the
+    /// wall can be offered again) — or the wall is unreadable with protected data available, the
+    /// persistent case in which the photos are offered with Keep refused rather than never.
+    ///
+    /// A stored, OBSERVED mirror rather than a computed property: two of its three inputs are
+    /// `@ObservationIgnored`, so a view reading a computed form would never re-render on the unlock
+    /// that opens it. Refreshed at every change of those inputs (``refreshHeldPhotosCanBeShown()``).
+    public private(set) var heldPhotosCanBeShown = false
     /// The friend-mesh clothing shop (Phase 3a): catalogs exchanged during the session + the 1-hour
     /// post-session browse window. Registered on the payload registry in `init`; lifecycle hooks fire
     /// from the same moments that drive the friend-review batch — but the two deliberately diverge on
@@ -343,8 +359,41 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// keychain before the first post-boot unlock). While set, `persistPhotoIndex` refuses to write:
     /// `meshPhotos` is empty for a reason that is NOT "the wall is empty", and the index is also the
     /// file manifest the store sweeps against, so saving it would delete every kept photo's bytes.
-    /// Cleared by the first re-read that succeeds (inside `persistPhotoIndex`).
+    /// Cleared by the first re-read that succeeds — inside `persistPhotoIndex`, or at the unlock or
+    /// foreground edge that makes the file readable again (``retryDeferredPhotoIndexes(now:)``),
+    /// so a wall deferred at a locked background launch is not an empty album for the whole process.
     @ObservationIgnored private var photoIndexDeferred = false
+    /// The sealed pending corpus (2026-09-30): every session photo, taken here or received, from
+    /// the moment it exists until the person answers the review — never the wall. Its own
+    /// `PendingSessionPhotos/` directory under the host's proximity root (excluded from backup) and
+    /// its own device-bound key (`KeychainPrivateMediaKeyProvider.Role.pendingSessionPhotos`).
+    @ObservationIgnored private let heldPhotoStore: PendingSessionPhotoStore
+    /// The durable mirror of the pending index: exactly what the last committed write (or a clean
+    /// load) left on disk, and what every write is handed. `sessionPhotos` and
+    /// `pendingFriendReview.photos` are memory projections of its `photos`; a held local id is in
+    /// exactly one of them once the index has been reconciled.
+    ///
+    /// The one sanctioned divergence: an answer whose write fails still takes its photos out of the
+    /// mirror (``PendingSessionPhotoStore/answering(_:in:now:)``), so the review stops offering them
+    /// and the next write that lands persists the answer.
+    @ObservationIgnored private var heldPhotoIndex = PendingSessionPhotoIndex.empty
+    /// Why the pending index could not be read, while it cannot. Nothing writes the corpus while
+    /// this is set (every hold is refused), because the mirror is empty for a reason that is not
+    /// "nothing is held". Re-read at the unlock/foreground edge and at the top of every hold and
+    /// answer.
+    @ObservationIgnored private var heldPhotoIndexDeferral: PendingSessionPhotoStore.Deferral?
+    /// Whether the launch reconcile has run: the held entries a kill left behind on the wall (the
+    /// crash window between an answer's wall commit and its pending write) are dropped, and the
+    /// rest offered. It runs only once BOTH indexes are readable — over an unreadable wall it would
+    /// re-offer a kept photo — so until then no held photo is offered at all.
+    @ObservationIgnored private var heldPhotosReconciled = false
+    /// Whether the held photos were offered over a wall that is still unreadable with protected data
+    /// AVAILABLE — a persistent failure, not a locked launch. Waiting for the reconcile then would
+    /// never end (and in the app it would hold the review, and so the discovery block, for good),
+    /// so they are offered with Keep refused (`keepUnavailable`) and Delete all working. The stated
+    /// cost: a photo kept just before a kill inside an answer is offered again, and discarding it
+    /// leaves the earlier wall copy. The real reconcile still runs the moment the wall reads.
+    @ObservationIgnored private var heldPhotosOfferedOverUnreadableWall = false
     /// Observed proxy for favorite changes. `photoWallPreferences` itself is `@ObservationIgnored`
     /// because its `photoWallPosts` getter mutates it during view-body evaluation (plainly observing
     /// it would risk update loops). This counter is bumped ONLY from `toggleFavorite` (a tap handler,
@@ -357,7 +406,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// How many of this session's captures reached nobody: the routed door answered
     /// `.skipped(.noDestinations)` — no mesh, no ledger, or a derived roster of just this device —
-    /// so the photo is on this device's own wall and nowhere else, and never will be anywhere
+    /// so the photo is on this device alone (held for its review, 2026-09-30) and never will be anywhere
     /// else: destinations are frozen at the mint and there is no offline queue (P8 item 0, device
     /// finding (c)). A count rather than a refusal: the solo first minute of every session is
     /// ordinary and an alert per shot would be hostile, but a session that ends with photos the
@@ -580,14 +629,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// passes it: the public initializer above cannot, so a Release build always takes this device's
     /// real identity.
     ///
+    /// `heldPhotoKeys` is the third seam, for the pending corpus's at-rest key: nil (every shipping
+    /// path) takes the device-bound keychain row; a test passes an in-memory or wrong key to reach
+    /// the corpus's deferral and purge branches without touching the process-wide row.
+    ///
     /// - Parameters:
     ///   - store: The host this manager's roots and vaults hang off.
     ///   - transport: The radio, or nil for the one this build selects.
     ///   - identity: The device identity, or nil for this device's own.
+    ///   - heldPhotoKeys: The pending corpus's key provider, or nil for the keychain row.
     init(
         store: any ProximityHost,
         transport: (any MeshTransportSession)?,
-        identity: IdentityService? = nil
+        identity: IdentityService? = nil,
+        heldPhotoKeys: (any PrivateMediaKeyProviding)? = nil
     ) {
         self.store = store
         self.transport = transport ?? NetworkMeshSession()
@@ -623,23 +678,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             indexURL: cacheURL,
             keyProvider: KeychainPrivateMediaKeyProvider(role: .friendWall)
         )
+        // Per-host like the wall, and a SUBDIRECTORY of the same root: each corpus sweeps orphans
+        // by directory, so siblings would sweep each other.
+        self.heldPhotoStore = PendingSessionPhotoStore(
+            directory: store.proximitySupportDirectory
+                .appendingPathComponent(PendingSessionPhotoStore.directoryName, isDirectory: true),
+            keyProvider: heldPhotoKeys ?? KeychainPrivateMediaKeyProvider(role: .pendingSessionPhotos)
+        )
         let preferencesURL = cacheURL.deletingLastPathComponent().appendingPathComponent("MeshPhotoWallPreferences.json")
         let preferencesStore = JSONSidecarFile<FriendPhotoWallPreferences>(fileURL: preferencesURL)
         self.photoWallPreferencesStore = preferencesStore
         self.photoWallPreferences = preferencesStore.load() ?? FriendPhotoWallPreferences()
-        // `loadIndex`, not `load`: a DEFERRED read must not look like an empty wall (see
-        // `photoIndexDeferred` — the index is also the store's file manifest). An `.unrecoverable`
-        // index is different: nothing can bring those entries back, so the wall starts empty and
-        // saves proceed, letting the next one replace the dead file and sweep its orphans.
-        switch photoCacheStore.loadIndex() {
-        case .entries(let photos):
-            meshPhotos = photos
-        case .deferred:
-            photoIndexDeferred = true
-        case .unrecoverable:
-            FernletAuditLog.log("mesh.photoIndex.unrecoverable")
-        }
-        prunePhotoWallPreferences()
+        loadPhotoCorpora(now: Date())
         setupMeshSession()
         registerClothingShopHandler()
         registerModerationReportHandler()
@@ -666,6 +716,30 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         beaconTimer?.cancel()
         rotationSyncTask?.cancel()
         sessionHeartStateClearTask?.cancel()
+    }
+
+    /// The init's two photo loads: the wall first, then the pending corpus, then the reconcile that
+    /// rebuilds the awaiting review from it (a process kill before the answer lands here).
+    ///
+    /// `loadIndex`, not `load`: a DEFERRED wall read must not look like an empty wall (see
+    /// `photoIndexDeferred` — the index is also the store's file manifest). An `.unrecoverable`
+    /// index is different: nothing can bring those entries back, so the wall starts empty and
+    /// saves proceed, letting the next one replace the dead file and sweep its orphans.
+    ///
+    /// - Parameter now: The launch instant, for dropping expired tombstones — never for removing a
+    ///   held photo, which no timer touches.
+    private func loadPhotoCorpora(now: Date) {
+        switch photoCacheStore.loadIndex() {
+        case .entries(let photos):
+            meshPhotos = photos
+        case .deferred:
+            photoIndexDeferred = true
+        case .unrecoverable:
+            FernletAuditLog.log("mesh.photoIndex.unrecoverable")
+        }
+        prunePhotoWallPreferences()
+        loadHeldPhotoIndex(now: now)
+        reconcileHeldPhotosIfReady(now: now)
     }
 
     /// Phase 3a: the shop rides the friend mesh as registered feature payloads. The dispatch default's
@@ -1459,8 +1533,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// **It never answers the photo half** (2026-09-30). A batch still carrying photos the user has
     /// not chosen between keeps them and stays up — the keep-friends prompt, or the `.none`
     /// auto-consume, must never be what throws a pending photo choice away — and is cleared only
-    /// once they are answered too (``finishReviewedPhotos(_:keeping:in:)``). A photo no longer on
-    /// the wall (deleted, or aged out by its FIFO cap) is no longer a choice, so it goes here.
+    /// once they are answered too (``finishReviewedPhotos(_:keeping:in:)``). A photo no longer held
+    /// (answered elsewhere, or purged) is no longer a choice, so it goes here.
     public func completeFriendReview(_ id: UUID) {
         guard var batch = pendingFriendReview, batch.id == id else { return }
         batch.entries.removeAll()
@@ -1468,16 +1542,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         pendingFriendReview = batch.isEmpty ? nil : batch
     }
 
-    /// The pending batch's photos that are still on the wall — exactly what the session-end review
-    /// can offer, newest first. Empty when no batch is pending.
+    /// The pending batch's photos that are still held — exactly what the session-end review can
+    /// offer, newest first. Empty when no batch is pending.
     public var pendingReviewPhotos: [FriendPhotoPayload] {
         guard let batch = pendingFriendReview else { return [] }
         return reviewablePhotos(of: batch)
     }
 
     /// The photos among `ids` that still await the user's keep/discard answer, wherever each one is
-    /// held right now: listed live in `sessionPhotos`, or moved into the pending batch (and still on
-    /// the wall). Live ones first, each list in its own order.
+    /// listed right now: live in `sessionPhotos`, or moved into the pending batch — and still held
+    /// in the pending corpus either way. Live ones first, each list in its own order.
     ///
     /// **What the in-camera Develop review renders** (2026-09-30 fix round, findings C-F1/L-F1). That
     /// review snapshots the ids it offers at Develop and must keep offering them if the session ends
@@ -1490,28 +1564,33 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Returns: The ones still unanswered, as metadata-only payloads.
     public func photosAwaitingAnswer(among ids: Set<UUID>) -> [FriendPhotoPayload] {
         guard !ids.isEmpty else { return [] }
-        let live = sessionPhotos.filter { ids.contains($0.id) }
+        let live = stillHeld(sessionPhotos).filter { ids.contains($0.id) }
         let liveIDs = Set(live.map(\.id))
         return live + pendingReviewPhotos.filter { ids.contains($0.id) && !liveIDs.contains($0.id) }
     }
 
-    /// `batch`'s photos filtered to the ids the wall still holds. Every pending photo was cached
-    /// into `meshPhotos` when it was taken or received, so the only ones this drops are photos a
-    /// per-photo delete or the wall's FIFO cap has already removed.
+    /// `batch`'s photos filtered to the ones still held.
     private func reviewablePhotos(of batch: MeshFriendReviewBatch) -> [FriendPhotoPayload] {
-        let onWall = Set(meshPhotos.map(\.id))
-        return batch.photos.filter { onWall.contains($0.id) }
+        stillHeld(batch.photos)
+    }
+
+    /// `photos` filtered to the local ids the pending mirror still holds. The two memory lists are
+    /// projections of that mirror, so this drops nothing in a consistent state; it is the backstop
+    /// that keeps a photo already answered — or purged — from ever being offered again.
+    private func stillHeld(_ photos: [FriendPhotoPayload]) -> [FriendPhotoPayload] {
+        let held = heldPhotoIndex.heldLocalIDs
+        return photos.filter { held.contains($0.id) }
     }
 
     /// Answers the promoted batch's PHOTO half: of the `reviewed` photos — the ones the session-end
-    /// review actually showed — the ones not in `kept` leave the wall, and all of them leave the
-    /// batch. The post-session twin of ``finishSessionPhotos(keeping:)``, with the same wall effects
-    /// (the index save sweeps the dropped files; the wall preferences are pruned).
+    /// review actually showed — the ones in `kept` are copied to the wall and the rest are deleted
+    /// for good, all through ``applyPhotoAnswers(kept:discarded:now:)``. The post-session twin of
+    /// ``finishSessionPhotos(keeping:of:)``.
     ///
     /// **Scoped to what was shown, never to the whole batch.** A photo promoted while the sheet was
     /// up — a late arrival, a second ending merged into the same batch — was never offered, so it is
-    /// neither discarded nor counted as kept: it stays pending and the review re-presents for it. A
-    /// stale `batchID` changes nothing, which leaves every photo on the wall — the conservative side
+    /// neither discarded nor kept: it stays held and the review re-presents for it. A stale
+    /// `batchID` changes nothing and reports ``SessionPhotoAnswer/nothing`` — the conservative side
     /// of an answer that can no longer be matched to its question. The batch clears once neither
     /// half has anything left.
     ///
@@ -1519,20 +1598,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   - reviewed: The photo ids the review presented.
     ///   - kept: The ids the user chose to keep; ids outside `reviewed` are ignored.
     ///   - batchID: The batch the review was presented from.
-    public func finishReviewedPhotos(_ reviewed: Set<UUID>, keeping kept: Set<UUID>, in batchID: UUID) {
-        guard var batch = pendingFriendReview, batch.id == batchID else { return }
-        let answered = Set(batch.photos.map(\.id)).intersection(reviewed)
-        let discarded = answered.subtracting(kept)
-        meshPhotos.removeAll { discarded.contains($0.id) }
-        batch.photos.removeAll { answered.contains($0.id) }
-        pendingFriendReview = batch.isEmpty ? nil : batch
-        persistPhotoIndex(meshPhotos)
-        prunePhotoWallPreferences()
+    /// - Returns: What landed, what was deleted, and what is still held — the review stays up while
+    ///   ``SessionPhotoAnswer/notApplied`` is not empty, and a camera-roll export may read only
+    ///   ``SessionPhotoAnswer/keptOnWall``.
+    public func finishReviewedPhotos(
+        _ reviewed: Set<UUID>, keeping kept: Set<UUID>, in batchID: UUID
+    ) -> SessionPhotoAnswer {
+        guard let batch = pendingFriendReview, batch.id == batchID else { return .nothing }
+        let answered = Set(stillHeld(batch.photos).map(\.id)).intersection(reviewed)
+        let answer = applyPhotoAnswers(
+            kept: answered.intersection(kept), discarded: answered.subtracting(kept), now: Date()
+        )
         FernletAuditLog.log(
             "mesh.session.photoReviewAnswered",
-            context: ["kept": String(answered.count - discarded.count), "discarded": String(discarded.count),
-                      "stillPending": String(batch.photos.count)]
+            context: ["kept": String(answer.keptOnWall.count), "discarded": String(answer.discarded.count),
+                      "unreadable": String(answer.unreadable.count), "notApplied": String(answer.notApplied.count),
+                      "stillPending": String(pendingFriendReview?.photos.count ?? 0)]
         )
+        return answer
     }
 
     /// Phase 2 ("Session-end review is model-state, not view-events"): when the session has ENDED
@@ -1546,10 +1629,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// verified termination (`applyVerifiedTermination()` → `leaveSession()`), with no Develop tap
     /// and so no review of its own; `leaveSession()` used to empty `sessionPhotos` in the same
     /// synchronous turn, so by the time the app's presenter ran it saw no photos and offered at most
-    /// the keep-friends prompt — and every photo, already on the wall since capture, was kept
+    /// the keep-friends prompt — and every photo, then already on the wall since capture, was kept
     /// without asking. Every other ending the user did not choose (a removal, the ceiling, epoch
     /// exhaustion, "Ask to remove" on the only other person, a hard stop) took the same shortcut.
-    /// Moving the photos here covers them all at once, because each reaches this funnel.
+    /// Moving the photos here covers them all at once, because each reaches this funnel — and since
+    /// the photos are held in the pending corpus rather than the wall, the move is memory-only.
     ///
     /// The predicate is ``isSessionLive`` — neither `isInSession` nor ``hasCommittedPeer``, and the
     /// P6 item 2 fix is where the last of those three stopped being right. On `isInSession` this
@@ -1590,8 +1674,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// bare, because a new search is a new session by definition and a photo still listed then
     /// belongs to one that ended without an answer. The ended session's final metadata is stamped
     /// first, while its photo-session id is still set — what the Develop flow's
-    /// ``finishSessionPhotos(keeping:)`` does before it prunes. R3: the merged list is capped at the
-    /// wall's own bound, which already bounds every photo that can exist to be pending.
+    /// ``finishSessionPhotos(keeping:)`` does before it answers. R3: the merged list is capped at the
+    /// pending corpus's own bound, which already bounds every photo that can be held.
+    ///
+    /// **It writes nothing** (invariant I6). Both lists are memory projections of the pending index,
+    /// which does not record "live" or "awaiting" at all — at a launch every held photo is awaiting
+    /// by definition — so an ending that runs while the device is locked (a continued-processing
+    /// task, a termination read in the background) cannot fail here and loses nothing. The
+    /// finalized session metadata rides only the memory lists; a kept photo carries it to the wall.
     ///
     /// **It can run under an open Develop review.** Door 3's give-up ends the session while the mesh
     /// is held, so the camera and any review it has up stay on screen through this move. That
@@ -1604,7 +1694,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         var batch = pendingFriendReview ?? MeshFriendReviewBatch(entries: [])
         let alreadyPending = Set(batch.photos.map(\.id))
         let arriving = sessionPhotos.filter { !alreadyPending.contains($0.id) }
-        batch.photos = Array((arriving + batch.photos).prefix(PrivateMediaStore.maxCachedPhotos))
+        batch.photos = Array((arriving + batch.photos).prefix(PendingSessionPhotoStore.maxHeldPhotos))
         pendingFriendReview = batch
         sessionPhotos.removeAll()
         FernletAuditLog.log(
@@ -1627,6 +1717,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `isOpen`'s edge: jobs that only move ciphertext must run on an unlock even while the app is
     /// backgrounded, which is exactly the window in which the store became readable.
     ///
+    /// **The photo indexes are re-read first** (2026-09-30). A rising ciphertext leg is also the
+    /// moment a wall or pending index that could not be read at a locked launch becomes readable,
+    /// so ``retryDeferredPhotoIndexes(now:)`` runs before the pass — which may project a routed
+    /// photo into the pending corpus, and must find its real index there — and before the
+    /// `runsPass` guard, so an edge that owes the routed store nothing still re-reads them.
+    ///
     /// - Parameters:
     ///   - gate: The facts as the app now knows them.
     ///   - now: The injected instant every job is judged against.
@@ -1646,6 +1742,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                  "duress": String(gate.duressActive)]
             )
         )
+        if edge.isRising { retryDeferredPhotoIndexes(now: now) }
+        refreshHeldPhotosCanBeShown()
         guard edge.runsPass else { return nil }
         return runRoutedReentry(edge, now: now)
     }
@@ -1657,12 +1755,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// after the develop/review flow completes" and empty `sessionPhotos` first — but most of its
     /// callers are endings nobody reviewed: a verified termination on the last device left in a
     /// mesh, a removal naming this device, the ceiling, epoch exhaustion, the pairwise "Ask to
-    /// remove", a hard stop. Every session photo is on the wall from capture, so that line kept
-    /// them all without asking. Now the teardown's `stopSearching()` moves whatever is still
-    /// listed into `pendingFriendReview` (``finishReviewedPhotos(_:keeping:in:)`` answers it); a
-    /// Develop flow that already had the user choose (``finishSessionPhotos(keeping:of:)``) took
-    /// its answered photos out of the list first, so nothing is offered twice. The photo-session ids are cleared only AFTER
-    /// the teardown, because the promotion stamps the ended session's metadata with them.
+    /// remove", a hard stop. Session photos were then on the wall from capture, so that line kept
+    /// them all without asking. Now every session photo is held in the pending corpus and the
+    /// teardown's `stopSearching()` moves whatever is still listed into `pendingFriendReview`
+    /// (``finishReviewedPhotos(_:keeping:in:)`` answers it), with no disk write; a Develop flow
+    /// that already had the user choose (``finishSessionPhotos(keeping:of:)``) took its answered
+    /// photos out of the list first, so nothing is offered twice. The photo-session ids are cleared
+    /// only AFTER the teardown, because the promotion stamps the ended session's metadata with them.
     public func leaveSession() {
         leaveMesh()
         photoSessionStartedAt = nil
@@ -2024,74 +2123,90 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
     }
 
-    /// The answer for the whole LIVE roll: every listed photo not in `keptPhotoIDs` leaves the wall,
-    /// and the list empties — so the teardown that follows has nothing left to promote.
-    /// ``finishSessionPhotos(keeping:of:)`` over every listed id. A photo the session ended without
-    /// an answer for is answered by the post-session review through
+    /// The answer for the whole LIVE roll: every listed photo not in `keptPhotoIDs` is deleted and
+    /// the kept ones are copied to the wall, so the teardown that follows has nothing left to
+    /// promote. ``finishSessionPhotos(keeping:of:)`` over every listed id. A photo the session ended
+    /// without an answer for is answered by the post-session review through
     /// ``finishReviewedPhotos(_:keeping:in:)``.
-    public func finishSessionPhotos(keeping keptPhotoIDs: Set<UUID>) {
+    ///
+    /// - Returns: What the answer did (``SessionPhotoAnswer``).
+    public func finishSessionPhotos(keeping keptPhotoIDs: Set<UUID>) -> SessionPhotoAnswer {
         finishSessionPhotos(keeping: keptPhotoIDs, of: Set(sessionPhotos.map(\.id)))
     }
 
     /// The in-camera Develop review's answer, scoped to the photos it SHOWED (`reviewed`, snapshotted
-    /// at Develop) and applied wherever each one is held now: of those still unanswered, the ones not
-    /// in `kept` leave the wall, and all of them leave the live list AND the pending batch.
+    /// at Develop) and applied wherever each one is listed now: of those still held, the ones in
+    /// `kept` are copied to the wall, the rest are deleted for good, and all of them leave the live
+    /// list AND the pending batch (``applyPhotoAnswers(kept:discarded:now:)``).
     ///
     /// **Held anywhere, not just live** (2026-09-30 fix round, findings C-F1/L-F1). Door 3's
     /// five-minute give-up ends the session while the mesh is still held, so the camera and its open
     /// review stay up while the ending moves the live list into `pendingFriendReview`. Answering
-    /// only `sessionPhotos` then pruned nothing: a confirmed "Delete all" left every photo on the
-    /// wall. The ids make the answer independent of where the photo sits.
+    /// only `sessionPhotos` then answered nothing. The ids make the answer independent of where the
+    /// photo is listed.
     ///
-    /// **First answer wins.** An id already answered — by the post-session review, a per-photo
-    /// delete, or an earlier call — is no longer held, so it is ignored rather than discarded
-    /// again. A photo listed after the snapshot (a late arrival while the sheet was up) was never
-    /// shown, so it stays listed and reaches the post-session review at the teardown.
+    /// **First answer wins.** An id already answered — by the post-session review or an earlier
+    /// call — is no longer held, so it is ignored rather than answered again. A photo listed after
+    /// the snapshot (a late arrival while the sheet was up) was never shown, so it stays listed and
+    /// reaches the post-session review at the teardown.
     ///
     /// - Parameters:
     ///   - kept: The ids the user chose to keep; ids outside `reviewed` are ignored.
     ///   - reviewed: The ids the review presented.
-    public func finishSessionPhotos(keeping kept: Set<UUID>, of reviewed: Set<UUID>) {
+    /// - Returns: What the answer did (``SessionPhotoAnswer``); the review stays up while its
+    ///   ``SessionPhotoAnswer/notApplied`` is not empty.
+    public func finishSessionPhotos(keeping kept: Set<UUID>, of reviewed: Set<UUID>) -> SessionPhotoAnswer {
         finalizeCurrentPhotoSessionMetadata()
-        let pendingIDs = Set(pendingFriendReview?.photos.map(\.id) ?? [])
-        let answered = reviewed.intersection(Set(sessionPhotos.map(\.id)).union(pendingIDs))
-        let discarded = answered.subtracting(kept)
-        meshPhotos.removeAll { discarded.contains($0.id) }
-        sessionPhotos.removeAll { answered.contains($0.id) }
-        if var batch = pendingFriendReview, !pendingIDs.isDisjoint(with: answered) {
-            batch.photos.removeAll { answered.contains($0.id) }
-            pendingFriendReview = batch.isEmpty ? nil : batch
+        let pendingIDs = Set(stillHeld(pendingFriendReview?.photos ?? []).map(\.id))
+        let answered = reviewed.intersection(Set(stillHeld(sessionPhotos).map(\.id)).union(pendingIDs))
+        let answer = applyPhotoAnswers(
+            kept: answered.intersection(kept), discarded: answered.subtracting(kept), now: Date()
+        )
+        if !pendingIDs.isDisjoint(with: answered) {
             FernletAuditLog.log(
                 "mesh.session.developAnsweredPendingPhotos",
                 context: ["answered": String(answered.intersection(pendingIDs).count)]
             )
         }
-        persistPhotoIndex(meshPhotos)
-        prunePhotoWallPreferences()
+        return answer
     }
 
-    public func deleteAllSessionPhotos() {
+    /// Deletes every photo on the live roll: ``finishSessionPhotos(keeping:)`` with nothing kept.
+    ///
+    /// - Returns: What the answer did (``SessionPhotoAnswer``).
+    public func deleteAllSessionPhotos() -> SessionPhotoAnswer {
         finishSessionPhotos(keeping: [])
     }
 
-    /// Permanently removes a single cached photo from the persistent gallery: drops it from the
-    /// in-memory lists, clears any wall preference that pointed at it (favorite / aggregated cover),
-    /// and re-saves the cache so the store's orphan cleanup deletes its image + thumbnail files.
+    /// Permanently removes one KEPT photo from the wall: drops it from `meshPhotos`, clears any wall
+    /// preference that pointed at it (favorite / aggregated cover), re-saves the index so the
+    /// store's orphan sweep deletes its image and thumbnail files, and tombstones its identity
+    /// (sender fingerprint + id) for 24 hours so a routed copy still in custody cannot come back.
+    ///
+    /// **A held photo is refused** (2026-09-30): held photos leave only through an answer. A delete
+    /// that dropped one from the memory batch while the pending index kept it would bring it back at
+    /// the next launch — an answer that did not persist, which is worse than no answer at all.
     public func deletePhoto(_ photoID: UUID) {
-        let existed = meshPhotos.contains { $0.id == photoID }
-        meshPhotos.removeAll { $0.id == photoID }
-        sessionPhotos.removeAll { $0.id == photoID }
-        // A photo that is gone is no longer a choice the session-end review can offer.
-        if var batch = pendingFriendReview, batch.photos.contains(where: { $0.id == photoID }) {
-            batch.photos.removeAll { $0.id == photoID }
-            pendingFriendReview = batch.isEmpty ? nil : batch
+        guard heldPhotoIndex.heldPhoto(localID: photoID) == nil else {
+            FernletAuditLog.log("mesh.heldPhotos.deleteRefused")
+            return
         }
+        let removed = meshPhotos.first { $0.id == photoID }
+        meshPhotos.removeAll { $0.id == photoID }
         // Drops the favorite / aggregated-cover entries that pointed at the photo (and any other
         // entry the cache no longer backs).
         prunePhotoWallPreferences()
-
-        guard existed else { return }
+        guard let removed else { return }
         persistPhotoIndex(meshPhotos)
+        tombstoneDeletedWallPhoto(removed)
+    }
+
+    /// The tombstone half of ``deletePhoto(_:)``: a wall photo from an older build, deleted inside a
+    /// routed window after the upgrade, must not be re-projected as a NEW held photo. Skipped while
+    /// the pending index cannot be read (nothing writes it then) and for a photo with no sender.
+    private func tombstoneDeletedWallPhoto(_ photo: FriendPhotoPayload) {
+        guard let sender = photo.senderFingerprint, heldPhotoIndexDeferral == nil else { return }
+        commitHeldPhotoAnswers([HeldPhotoKey(origin: sender, itemID: photo.id)], now: Date())
     }
 
     /// The one seam every wall save goes through, so the deferred-index rule is enforced in a
@@ -2103,6 +2218,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// first: only a successful read clears the flag, and it brings the disk entries back into
     /// `meshPhotos` (this session's arrivals win by id — they carry the bytes still to be written).
     /// Nothing was deletable while the flag was set, so nothing can be resurrected by that merge.
+    /// The unlock/foreground edge re-reads it too (``retryDeferredPhotoIndexes(now:)``), so a wall
+    /// deferred at launch recovers without waiting for a save — which, since the wall stopped
+    /// receiving captures (2026-09-30), might otherwise never come.
     private func persistPhotoIndex(_ photos: [FriendPhotoPayload]) {
         guard photoIndexDeferred else {
             photoCacheStore.save(photos)
@@ -2153,6 +2271,429 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard pruned != photoWallPreferences else { return }
         photoWallPreferences = pruned
         persistPhotoWallPreferences()
+    }
+
+    // MARK: - Held session photos (2026-09-30)
+
+    /// Holds one session photo in the sealed pending corpus — the ONLY way a session photo enters
+    /// this device, for BOTH producers (``addPhoto(_:)`` and the routed projection). It never
+    /// touches `meshPhotos`: nothing reaches the wall before the person's answer.
+    ///
+    /// Refused, by identity (origin + item id, never the id alone): a tombstoned key is
+    /// ``PendingSessionPhotoStore/Hold/answered`` (it was answered and must not come back), and a
+    /// key already held, or a wall photo with the same sender and id, is
+    /// ``PendingSessionPhotoStore/Hold/alreadyHeld``. Also refused, as `notPersisted`, while a
+    /// duress session is in force and while the pending index cannot be read — a write over an
+    /// unread index would replace every photo it holds.
+    ///
+    /// The local id is the item id unless another held photo or a wall photo already uses it (a
+    /// member reusing someone else's id), in which case a fresh one is minted so neither overwrites
+    /// the other's files. A live photo is stamped with the current session's metadata and listed
+    /// in `sessionPhotos`; an awaiting one keeps its own and joins the pending batch (a photos-only
+    /// batch is created if none exists), which re-triggers the review.
+    ///
+    /// - Parameters:
+    ///   - photo: The photo, carrying its plaintext bytes.
+    ///   - key: Who minted it and the id they chose: this device's own fingerprint for a capture,
+    ///     the signed manifest's origin and item id for a routed photo.
+    ///   - live: Whether it belongs to the session that is live right now.
+    /// - Returns: The store's outcome; only ``PendingSessionPhotoStore/Hold/held`` changed anything.
+    func holdSessionPhoto(
+        _ photo: FriendPhotoPayload, key: MeshContentKey, live: Bool
+    ) -> PendingSessionPhotoStore.Hold {
+        let now = Date()
+        retryDeferredPhotoIndexes(now: now)
+        guard !routedAccessGate.duressActive, heldPhotoIndexDeferral == nil else {
+            FernletAuditLog.log(
+                "mesh.heldPhotos.holdRefused",
+                context: ["reason": routedAccessGate.duressActive ? "duress" : "pendingIndexDeferred"]
+            )
+            return .notPersisted
+        }
+        let heldKey = HeldPhotoKey(origin: key.senderFingerprint, itemID: key.contentID)
+        if let settled = heldPhotoSettlement(heldKey) { return settled }
+        guard let imageData = photo.imageData else { return .notPersisted }
+        let stamped = live ? photo.withSession(currentPhotoSessionMetadata()) : photo
+        let local = withHeldLocalID(stamped, imageData: imageData)
+        let entry = HeldSessionPhoto(key: heldKey, heldAt: now, payload: local)
+        let (outcome, next) = heldPhotoStore.hold(entry, imageData: imageData, into: heldPhotoIndex)
+        guard outcome == .held else {
+            FernletAuditLog.log("mesh.heldPhotos.holdRefused", context: ["reason": Self.holdToken(outcome)])
+            return outcome
+        }
+        heldPhotoIndex = next
+        listHeldPhoto(local.withoutImageData(), live: live)
+        return .held
+    }
+
+    /// A frozen English audit token for a hold outcome — never copy, never localized.
+    private static func holdToken(_ outcome: PendingSessionPhotoStore.Hold) -> String {
+        switch outcome {
+        case .held: return "held"
+        case .alreadyHeld: return "alreadyHeld"
+        case .answered: return "answered"
+        case .full: return "full"
+        case .unsafeImage: return "unsafeImage"
+        case .notPersisted: return "notPersisted"
+        }
+    }
+
+    /// Whether this identity is already settled — answered (tombstoned), held, or on the wall with
+    /// the same sender and id — or nil when it may be held. Read from the mirror and the wall only;
+    /// nothing is decrypted to answer it, which is what lets the routed projection ask it before
+    /// the body is opened.
+    private func heldPhotoSettlement(_ key: HeldPhotoKey) -> PendingSessionPhotoStore.Hold? {
+        if heldPhotoIndex.isAnswered(key) { return .answered }
+        if heldPhotoIndex.holds(key) || wallHolds(key) { return .alreadyHeld }
+        return nil
+    }
+
+    /// Whether the wall holds a photo with this identity: the same sender fingerprint and id.
+    private func wallHolds(_ key: HeldPhotoKey) -> Bool {
+        meshPhotos.contains { $0.id == key.itemID && $0.senderFingerprint == key.origin }
+    }
+
+    /// `photo` under the local id it will be held by: its own id, or a fresh one when another held
+    /// photo or a wall photo already uses that id (audited — only a routed photo whose origin reused
+    /// someone else's item id can collide; an own capture's id is minted here).
+    private func withHeldLocalID(_ photo: FriendPhotoPayload, imageData: Data) -> FriendPhotoPayload {
+        let taken = heldPhotoIndex.heldLocalIDs.contains(photo.id) || meshPhotos.contains { $0.id == photo.id }
+        guard taken else { return photo }
+        FernletAuditLog.log("mesh.heldPhotos.idCollision")
+        return FriendPhotoPayload(
+            id: UUID(),
+            imageData: imageData,
+            addedAt: photo.addedAt,
+            senderName: photo.senderName,
+            senderFingerprint: photo.senderFingerprint,
+            senderSigningPublicKey: photo.senderSigningPublicKey,
+            session: photo.session
+        )
+    }
+
+    /// Lists a just-held photo in its memory projection: the live roll, or the awaiting batch.
+    private func listHeldPhoto(_ metadata: FriendPhotoPayload, live: Bool) {
+        if live {
+            // R3: every listed photo is held, and the corpus refuses a hold past the same bound.
+            sessionPhotos.insert(metadata, at: 0)
+            sessionPhotos = Array(sessionPhotos.prefix(Self.maxSessionPhotos))
+            return
+        }
+        var batch = pendingFriendReview ?? MeshFriendReviewBatch(entries: [])
+        batch.photos.insert(metadata, at: 0)
+        batch.photos = Array(batch.photos.prefix(PendingSessionPhotoStore.maxHeldPhotos))
+        pendingFriendReview = batch
+        FernletAuditLog.log("mesh.heldPhotos.heldAwaiting", context: ["pending": String(batch.photos.count)])
+    }
+
+    /// Re-reads whichever photo index could not be read before — the wall's, the pending corpus's,
+    /// or both — and then runs the reconcile if both are now readable.
+    ///
+    /// Callers: the gate door on a rising ciphertext leg (the unlock or foreground that makes the
+    /// `.completeFileProtection` files readable again), and the top of every hold and answer.
+    /// Nothing re-read the wall before this existed: a wall deferred at a locked background launch
+    /// was an empty album for the rest of the process.
+    ///
+    /// - Parameter now: The instant for the pending load's tombstone pruning.
+    private func retryDeferredPhotoIndexes(now: Date) {
+        guard photoIndexDeferred || heldPhotoIndexDeferral != nil else { return }
+        if photoIndexDeferred { retryDeferredWallIndex() }
+        if heldPhotoIndexDeferral != nil { loadHeldPhotoIndex(now: now) }
+        reconcileHeldPhotosIfReady(now: now)
+    }
+
+    /// The wall half of ``retryDeferredPhotoIndexes(now:)``: one re-read, merged exactly as
+    /// `persistPhotoIndex` merges. While the wall was deferred nothing could be added to
+    /// `meshPhotos` (a keep is refused then, and a hold never touches it), so the merge is the
+    /// recovered index; it is written back only if that ever stops being true.
+    private func retryDeferredWallIndex() {
+        guard case .entries(let recovered) = photoCacheStore.loadIndex() else { return }
+        photoIndexDeferred = false
+        let unsaved = meshPhotos
+        let merged = Self.mergedPhotoIndex(session: unsaved, recovered: recovered)
+        meshPhotos = merged.map { $0.withoutImageData() }
+        if !unsaved.isEmpty { photoCacheStore.save(merged) }
+        prunePhotoWallPreferences()
+        FernletAuditLog.log("mesh.photoIndex.recoveredAfterDeferral", context: ["photos": String(meshPhotos.count)])
+    }
+
+    /// Loads the pending index into the mirror, or records why it cannot be read.
+    ///
+    /// An `.unrecoverable` index (a present key that fails to open it: corruption, or a duress
+    /// crypto-erase) has already been purged by the store; the mirror starts empty and holds may
+    /// proceed.
+    private func loadHeldPhotoIndex(now: Date) {
+        switch heldPhotoStore.load(now: now) {
+        case .loaded(let index):
+            heldPhotoIndex = index
+            heldPhotoIndexDeferral = nil
+        case .deferred(let deferral):
+            heldPhotoIndexDeferral = deferral
+        case .unrecoverable(let purged):
+            FernletAuditLog.log("mesh.heldPhotos.indexUnrecoverable", context: ["purged": String(purged)])
+            heldPhotoIndex = .empty
+            heldPhotoIndexDeferral = nil
+        }
+        refreshHeldPhotosCanBeShown()
+    }
+
+    /// The launch reconcile, once BOTH indexes are readable: a held entry whose local id is on the
+    /// wall, whose key names a wall photo (same sender, same id), or that is tombstoned was already
+    /// answered — the kill landed between an answer's wall commit and its pending write — so it is
+    /// dropped and tombstoned, never offered. Everything else still held is offered as awaiting.
+    ///
+    /// Over a wall that could not be read it would re-offer a kept photo, and a discard of it would
+    /// then leave the wall copy — so it does not run until the wall is readable. While the wall is
+    /// deferred at a LOCKED launch nothing held is offered; once protected data is available and the
+    /// wall still cannot be read, the failure is persistent and waiting would deadlock the review,
+    /// so ``offerHeldPhotosOverUnreadableWallIfPersistent()`` offers them with Keep refused.
+    ///
+    /// - Parameter now: The instant the tombstones are stamped with.
+    private func reconcileHeldPhotosIfReady(now: Date) {
+        defer { refreshHeldPhotosCanBeShown() }
+        guard !heldPhotosReconciled, heldPhotoIndexDeferral == nil else { return }
+        guard !photoIndexDeferred else {
+            offerHeldPhotosOverUnreadableWallIfPersistent()
+            return
+        }
+        let wallIDs = Set(meshPhotos.map(\.id))
+        let stale = heldPhotoIndex.photos.filter {
+            wallIDs.contains($0.localID) || wallHolds($0.key) || heldPhotoIndex.isAnswered($0.key)
+        }
+        if !stale.isEmpty {
+            FernletAuditLog.log("mesh.heldPhotos.reconciled", context: ["dropped": String(stale.count)])
+            commitHeldPhotoAnswers(Set(stale.map(\.key)), now: now)
+            // Already offered over an unreadable wall: take the ones that turned out to be kept back
+            // out of the review.
+            forgetAnsweredHeldPhotos(Set(stale.map(\.localID)))
+        }
+        heldPhotosReconciled = true
+        offerHeldPhotosAwaitingAnswer()
+    }
+
+    /// The persistent-failure half of the reconcile's precondition: with protected data available
+    /// (the device is unlocked, so the `.completeFileProtection` file SHOULD read) the wall still
+    /// cannot be read, so the held photos are offered now — Keep refused with its reason, Delete
+    /// all working — rather than never. See ``heldPhotosOfferedOverUnreadableWall`` for the cost.
+    private func offerHeldPhotosOverUnreadableWallIfPersistent() {
+        guard routedAccessGate.protectedDataAvailable, !heldPhotosOfferedOverUnreadableWall else { return }
+        FernletAuditLog.log("mesh.heldPhotos.offeredOverUnreadableWall")
+        heldPhotosOfferedOverUnreadableWall = true
+        offerHeldPhotosAwaitingAnswer()
+    }
+
+    /// Lists every held photo not already listed as awaiting, in a photos-only batch if none exists:
+    /// the rebuild that makes the review survive a process kill. Newest first, as the index keeps
+    /// them. At a launch nothing is listed yet and no session is live, so every held photo lands
+    /// here.
+    private func offerHeldPhotosAwaitingAnswer() {
+        var listed = Set(sessionPhotos.map(\.id))
+        listed.formUnion(pendingFriendReview?.photos.map(\.id) ?? [])
+        let unlisted = heldPhotoIndex.photos.filter { !listed.contains($0.localID) }.map(\.payload)
+        guard !unlisted.isEmpty else { return }
+        var batch = pendingFriendReview ?? MeshFriendReviewBatch(entries: [])
+        batch.photos = Array((unlisted + batch.photos).prefix(PendingSessionPhotoStore.maxHeldPhotos))
+        pendingFriendReview = batch
+        FernletAuditLog.log("mesh.heldPhotos.offeredFromIndex", context: ["photos": String(unlisted.count)])
+    }
+
+    /// Recomputes ``heldPhotosCanBeShown`` from its three inputs, writing only on a change so an
+    /// unchanged push does not wake every observer.
+    private func refreshHeldPhotosCanBeShown() {
+        let offered = heldPhotosReconciled || heldPhotosOfferedOverUnreadableWall
+        let next = routedAccessGate.isOpen && heldPhotoIndexDeferral == nil && offered
+        if next != heldPhotosCanBeShown { heldPhotosCanBeShown = next }
+    }
+
+    /// Whether the wall's index is readable, so a review may offer Keep. A review presented while it
+    /// is not says why and still offers Delete all, which needs only the pending index.
+    public var wallCanTakeKeeps: Bool { !photoIndexDeferred }
+
+    /// Whether ended-session photos are waiting for the person's answer.
+    public var hasOutstandingPhotoReview: Bool {
+        !(pendingFriendReview?.photos.isEmpty ?? true)
+    }
+
+    /// A held photo's full-size plaintext for the review, or nil. **The decrypt seam for pending
+    /// bytes** (invariant I13): it answers only while the routed access gate is open — unlocked,
+    /// foreground, and NOT under duress — so a duress decoy can never draw a held photo. The wall's
+    /// ``imageData(for:)`` never reads the pending corpus, and this never reads the wall.
+    public func reviewImageData(for photo: FriendPhotoPayload) -> Data? {
+        guard routedAccessGate.isOpen, let held = heldPhotoIndex.heldPhoto(localID: photo.id) else { return nil }
+        return heldPhotoStore.imageData(for: held)
+    }
+
+    /// A held photo's thumbnail plaintext for the review's tiles, or nil — under the same gate as
+    /// ``reviewImageData(for:)``.
+    public func reviewThumbnailData(for photo: FriendPhotoPayload) -> Data? {
+        guard routedAccessGate.isOpen, let held = heldPhotoIndex.heldPhoto(localID: photo.id) else { return nil }
+        return heldPhotoStore.thumbnailData(for: held)
+    }
+
+    /// Delete-all's leg for the photos nobody chose yet (wipe leg 4d): empties the live roll, the
+    /// live roster and the WHOLE pending batch — candidates too, because a keep-as-friend offer from
+    /// a session the person just asked to erase would write new trust rows about it — and the
+    /// mirror (tombstones included: after delete-all the routed store is wiped and the identity
+    /// rotated, so nothing can be re-projected), then removes the `PendingSessionPhotos/` directory.
+    ///
+    /// Clearing the live roster here means a hard-stop leave that runs after the purge promotes
+    /// nothing. The key row survives (an emptied store's key protects nothing), exactly like the
+    /// own-photo row.
+    ///
+    /// - Returns: Whether the corpus directory is gone; false is an incomplete-wipe line.
+    public func purgeHeldSessionPhotosForDeleteAll() -> Bool {
+        sessionPhotos = []
+        sessionRoster = []
+        pendingFriendReview = nil
+        heldPhotoIndex = .empty
+        let purged = heldPhotoStore.purgeAll()
+        if purged { heldPhotoIndexDeferral = nil }
+        refreshHeldPhotosCanBeShown()
+        FernletAuditLog.log("mesh.heldPhotos.purgedForDeleteAll", context: ["purged": String(purged)])
+        return purged
+    }
+
+    // MARK: - The held-photo answer (2026-09-30)
+
+    /// The one engine every session-photo answer runs through (ids are LOCAL ids).
+    ///
+    /// Order, and why:
+    /// 1. The routed access gate must be open — a keep reads plaintext, and no answer may run under
+    ///    duress or in the background. Otherwise nothing is applied (`unavailable`).
+    /// 2. The deferred indexes are re-read. A pending index still unreadable applies nothing; a wall
+    ///    still unreadable refuses the keeps (`keepUnavailable`) while the DISCARDS proceed.
+    /// 3. Kept photos are hydrated from the pending corpus and committed to the wall with
+    ///    `PrivateMediaStore.commitKept(_:onto:)`, which reports exactly which ones landed; the
+    ///    wall mirror is REPLACED with the committed wall. A kept photo whose bytes do not open is
+    ///    `unreadable` and treated as discarded; one the wall did not take stays held
+    ///    (`wallWriteFailed`) and nothing of its is swept.
+    /// 4. ONE pending index write removes and tombstones every answered photo — only after the wall
+    ///    commit, so a kill in between leaves a photo both kept and held, which the launch
+    ///    reconcile repairs; never the reverse.
+    /// 5. The memory lists and the wall preferences follow.
+    ///
+    /// - Parameters:
+    ///   - kept: The ids to keep.
+    ///   - discarded: The ids to delete (an id in both is kept).
+    ///   - now: The instant the tombstones are stamped with.
+    /// - Returns: The per-photo report. Ids not held are in no set.
+    func applyPhotoAnswers(kept: Set<UUID>, discarded: Set<UUID>, now: Date) -> SessionPhotoAnswer {
+        let asked = kept.union(discarded)
+        guard !asked.isEmpty else { return .nothing }
+        guard routedAccessGate.isOpen else {
+            FernletAuditLog.log("mesh.heldPhotos.answerRefused", context: ["reason": "gateClosed"])
+            return Self.answerNotApplied(asked.intersection(heldPhotoIndex.heldLocalIDs))
+        }
+        retryDeferredPhotoIndexes(now: now)
+        guard heldPhotoIndexDeferral == nil else {
+            FernletAuditLog.log("mesh.heldPhotos.answerRefused", context: ["reason": "pendingIndexDeferred"])
+            return Self.answerNotApplied(asked.intersection(heldPhotoIndex.heldLocalIDs))
+        }
+        let heldKept = heldPhotoIndex.photos.filter { kept.contains($0.localID) }
+        let heldDiscarded = heldPhotoIndex.photos.filter {
+            discarded.contains($0.localID) && !kept.contains($0.localID)
+        }
+        let keep = keepHeldPhotosOnWall(heldKept)
+        let answered = keep.landed + keep.unreadable + heldDiscarded
+        commitHeldPhotoAnswers(Set(answered.map(\.key)), now: now)
+        forgetAnsweredHeldPhotos(Set(answered.map(\.localID)))
+        if keep.wallChanged { prunePhotoWallPreferences() }
+        return SessionPhotoAnswer(
+            keptOnWall: Set(keep.landed.map(\.localID)),
+            discarded: Set(heldDiscarded.map(\.localID)),
+            unreadable: Set(keep.unreadable.map(\.localID)),
+            notApplied: Set(keep.notLanded.map(\.localID)),
+            failure: keep.failure
+        )
+    }
+
+    /// An answer that applied nothing: every held id it named is still held, for the stated reason.
+    private static func answerNotApplied(_ held: Set<UUID>) -> SessionPhotoAnswer {
+        SessionPhotoAnswer(keptOnWall: [], discarded: [], unreadable: [], notApplied: held, failure: .unavailable)
+    }
+
+    /// What step 3 of ``applyPhotoAnswers(kept:discarded:now:)`` did with the kept photos.
+    ///
+    /// Concurrency: a plain value, built and read on the manager's actor.
+    private struct HeldKeepOutcome {
+        /// On the wall: their sealed bytes landed and the committed index names them.
+        var landed: [HeldSessionPhoto] = []
+        /// Their held bytes could not be opened; answered like a discard.
+        var unreadable: [HeldSessionPhoto] = []
+        /// Still held, untouched: the wall could not take them, or cannot be read at all.
+        var notLanded: [HeldSessionPhoto] = []
+        /// Why ``notLanded`` is not empty.
+        var failure: SessionPhotoAnswerFailure?
+        /// Whether the wall index was rewritten (its preferences are then re-pruned).
+        var wallChanged = false
+    }
+
+    /// Step 3: copies the kept photos to the wall through the per-photo keep commit, re-sealing
+    /// them under the wall key (no file ever moves between corpora). Each carries the finalized
+    /// session metadata its memory list holds, falling back to what was stamped at hold.
+    private func keepHeldPhotosOnWall(_ held: [HeldSessionPhoto]) -> HeldKeepOutcome {
+        guard !held.isEmpty else { return HeldKeepOutcome() }
+        guard !photoIndexDeferred else {
+            FernletAuditLog.log("mesh.heldPhotos.keepRefused", context: ["reason": "wallDeferred"])
+            return HeldKeepOutcome(notLanded: held, failure: .keepUnavailable)
+        }
+        var hydrated: [FriendPhotoPayload] = []
+        var unreadable: [HeldSessionPhoto] = []
+        // R2: bounded by the held-photo cap.
+        for photo in held {
+            guard let data = heldPhotoStore.imageData(for: photo) else {
+                unreadable.append(photo)
+                continue
+            }
+            hydrated.append(listedPayload(for: photo).withDecryptedImageData(data))
+        }
+        let result = photoCacheStore.commitKept(hydrated, onto: meshPhotos)
+        if result.indexCommitted { meshPhotos = result.committedWall }
+        let unreadableIDs = Set(unreadable.map(\.localID))
+        let landed = held.filter { result.keptOnWall.contains($0.localID) }
+        let notLanded = held.filter { !result.keptOnWall.contains($0.localID) && !unreadableIDs.contains($0.localID) }
+        if !unreadable.isEmpty {
+            FernletAuditLog.log("mesh.heldPhotos.unreadableAtKeep", context: ["count": String(unreadable.count)])
+        }
+        if !notLanded.isEmpty {
+            FernletAuditLog.log("mesh.heldPhotos.keepNotLanded", context: ["count": String(notLanded.count)])
+        }
+        return HeldKeepOutcome(
+            landed: landed, unreadable: unreadable, notLanded: notLanded,
+            failure: notLanded.isEmpty ? nil : .wallWriteFailed, wallChanged: result.indexCommitted
+        )
+    }
+
+    /// The payload a kept photo goes to the wall with: the memory list's copy (it carries the
+    /// session metadata finalized at the ending), else the one stamped at hold (after a kill).
+    private func listedPayload(for held: HeldSessionPhoto) -> FriendPhotoPayload {
+        sessionPhotos.first { $0.id == held.localID }
+            ?? pendingFriendReview?.photos.first { $0.id == held.localID }
+            ?? held.payload
+    }
+
+    /// Step 4: ONE pending index write that removes and tombstones `keys`. A write that fails after
+    /// the person answered still takes them out of the mirror (audited): the review stops offering
+    /// them and the next write that lands persists the answer; a kill first re-offers a discarded
+    /// photo (never keeps it) and the reconcile repairs a kept one.
+    private func commitHeldPhotoAnswers(_ keys: Set<HeldPhotoKey>, now: Date) {
+        guard !keys.isEmpty else { return }
+        let (committed, next) = heldPhotoStore.commitAnswers(keys, in: heldPhotoIndex, now: now)
+        guard !committed else {
+            heldPhotoIndex = next
+            return
+        }
+        FernletAuditLog.log("mesh.heldPhotos.answerNotPersisted", context: ["count": String(keys.count)])
+        heldPhotoIndex = PendingSessionPhotoStore.answering(keys, in: heldPhotoIndex, now: now)
+    }
+
+    /// Step 5: answered photos leave both memory projections, and a batch left with nothing clears.
+    private func forgetAnsweredHeldPhotos(_ ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        sessionPhotos.removeAll { ids.contains($0.id) }
+        guard var batch = pendingFriendReview, batch.photos.contains(where: { ids.contains($0.id) }) else { return }
+        batch.photos.removeAll { ids.contains($0.id) }
+        pendingFriendReview = batch.isEmpty ? nil : batch
     }
 
     // MARK: - Public API
@@ -2771,14 +3312,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// Captures one photo onto this device's own wall and shares it as a routed item (P5 item 13).
+    /// Captures one photo, HOLDS it in the sealed pending corpus, and shares it as a routed item
+    /// (P5 item 13).
     ///
-    /// **The local echo is unconditional**, and that is the shipped behaviour, not a new decision
-    /// (D-13.8): both retired arms cached before any send and incremented the session counter
-    /// whichever way the send went, so a solo member has always got a wall entry and no error.
-    /// Only the TRANSPORT is conditional — the routed door answers `.skipped` where there is nobody
-    /// to send to, `.staged` where the item is minted, and `.refused` only for a mint that was
-    /// attempted and failed.
+    /// **The local copy is held, never put on the wall** (2026-09-30): it waits for the person's
+    /// review like every other session photo, live if the session is, awaiting if it is not. The
+    /// share is unconditional on the transport side as before — the routed door answers `.skipped`
+    /// where there is nobody to send to, `.staged` where the item is minted, and `.refused` only
+    /// for a mint that was attempted and failed — but **only a held photo is shared**: if this
+    /// phone cannot seal its own copy, it spends no film and sends nothing, and says "Couldn't keep
+    /// that photo" (the routed store's rule, "if you cannot seal, you must not acknowledge").
     ///
     /// What replaced what: the group-key seal and the epoch-0 plaintext broadcast are both gone,
     /// with the per-recipient content-key wrap in their place. An open-mesh photo used to travel in
@@ -2801,8 +3344,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
               let normalized = image.resizedForFriendSharing().jpegData(compressionQuality: 0.82) else { return }
         let itemID = UUID()
         let addedAt = Date()
+        let live = isSessionLive
         let session = currentPhotoSessionMetadata()
-        cachePhoto(FriendPhotoPayload(
+        let photo = FriendPhotoPayload(
             id: itemID,
             imageData: normalized,
             addedAt: addedAt,
@@ -2810,7 +3354,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             senderFingerprint: identity.localFingerprint,
             senderSigningPublicKey: identity.localSigningPublicKey,
             session: session
-        ), includeInSession: true)
+        )
+        let key = MeshContentKey(senderFingerprint: identity.localFingerprint, contentID: itemID)
+        guard holdSessionPhoto(photo, key: key, live: live) == .held else {
+            meshError = ProximityUICopy.Camera.holdFailed
+            return
+        }
         photosAddedThisSession += 1
         shareRoutedPhoto(itemID: itemID, addedAt: addedAt, imageData: normalized, session: session)
     }
@@ -2821,7 +3370,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `originFingerprint`, and the signing key is the receiver's own admission ledger. A refusal
     /// reaches the user as a frozen token on ``routedShareRefusal``; a skip — nobody to send to —
     /// reaches them as a count on ``photosKeptOnThisPhone``; a staged item says nothing, because
-    /// the echo on the wall is the feedback.
+    /// the held copy in the camera's roll is the feedback.
     private func shareRoutedPhoto(
         itemID: UUID, addedAt: Date, imageData: Data, session: FriendPhotoSessionMetadata
     ) {
@@ -2852,8 +3401,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// The skip's one observable half (P8 item 0, device finding (c)): the capture is on this
-    /// device's wall and on no other, and never will be, so it is counted on
+    /// The skip's one observable half (P8 item 0, device finding (c)): the capture is held on this
+    /// device and on no other, and never will be, so it is counted on
     /// ``photosKeptOnThisPhone`` — which the app says as one sentence — and audited once, on the
     /// same terms as a refusal but under its own token, because nothing failed.
     private func noteRoutedPhotoSkip(_ skip: MeshRoutedShareSkip) {
@@ -3418,7 +3967,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// **Memory-only, and deliberately not a fourth stored rung** (D-13.16): a stored "handed to the
     /// app" state is exactly what ``MeshDeliveryTarget`` was built to avoid, since a max-merge could
     /// then overwrite it. This set exists so the per-origin quota is not spent twice inside one
-    /// session; across a restart the friend-photo wall's own `photo.id` dedup absorbs a re-hand.
+    /// session; across a restart the held/answered/wall dedup, keyed by origin and item id
+    /// (``holdSessionPhoto(_:key:live:)``, its durable tombstones), absorbs a re-hand — and refuses
+    /// one the person already answered, which the old wall-only `photo.id` dedup could not.
     /// Bounded by the store's item cap, cleared with the rest of the drain state, and therefore
     /// owed no `Docs/PrivacyWipeCoverage.md` row.
     /// `private(set)` rather than `private` so a tier-1 cell can OBSERVE the mark instead of
@@ -8582,6 +9133,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) -> MeshRoutedProjectionVerdict {
         switch canonicalStore {
         case .friendPhotoWall:
+            // FIRST, before the body is opened and before the quota (invariant I5): a photo this
+            // phone already answered is refused for good by its (origin, item id) tombstone, so a
+            // custody copy still live in the mesh can never become a photo here again; one already
+            // held or on the wall is handed on without a second write.
+            if let settled = routedPhotoSettlement(manifest) { return settled }
             guard let body = openedRoutedPhotoBody(blob, manifest: manifest) else {
                 return .refusedForGood
             }
@@ -8747,24 +9303,49 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// The canonical-store write itself: the SAME effects the legacy `.friendPhoto` handler produced,
-    /// reached through the same functions.
+    /// Whether a routed photo's identity is already settled on this phone, asked before its body is
+    /// opened: tombstoned → `refusedForGood` (it was answered — kept, discarded or deleted — and must
+    /// never come back; the verdict takes it off the retry list), already held or on the wall →
+    /// `handedOn` with nothing written, otherwise nil.
     ///
-    /// The per-origin quota, the display-field sanitisation, `cachePhoto` (and with it the wall, the
-    /// FIFO cap, the preference pruning and the sealed `PrivateMediaStore` index) and the closeness
-    /// hook are all unchanged. Two things are corrected rather than reproduced: the attribution
-    /// comes from the origin's signed fingerprint and the ledger's key for it instead of an unsigned
-    /// claim in the payload, and the closeness hook is called with the **origin** rather than the
-    /// courier that happened to carry the bytes.
+    /// Keyed on the SIGNED origin and item id (``MeshContentKey``), never the id alone: a member
+    /// who copies another member's item id can neither make the genuine photo look settled nor get
+    /// it tombstoned.
+    private func routedPhotoSettlement(_ manifest: MeshRoutedManifest) -> MeshRoutedProjectionVerdict? {
+        let key = HeldPhotoKey(origin: manifest.originFingerprint, itemID: manifest.itemID)
+        switch heldPhotoSettlement(key) {
+        case .answered?:
+            FernletAuditLog.log("mesh.routedProjection.photoAlreadyAnswered", context: heldMeshAuditContext())
+            return .refusedForGood
+        case .alreadyHeld?:
+            return .handedOn
+        default:
+            return nil
+        }
+    }
+
+    /// The canonical-store write for a routed photo: it is HELD for the person's review
+    /// (``holdSessionPhoto(_:key:live:)``), never put on the wall (2026-09-30).
     ///
-    /// The one call site is ``projectRoutedItemIfPermitted(key:manifest:)``, which has just
-    /// consulted ``mayMutateCanonicalStoreWithRoutedContent``; the pin in
-    /// `MeshRoutedLockedDeviceTests` is what makes a second, ungated one a build failure.
+    /// The per-origin quota, the display-field sanitisation and the closeness hook are unchanged;
+    /// the attribution comes from the origin's signed fingerprint and the ledger's key for it, and
+    /// the closeness hook is called with the **origin** rather than the courier.
     ///
-    /// It takes **no clock**: every instant it writes is the origin's signed one
-    /// (`body.header.addedAt`), and the session question is `isPhotoFromCurrentSession`'s, which
-    /// reads this device's own session window. A `now:` parameter here would be read by nothing and
-    /// would say, falsely, that the projection dates what it stores.
+    /// **Live is the SIGNED mesh id's call**: the photo belongs to the live session when a session
+    /// is live and `manifest.meshID` is the current mesh — never the optional, peer-supplied
+    /// `header.session`, so a session-less photo from the live mesh joins the live roll (and is
+    /// stamped with its metadata) instead of disturbing it as an awaiting one. A late arrival — the
+    /// session ended, a reunion delivery, another mesh — is held awaiting and re-triggers the review.
+    ///
+    /// A hold that cannot be persisted (the corpus is full, or no key) is `refusedForNow`: the item
+    /// stays in routed custody and is retried after the review frees room. An unsafe image is
+    /// refused for good, as no retry can change it.
+    ///
+    /// The one call site is ``dispatchRoutedPlaintext(_:store:author:manifest:seenAt:)``, which has
+    /// just consulted ``mayMutateCanonicalStoreWithRoutedContent``; the pin in
+    /// `MeshRoutedLockedDeviceTests` is what makes a second, ungated one a build failure. It takes
+    /// **no clock**: the one instant it stores is the origin's signed `addedAt`, and the hold's own
+    /// `heldAt` is this phone's clock at the write, read there.
     private func routedCanonicalDispatch(
         _ body: MeshRoutedPhotoBody,
         author: MeshRosterMember,
@@ -8782,10 +9363,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             senderSigningPublicKey: author.signingPublicKey,
             session: body.header.session
         ))
-        let inSession = isPhotoFromCurrentSession(photo)
-        cachePhoto(photo, includeInSession: inSession)
-        if inSession { onFriendPhotoSession?(author.fingerprint) }
-        return .handedOn
+        let live = isSessionLive && manifest.meshID == currentMesh?.meshID
+        let key = MeshContentKey(senderFingerprint: manifest.originFingerprint, contentID: manifest.itemID)
+        switch holdSessionPhoto(photo, key: key, live: live) {
+        case .held:
+            if live { onFriendPhotoSession?(author.fingerprint) }
+            return .handedOn
+        case .alreadyHeld:
+            return .handedOn
+        case .answered, .unsafeImage:
+            return .refusedForGood
+        case .full, .notPersisted:
+            return .refusedForNow
+        }
     }
 
     /// The canonical-store write for a routed TEXT item: the same effects the legacy `.tempMessage`
@@ -13270,8 +13860,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: - Photo handling
 
-    /// Coerces a peer-supplied photo payload before it reaches the PERSISTENT wall cache (R3/R5):
-    /// moderated sender name, moderated + capped session participants, capped mesh name.
+    /// Coerces a peer-supplied photo payload before it is held in the sealed pending corpus (and so
+    /// before it can ever reach the persistent wall) (R3/R5): moderated sender name, moderated +
+    /// capped session participants, capped mesh name.
     ///
     /// Its one caller is now ``routedCanonicalDispatch(_:author:manifest:)``, which hands it a
     /// payload built from an opened routed body — so the encrypted branch below is unreachable for
@@ -13320,26 +13911,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             senderSigningPublicKey: payload.senderSigningPublicKey,
             session: session
         )
-    }
-
-    private func cachePhoto(_ photo: FriendPhotoPayload, includeInSession: Bool = false) {
-        guard !meshPhotos.contains(where: { $0.id == photo.id }) else { return }
-        let cachedPhoto = includeInSession ? photo.withSession(currentPhotoSessionMetadata()) : photo
-        meshPhotos.insert(cachedPhoto.withoutImageData(), at: 0)
-        // Metadata-only entries (no image bytes), so the in-memory list can mirror the disk cap.
-        // Keeping it at the spec's 1000 makes the FIFO cap and the 900-photo soft-warning real;
-        // the full-resolution bytes stay on disk and rehydrate on demand.
-        let evictedByCap = meshPhotos.count > PrivateMediaStore.maxCachedPhotos
-        meshPhotos = Array(meshPhotos.prefix(PrivateMediaStore.maxCachedPhotos))
-        persistPhotoIndex(meshPhotos.map { $0.id == cachedPhoto.id ? cachedPhoto : $0 })
-        if evictedByCap { prunePhotoWallPreferences() }
-        if includeInSession {
-            // Store metadata only; the full-resolution bytes were just persisted to the disk
-            // cache above and are rehydrated on demand (see `imageData(for:)`).
-            // Retaining raw bytes here grew unbounded in memory for the whole session.
-            sessionPhotos.insert(cachedPhoto.withoutImageData(), at: 0)
-            sessionPhotos = Array(sessionPhotos.prefix(Self.maxSessionPhotos))
-        }
     }
 
     public func imageData(for photo: FriendPhotoPayload) -> Data? {
@@ -13483,10 +14054,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     private func persistPhotoWallPreferences() {
         photoWallPreferencesStore.save(photoWallPreferences)
-    }
-
-    private func isPhotoFromCurrentSession(_ photo: FriendPhotoPayload) -> Bool {
-        photoSessionStartedAt != nil && photo.session != nil
     }
 
     // MARK: - Clothing shop (Phase 3a)
@@ -13960,6 +14527,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public func wipeIdentityForDeleteAll() throws {
         try identity.wipe()
         photoCacheStore.invalidateEncryptionKeyCache()
+        heldPhotoStore.invalidateEncryptionKeyCache()
     }
 
     // MARK: - Phase 3: Static decrypt helper (the surviving control half)

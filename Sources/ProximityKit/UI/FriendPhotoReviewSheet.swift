@@ -8,13 +8,16 @@ import os
 
 /// One selectable photo thumbnail in the session-end review grid.
 ///
-/// Renders the payload's inline bytes when present, otherwise rehydrates them on demand through
-/// `loadImageData` (session photos are held metadata-only to bound memory); a checkmark overlay
-/// marks selection.
+/// Renders the payload's inline bytes when present, otherwise loads them on demand through
+/// `loadImageData` (session photos are held metadata-only, sealed in the pending corpus; the host
+/// passes its gated seam); a checkmark overlay marks selection.
 struct FriendPhotoTile: View {
     let photo: FriendPhotoPayload
     let selected: Bool
     var loadImageData: (() -> Data?)? = nil
+    /// Part of the load's identity: a new value loads the bytes again (the review's decrypt seam
+    /// may have been closed the first time).
+    var reloadToken = 0
 
     @State private var loadedImageData: Data?
 
@@ -60,23 +63,41 @@ struct FriendPhotoTile: View {
         )
         // Selection was conveyed by a moss checkmark alone — say it out loud too.
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .task(id: photo.id) {
+        .task(id: "\(photo.id.uuidString)#\(reloadToken)") {
             guard photo.imageData == nil else { return }
             loadedImageData = loadImageData?()
         }
     }
 }
 
-/// The session-end photo review sheet: pick which shared pictures to keep (everything else is
-/// deleted from the temporary cache), with the keep-as-friend section riding along when eligible
+/// What the review is busy doing while its buttons are disabled — a line the sheet renders from its
+/// own catalog, so a host in another bundle never passes display text in.
+///
+/// Concurrency: an immutable `Sendable` value.
+public enum FriendPhotoReviewWorkingMessage: Equatable, Sendable {
+    /// The kept photos are being copied to the system Photos library (after the keep landed).
+    case savingToPhotos
+}
+
+/// The session-end photo review sheet: pick which session pictures to keep — nothing is saved,
+/// anywhere, until this answer — with the keep-as-friend section riding along when eligible
 /// candidates exist.
 ///
-/// Presented by the app's session-end flow off the promoted review state; the host supplies the
-/// save/discard actions (explicitly `@MainActor`-typed so their bodies stay on the main actor
-/// after `await` resumes) and the optional disk-cache rehydrator for metadata-only photos.
-/// A host that also passes `saveToPhotos` gets the split (FRND-12) action bar: keeping to the
-/// in-app wall is the primary action and the system photo-library export is a separate,
-/// strictly optional button — so a Photos permission denial can never cost the user the keep.
+/// Presented by the app's hosts (the Friends surface's session-end review, the camera's Develop
+/// review) over photos HELD in the sealed pending corpus (2026-09-30): ``keepSelected`` copies the
+/// ticked ones to the in-app wall, ``discardAll`` deletes every shown one, and the host reads the
+/// manager's per-photo answer. Copying to the system Photos library is an opt-in toggle
+/// (``alsoSaveToPhotos``) the HOST applies only after the keep has landed and only to the photos
+/// that landed — there is no path from this sheet to the camera roll before the choice.
+///
+/// Two host-driven states: ``answerFailure`` keeps an unapplied answer on screen with an inline line
+/// (the photos are still offered; nothing was lost), and ``canKeep`` false disables Keep with the
+/// reason while Delete all still works. While the scene is not `.active` the sheet draws an opaque
+/// cover INSTEAD of the grid, so the app-switcher snapshot never holds a photo nobody chose (the
+/// switcher can be entered without a background transition, hence `!= .active`).
+///
+/// The actions are explicitly `@MainActor`-typed so their bodies stay on the main actor after an
+/// `await` resumes.
 public struct FriendPhotoReviewSheet: View {
     let photos: [FriendPhotoPayload]
     @Binding var selectedIDs: Set<UUID>
@@ -84,24 +105,32 @@ public struct FriendPhotoReviewSheet: View {
     /// (empty = hide the section). The host mints the kept set when the review completes.
     var friendCandidates: [MeshSessionRosterEntry] = []
     var keptFriendFingerprints: Binding<Set<String>> = .constant([])
-    // MainActor-typed so the supplied closure bodies (which touch @MainActor mesh state and
-    // @State) run on the main actor even after an `await` resume, not the module's default
-    // (which erases to a bare function value that can resume off-main).
-    let saveSelected: @MainActor () async -> Void
-    /// FRND-12: when non-nil the pinned bar splits in two — the primary action becomes
-    /// "Keep selected" (`saveSelected`, in-app wall only, no Photos authorization involved) and
-    /// this closure runs behind a secondary "Also save to Photos" button, so a photo-library
-    /// permission denial can never cost the user the keep. When nil the bar keeps the single
-    /// legacy "Save selected" primary and the host owns the whole save flow.
-    var saveToPhotos: (@MainActor () async -> Void)? = nil
-    let discardAll: @MainActor () -> Void
-    /// Rehydrates a photo's bytes on demand (from the disk cache) for tiles whose in-memory
-    /// payload carries no image data — session photos are stored metadata-only to bound memory.
+    /// The opt-in "Also save kept photos to Photos" toggle, off each time the review presents. The
+    /// host reads it after the keep; the sheet never exports anything itself.
+    @Binding var alsoSaveToPhotos: Bool
+    /// False while the wall cannot take a keep (its index cannot be read): Keep is disabled with the
+    /// reason, and Delete all still works — a broken wall never deadlocks the review.
+    let canKeep: Bool
+    /// What the host is busy doing, shown as a status line while every button is disabled.
+    let workingMessage: FriendPhotoReviewWorkingMessage?
+    /// Why the last answer was not applied in full, shown inline (the review stays up).
+    let answerFailure: SessionPhotoAnswerFailure?
+    /// How many kept photos could not be opened and were removed by the last answer.
+    let unreadableCount: Int
+    /// Bumped by the host when the decrypt seam reopens, so a tile that loaded nothing while it was
+    /// closed loads again.
+    let tileReloadToken: Int
+    let keepSelected: @MainActor () async -> Void
+    let discardAll: @MainActor () async -> Void
+    /// Loads a held photo's bytes for its tile (the host's gated seam); nil draws a placeholder.
     var loadImageData: ((FriendPhotoPayload) -> Data?)? = nil
     @State private var isSaving = false
-    /// "Delete all" discards every shared picture from this device and leaves the session — on a
-    /// sheet that (in the disconnect flow) can't even be swiped away. It asks first.
+    /// "Delete all" deletes every shown picture from this device — on a sheet that (in the
+    /// disconnect flow) can't even be swiped away. It asks first.
     @State private var askingToDeleteAll = false
+    /// Read for the snapshot cover. Both hosts are SwiftUI presentations inside the app scene, so
+    /// the scene's phase reaches this sheet through the environment.
+    @Environment(\.scenePhase) private var scenePhase
     /// Adaptive-grid cell minimum, scaled with Dynamic Type (accessibility wall rule
     /// A5-GRID-SCALES). A bare `110` pins the cell while ``FriendPhotoTile``'s contents grow
     /// inside it; this grows the column with them, so the grid reflows to fewer, larger tiles at
@@ -113,22 +142,48 @@ public struct FriendPhotoReviewSheet: View {
     /// so this is not a visual change for anyone who has not asked for one.
     @ScaledMetric(relativeTo: .body) private var photoTileMinimum: CGFloat = 110
 
+    /// Creates the review.
+    ///
+    /// - Parameters:
+    ///   - photos: The held photos to offer (metadata only; tiles load through `loadImageData`).
+    ///   - selectedIDs: The ticked photos.
+    ///   - friendCandidates: Eligible keep-as-friend candidates (empty hides the section).
+    ///   - keptFriendFingerprints: The candidates the person chose to keep.
+    ///   - alsoSaveToPhotos: The opt-in camera-roll toggle the host applies after the keep.
+    ///   - canKeep: Whether the wall can take a keep right now.
+    ///   - workingMessage: What the host is busy doing, if anything.
+    ///   - answerFailure: Why the last answer was not applied in full, if it was not.
+    ///   - unreadableCount: Kept photos the last answer removed because they could not be opened.
+    ///   - tileReloadToken: Changes when tiles should load again.
+    ///   - keepSelected: Keeps the ticked photos.
+    ///   - discardAll: Deletes every shown photo (after the sheet's own confirmation).
+    ///   - loadImageData: The tile loader.
     public init(
         photos: [FriendPhotoPayload],
         selectedIDs: Binding<Set<UUID>>,
         friendCandidates: [MeshSessionRosterEntry] = [],
         keptFriendFingerprints: Binding<Set<String>> = .constant([]),
-        saveSelected: @escaping @MainActor () async -> Void,
-        saveToPhotos: (@MainActor () async -> Void)? = nil,
-        discardAll: @escaping @MainActor () -> Void,
+        alsoSaveToPhotos: Binding<Bool>,
+        canKeep: Bool = true,
+        workingMessage: FriendPhotoReviewWorkingMessage? = nil,
+        answerFailure: SessionPhotoAnswerFailure? = nil,
+        unreadableCount: Int = 0,
+        tileReloadToken: Int = 0,
+        keepSelected: @escaping @MainActor () async -> Void,
+        discardAll: @escaping @MainActor () async -> Void,
         loadImageData: ((FriendPhotoPayload) -> Data?)? = nil
     ) {
         self.photos = photos
         self._selectedIDs = selectedIDs
         self.friendCandidates = friendCandidates
         self.keptFriendFingerprints = keptFriendFingerprints
-        self.saveSelected = saveSelected
-        self.saveToPhotos = saveToPhotos
+        self._alsoSaveToPhotos = alsoSaveToPhotos
+        self.canKeep = canKeep
+        self.workingMessage = workingMessage
+        self.answerFailure = answerFailure
+        self.unreadableCount = unreadableCount
+        self.tileReloadToken = tileReloadToken
+        self.keepSelected = keepSelected
         self.discardAll = discardAll
         self.loadImageData = loadImageData
     }
@@ -140,7 +195,7 @@ public struct FriendPhotoReviewSheet: View {
                 .font(.fernlet(.displayMedium))
                 .foregroundStyle(Color.bark)
 
-            Text(verbatim: explainerText)
+            Text(verbatim: ProximityUICopy.Review.explainerPending)
                 .font(.fernlet(.body))
                 .foregroundStyle(Color.slate)
                 .fernletWrappingText()
@@ -153,7 +208,8 @@ public struct FriendPhotoReviewSheet: View {
                         FriendPhotoTile(
                             photo: photo,
                             selected: selectedIDs.contains(photo.id),
-                            loadImageData: loadImageData.map { load in { load(photo) } }
+                            loadImageData: loadImageData.map { load in { load(photo) } },
+                            reloadToken: tileReloadToken
                         )
                     }
                     .buttonStyle(.plain)
@@ -172,36 +228,76 @@ public struct FriendPhotoReviewSheet: View {
         .padding(.bottom, 10)
     }
 
-    /// The pinned action bar. Legacy form: discard everything, or save what was picked. Split
-    /// (FRND-12) form: the optional "Also save to Photos" export rides above the decisive pair,
-    /// and the primary keeps to the in-app wall with no Photos-library involvement.
+    /// The pinned action bar: the status line (when there is one), the opt-in camera-roll toggle,
+    /// then the decisive pair — delete everything shown, or keep what was picked.
     private var actionBar: some View {
         VStack(spacing: 10) {
-            if let saveToPhotos {
-                Button(ProximityUICopy.Review.alsoSaveToPhotos) {
-                    runExclusively { await saveToPhotos() }
-                }
-                .buttonStyle(ActionPillButtonStyle(.secondary))
-                .disabled(selectedIDs.isEmpty || isSaving)
-                .accessibilityIdentifier("friends.review.alsoSaveToPhotos")
+            if let line = statusLine {
+                Text(verbatim: line.text)
+                    .font(.fernlet(.bodySmall))
+                    .foregroundStyle(line.isFailure ? Color.bark : Color.slate)
+                    .multilineTextAlignment(.center)
+                    .fernletWrappingText()
+                    .accessibilityIdentifier(line.identifier)
             }
+            Toggle(isOn: $alsoSaveToPhotos) {
+                Text(verbatim: ProximityUICopy.Review.alsoSaveToPhotosToggle)
+                    .font(.fernlet(.body))
+                    .foregroundStyle(Color.bark)
+            }
+            .tint(Color.moss)
+            .disabled(isBusy || !keepAvailable)
+            .accessibilityIdentifier("friends.review.alsoSaveToPhotosToggle")
             AdaptiveStack(spacing: 10) {
                 Button(deleteAllLabel) {
                     askingToDeleteAll = true
                 }
                 .buttonStyle(ActionPillButtonStyle(.destructive))
-                .disabled(isSaving)
+                .disabled(isBusy)
                 .accessibilityIdentifier("friends.review.deleteAll")
-                Button(primaryActionLabel) {
-                    runExclusively { await saveSelected() }
+                Button(ProximityUICopy.Review.keepSelected) {
+                    runExclusively { await keepSelected() }
                 }
                 .buttonStyle(ActionPillButtonStyle(.primary))
-                .disabled(selectedIDs.isEmpty || isSaving)
+                .disabled(selectedIDs.isEmpty || isBusy || !keepAvailable)
                 .accessibilityIdentifier("friends.review.saveSelected")
             }
         }
         .padding(16)
         .background(Color.parchment)
+    }
+
+    /// Whether any action is running — this sheet's own, or the host's working state.
+    private var isBusy: Bool { isSaving || workingMessage != nil }
+
+    /// Whether Keep may be offered: the host says the wall can take it, and the last answer did not
+    /// just find it unreadable.
+    private var keepAvailable: Bool { canKeep && answerFailure != .keepUnavailable }
+
+    /// The one status line under the grid, most urgent first: what the host is doing, why Keep is
+    /// off, why the last answer did not land, and what the last answer could not open.
+    private var statusLine: FriendPhotoReviewStatusLine? {
+        if workingMessage == .savingToPhotos {
+            return FriendPhotoReviewStatusLine(
+                text: ProximityUICopy.Review.savingToPhotos, identifier: "friends.review.working", isFailure: false
+            )
+        }
+        if !keepAvailable {
+            return FriendPhotoReviewStatusLine(
+                text: ProximityUICopy.Review.keepUnavailable, identifier: "friends.review.keepUnavailable",
+                isFailure: true
+            )
+        }
+        if answerFailure != nil {
+            return FriendPhotoReviewStatusLine(
+                text: ProximityUICopy.Review.answerFailed, identifier: "friends.review.answerFailed", isFailure: true
+            )
+        }
+        guard unreadableCount > 0 else { return nil }
+        return FriendPhotoReviewStatusLine(
+            text: ProximityUICopy.Review.unreadable(unreadableCount), identifier: "friends.review.unreadable",
+            isFailure: true
+        )
     }
 
     /// Runs one bar action at a time: `isSaving` disables every button until the closure resumes.
@@ -213,32 +309,25 @@ public struct FriendPhotoReviewSheet: View {
         }
     }
 
-    /// The affirmative button's label. The split (FRND-12) bar keeps to the in-app wall — "Keep
-    /// selected", no Photos authorization involved; the legacy single-action bar keeps its
-    /// original "Save selected".
-    /// A resolved `String`, not a `LocalizedStringKey`: a key held in package source carries no
-    /// bundle, so SwiftUI resolves it against `Bundle.main` — the app's — which never consults this
-    /// module's catalog (review §4.0). Both words come from ``ProximityUICopy``.
-    private var primaryActionLabel: String {
-        saveToPhotos == nil ? ProximityUICopy.Review.saveSelected : ProximityUICopy.Review.keepSelected
-    }
-
-    /// The explainer under the title — the split (FRND-12) bar talks about keeping, because its
-    /// primary action no longer touches the system photo library.
-    /// Resolved here for the same reason as ``primaryActionLabel``.
-    private var explainerText: String {
-        saveToPhotos == nil ? ProximityUICopy.Review.explainerSave : ProximityUICopy.Review.explainerKeep
-    }
-
     public var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                reviewScrollContent
+        ZStack {
+            if scenePhase == .active {
+                VStack(spacing: 0) {
+                    ScrollView {
+                        reviewScrollContent
+                    }
+                    actionBar
+                }
+            } else {
+                snapshotCover
             }
-
-            actionBar
         }
         .background(Color.parchment)
+        .onChange(of: statusLine?.text) { _, line in
+            // The working line and the inline failure are announced, not only drawn.
+            guard let line else { return }
+            FernletAnnouncer.system.announce(.status, resolved: line)
+        }
         .confirmDestructive(
             photos.count == 1 ? "Delete this shared picture?" : "Delete \(photos.count) shared pictures?",
             isPresented: $askingToDeleteAll,
@@ -247,8 +336,28 @@ public struct FriendPhotoReviewSheet: View {
         ) {
             // Wrapped rather than passed directly: `discardAll` is explicitly `@MainActor`-typed and
             // the modifier's parameter is a plain function type.
-            discardAll()
+            runExclusively { await discardAll() }
         }
+    }
+
+    /// The opaque cover drawn INSTEAD of the review while the scene is not active: no tile image is
+    /// in the view tree, so the snapshot iOS writes for the app switcher cannot hold a pending photo.
+    /// One accessibility element carrying the explanation.
+    private var snapshotCover: some View {
+        ZStack {
+            Color.parchment.ignoresSafeArea()
+            VStack(spacing: 8) {
+                Image(systemName: "lock.fill")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(Color.slate)
+                Text(verbatim: ProximityUICopy.Review.snapshotCover)
+                    .font(.fernlet(.labelSmall))
+                    .foregroundStyle(Color.slate)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(verbatim: ProximityUICopy.Review.snapshotCover))
+        .accessibilityIdentifier("friends.review.snapshotCover")
     }
 
     /// "Delete all 12" — the count is what turns a mis-tap into a visible amount of loss.
@@ -265,9 +374,21 @@ public struct FriendPhotoReviewSheet: View {
     }
 }
 
-/// Saves selected friend photos into the system photo library (add-only authorization).
+/// One status line under the review grid: resolved text, its frozen accessibility identifier, and
+/// whether it reports a failure (drawn in the stronger colour).
 ///
-/// Stateless namespace enum used by the review sheet's save action. Deliberately `nonisolated`
+/// Concurrency: an immutable value built during body evaluation.
+private struct FriendPhotoReviewStatusLine: Equatable {
+    let text: String
+    let identifier: String
+    let isFailure: Bool
+}
+
+/// Saves KEPT friend photos into the system photo library (add-only authorization).
+///
+/// Stateless namespace enum used by the review hosts' post-answer export — only ever over the
+/// photos an answer reported landed on the wall, re-read from the wall, never pending bytes — and
+/// by the album carousel's per-photo save of a photo already on the wall. Deliberately `nonisolated`
 /// with a `@Sendable` change block: `PHPhotoLibrary.performChanges` runs on its own serial queue,
 /// and inheriting the module's MainActor default there trips the Swift executor precondition (the
 /// build-19 TestFlight crash). Counts actual creation requests so an all-decode-failure surfaces

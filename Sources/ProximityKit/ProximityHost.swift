@@ -37,8 +37,9 @@ public protocol ProximityHost: AnyObject {
     /// sidecars named by ``HeartDropStorageScope``).
     ///
     /// Comes through the HOST rather than being a constant inside `MeshNetworkManager` because it is
-    /// shared *mutable on-disk state*: `deletePhoto` / `deleteAllSessionPhotos` re-save the whole
-    /// index, and every manager loads that file at init. With one process-wide path, a manager built
+    /// shared *mutable on-disk state*: `deletePhoto` and an answer's keep re-save the whole wall
+    /// index, every hold and answer rewrites the pending session-photo index beside it
+    /// (`PendingSessionPhotos/`, 2026-09-30), and every manager loads both at init. With one process-wide path, a manager built
     /// in one test reads (and overwrites) the wall of every other live one — and under the test
     /// runner, where XCTest and Swift Testing suites run in parallel in ONE process, that is a live
     /// cross-suite race. Routing it through the host means the 49 `MeshNetworkManager(store:)` sites
