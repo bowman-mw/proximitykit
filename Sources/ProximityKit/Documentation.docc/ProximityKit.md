@@ -506,9 +506,10 @@ verify QR read the namespace too. Their serializer overloads take `in purposes:`
 four activity and moderation tags in the serializer until their features move (A0.4). The six routed
 doors and `MeshChannelIntroductionExchange` keep their own copy (a trailing `purposes:` with no
 default), which ``MeshNetworkManager`` fills with its stored `namespace.family.purposes`; the
-transport fills the exchange's from `MeshIntroductionAuthority.namespace`, a requirement the manager
-meets with that same stored value, so a peer's introduction is checked under the label
-`signChannelIntroduction` signs this side's under. Every routed builder signs under its identity's
+transport filled the exchange's from a `MeshIntroductionAuthority.namespace` requirement the manager
+met with that same stored value, until step A0.2.7 gave the radio a copy of its own and retired the
+requirement, so a peer's introduction is checked under the label `signChannelIntroduction` signs this
+side's under. Every routed builder signs under its identity's
 ``IdentityService/purposes``. ``ProximityVerifyQR/makeURL(identity:now:)`` takes the scheme and the
 QR label off the signing identity's namespace, ``ProximityVerifyQR/parse(_:in:)`` compares a scanned
 URL's scheme with the caller's ``ProximityNamespace/Family/verifyQR``, and
@@ -520,8 +521,8 @@ and the app's duress flow their identity's.
 
 **Hashes, seals, salts and the epoch (step A0.2.6).** The routed family's hash and id domains, the
 five AEAD labels, the three HKDF salts and the epoch id's domain read the namespace too, so among the
-core labels only the TLS exporter label (A0.2.7) and the two column seals (A0.2.9) are still read off
-FernletCrypto's registry. ``MeshRoutedContentDigest``'s three statics,
+core labels only the TLS exporter label (moved by A0.2.7) and the two column seals (A0.2.9) were still
+read off FernletCrypto's registry. ``MeshRoutedContentDigest``'s three statics,
 ``MeshRoutedContentHasher/init(purposes:)``, ``MeshChunkAssembly/admit(_:in:)`` and
 ``MeshChunkAssembly/completion(against:in:)`` take the caller's purposes, and the three ids that hash a
 label became functions — ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)`` and
@@ -539,6 +540,21 @@ namespace. `MeshEpochBounds.derivationDomain` is gone:
 ``MeshRotationPolicy/plan(head:coordinatorFingerprint:meshID:presentedRoster:in:)`` derive every
 epoch id under `purposes.hash.meshEpochIDV1`, raw, while parsing and decoding an epoch derive nothing.
 The manager hands every reader it calls its stored namespace; a builder, its identity's.
+
+**The radios (step A0.2.7).** `NetworkMeshSession`, `NetworkPresenceSession` and
+`NetworkRecipeShareSession` take `init(namespace:)` and read what they put on the air once, there:
+their service type and ALPN (`family.radios.mesh`, `.presence`, `.recipeShare`), and for the mesh
+radio the heartbeat (`family.radios.meshHeartbeat`), the TLS exporter label its channel binding
+derives under (`purposes.keyDerivation.meshTLSExporterV1`, handed to the static
+`channelBindingHash(for:exporterLabel:)`) and a copy of `family.purposes`, under which every tunnel's
+``MeshChannelIntroductionExchange`` frames this side's transcript and checks the peer's; each builds
+its one `Logger` from `installation.logSubsystem`. The static service types, ALPNs, heartbeat and
+loggers are gone, and so is the `MeshIntroductionAuthority.namespace` requirement A0.2.5 added while
+the radio held no namespace. The three managers build their radio from their stored namespace
+(``PresenceManager``'s `makeSession` is set in `init`, a closure capturing the `Sendable` value), so
+the manager that signs a tunnel's introduction and the radio that checks the peer's read one
+namespace. The Bonjour instance prefixes, the TLS certificate's common name and the `"Fernlet"`
+display default stay as they are until A0.3.
 
 ## Topics
 

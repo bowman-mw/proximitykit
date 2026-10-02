@@ -344,11 +344,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// host. The default identity is built from it, and since step A0.2.4 its purposes are what the
     /// membership verifiers, the ledger adoption and the admission-token check run under; since
     /// A0.2.5 the six routed verifiers too, the QR ceremony's scan, response and check, and the
-    /// channel introduction this manager signs as the transport's ``MeshIntroductionAuthority``
-    /// (whose requirement it satisfies, so the transport checks the peer's under the same labels);
+    /// channel introduction this manager signs as the transport's ``MeshIntroductionAuthority``;
     /// since A0.2.6 the routed item it seals and hashes, the chunk and receipt ids its replay window
     /// keys on, the routed store's three hashing verbs, the encrypted-metadata door's AAD and every
-    /// epoch id it mints or plans. A0.2's later commits route the rest of this manager's labels and
+    /// epoch id it mints or plans; since A0.2.7 the radio it builds by default, which reads its wire
+    /// values off it and checks the peer's introduction under its labels, the labels this manager
+    /// signs this side's under. A0.2's later commits route the rest of this manager's labels and
     /// names through it.
     /// `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
@@ -648,7 +649,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// - Parameters:
     ///   - store: The host this manager's roots, vaults and namespace hang off.
-    ///   - transport: The radio, or nil for the one this build selects.
+    ///   - transport: The radio, or nil for the one this build selects, built from the host's namespace.
     ///   - identity: The device identity, or nil for this device's own under the host's namespace.
     ///   - heldPhotoKeys: The pending corpus's key provider, or nil for the keychain row.
     init(
@@ -658,9 +659,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         heldPhotoKeys: (any PrivateMediaKeyProviding)? = nil
     ) {
         self.store = store
-        self.transport = transport ?? NetworkMeshSession()
         let namespace = store.proximityNamespace
         self.namespace = namespace
+        self.transport = transport ?? NetworkMeshSession(namespace: namespace)
         let id = identity ?? IdentityService(namespace: namespace)
         // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
         // otherwise every later sign/seal on this identity fails with no visible cause.

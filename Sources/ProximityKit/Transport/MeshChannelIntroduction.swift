@@ -719,13 +719,10 @@ protocol MeshIntroductionAuthority: AnyObject {
     /// did before. Nothing about identity moves: the roster still decides who connects.
     var mayReconcileDivergentEpochs: Bool { get }
 
-    /// The host's protocol identity, as the layer above the transport holds it (plan step A0.2.5).
-    /// The transport hands its `family.purposes` to every ``MeshChannelIntroductionExchange`` it
-    /// starts, so the peer's introduction is checked under the same labels
-    /// ``signChannelIntroduction(_:)`` signs this side's under.
-    var namespace: ProximityNamespace { get }
-
-    /// Signs the introduction transcript with the device's identity key under
-    /// ``namespace``'s `purposes.signature.meshChannelIntroductionV1`.
+    /// Signs the introduction transcript with the device's identity key under the host namespace's
+    /// `purposes.signature.meshChannelIntroductionV1`: the namespace the radio was built from, whose
+    /// `family.purposes` the radio frames this transcript and checks the peer's under (plan step
+    /// A0.2.7; A0.2.5 handed the radio those labels through this protocol, before it held a
+    /// namespace of its own).
     func signChannelIntroduction(_ transcript: Data) throws -> Data
 }

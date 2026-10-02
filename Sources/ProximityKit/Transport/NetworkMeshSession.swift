@@ -5,7 +5,6 @@ import Foundation
 import Network
 import os
 import Security
-import FernletCrypto
 import FernletDomainModel
 import FernletFoundation
 
@@ -305,13 +304,32 @@ final class NetworkPeerChannel: PeerTransport {
 @MainActor
 final class NetworkMeshSession: NetworkChannelHost {
 
-    /// The friend mesh's QUIC service type. Frozen wire token: it must also appear in the app's
-    /// Info.plist `NSBonjourServices` or discovery is silently dead on device.
-    nonisolated static let friendServiceType = "_fernlet-mesh2._udp"
+    /// The friend mesh's QUIC service type, the host namespace's `family.radios.mesh.serviceType`.
+    /// Frozen wire token: it must also appear in the app's Info.plist `NSBonjourServices` or
+    /// discovery is silently dead on device.
+    nonisolated let serviceType: String
 
-    /// ALPN for the mesh protocol. Frozen wire token, never localized, distinct from the DEBUG
-    /// probe's `fernlet-mesh-probe-v1` so a spike build and a shipping build cannot negotiate.
-    nonisolated static let alpn = "fernlet-mesh-v1"
+    /// ALPN for the mesh protocol, the host namespace's `family.radios.mesh.alpn`. Frozen wire token,
+    /// never localized, distinct from the DEBUG probe's `fernlet-mesh-probe-v1` so a spike build and
+    /// a shipping build cannot negotiate.
+    nonisolated let alpn: String
+
+    /// The heartbeat datagram's fixed payload, the host namespace's `family.radios.meshHeartbeat`. A
+    /// frozen wire token, never localized, and filtered out of the inbound path by byte equality so it
+    /// never reaches a decoder as an app frame.
+    nonisolated let heartbeatDatagram: Data
+
+    /// The label every tunnel's channel binding derives its TLS exporter secret under, the host
+    /// namespace's `family.purposes.keyDerivation.meshTLSExporterV1` (role `.tlsExporterLabel`).
+    /// See ``channelBindingHash(for:exporterLabel:)``.
+    nonisolated let tlsExporterLabel: ProximityCryptographicPurpose
+
+    /// The labels every tunnel's ``MeshChannelIntroductionExchange`` frames this side's transcript and
+    /// checks the peer's under, the host namespace's `family.purposes`: the radio's own copy, so the
+    /// exchange needs nothing of the namespace from its ``introductionAuthority``. The manager that
+    /// builds the radio from its namespace signs this side's introduction under the same namespace's
+    /// label.
+    nonisolated let purposes: ProximityNamespace.Purposes
 
     /// Hard ceiling on one inbound frame, enforced before the bytes reach any channel or decoder.
     /// Pinned to the same value the retired `MeshMultipeerSession` used, so both transports refused
@@ -418,7 +436,8 @@ final class NetworkMeshSession: NetworkChannelHost {
     nonisolated static let includesPeerToPeer = true
     #endif
 
-    private static let logger = Logger(subsystem: "com.fernlet", category: "proximity.transport.quic")
+    /// This radio's log, under the host namespace's `installation.logSubsystem`.
+    private let logger: Logger
 
     // MARK: Hooks
 
@@ -559,7 +578,21 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// Peers this radio currently holds a tunnel to.
     var connectedPeers: [PeerHandle] { tunnels.values.map(\.peer) }
 
-    init() {}
+    /// A radio that speaks the host's wire: it advertises and browses the namespace's mesh service
+    /// type, negotiates its ALPN, beats its heartbeat, binds every tunnel's introduction under its
+    /// TLS exporter label, frames and checks that introduction under its labels and logs under its
+    /// subsystem (ProximityKit plan step A0.2.7). Each value is read once, here; building a radio
+    /// starts nothing.
+    ///
+    /// - Parameter namespace: The host's protocol identity, as its manager holds it.
+    init(namespace: ProximityNamespace) {
+        serviceType = namespace.family.radios.mesh.serviceType
+        alpn = namespace.family.radios.mesh.alpn
+        heartbeatDatagram = namespace.family.radios.meshHeartbeat
+        tlsExporterLabel = namespace.family.purposes.keyDerivation.meshTLSExporterV1
+        purposes = namespace.family.purposes
+        logger = Logger(subsystem: namespace.installation.logSubsystem, category: "proximity.transport.quic")
+    }
 
     /// Cancels every task this radio owns.
     ///
@@ -768,7 +801,7 @@ final class NetworkMeshSession: NetworkChannelHost {
             // a refused dial and a dial nobody made are indistinguishable in a `--console-pty`
             // transcript otherwise, and telling those two apart is the whole of a topology bug.
             let lines = peerLines("dial refused \(admission)", key: key)
-            Self.logger.notice("\(lines.logged, privacy: .public)")
+            logger.notice("\(lines.logged, privacy: .public)")
             MeshTransportConsoleLog.echo(lines.echoed)
             return
         }
@@ -1082,10 +1115,10 @@ private extension NetworkMeshSession {
         let listener = try NetworkListener(
             for: .bonjour(
                 name: instanceName,
-                type: Self.friendServiceType,
+                type: serviceType,
                 txtRecord: NWTXTRecord(advertisedFields)
             ),
-            using: Self.listenerParameters(identity: tlsIdentity.identity)
+            using: listenerParameters(identity: tlsIdentity.identity)
         ).newConnectionLimit(MeshLinkTable.maxConcurrentLinks)
         self.listener = listener
         listener.onStateUpdate { [weak self] _, state in
@@ -1139,8 +1172,8 @@ private extension NetworkMeshSession {
     func startBrowser() {
         guard isRunning, !isDiscoveryPaused, browser == nil else { return }
         let browser = NetworkBrowser(
-            for: .bonjour(Self.friendServiceType, includeTxtRecord: true),
-            using: Self.connectionParameters().parameters
+            for: .bonjour(serviceType, includeTxtRecord: true),
+            using: connectionParameters().parameters
         )
         self.browser = browser
         browser.onStateUpdate { [weak self] _, state in
@@ -1168,7 +1201,7 @@ private extension NetworkMeshSession {
             listenerIsReady = true
             startBrowserWhenReady()
         case .waiting(let error):
-            Self.logger.debug("QUIC listener waiting: \(error.localizedDescription, privacy: .public)")
+            logger.debug("QUIC listener waiting: \(error.localizedDescription, privacy: .public)")
         case .failed(let error):
             report("The QUIC listener failed: \(error.localizedDescription)")
         case .setup, .cancelled:
@@ -1202,7 +1235,7 @@ private extension NetworkMeshSession {
         case .failed(let error):
             report("The Bonjour browser failed: \(error.localizedDescription)")
         case .waiting(let error):
-            Self.logger.debug("Bonjour browser waiting: \(error.localizedDescription, privacy: .public)")
+            logger.debug("Bonjour browser waiting: \(error.localizedDescription, privacy: .public)")
         case .ready, .setup, .cancelled:
             break
         @unknown default:
@@ -1213,12 +1246,12 @@ private extension NetworkMeshSession {
     /// QUIC parameters for an outbound mesh connection — ``ProximityQUICParameters`` under the
     /// mesh's own ALPN, so the two radios share one parameter factory and cannot drift apart on the
     /// settings that are safety claims (`prohibitedInterfaceTypes`, the idle timeout).
-    static func connectionParameters() -> NWParametersBuilder<QUIC> {
+    func connectionParameters() -> NWParametersBuilder<QUIC> {
         ProximityQUICParameters.connection(alpn: alpn)
     }
 
     /// QUIC parameters for the mesh listener, presenting this session's ephemeral identity.
-    static func listenerParameters(identity: sec_identity_t) -> NWParametersBuilder<QUIC> {
+    func listenerParameters(identity: sec_identity_t) -> NWParametersBuilder<QUIC> {
         ProximityQUICParameters.listener(alpn: alpn, identity: identity)
     }
 }
@@ -1340,7 +1373,7 @@ private extension NetworkMeshSession {
         guard keys.count != lastBrowseSetCount else { return }
         lastBrowseSetCount = keys.count
         let names = keys.map(\.rawValue).sorted().joined(separator: ",")
-        Self.logger.notice("browsed peers=\(keys.count, privacy: .public) [\(names, privacy: .private)]")
+        logger.notice("browsed peers=\(keys.count, privacy: .public) [\(names, privacy: .private)]")
         MeshTransportConsoleLog.echo("browsed peers=\(keys.count) [\(names)]")
     }
 
@@ -1450,18 +1483,6 @@ private extension NetworkMeshSession {
     }
 }
 
-// MARK: - Heartbeat
-
-extension NetworkMeshSession {
-
-    /// The heartbeat datagram's fixed payload. A frozen wire token, never localized, and filtered
-    /// out of the inbound path so it never reaches a decoder as an app frame.
-    ///
-    /// Internal rather than private only so `ProximityNamespaceGoldenTests` can pin its bytes before
-    /// plan step A0.2 moves the value into the host-supplied namespace.
-    static var heartbeatDatagram: Data { Data("fernlet-mesh-heartbeat".utf8) }
-}
-
 // MARK: - Tunnels
 
 private extension NetworkMeshSession {
@@ -1476,7 +1497,7 @@ private extension NetworkMeshSession {
             handleDialFailure(key, reason: "no cached endpoint for a due re-dial")
             return
         }
-        let connection = NetworkConnection(to: endpoint, using: Self.connectionParameters()).start()
+        let connection = NetworkConnection(to: endpoint, using: connectionParameters()).start()
         let channel = prepareChannel(for: key)
         replaceTunnel(at: key, with: Tunnel(peer: channel.peer, channel: channel, role: .initiator))
         tunnels[key]?.task = Task { @MainActor [weak self] in
@@ -1498,7 +1519,7 @@ private extension NetworkMeshSession {
         guard isRunning else { return }
         let key = MeshLinkKey(connection.id)
         guard pendingInbound[key] == nil, pendingInbound.count < Self.maxPendingInboundTunnels else {
-            Self.logger.debug(
+            logger.debug(
                 "inbound QUIC tunnel refused pre-introduction for \(self.peerLabel(for: key), privacy: .public)"
             )
             return
@@ -1608,7 +1629,7 @@ private extension NetworkMeshSession {
             .filter { now.timeIntervalSince($0.value.startedAt) > Self.introductionDeadlineSeconds }
             .keys
         for key in expired {
-            Self.logger.debug(
+            logger.debug(
                 "inbound QUIC tunnel timed out mid-introduction for \(self.peerLabel(for: key), privacy: .public)"
             )
             dropPendingInbound(key)
@@ -1823,12 +1844,12 @@ private extension NetworkMeshSession {
     ) {
         let lines = peerLines(
             "datagramCapacity usable=\(datagrams.parent.usableDatagramFrameSize) "
-                + "requested=\(Self.datagramFrameSize) required=\(Self.heartbeatDatagram.count) "
+                + "requested=\(Self.datagramFrameSize) required=\(heartbeatDatagram.count) "
                 + "idleTimeoutMs=\(MeshHeartbeatSchedule.idleTimeoutMilliseconds) "
                 + "beatSeconds=\(Int(MeshHeartbeatSchedule.intervalSeconds))",
             key: key
         )
-        Self.logger.notice("\(lines.logged, privacy: .public)")
+        logger.notice("\(lines.logged, privacy: .public)")
         MeshTransportConsoleLog.echo(lines.echoed)
     }
 
@@ -1968,7 +1989,7 @@ private extension NetworkMeshSession {
             let header = try await stream.receive(exactly: NetworkMeshWire.headerByteCount).content
             let length = try NetworkMeshWire.payloadLength(from: header, ceiling: Self.maxInboundWireBytes)
             let payload = try await stream.receive(exactly: length).content
-            guard payload != Self.heartbeatDatagram else {
+            guard payload != heartbeatDatagram else {
                 noteHeartbeat("received", key: key, over: .controlStream)
                 continue
             }
@@ -1989,7 +2010,7 @@ private extension NetworkMeshSession {
             guard !Task.isCancelled, tunnels[key] != nil else { return }
             do {
                 let payload = try await datagrams.receive().content
-                guard payload != Self.heartbeatDatagram else {
+                guard payload != heartbeatDatagram else {
                     noteHeartbeat("received", key: key, over: .datagram)
                     continue
                 }
@@ -2081,13 +2102,13 @@ private extension NetworkMeshSession {
             + "live=\(tunnel.controlStream != nil) tunnels=\(tunnels.count) "
             + "for \(key.rawValue): \(detail)"
         guard cause.isBenign else {
-            Self.logger.error(
+            logger.error(
                 "\(logged, privacy: .public) fingerprint=\(fingerprint, privacy: .private)"
             )
             MeshTransportConsoleLog.echo(echoed)
             return
         }
-        Self.logger.notice(
+        logger.notice(
             "\(logged, privacy: .public) fingerprint=\(fingerprint, privacy: .private)"
         )
         MeshTransportConsoleLog.echo(echoed)
@@ -2099,7 +2120,7 @@ private extension NetworkMeshSession {
     func handleDialFailure(_ key: MeshLinkKey, reason: String) {
         switch links.noteDialFailed(key, now: Date()) {
         case .retry(let attempt, _):
-            Self.logger.debug("QUIC dial attempt \(attempt, privacy: .public) queued after: \(reason, privacy: .public)")
+            logger.debug("QUIC dial attempt \(attempt, privacy: .public) queued after: \(reason, privacy: .public)")
         case .giveUp(let attempts):
             report("The QUIC tunnel gave up after \(attempts) attempts: \(reason)")
         }
@@ -2174,7 +2195,7 @@ private extension NetworkMeshSession {
             }
         } catch {
             guard !Task.isCancelled else { return }
-            Self.logger.debug(
+            logger.debug(
                 "QUIC transfer acceptor ended for \(self.peerLabel(for: key), privacy: .public)"
             )
         }
@@ -2244,7 +2265,7 @@ private extension NetworkMeshSession {
     /// reads the photo flow off.
     func noteTransfer(_ verb: String, bytes: Int, streamID: UInt64, key: MeshLinkKey) {
         let lines = peerLines("transfer \(verb) bytes=\(bytes) stream=\(streamID)", key: key)
-        Self.logger.notice("\(lines.logged, privacy: .public)")
+        logger.notice("\(lines.logged, privacy: .public)")
         MeshTransportConsoleLog.echo(lines.echoed)
     }
 }
@@ -2275,14 +2296,14 @@ private extension NetworkMeshSession {
             report("The QUIC transport has no introduction authority, so no peer can be authenticated.")
             return nil
         }
-        guard let binding = Self.channelBindingHash(for: connection) else {
+        guard let binding = Self.channelBindingHash(for: connection, exporterLabel: tlsExporterLabel) else {
             report("The QUIC transport could not derive a TLS exporter binding for this tunnel.")
             return nil
         }
         var exchange = MeshChannelIntroductionExchange(
             role: role,
             localHello: localHello(from: authority),
-            purposes: authority.namespace.family.purposes
+            purposes: purposes
         )
         do {
             let peerHello = try await exchangeHellos(role: role, local: exchange.localHello, over: stream)
@@ -2394,12 +2415,22 @@ private extension NetworkMeshSession {
     /// SHA-256 of this connection's TLS exporter secret — the value that is equal at the two ends of
     /// one live tunnel and nowhere else.
     ///
-    /// The label is the reviewed registry constant `KeyDerivation.meshTLSExporterV1`, never a
-    /// literal, and deliberately **not** the DEBUG probe's `meshProbeTLSExporterV1`: two builds
-    /// deriving the same secret from the same connection would make the spike a signing oracle for
-    /// the shipping introduction. `CryptographicDomainSeparationTests` pins the two apart.
-    static func channelBindingHash(for connection: NetworkConnection<QUIC>) -> Data? {
-        let label = FernletCryptoPurpose.KeyDerivation.meshTLSExporterV1.rawValue
+    /// The label is the host namespace's `keyDerivation.meshTLSExporterV1`, which the radio read at
+    /// construction and hands in here, never a literal, and deliberately **not** the DEBUG probe's
+    /// `meshProbeTLSExporterV1`: two builds deriving the same secret from the same connection would
+    /// make the spike a signing oracle for the shipping introduction. `CryptographicDomainSeparationTests`
+    /// pins the two apart. Its role, `.tlsExporterLabel`, takes the label whole: the exporter gets its
+    /// bytes and their count, with no terminator and no count in front.
+    ///
+    /// - Parameters:
+    ///   - connection: The live tunnel whose exporter secret is bound.
+    ///   - exporterLabel: The label the secret is derived under.
+    /// - Returns: The binding hash, or nil when the connection has no exporter secret to give.
+    static func channelBindingHash(
+        for connection: NetworkConnection<QUIC>,
+        exporterLabel: ProximityCryptographicPurpose
+    ) -> Data? {
+        let label = exporterLabel.rawValue
         let secret = label.withCString { pointer in
             sec_protocol_metadata_create_secret(
                 connection.securityProtocolMetadata,
@@ -2554,12 +2585,12 @@ private extension NetworkMeshSession {
         guard channel == .datagram, let datagrams = tunnel.datagrams else {
             guard let stream = tunnel.controlStream else { return }
             noteHeartbeat("sending", key: key, over: .controlStream)
-            beat(key) { try await self.sendFramed(Self.heartbeatDatagram, over: stream) }
+            beat(key) { try await self.sendFramed(self.heartbeatDatagram, over: stream) }
             return
         }
         noteHeartbeat("sending", key: key, over: .datagram)
         beat(key, isDatagram: true) {
-            try await datagrams.send(NetworkMeshSession.heartbeatDatagram)
+            try await datagrams.send(self.heartbeatDatagram)
         }
     }
 
@@ -2599,7 +2630,7 @@ private extension NetworkMeshSession {
             key: key,
             detail: error.localizedDescription
         )
-        Self.logger.notice("\(lines.logged, privacy: .public)")
+        logger.notice("\(lines.logged, privacy: .public)")
         MeshTransportConsoleLog.echo(lines.echoed)
     }
 
@@ -2611,7 +2642,7 @@ private extension NetworkMeshSession {
     /// which pipe.
     func noteHeartbeat(_ verb: String, key: MeshLinkKey, over channel: MeshHeartbeatChannel) {
         let lines = peerLines("heartbeat \(verb) over \(channel)", key: key)
-        Self.logger.debug("\(lines.logged, privacy: .public)")
+        logger.debug("\(lines.logged, privacy: .public)")
         MeshTransportConsoleLog.echo(lines.echoed)
     }
 
@@ -2629,7 +2660,7 @@ private extension NetworkMeshSession {
     ///   - key: The link the refused tunnel would have lived under.
     func noteInboundRefusal(_ reason: String, key: MeshLinkKey) {
         let lines = peerLines("inbound tunnel refused \(reason)", key: key)
-        Self.logger.notice("\(lines.logged, privacy: .public)")
+        logger.notice("\(lines.logged, privacy: .public)")
         MeshTransportConsoleLog.echo(lines.echoed)
     }
 
@@ -2637,7 +2668,7 @@ private extension NetworkMeshSession {
     /// a missing `NSBonjourServices` entry or a declined Local Network prompt visible instead of
     /// silently dead, and it is read by a developer, not a user.
     func report(_ message: String) {
-        Self.logger.error("\(message, privacy: .public)")
+        logger.error("\(message, privacy: .public)")
         MeshTransportConsoleLog.echo(message)
         onTransportError?(message)
     }

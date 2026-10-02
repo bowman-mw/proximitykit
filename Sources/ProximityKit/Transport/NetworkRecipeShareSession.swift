@@ -180,18 +180,20 @@ nonisolated struct RecipeSharePosture {
 @MainActor
 final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHost {
 
-    /// The recipe radio's QUIC service type. A frozen wire token: it must also appear in the app's
+    /// The recipe radio's QUIC service type, the host namespace's
+    /// `family.radios.recipeShare.serviceType`. A frozen wire token: it must also appear in the app's
     /// Info.plist `NSBonjourServices` or discovery is silently dead on device.
     ///
     /// Deliberately **not** a reuse of the retired radio's `_fernlet-recipe._tcp`/`._udp`. Those
     /// entries survive until P9 item 4 deletes them, and reusing a name during the migration
     /// window would put this listener and the old advertiser on one service type, where each would
     /// browse the other's registrations as a peer.
-    nonisolated static let serviceType = "_fernlet-recipe2._udp"
+    nonisolated let serviceType: String
 
-    /// ALPN for the recipe-share protocol. A frozen wire token, distinct from the mesh's
-    /// `fernlet-mesh-v1` and presence's `fernlet-near-v1` so no two radios can negotiate.
-    nonisolated static let alpn = "fernlet-recipe-v1"
+    /// ALPN for the recipe-share protocol, the host namespace's `family.radios.recipeShare.alpn`. A
+    /// frozen wire token, distinct from the mesh's `fernlet-mesh-v1` and presence's `fernlet-near-v1`
+    /// so no two radios can negotiate.
+    nonisolated let alpn: String
 
     /// Hard ceiling on one inbound frame, enforced before the bytes reach any channel or decoder.
     /// The same value the other two transports enforce, so all three refuse identically.
@@ -243,7 +245,8 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     nonisolated static let redundantTunnelCloseReason =
         "redundantTunnelClosed: a duplicate recipe-share connection to one peer was collapsed."
 
-    private static let logger = Logger(subsystem: "com.fernlet", category: "proximity.recipe.quic")
+    /// This radio's log, under the host namespace's `installation.logSubsystem`.
+    private let logger: Logger
 
     // MARK: Hooks
 
@@ -393,7 +396,16 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// Peers this radio currently holds a tunnel to, in no particular order.
     var connectedPeers: [PeerHandle] { tunnels.values.map(\.peer) }
 
-    init() {}
+    /// A radio that speaks the host's wire: it advertises and browses the namespace's recipe-share
+    /// service type, negotiates its ALPN and logs under its subsystem (ProximityKit plan step
+    /// A0.2.7). Each value is read once, here; building a radio starts nothing.
+    ///
+    /// - Parameter namespace: The host's protocol identity, as its manager holds it.
+    init(namespace: ProximityNamespace) {
+        serviceType = namespace.family.radios.recipeShare.serviceType
+        alpn = namespace.family.radios.recipeShare.alpn
+        logger = Logger(subsystem: namespace.installation.logSubsystem, category: "proximity.recipe.quic")
+    }
 
     /// Cancels every task this radio owns (memory-lifecycle rule ML1). ``stop()`` already does it;
     /// this is for the owner that is released without calling it.
@@ -528,7 +540,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
         }
         let connection = NetworkConnection(
             to: endpoint,
-            using: ProximityQUICParameters.connection(alpn: Self.alpn)
+            using: ProximityQUICParameters.connection(alpn: alpn)
         ).start()
         let channel = prepareChannel(for: key)
         tunnels[key] = Tunnel(peer: channel.peer, channel: channel, role: .initiator)
@@ -801,11 +813,11 @@ private extension NetworkRecipeShareSession {
         let listener = try NetworkListener(
             for: .bonjour(
                 name: posture.instanceName,
-                type: Self.serviceType,
+                type: serviceType,
                 txtRecord: NWTXTRecord(fields)
             ),
             using: ProximityQUICParameters.listener(
-                alpn: Self.alpn,
+                alpn: alpn,
                 identity: posture.tlsIdentity.identity
             )
         ).newConnectionLimit(Self.maxTunnels + Self.maxPendingInbound)
@@ -855,8 +867,8 @@ private extension NetworkRecipeShareSession {
     func startBrowser() {
         guard isRunning, !isDiscoveryPaused, browser == nil else { return }
         let browser = NetworkBrowser(
-            for: .bonjour(Self.serviceType, includeTxtRecord: true),
-            using: ProximityQUICParameters.connection(alpn: Self.alpn).parameters
+            for: .bonjour(serviceType, includeTxtRecord: true),
+            using: ProximityQUICParameters.connection(alpn: alpn).parameters
         )
         self.browser = browser
         browser.onStateUpdate { [weak self] _, state in
@@ -884,7 +896,7 @@ private extension NetworkRecipeShareSession {
             listenerIsReady = true
             startBrowserWhenReady()
         case .waiting(let error):
-            Self.logger.debug("recipe listener waiting: \(error.localizedDescription, privacy: .public)")
+            logger.debug("recipe listener waiting: \(error.localizedDescription, privacy: .public)")
         case .failed(let error):
             report("The recipe-share listener failed: \(error.localizedDescription)")
         case .setup, .cancelled:
@@ -948,7 +960,7 @@ private extension NetworkRecipeShareSession {
         case .failed(let error):
             reportBrowserFailure("The recipe-share browser failed: \(error.localizedDescription)")
         case .waiting(let error):
-            Self.logger.debug("recipe browser waiting: \(error.localizedDescription, privacy: .public)")
+            logger.debug("recipe browser waiting: \(error.localizedDescription, privacy: .public)")
         case .ready, .setup, .cancelled:
             break
         @unknown default:
@@ -978,7 +990,7 @@ private extension NetworkRecipeShareSession {
     }
 
     func report(_ message: String) {
-        Self.logger.error("\(message, privacy: .public)")
+        logger.error("\(message, privacy: .public)")
         onTransportError?(message)
     }
 
@@ -1162,7 +1174,7 @@ private extension NetworkRecipeShareSession {
         guard isRunning, !isDiscoveryPaused else { return }
         let pendingKey = MeshLinkKey(connection.id)
         guard pendingInbound[pendingKey] == nil, pendingInbound.count < Self.maxPendingInbound else {
-            Self.logger.debug(
+            logger.debug(
                 "recipe connection refused pre-hello for \(self.peerLabel(for: pendingKey), privacy: .public)"
             )
             return
@@ -1375,7 +1387,7 @@ private extension NetworkRecipeShareSession {
     func endTunnel(_ key: MeshLinkKey, reason: String, notifyOwner: Bool = true) {
         guard let tunnel = tunnels.removeValue(forKey: key) else { return }
         tunnel.cancelTasks()
-        Self.logger.notice(
+        logger.notice(
             "recipe tunnel ended for \(self.peerLabel(for: key), privacy: .public): \(reason, privacy: .public)"
         )
         tunnel.channel.notifyDisconnected(reason: reason)
@@ -1463,7 +1475,7 @@ private extension NetworkRecipeShareSession {
             }
         } catch {
             guard !Task.isCancelled else { return }
-            Self.logger.debug(
+            logger.debug(
                 "recipe transfer acceptor ended for \(self.peerLabel(for: key), privacy: .public)"
             )
         }

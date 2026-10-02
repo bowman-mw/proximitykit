@@ -146,19 +146,21 @@ protocol PresenceRadioSession: AnyObject {
 @MainActor
 final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
 
-    /// The presence radio's QUIC service type. A frozen wire token: it must also appear in the
-    /// app's Info.plist `NSBonjourServices` or discovery is silently dead on device.
+    /// The presence radio's QUIC service type, the host namespace's
+    /// `family.radios.presence.serviceType`. A frozen wire token: it must also appear in the app's
+    /// Info.plist `NSBonjourServices` or discovery is silently dead on device.
     ///
     /// Deliberately **not** a reuse of the retired MC radio's `_fernlet-near._udp`. That entry
     /// survived in the app's plist for the length of the migration window, and reusing the name
     /// then would have put this listener and the MC advertiser on one service type, where each
     /// would have browsed the other's registrations as a peer. The old entry is gone; this token
     /// is the one that stayed.
-    nonisolated static let serviceType = "_fernlet-near2._udp"
+    nonisolated let serviceType: String
 
-    /// ALPN for the presence protocol. A frozen wire token, distinct from the mesh's
-    /// `fernlet-mesh-v1` so the two radios cannot negotiate a connection with each other.
-    nonisolated static let alpn = "fernlet-near-v1"
+    /// ALPN for the presence protocol, the host namespace's `family.radios.presence.alpn`. A frozen
+    /// wire token, distinct from the mesh's `fernlet-mesh-v1` so the two radios cannot negotiate a
+    /// connection with each other.
+    nonisolated let alpn: String
 
     /// Hard ceiling on one inbound frame, enforced before the bytes reach any channel or decoder.
     /// The same value both other transports enforce, so all three refuse identically.
@@ -216,7 +218,8 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     nonisolated static let redundantTunnelCloseReason =
         "redundantTunnelClosed: a duplicate presence connection to one peer was collapsed."
 
-    private static let logger = Logger(subsystem: "com.fernlet", category: "proximity.presence.quic")
+    /// This radio's log, under the host namespace's `installation.logSubsystem`.
+    private let logger: Logger
 
     // MARK: Hooks
 
@@ -284,7 +287,16 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     /// Peers this radio currently holds a tunnel to, in no particular order.
     var connectedPeers: [PeerHandle] { tunnels.values.map(\.peer) }
 
-    init() {}
+    /// A radio that speaks the host's wire: it advertises and browses the namespace's presence
+    /// service type, negotiates its ALPN and logs under its subsystem (ProximityKit plan step
+    /// A0.2.7). Each value is read once, here; building a radio starts nothing.
+    ///
+    /// - Parameter namespace: The host's protocol identity, as its manager holds it.
+    init(namespace: ProximityNamespace) {
+        serviceType = namespace.family.radios.presence.serviceType
+        alpn = namespace.family.radios.presence.alpn
+        logger = Logger(subsystem: namespace.installation.logSubsystem, category: "proximity.presence.quic")
+    }
 
     /// Cancels every task this radio owns (memory-lifecycle rule ML1). ``stop()`` already does it;
     /// this is for the owner that is released without calling it.
@@ -378,7 +390,7 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     func dial(_ peer: PeerHandle, helloTag: String) {
         guard isRunning, let key = identities.key(for: peer) else { return }
         guard let endpoint = browsedEndpoints[key] else {
-            Self.logger.notice(
+            logger.notice(
                 "presence dial refused for \(self.peerLabel(for: key), privacy: .public): no browsed endpoint"
             )
             return
@@ -386,7 +398,7 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
         guard tunnels[key] == nil, tunnels.count < Self.maxTunnels else { return }
         let connection = NetworkConnection(
             to: endpoint,
-            using: ProximityQUICParameters.connection(alpn: Self.alpn)
+            using: ProximityQUICParameters.connection(alpn: alpn)
         ).start()
         let channel = prepareChannel(for: key)
         tunnels[key] = Tunnel(peer: channel.peer, channel: channel, role: .initiator)
@@ -580,11 +592,11 @@ private extension NetworkPresenceSession {
         let listener = try NetworkListener(
             for: .bonjour(
                 name: posture.instanceName,
-                type: Self.serviceType,
+                type: serviceType,
                 txtRecord: NWTXTRecord(advertisedFields)
             ),
             using: ProximityQUICParameters.listener(
-                alpn: Self.alpn,
+                alpn: alpn,
                 identity: posture.tlsIdentity.identity
             )
         ).newConnectionLimit(Self.maxTunnels)
@@ -634,8 +646,8 @@ private extension NetworkPresenceSession {
     func startBrowser() {
         guard isRunning, browser == nil else { return }
         let browser = NetworkBrowser(
-            for: .bonjour(Self.serviceType, includeTxtRecord: true),
-            using: ProximityQUICParameters.connection(alpn: Self.alpn).parameters
+            for: .bonjour(serviceType, includeTxtRecord: true),
+            using: ProximityQUICParameters.connection(alpn: alpn).parameters
         )
         self.browser = browser
         browser.onStateUpdate { [weak self] _, state in
@@ -662,7 +674,7 @@ private extension NetworkPresenceSession {
             listenerIsReady = true
             startBrowserWhenReady()
         case .waiting(let error):
-            Self.logger.debug("presence listener waiting: \(error.localizedDescription, privacy: .public)")
+            logger.debug("presence listener waiting: \(error.localizedDescription, privacy: .public)")
         case .failed(let error):
             report("The presence listener failed: \(error.localizedDescription)")
         case .setup, .cancelled:
@@ -696,7 +708,7 @@ private extension NetworkPresenceSession {
         case .failed(let error):
             report("The presence browser failed: \(error.localizedDescription)")
         case .waiting(let error):
-            Self.logger.debug("presence browser waiting: \(error.localizedDescription, privacy: .public)")
+            logger.debug("presence browser waiting: \(error.localizedDescription, privacy: .public)")
         case .ready, .setup, .cancelled:
             break
         @unknown default:
@@ -724,7 +736,7 @@ private extension NetworkPresenceSession {
     }
 
     func report(_ message: String) {
-        Self.logger.error("\(message, privacy: .public)")
+        logger.error("\(message, privacy: .public)")
         onTransportError?(message)
     }
 }
@@ -881,7 +893,7 @@ private extension NetworkPresenceSession {
         guard isRunning else { return }
         let pendingKey = MeshLinkKey(connection.id)
         guard pendingInbound[pendingKey] == nil, pendingInbound.count < Self.maxPendingInbound else {
-            Self.logger.debug("presence connection refused pre-hello for \(self.peerLabel(for: pendingKey), privacy: .public)")
+            logger.debug("presence connection refused pre-hello for \(self.peerLabel(for: pendingKey), privacy: .public)")
             return
         }
         pendingInbound[pendingKey] = Task { @MainActor [weak self] in
@@ -1039,7 +1051,7 @@ private extension NetworkPresenceSession {
     func endTunnel(_ key: MeshLinkKey, reason: String, notifyOwner: Bool = true) {
         guard let tunnel = tunnels.removeValue(forKey: key) else { return }
         tunnel.task?.cancel()
-        Self.logger.notice("presence tunnel ended for \(self.peerLabel(for: key), privacy: .public): \(reason, privacy: .public)")
+        logger.notice("presence tunnel ended for \(self.peerLabel(for: key), privacy: .public): \(reason, privacy: .public)")
         tunnel.channel.notifyDisconnected(reason: reason)
         guard notifyOwner else { return }
         onPeerDisconnected?(tunnel.peer, reason)

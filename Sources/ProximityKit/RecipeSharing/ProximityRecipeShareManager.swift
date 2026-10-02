@@ -218,10 +218,10 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         makeSession: (() -> any RecipeShareRadioSession)?,
         identity injected: IdentityService? = nil
     ) {
-        self.session = makeSession?() ?? NetworkRecipeShareSession()
         self.store = store
         let namespace = store.proximityNamespace
         self.namespace = namespace
+        self.session = makeSession?() ?? NetworkRecipeShareSession(namespace: namespace)
         let id = injected ?? IdentityService(namespace: namespace)
         do {
             try id.ensureProvisioned()

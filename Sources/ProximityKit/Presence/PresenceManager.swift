@@ -185,8 +185,9 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// presence radio and nothing in shipping code writes this — the counterpart of the mesh's
     /// retired `MeshTransportFactory` seam, for a manager that only ever has one answer. A test
     /// substitutes an in-memory fake so the advertise, republish, dial and stand-down decisions
-    /// are reachable without starting Bonjour.
-    @ObservationIgnored var makeSession: () -> any PresenceRadioSession = { NetworkPresenceSession() }
+    /// are reachable without starting Bonjour. The default is set in `init`, where it captures
+    /// ``namespace`` when it is made, so every radio it builds speaks the host's wire.
+    @ObservationIgnored var makeSession: () -> any PresenceRadioSession
     @ObservationIgnored private(set) var isRunning = false
 
     /// Live heart connections (outbound sends in flight + inbound accepts). Keyed by peer UUID.
@@ -292,6 +293,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         self.ledger = ledger
         let namespace = store.proximityNamespace
         self.namespace = namespace
+        self.makeSession = { NetworkPresenceSession(namespace: namespace) }
         if let identity {
             self.identity = identity
         } else {
@@ -1670,7 +1672,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// teardown path a completed/failed send runs. Afterward the peer, if still advertising, must
     /// remain both reachable and sendable.
     func simulateHeartConnectionTeardownForTesting(peer: PeerHandle, ranging: any RangingProvider) {
-        let channelSession = session ?? NetworkPresenceSession()
+        let channelSession = session ?? NetworkPresenceSession(namespace: namespace)
         let channel = channelSession.channel(for: peer)
         let coordinator = ProximityCoordinator(
             identity: identity,
@@ -1704,7 +1706,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         trustPolicy: FriendSessionTrustPolicy,
         intendedFriend: ProximityTrustedPeerRecord? = nil
     ) -> Bool {
-        let channelSession = session ?? NetworkPresenceSession()
+        let channelSession = session ?? NetworkPresenceSession(namespace: namespace)
         heartConnections.append(PresenceHeartConnection(
             id: peer.id,
             peer: peer,
