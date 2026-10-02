@@ -501,7 +501,7 @@ nonisolated struct MeshChannelIntroductionExchange {
     /// Starts an exchange for one tunnel.
     ///
     /// `purposes` has no default: ProximityKit holds no namespace of its own, so the transport
-    /// passes its introduction authority's.
+    /// passes its own copy, the `family.purposes` it read from its namespace in `init(namespace:)`.
     init(role: MeshChannelRole, localHello: MeshChannelHello, purposes: ProximityNamespace.Purposes) {
         self.role = role
         self.localHello = localHello

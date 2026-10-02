@@ -342,10 +342,10 @@ preferences, ``ProximityHeartLedger``, the three sealed heart-drop stores, ``Mod
 ``FriendStateCache``, ``ClosenessLedger`` and ``ProximityActivityManager``'s ledger. There is
 deliberately no argument-less default on ``JSONSidecarFile``: every owner states its root, because a
 default that silently resolves to the process-wide `Application Support/Fernlet` is exactly how a
-store rejoins the shared-root race, and the omission compiles. The root defaults to
-``ProximitySupportLayout/defaultDirectory`` (`Application Support/Fernlet`, the path the cache has
-always used). The indirection exists because the wall's index is re-saved WHOLE on every keep or
-delete and re-read by every manager at init — on a single process-wide path, one live
+store rejoins the shared-root race, and the omission compiles. The root defaults to the host
+namespace's `installation.storage.defaultDirectory` (for Fernlet `Application Support/Fernlet`, the
+path the cache has always used). The indirection exists because the wall's index is re-saved WHOLE
+on every keep or delete and re-read by every manager at init — on a single process-wide path, one live
 ``MeshNetworkManager`` inherits and then overwrites another's album. That is invisible in the app,
 which has one manager, and a live cross-suite race under the test runner, where suites share a
 process. Routing the root through the host means every `MeshNetworkManager(store:)` inherits its
@@ -442,14 +442,21 @@ type has no local label). Senders keep emitting frozen English forever.
 
 ### Protocol namespace: what the host supplies
 
-``ProximityNamespace`` (`Namespace/`) holds every byte string by which this module's wire, keychain
-and disk formats identify the app it runs in. Plan step A0.2 of
-`Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md` moved every such read in this module onto it,
-each byte-identical for Fernlet. Beside it the host supplies two things this module used to take
-from Fernlet's own modules, the install binding the sealed mesh stores seal under and the sink audit
-lines go to, and two mechanisms were copied in rather than shared: the column seal and the keychain
-item. This module holds no instance of any of them and offers no default for the namespace or the
-binding: no global, no slot, no `@TaskLocal`.
+``ProximityNamespace`` (`Namespace/`) holds the byte strings by which this module's wire, keychain
+and disk formats identify the app it runs in: the 39 labels, the three radios' values, the QR
+scheme, the identity's and the two mesh seal keys' keychain rows, the storage names and the log
+subsystem. Plan step A0.2 of `Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md` moved every read of
+those in this module onto it, each byte-identical for Fernlet. Some such strings stay outside it
+until a later step (see "What A0.2 left for later" below): the 13 feature labels this module reads
+from FernletCrypto's registry, the heart-drop and moderation keychain services and
+``ProximitySupportLayout``'s `Fernlet` folder until A0.4, and the payload vocabulary and
+presentation strings until A0.3. `ProximityNamespaceBoundaryTests` allowlists each feature-label
+read and each literal that spells `fernlet`, with the step that removes it. Beside it the
+host supplies two things this module used to take from Fernlet's own modules, the install binding
+the sealed mesh stores seal under and the sink audit lines go to, and two mechanisms were copied in
+rather than shared: the column seal and the keychain item. This module holds no instance of the
+namespace or the binding and offers no default for either: no global, no slot, no `@TaskLocal`. The
+audit sink alone lives in one process-wide slot, ``ProximityAudit`` (see "The audit sink" below).
 
 **What the namespace holds.** Its ``ProximityNamespace/Family`` is what every interoperating app
 shares: the 39 domain-separation labels as ``ProximityCryptographicPurpose`` values
@@ -481,14 +488,18 @@ let a host's own tests show it overlaps no other app. This module does not yet r
 namespace at run time; that arrives with plan step A0.3.
 
 **How a host supplies it.** ``ProximityHost/proximityNamespace`` and
-``ProximityHost/proximityInstallBinding`` are the two ``ProximityHost`` requirements with no default
-in the protocol extension, so a host that leaves either out fails to compile instead of running
-under another app's identity or binding. The extension's other defaults, the sidecar root
-(`installation.storage.defaultDirectory`) and both mesh storage scopes, are built from them.
-Fernlet's values are not in this module and never will be: `ProximityNamespace.fernlet` and
-`FernletDeviceBindingAdapter` live in `FernletConnections`, which depends on this module, so
-ProximityKit cannot name them. Fernlet's app answers both in `ProximityHostAdapter.swift`, as every
-test double does.
+``ProximityHost/proximityInstallBinding`` are two of the seven ``ProximityHost`` requirements with no
+default in the protocol extension (the others are the display name, the trusted peers, the vault,
+`isBlockedFingerprint(_:)` and `blockProximityPeer(signingPublicKey:)`), and the two it will never
+default, so a host that leaves either out fails to compile instead of running under another app's
+identity or binding. The extension's five defaults are the two hearts settings, the sidecar root
+(`installation.storage.defaultDirectory`, built from the namespace) and both mesh storage scopes
+(built from the namespace and the binding). Fernlet's values are not in this module and never will
+be: `ProximityNamespace.fernlet` and `FernletDeviceBindingAdapter` live in `FernletConnections`,
+which depends on this module, so ProximityKit cannot name them. Fernlet's app answers both in
+`ProximityHostAdapter.swift`, as the test target's eleven Fernlet doubles do;
+`ProximityNamespaceGoldenTests`' three hosts take the namespace, and two of them the binding, from
+the cell that builds them, so a cell can run one under another app's namespace or a pinned binding.
 
 **How each kind of reader gets it.** Every reader keeps, or is handed, its own copy, read from a
 value it already holds, so no read hops an actor and no reader can see a namespace its root did not
@@ -727,8 +738,10 @@ matched. Every non-empty reference must now be a canonical `MeshEpochRef` (check
 widths, so a bad one is `malformedHello`), equality is equality of the whole value, and the joiner
 that holds no key is a named branch of `MeshEpochAcceptance.introductionVerdict` rather than a
 short-circuit that skipped the comparison. `MeshIntroductionAuthority` is the seam that supplies the mesh id,
-epoch reference, roster, signing key and (since step A0.2.5) the namespace whose labels the exchange
-holds; a session without one authenticates nobody and therefore
+epoch reference, roster and signing key; the labels the exchange frames and checks under are the
+radio's own copy of its namespace's `family.purposes`, read in `init(namespace:)`, and they match the
+label `signChannelIntroduction` signs under because the manager builds its radio from the namespace
+it stores and signs under. A session without an authority authenticates nobody and therefore
 admits nobody. The verified `sid` it yields is what lets an inbound tunnel be matched to the browsed
 advertisement it came from, so duplicate-tunnel suppression ranks the pair instead of admitting both.
 
@@ -1582,8 +1595,10 @@ from one source and cannot drift, which is the failure item 4's forward-compat n
   argument and a branch on a *resolved* value stay legal, and a `switch` on a token does not.
 
 **Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
-the `PayloadType` it travels as, and the `FernletCryptoPurpose` it is signed under are the SAME
-frozen English spelling, so one grep finds every layer that touches those bytes:
+the `PayloadType` it travels as, and the namespace signature label it is signed under
+(`purposes.signature.<field>`; `.fernlet` spells each exactly as its `FernletCryptoPurpose` twin,
+pinned equal until C1) are, in Fernlet's namespace, the SAME frozen English spelling, so one grep
+finds every layer that touches those bytes:
 
 | token | record | signed by | crypto domain |
 | --- | --- | --- | --- |

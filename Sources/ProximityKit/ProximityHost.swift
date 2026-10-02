@@ -77,16 +77,23 @@ public protocol ProximityHost: AnyObject {
     /// sidecar root.
     var meshRoutedStorage: MeshRoutedStorageScope { get }
 
-    /// The host's protocol identity (ProximityKit plan step A0.2.3): every byte string by which this
-    /// module's wire, keychain and disk formats identify the app it runs in, as the one
-    /// ``ProximityNamespace`` the host builds at its composition root.
+    /// The host's protocol identity (ProximityKit plan step A0.2.3): the labels, radio values, QR
+    /// scheme, identity and mesh seal-key rows, storage names and log subsystem by which this module's
+    /// wire, keychain and disk formats identify the app it runs in, as the one ``ProximityNamespace``
+    /// the host builds at its composition root. Some such strings stay outside it until a later plan
+    /// step: the feature labels, the heart-drop and moderation keychain services and
+    /// ``ProximitySupportLayout``'s folder until A0.4, the payload vocabulary and presentation strings
+    /// until A0.3. `ProximityNamespaceBoundaryTests` allowlists each feature-label read and each
+    /// literal that spells `fernlet`.
     ///
     /// **Deliberately no default.** The extension below hands a host that carries no value of its
     /// own the hearts settings, the sidecar root and the two storage scopes; it hands out no
     /// namespace, and never will. ProximityKit holds no namespace instance and keeps no global, so a
     /// host that supplies none gets a compile error, never another app's identity. Fernlet's app
     /// supplies `ProximityNamespace.fernlet` (the `FernletConnections` module) in
-    /// `ProximityHostAdapter.swift`, and every test double supplies the same value.
+    /// `ProximityHostAdapter.swift`, as the test target's eleven Fernlet doubles do;
+    /// `ProximityNamespaceGoldenTests`' three hosts take theirs from the cell that builds them, another
+    /// app's in the cells that test one.
     ///
     /// Read once, at construction: ``MeshNetworkManager``, ``PresenceManager`` and
     /// ``ProximityRecipeShareManager`` each keep their own copy and build the identity and the radio
@@ -103,9 +110,10 @@ public protocol ProximityHost: AnyObject {
     /// else the host seals under it, so ProximityKit keeps no row of its own and never falls back to
     /// one: a host that supplies none fails to compile. Fernlet's app answers
     /// `FernletDeviceBindingAdapter()` (the `FernletConnections` module, delegating to FernletCrypto's
-    /// `DeviceBindingID`) in `ProximityHostAdapter.swift`, as every test double does. The extension
-    /// below builds both default storage scopes with it; a host with scopes of its own hands each the
-    /// same binding.
+    /// `DeviceBindingID`) in `ProximityHostAdapter.swift`, as the test target's doubles do, but for
+    /// the two `ProximityNamespaceGoldenTests` hosts that take theirs from the cell that builds them,
+    /// a pinned binding in the cells that test one. The extension below builds both default storage
+    /// scopes with it; a host with scopes of its own hands each the same binding.
     var proximityInstallBinding: any ProximityInstallBinding { get }
 }
 
@@ -186,8 +194,10 @@ public enum ProximitySupportLayout {
     /// ledger and the heart-drop sidecars have always used, so no shipped install is migrated by the
     /// seams that made these injectable.
     /// `nonisolated` against the target's `defaultIsolation(MainActor.self)`: a pure path
-    /// computation, read from the nonisolated stored properties and static defaults that resolve
-    /// production paths (`HeartDropStorageScope.production`, `FernletStore.proximitySupportRoot`).
+    /// computation, read by the nonisolated static default `HeartDropStorageScope.production`. The
+    /// main-actor feature ledgers (`ProximityHeartLedger`, `FriendStateCache`, `ClosenessLedger`,
+    /// `ModerationLedger`, `ProximityActivityManager`) read it too, for their initializers' default
+    /// file URLs.
     public nonisolated static var defaultDirectory: URL {
         // `URL.applicationSupportDirectory` is the non-optional accessor for exactly the path the
         // optional `FileManager.urls(for:in:).first` resolved to (R5: no force unwrap).

@@ -18,9 +18,9 @@ nonisolated extension ProximityNamespace {
     /// or a log stream. That matters most on an unsandboxed Mac, where two apps can otherwise reach
     /// the same Application Support folder.
     public nonisolated struct Installation: Hashable, Sendable {
-        /// The keychain rows ProximityKit writes.
+        /// The keychain rows ProximityKit writes for the device identity and the two mesh seal keys.
         public let keychain: Keychain
-        /// The on-disk names ProximityKit writes.
+        /// The default directory's name and the two mesh stores' on-disk names.
         public let storage: Storage
         /// The `os.Logger` subsystem the three radios log under. Never on the wire.
         public let logSubsystem: String
@@ -28,8 +28,8 @@ nonisolated extension ProximityNamespace {
         /// Assembles an installation.
         ///
         /// - Parameters:
-        ///   - keychain: The keychain rows ProximityKit writes.
-        ///   - storage: The on-disk names ProximityKit writes.
+        ///   - keychain: The identity's and the two mesh seal keys' keychain rows.
+        ///   - storage: The default directory's name and the two mesh stores' on-disk names.
         ///   - logSubsystem: The radios' log subsystem.
         public init(keychain: Keychain, storage: Storage, logSubsystem: String) {
             self.keychain = keychain
@@ -40,7 +40,9 @@ nonisolated extension ProximityNamespace {
 
     // MARK: - Keychain
 
-    /// The keychain row names ProximityKit writes.
+    /// The names of the keychain rows ProximityKit writes for the device identity and the two mesh seal
+    /// keys. The heart-drop and moderation keychain services are still ProximityKit literals until
+    /// plan step A0.4 takes their features out.
     ///
     /// Row names only. Each row's accessibility and synchronizable class stay ProximityKit code, where
     /// the key-custody walls read them: a host names its rows and never weakens how they are kept.
@@ -104,7 +106,7 @@ nonisolated extension ProximityNamespace {
         /// The row of the key that seals the routed store.
         public let meshRoutedSealKey: Row
 
-        /// Names every keychain row ProximityKit writes.
+        /// Names the identity's and the two mesh seal keys' keychain rows.
         ///
         /// - Parameters:
         ///   - identity: The device identity's rows.
@@ -119,7 +121,9 @@ nonisolated extension ProximityNamespace {
 
     // MARK: - Storage
 
-    /// The on-disk names ProximityKit writes.
+    /// The on-disk names ProximityKit writes for its default directory and the two mesh stores. Until
+    /// plan step A0.4 the heart-drop scope and the feature ledgers default instead to
+    /// ``ProximitySupportLayout/defaultDirectory``, which spells Fernlet's folder.
     public nonisolated struct Storage: Hashable, Sendable {
         /// The folder under Application Support that a host passing no root of its own gets.
         public let directoryName: String
@@ -130,7 +134,7 @@ nonisolated extension ProximityNamespace {
         /// The directory holding the routed store's chunk files.
         public let meshRoutedChunkDirectoryName: String
 
-        /// Names every on-disk entry ProximityKit writes.
+        /// Names the default directory and the two mesh stores' on-disk entries.
         ///
         /// - Parameters:
         ///   - directoryName: The folder under Application Support.
