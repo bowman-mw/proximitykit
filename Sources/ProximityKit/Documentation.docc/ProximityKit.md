@@ -457,10 +457,10 @@ ProximityKit holds no instance and offers no default: no global, no slot, no `@T
 builds one value and hands it down, and every reader keeps its own copy. Step A0.2.1 adds the type
 and nothing reads it yet; A0.2's later commits route this module's reads through it — the host's
 supply path, the signed transcripts, the hashes and seals, the radios and the at-rest names — each
-byte-identical for Fernlet. Fernlet's own value is not in this module and never will be: it lands
-in a `FernletConnections` module that depends on this one (step A0.2.2), so ProximityKit cannot
-name it. `ProximityNamespaceSoundnessTests` holds the rules, the byte rules of each framing and the
-collision checks, over namespaces built only from literals.
+byte-identical for Fernlet. Fernlet's own value is not in this module and never will be: it lives
+in `FernletConnections` (`ProximityNamespace.fernlet`, step A0.2.2), a module that depends on this
+one, so ProximityKit cannot name it. `ProximityNamespaceSoundnessTests` holds the rules, the byte
+rules of each framing and the collision checks, over namespaces built only from literals.
 
 ## Topics
 
