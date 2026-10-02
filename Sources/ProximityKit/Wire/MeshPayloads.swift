@@ -1,5 +1,4 @@
 import Foundation
-import FernletCrypto
 import FernletDomainModel
 
 // WI-9: every wire payload below is marked `nonisolated, Sendable`. ProximityKit declares
@@ -204,7 +203,7 @@ public nonisolated struct MeshAdmissionGrantPayload: Codable, Equatable, Sendabl
 /// key to a mesh id, with a 2-hour default expiry.
 ///
 /// Minted via ``signed(meshID:joinerFingerprint:joinerSigningPublicKey:admitterIdentity:grantedAt:expiresAt:)``
-/// and checked via ``verify(joinerSigningPublicKey:expectedMeshID:expectedAdmitterSigningPublicKey:now:)``, which requires the
+/// and checked via ``verify(joinerSigningPublicKey:expectedMeshID:expectedAdmitterSigningPublicKey:now:in:)``, which requires the
 /// locally-held key to equal the bound joiner key (defeating fingerprint-collision
 /// impersonation) and the signed meshID to equal the grant's claimed mesh. Verification accepts
 /// both the v2 cross-platform canonical bytes and the legacy encoder — a documented permanent
@@ -458,7 +457,8 @@ extension MeshAdmissionToken {
             admitterSignature: Data()
         )
         token.admitterSignature = try admitterIdentity.sign(
-            canonicalBytes(for: token), purpose: FernletCryptoPurpose.Signature.meshAdmissionTokenV2)
+            canonicalBytes(for: token, in: admitterIdentity.purposes),
+            purpose: admitterIdentity.purposes.signature.meshAdmissionTokenV2)
         return token
     }
 
@@ -478,10 +478,17 @@ extension MeshAdmissionToken {
     ///
     /// `nonisolated` (WI-9): pure signature math (`IdentityService.verify`/`fingerprint` statics +
     /// `canonicalBytes`), touching no actor state — so a token can be verified off the main actor.
+    ///
+    /// `purposes` are the labels the signature is checked under, the caller's own namespace's (plan
+    /// step A0.2.4), with no default: ProximityKit holds no namespace of its own. The legacy
+    /// alternative below is the family's verify-only `legacyV1.meshAdmissionTokenV1`; a family that
+    /// refuses legacy peers has none, so there a token signed over the legacy bytes is
+    /// `signatureInvalid`.
     nonisolated public func verify(joinerSigningPublicKey presentedKey: Data,
                                    expectedMeshID: UUID,
                                    expectedAdmitterSigningPublicKey: Data?,
-                                   now: Date = Date()) throws {
+                                   now: Date = Date(),
+                                   in purposes: ProximityNamespace.Purposes) throws {
         guard let expectedAdmitter = expectedAdmitterSigningPublicKey,
               expectedAdmitter == admitterSigningPublicKey else {
             throw VerifyError.admitterKeyMismatch
@@ -514,13 +521,24 @@ extension MeshAdmissionToken {
         // field would be a downgrade-confusion vector; the only clean retirement is a future
         // wire-breaking, schema-versioned token format. Left as-is deliberately (no security impact).
         let signatureValid =
-            IdentityService.verify(admitterSignature, of: canonicalBytes(for: self), by: admitterSigningPublicKey,
-                                   purpose: FernletCryptoPurpose.Signature.meshAdmissionTokenV2)
-            || IdentityService.verify(admitterSignature, of: legacyCanonicalBytes(for: self), by: admitterSigningPublicKey,
-                                      purpose: FernletCryptoPurpose.Signature.meshAdmissionTokenLegacyV1)
+            IdentityService.verify(admitterSignature, of: canonicalBytes(for: self, in: purposes), by: admitterSigningPublicKey,
+                                   purpose: purposes.signature.meshAdmissionTokenV2)
+            || legacySignatureVerifies(in: purposes)
         guard signatureValid else {
             throw VerifyError.signatureInvalid
         }
+    }
+
+    /// The dual verify's legacy alternative: the admitter's signature over the pre-WI-6 bytes, under
+    /// the family's verify-only `legacyV1.meshAdmissionTokenV1` (plan step A0.2.4).
+    ///
+    /// - Parameter purposes: The caller's namespace labels.
+    /// - Returns: Whether the signature verifies over the legacy bytes; always `false` when the family
+    ///   refuses legacy peers (`legacyV1` is `.refused`, so it has no such label).
+    nonisolated private func legacySignatureVerifies(in purposes: ProximityNamespace.Purposes) -> Bool {
+        guard let legacyPurpose = purposes.signature.legacyV1.meshAdmissionTokenV1 else { return false }
+        return IdentityService.verify(admitterSignature, of: legacyCanonicalBytes(for: self), by: admitterSigningPublicKey,
+                                      purpose: legacyPurpose)
     }
 }
 

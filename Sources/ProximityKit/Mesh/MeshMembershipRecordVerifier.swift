@@ -14,7 +14,6 @@
 // store, no transport. `expiresAt` is deliberately NOT re-applied to admission records: the token's
 // expiry is an admission-time freshness check, and a durable record is hours old by design.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshMembershipRecordRejection
@@ -109,12 +108,24 @@ nonisolated struct MeshMembershipRecordVerifier {
     /// there is no other door.
     private(set) var ledger: MeshMembershipLedger
 
+    /// The labels every signature is checked under: this verifier's own copy of its host
+    /// namespace's purposes (plan step A0.2.4), handed in at construction and never looked up, so a
+    /// verifier carried off the main actor reads them with no hop.
+    let purposes: ProximityNamespace.Purposes
+
     /// Builds a verifier over an existing ledger — typically one loaded from the sealed
     /// ``MeshSessionContext``, whose contents were verified when they were first accepted.
-    init(meshID: UUID, founderSigningPublicKey: Data? = nil, ledger: MeshMembershipLedger = .empty) {
+    ///
+    /// `purposes` has no default: ProximityKit holds no namespace of its own, so the caller passes
+    /// the purposes it already holds (its manager's namespace, or another verifier's copy).
+    init(
+        meshID: UUID, founderSigningPublicKey: Data? = nil, ledger: MeshMembershipLedger = .empty,
+        purposes: ProximityNamespace.Purposes
+    ) {
         self.meshID = meshID
         self.founderSigningPublicKey = founderSigningPublicKey
         self.ledger = ledger
+        self.purposes = purposes
     }
 
     /// The roster derived from everything accepted so far.
@@ -154,9 +165,9 @@ nonisolated struct MeshMembershipRecordVerifier {
         if let rejection = admitterAuthorization(for: record) { return rejection }
         guard IdentityService.verify(
             record.signature,
-            of: canonicalBytes(for: record.token),
+            of: canonicalBytes(for: record.token, in: purposes),
             by: record.token.admitterSigningPublicKey,
-            purpose: FernletCryptoPurpose.Signature.meshAdmissionTokenV2
+            purpose: purposes.signature.meshAdmissionTokenV2
         ) else {
             return .signatureInvalid
         }
@@ -203,9 +214,9 @@ nonisolated struct MeshMembershipRecordVerifier {
         }
         guard IdentityService.verify(
             record.signature,
-            of: canonicalBytes(for: record),
+            of: canonicalBytes(for: record, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshMemberDepartureV1
+            purpose: purposes.signature.meshMemberDepartureV1
         ) else {
             return .signatureInvalid
         }
@@ -230,9 +241,9 @@ nonisolated struct MeshMembershipRecordVerifier {
         if let rejection = quorumRejection(for: record) { return rejection }
         guard IdentityService.verify(
             record.signature,
-            of: canonicalBytes(for: record),
+            of: canonicalBytes(for: record, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshMemberRemovalV1
+            purpose: purposes.signature.meshMemberRemovalV1
         ) else {
             return .signatureInvalid
         }
@@ -279,9 +290,9 @@ nonisolated struct MeshMembershipRecordVerifier {
         guard roster.contains(fingerprint: record.memberFingerprint) else { return .signerNotAMember }
         guard IdentityService.verify(
             record.signature,
-            of: canonicalBytes(for: record),
+            of: canonicalBytes(for: record, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshTerminatedV1
+            purpose: purposes.signature.meshTerminatedV1
         ) else {
             return .signatureInvalid
         }
@@ -305,9 +316,9 @@ nonisolated struct MeshMembershipRecordVerifier {
         guard roster.contains(fingerprint: payload.senderFingerprint) else { return .signerNotAMember }
         guard IdentityService.verify(
             payload.signature,
-            of: canonicalBytes(for: payload),
+            of: canonicalBytes(for: payload, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshInventoryDigestV1
+            purpose: purposes.signature.meshInventoryDigestV1
         ) else {
             return .signatureInvalid
         }
@@ -332,9 +343,9 @@ nonisolated struct MeshMembershipRecordVerifier {
         guard roster.contains(fingerprint: payload.senderFingerprint) else { return .signerNotAMember }
         guard IdentityService.verify(
             payload.signature,
-            of: canonicalBytes(for: payload),
+            of: canonicalBytes(for: payload, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshEpochHeadsV1
+            purpose: purposes.signature.meshEpochHeadsV1
         ) else {
             return .signatureInvalid
         }
@@ -379,9 +390,9 @@ nonisolated struct MeshMembershipRecordVerifier {
         }
         guard IdentityService.verify(
             advertisement.signature,
-            of: canonicalBytes(for: advertisement),
+            of: canonicalBytes(for: advertisement, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshKeyAgreementV1
+            purpose: purposes.signature.meshKeyAgreementV1
         ) else {
             return .refused(.signatureInvalid)
         }
@@ -412,9 +423,9 @@ nonisolated struct MeshMembershipRecordVerifier {
         guard proposal.targetFingerprint != proposal.proposerFingerprint else { return .voterNotEligible }
         guard IdentityService.verify(
             proposal.signature,
-            of: canonicalBytes(for: proposal),
+            of: canonicalBytes(for: proposal, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshRemovalProposalV1
+            purpose: purposes.signature.meshRemovalProposalV1
         ) else {
             return .signatureInvalid
         }
@@ -436,9 +447,9 @@ nonisolated struct MeshMembershipRecordVerifier {
         guard vote.voterFingerprint != vote.targetFingerprint else { return .voterNotEligible }
         guard IdentityService.verify(
             vote.signature,
-            of: canonicalBytes(for: vote),
+            of: canonicalBytes(for: vote, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshRemovalVoteV1
+            purpose: purposes.signature.meshRemovalVoteV1
         ) else {
             return .signatureInvalid
         }
@@ -453,7 +464,7 @@ nonisolated struct MeshMembershipRecordVerifier {
 
     /// This device's own digest, for sending.
     var localInventoryDigest: MeshInventoryDigest {
-        MeshInventoryDigest(meshID: meshID, ledger: ledger)
+        MeshInventoryDigest(meshID: meshID, ledger: ledger, purposes: purposes)
     }
 
     // MARK: - Shared checks

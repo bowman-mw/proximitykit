@@ -483,6 +483,23 @@ deprecation attribute (warnings are errors), for FernletCrypto's feature labels,
 probe purposes and the tests until their labels move. `ProximityNamespaceGoldenTests` pins the
 keychain read and both overloads' treatment of every `.fernlet` label.
 
+**Signed transcripts I (step A0.2.4).** The identity envelope, the admission token, the membership
+records and messages, the removal quorum and the key advertisement take their labels from the
+namespace, and so does the membership inventory digest's hash. The serializer's overloads for them
+and `canonicalInventoryDigestBytes` take `in purposes: ProximityNamespace.Purposes` and write
+`purposes.signature.<field>` (or `purposes.hash.meshInventoryDigestV1`) where a file-level tag used
+to sit. Every reader passes the purposes it already holds, never a default: a builder its signing
+identity's ``IdentityService/purposes``, the envelope's `verify` its `identityService`'s, a
+`MeshMembershipRecordVerifier` the copy it keeps from construction (a trailing `purposes:`), and
+``MeshNetworkManager`` its stored `namespace.family.purposes` for the verifiers it builds, the ledger
+adoption (`MeshLedgerAdoption.bootstrapVerifier(...in:)`, `adopt(...in:)`) and the admission-token
+check (`MeshAdmissionToken/verify(joinerSigningPublicKey:expectedMeshID:expectedAdmitterSigningPublicKey:now:in:)`).
+`MeshInventoryDigest(meshID:ledger:purposes:)` hashes under them and stores none of it, so its
+`Codable` form does not change. The legacy pair is the family's choice now: a schema-v1 envelope and
+a pre-WI-6 admission token verify under `legacyV1`'s verify-only labels, and a family that took
+``ProximityNamespace/LegacyV1/refused`` has none, so for it a legacy-framed signature is
+`signatureInvalid`. `.fernlet` accepts its legacy peers, so Fernlet verifies exactly what it did.
+
 ## Topics
 
 ### Host seam and app integration
@@ -1864,7 +1881,7 @@ Three consequences worth stating outright:
   rather than at the next evaluation. It runs no detector and raises no event — a merge is not a
   reachability change.
 - **A restart merges rather than rebuilding.** `restoreMembershipLedger(from:)` puts the sealed
-  ledger back through ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:)`` — a
+  ledger back through ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:in:)`` — a
   re-verification from the ledger's own self-admitted root, not a trust — so a relaunched member has
   something to merge *from* instead of dropping every membership frame `droppedNoLedger`. Schema
   stays at **2**; nothing new is written.

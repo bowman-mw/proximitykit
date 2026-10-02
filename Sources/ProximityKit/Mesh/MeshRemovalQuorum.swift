@@ -34,7 +34,6 @@
 // additive family with hyphens (`removal-proposal` / `removal-vote`), so one grep separates the
 // signed quorum from the legacy pair.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshRemovalQuorumBounds
@@ -498,8 +497,8 @@ extension SignedRemovalProposal {
             signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshRemovalProposalV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshRemovalProposalV1
         )
         return SignedRemovalProposal(
             meshID: meshID,
@@ -540,8 +539,8 @@ extension SignedRemovalVote {
             signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshRemovalVoteV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshRemovalVoteV1
         )
         return SignedRemovalVote(
             meshID: proposal.meshID,

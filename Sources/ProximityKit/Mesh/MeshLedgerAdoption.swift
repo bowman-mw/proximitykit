@@ -96,7 +96,7 @@ nonisolated enum MeshLedgerAdoptionOutcome {
 /// ``MeshMembershipRecordVerifier/founderSigningPublicKey``. A joiner armed with its admitter's key
 /// as the root therefore refuses the *founder's* self-admission when it later arrives
 /// (`unauthorizedAdmitter`) — the two ledgers would never converge, and every subsequent record
-/// from the rest of the mesh would be refused with it. ``adopt(offered:ownAdmission:meshID:)`` is
+/// from the rest of the mesh would be refused with it. ``adopt(offered:ownAdmission:meshID:in:)`` is
 /// the answer: it does not merge into the bootstrap ledger, it **rebases** onto the offered one and
 /// re-files this device's own record there.
 ///
@@ -141,20 +141,24 @@ nonisolated enum MeshLedgerAdoption {
     /// this device authenticated (the grant is refused unless the token's admitter root equals the
     /// envelope's authenticated sender — `admissionGrantIsAuthorized`). It is a deliberately
     /// provisional root: it makes this device a member of its own ledger so it can sign and file
-    /// records at once, and ``adopt(offered:ownAdmission:meshID:)`` replaces it with the real one.
+    /// records at once, and ``adopt(offered:ownAdmission:meshID:in:)`` replaces it with the real one.
     ///
     /// - Parameters:
     ///   - meshID: The mesh being joined.
     ///   - ownAdmission: This device's verified admission record.
+    ///   - purposes: The caller's namespace labels, which the armed verifier keeps as its own copy
+    ///     (plan step A0.2.4).
     /// - Returns: The armed verifier, or the named refusal.
     static func bootstrapVerifier(
         meshID: UUID,
-        ownAdmission: SignedAdmissionRecord
+        ownAdmission: SignedAdmissionRecord,
+        in purposes: ProximityNamespace.Purposes
     ) -> MeshLedgerAdoptionOutcome {
         guard ownAdmission.meshID == meshID else { return .refused(.foreignMesh) }
         var verifier = MeshMembershipRecordVerifier(
             meshID: meshID,
-            founderSigningPublicKey: ownAdmission.token.admitterSigningPublicKey
+            founderSigningPublicKey: ownAdmission.token.admitterSigningPublicKey,
+            purposes: purposes
         )
         if let rejection = verifier.insert(ownAdmission) {
             return .refused(.ownAdmissionRefused(rejection))
@@ -169,13 +173,17 @@ nonisolated enum MeshLedgerAdoption {
     ///   - offered: The peer's ledger, entirely untrusted.
     ///   - ownAdmission: This device's own verified admission record, re-filed into the result.
     ///   - meshID: The mesh both must name.
+    ///   - purposes: The caller's namespace labels: every record of the offered ledger is
+    ///     re-verified under them, and the adopted verifier keeps them as its own copy (plan step
+    ///     A0.2.4).
     /// - Returns: A verifier rooted at the offered ledger's founder and holding every record of it
     ///   that verified, plus this device's own admission — or the named refusal, in which case the
     ///   caller keeps the ledger it had.
     static func adopt(
         offered: MeshMembershipLedger,
         ownAdmission: SignedAdmissionRecord,
-        meshID: UUID
+        meshID: UUID,
+        in purposes: ProximityNamespace.Purposes
     ) -> MeshLedgerAdoptionOutcome {
         guard ownAdmission.meshID == meshID else { return .refused(.foreignMesh) }
         guard let root = offered.admissions.earliest else { return .refused(.rootMissing) }
@@ -185,7 +193,8 @@ nonisolated enum MeshLedgerAdoption {
         }
         var verifier = MeshMembershipRecordVerifier(
             meshID: meshID,
-            founderSigningPublicKey: root.token.admitterSigningPublicKey
+            founderSigningPublicKey: root.token.admitterSigningPublicKey,
+            purposes: purposes
         )
         verifier.merge(offered)
         guard chains(verifier.roster, to: ownAdmission) else { return .refused(.admitterNotChained) }

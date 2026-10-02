@@ -27,7 +27,6 @@
 // `@MainActor` factory at the bottom mints a signature. The fold is a pure function, so the whole
 // decision table — the duplicate-key refusal included — is provable at tier 1 with no rig.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - SignedKeyAgreementAdvertisement
@@ -1050,8 +1049,8 @@ extension SignedKeyAgreementAdvertisement {
             signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshKeyAgreementV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshKeyAgreementV1
         )
         return SignedKeyAgreementAdvertisement(
             meshID: meshID,

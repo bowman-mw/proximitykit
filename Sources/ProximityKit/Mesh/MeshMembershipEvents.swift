@@ -17,7 +17,6 @@
 // a record that reached a ledger unverified is a member on a roster nobody vouched for.
 
 import CryptoKit
-import FernletCrypto
 import FernletDomainModel
 import Foundation
 
@@ -112,9 +111,10 @@ nonisolated struct MeshRecordIdentity: Equatable, Sendable {
 /// digest; it only decides whether to ask. That is what keeps the failure mode of a wrong digest
 /// bounded to a wasted exchange.
 ///
-/// The hash is domain-separated under `FernletCryptoPurpose.Hash.meshInventoryDigestV1` and
-/// computed over the sorted ``MeshRecordIdentity`` list, so it is a pure function of the record
-/// SET — order of arrival, and which device is asking, cannot change it.
+/// The hash is domain-separated under the host namespace's `purposes.hash.meshInventoryDigestV1`
+/// (plan step A0.2.4) and computed over the sorted ``MeshRecordIdentity`` list, so it is a pure
+/// function of the record SET — order of arrival, and which device is asking, cannot change it. The
+/// purposes are an initializer argument and never stored: the digest's `Codable` form is unchanged.
 nonisolated struct MeshInventoryDigest: Codable, Equatable, Sendable {
 
     /// The mesh the digest describes. A digest for another mesh is a refusal, not a difference.
@@ -130,14 +130,14 @@ nonisolated struct MeshInventoryDigest: Codable, Equatable, Sendable {
     /// SHA-256 over the domain-tagged, sorted identities of every record in the ledger.
     let recordsHash: Data
 
-    /// Computes the digest of a ledger.
-    init(meshID: UUID, ledger: MeshMembershipLedger) {
+    /// Computes the digest of a ledger, its records hash under `purposes`.
+    init(meshID: UUID, ledger: MeshMembershipLedger, purposes: ProximityNamespace.Purposes) {
         self.meshID = meshID
         admissionCount = ledger.admissions.count
         departureCount = ledger.departures.count
         removalCount = ledger.removals.count
         terminationCount = ledger.terminations.count
-        recordsHash = Self.hash(of: Self.identities(in: ledger))
+        recordsHash = Self.hash(of: Self.identities(in: ledger), in: purposes)
     }
 
     /// Rebuilds a digest from already-computed parts — the decode path's memberwise entry, and
@@ -195,10 +195,10 @@ nonisolated struct MeshInventoryDigest: Codable, Equatable, Sendable {
         return identities.sorted(by: MeshRecordIdentity.precedes)
     }
 
-    // The hash below is domain-separated by `canonicalInventoryDigestBytes(for:)`, whose leading
-    // field is the registered purpose `FernletCryptoPurpose.Hash.meshInventoryDigestV1`.
-    private static func hash(of identities: [MeshRecordIdentity]) -> Data {
-        Data(SHA256.hash(data: canonicalInventoryDigestBytes(for: identities)))
+    // The hash below is domain-separated by `canonicalInventoryDigestBytes(for:in:)`, whose leading
+    // field is the namespace purpose `purposes.hash.meshInventoryDigestV1`.
+    private static func hash(of identities: [MeshRecordIdentity], in purposes: ProximityNamespace.Purposes) -> Data {
+        Data(SHA256.hash(data: canonicalInventoryDigestBytes(for: identities, in: purposes)))
     }
 }
 
@@ -428,7 +428,7 @@ extension SignedDepartureRecord {
     ///
     /// `@MainActor` because `IdentityService` is: signing reads the device's long-term key. The
     /// verification counterpart is `nonisolated`, so a received record can be checked off the main
-    /// actor exactly as ``MeshAdmissionToken/verify(joinerSigningPublicKey:expectedMeshID:expectedAdmitterSigningPublicKey:now:)`` is.
+    /// actor exactly as ``MeshAdmissionToken/verify(joinerSigningPublicKey:expectedMeshID:expectedAdmitterSigningPublicKey:now:in:)`` is.
     @MainActor
     static func signed(
         meshID: UUID,
@@ -444,8 +444,8 @@ extension SignedDepartureRecord {
             signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshMemberDepartureV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshMemberDepartureV1
         )
         return SignedDepartureRecord(
             meshID: meshID,
@@ -479,8 +479,8 @@ extension SignedTerminationRecord {
             signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshTerminatedV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshTerminatedV1
         )
         return SignedTerminationRecord(
             meshID: meshID,
@@ -518,8 +518,8 @@ extension SignedRemovalRecord {
             signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshMemberRemovalV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshMemberRemovalV1
         )
         return SignedRemovalRecord(
             meshID: meshID,
@@ -543,7 +543,7 @@ extension MeshInventoryDigestPayload {
         identity: IdentityService,
         sentAt: Date = Date()
     ) throws -> MeshInventoryDigestPayload {
-        let digest = MeshInventoryDigest(meshID: meshID, ledger: ledger)
+        let digest = MeshInventoryDigest(meshID: meshID, ledger: ledger, purposes: identity.purposes)
         let unsigned = MeshInventoryDigestPayload(
             digest: digest,
             senderFingerprint: identity.localFingerprint,
@@ -551,8 +551,8 @@ extension MeshInventoryDigestPayload {
             signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshInventoryDigestV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshInventoryDigestV1
         )
         return MeshInventoryDigestPayload(
             digest: digest,
@@ -633,8 +633,8 @@ extension MeshEpochHeadsPayload {
             sentAt: sentAt, signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshEpochHeadsV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshEpochHeadsV1
         )
         return MeshEpochHeadsPayload(
             meshID: meshID, heads: unsigned.heads, senderFingerprint: identity.localFingerprint,

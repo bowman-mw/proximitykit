@@ -5,7 +5,6 @@
 // Every envelope is Ed25519-signed over a deterministic canonical JSON encoding.
 
 import Foundation
-import FernletCrypto
 import FernletDomainModel
 
 // MARK: - Envelope
@@ -257,6 +256,10 @@ extension FernletIdentityEnvelope {
     /// `replayCache`: nil ONLY for callers with their own durable dedup that must accept envelopes
     /// older than the cache's 24 h window (the heart dead-drop, whose pickup window is 7 days) —
     /// every live-radio path keeps passing one.
+    /// The signature is checked under `identityService`'s namespace labels (plan step A0.2.4):
+    /// `purposes.signature.identityEnvelopeV2`, or for a schema-v1 envelope the verify-only
+    /// `legacyV1.identityEnvelopeV1` — which a family that refuses legacy peers does not have, so
+    /// there a schema-v1 envelope is `signatureInvalid`.
     @MainActor
     public func verify(
         identityService: IdentityService,
@@ -269,14 +272,16 @@ extension FernletIdentityEnvelope {
         if let expiresAt, expiresAt < Date() { throw VerifyError.expired }
 
         // Version-gated canonical bytes: v1 used the legacy `.sortedKeys`/`.iso8601` JSON encoder;
-        // v2+ uses the cross-platform binary serializer.
+        // v2+ uses the cross-platform binary serializer. A family that refuses legacy peers has no v1
+        // label (`legacyV1` is `.refused`), so `label` is nil and the envelope is `signatureInvalid`.
         let canon = schemaVersion == Self.legacySchemaVersion
             ? legacyCanonicalBytes(for: self)
-            : canonicalBytes(for: self)
-        let purpose = schemaVersion == Self.legacySchemaVersion
-            ? FernletCryptoPurpose.Signature.identityEnvelopeLegacyV1
-            : FernletCryptoPurpose.Signature.identityEnvelopeV2
-        guard IdentityService.verify(signature, of: canon, by: senderSigningPublicKey, purpose: purpose) else {
+            : canonicalBytes(for: self, in: identityService.purposes)
+        let label = schemaVersion == Self.legacySchemaVersion
+            ? identityService.purposes.signature.legacyV1.identityEnvelopeV1
+            : identityService.purposes.signature.identityEnvelopeV2
+        guard let purpose = label,
+              IdentityService.verify(signature, of: canon, by: senderSigningPublicKey, purpose: purpose) else {
             throw VerifyError.signatureInvalid
         }
 
@@ -348,7 +353,8 @@ extension FernletIdentityEnvelope {
             signature: Data()
         )
         envelope.signature = try identityService.sign(
-            canonicalBytes(for: envelope), purpose: FernletCryptoPurpose.Signature.identityEnvelopeV2)
+            canonicalBytes(for: envelope, in: identityService.purposes),
+            purpose: identityService.purposes.signature.identityEnvelopeV2)
         return envelope
     }
 }

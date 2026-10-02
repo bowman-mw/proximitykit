@@ -342,8 +342,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private unowned let store: any ProximityHost
     /// The host's protocol identity, read once from ``store`` at construction and kept as this
     /// manager's own copy (ProximityKit plan step A0.2.3), so no later read reaches back to the
-    /// host. The default identity is built from it; A0.2's later commits route the rest of this
-    /// manager's labels and names through it. `nonisolated`: inert `Sendable` value data.
+    /// host. The default identity is built from it, and since step A0.2.4 its purposes are what the
+    /// membership verifiers, the ledger adoption and the admission-token check run under; A0.2's
+    /// later commits route the rest of this manager's labels and names through it. `nonisolated`:
+    /// inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
     /// its body. `NetworkMeshSession` since the MC→QUIC cutover (2026-09-21), and the only radio a
@@ -4198,7 +4200,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if let existing = membershipVerifier, existing.meshID == meshID { return }
         membershipVerifier = MeshMembershipRecordVerifier(
             meshID: meshID,
-            founderSigningPublicKey: founderSigningPublicKey
+            founderSigningPublicKey: founderSigningPublicKey,
+            purposes: namespace.family.purposes
         )
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
@@ -5861,7 +5864,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// one this device authenticated: `admissionGrantIsAuthorized` refuses a grant whose token root
     /// is not the envelope's authenticated sender, and a current member of the mesh at that. The
     /// provisional root is replaced by the real founder the moment a peer's ledger arrives and
-    /// ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:)`` proves the chain reaches this
+    /// ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:in:)`` proves the chain reaches this
     /// device's admitter.
     ///
     /// Idempotent: a ledger that has already grown past its bootstrap is left alone, so a
@@ -5878,7 +5881,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
            !existing.ledger.admissions.isEmpty {
             return true
         }
-        switch MeshLedgerAdoption.bootstrapVerifier(meshID: grant.meshID, ownAdmission: ownAdmission) {
+        switch MeshLedgerAdoption.bootstrapVerifier(
+            meshID: grant.meshID, ownAdmission: ownAdmission, in: namespace.family.purposes
+        ) {
         case .adopted(let verifier):
             membershipVerifier = verifier
             peerInventoryDigests.removeAll()
@@ -11207,7 +11212,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// descriptor happens to be gossiped — which is the "restart rebuilds the ledger instead of
     /// merging what the peer sends" shape §10.3 exists to forbid.
     ///
-    /// It is a **re-verification, not a trust**: ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:)``
+    /// It is a **re-verification, not a trust**: ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:in:)``
     /// re-derives the whole ledger from its own self-admitted root and proves the chain reaches
     /// this device's own admission before a single record counts, exactly as it does for a joiner
     /// being handed a peer's ledger. A file that does not prove that is left unadopted — the honest
@@ -11234,7 +11239,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let own = context.ledger.admissions.all.first(where: { $0.memberFingerprint == local })
         else { return }
         switch MeshLedgerAdoption.adopt(
-            offered: context.ledger, ownAdmission: own, meshID: context.meshID
+            offered: context.ledger, ownAdmission: own, meshID: context.meshID, in: namespace.family.purposes
         ) {
         case .adopted(let verifier):
             membershipVerifier = verifier
@@ -11579,7 +11584,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Non-nil only while this device is on its bootstrap ledger, fed only by the peer that
     /// admitted it, and bounded by the record sets' own caps. It is untrusted throughout:
-    /// ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:)`` verifies every record in it from
+    /// ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:in:)`` verifies every record in it from
     /// the offered root before a single one counts.
     @ObservationIgnored private var pendingAdoptionLedger = MeshMembershipLedger.empty
 
@@ -11629,7 +11634,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// advertisement would re-spend the drain's per-peer session budget).
     private func attemptLedgerAdoption(ownAdmission: SignedAdmissionRecord, meshID: UUID) {
         let outcome = MeshLedgerAdoption.adopt(
-            offered: pendingAdoptionLedger, ownAdmission: ownAdmission, meshID: meshID
+            offered: pendingAdoptionLedger, ownAdmission: ownAdmission, meshID: meshID, in: namespace.family.purposes
         )
         guard case .adopted(let adopted) = outcome else { return }
         let snapshot = membershipVerifier
@@ -13800,7 +13805,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         do {
             try grant.token.verify(joinerSigningPublicKey: identity.localSigningPublicKey,
                                    expectedMeshID: grant.meshID,
-                                   expectedAdmitterSigningPublicKey: senderSigningPublicKey)
+                                   expectedAdmitterSigningPublicKey: senderSigningPublicKey,
+                                   in: namespace.family.purposes)
         } catch {
             FernletAuditLog.log("mesh.admissionGrant.droppedTokenVerifyFailed")
             return
@@ -15825,7 +15831,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         membershipVerifier = MeshMembershipRecordVerifier(
             meshID: meshID,
             founderSigningPublicKey: founderSigningPublicKey,
-            ledger: ledger
+            ledger: ledger,
+            purposes: namespace.family.purposes
         )
     }
 
