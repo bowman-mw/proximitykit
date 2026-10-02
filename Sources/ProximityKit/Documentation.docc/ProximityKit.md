@@ -15,16 +15,25 @@ social exhaust (who you met, who sent you warmth, who you reported) lives in dev
 files that are deliberately **never** part of the synced snapshot.
 
 **Position in the FernletKit graph and the S3 wall.** The `ProximityKit` target depends on
-`PrivateMediaStore` (the sealed photo index behind the mesh photo cache), `FernletDomainModel`,
-`FernletFoundation`, and `FernletUI` (for the two SwiftUI review sheets). It therefore sits on
+`PrivateMediaStore` (the sealed photo index behind the mesh photo cache), `FernletCrypto`,
+`FernletDomainModel` and `FernletFoundation`. It therefore sits on
 the *protected* side of the S3 privacy wall: it may reach a sealed `Private*` store, and the
 walled `AIProviders` / `CloudKitSync` targets can never import it (nor it them — the dead-drop's
 CloudKit transport is injected app-side through the `HeartDropTransporting` seam, so this module
 only ever hands ciphertext + rotating day tags outward). Its one seam back to app state is the
 ``ProximityHost`` protocol, which `FernletStore` conforms to via an app-side adapter; the
-"outward edges only" rule keeps the module a black box the app drives, never the reverse. Note
-the target-comment in `FernletKit/Package.swift` predates the `FernletUI` edge — the dependency
-list in the manifest is the truth.
+"outward edges only" rule keeps the module a black box the app drives, never the reverse.
+
+**No SwiftUI view and no `FernletUI` edge** (step A0.1 of
+`Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md`, the first step towards ProximityKit as a
+drop-in package of its own). The three screens this module used to ship from its `UI/` folder — the
+session-end photo review with its Photos saver and save-failure alert, the keep-as-friend prompt,
+and the fingerprint view — moved to the `FernletProximityUI` module, which depends on this one and
+never the reverse. ``PeerNameDisplay`` deliberately stayed in `UI/`: it imports neither SwiftUI nor
+`FernletUI`, `PresenceManager.firstName(of:)` calls it (a module below cannot call up into
+`FernletProximityUI`), and it reads this module's internal `MeshLinkAdvertisement.instanceNamePrefix`.
+It is Fernlet display policy rather than mechanism, though, so it should follow `PresenceManager`
+out of ProximityKit to FernletKit with the feature code in the plan's step A0.4.
 
 **How a session forms.** A radio owner (``MeshNetworkManager`` for the friend mesh,
 ``ProximityRecipeShareManager`` for recipe pairing, ``PresenceManager`` for presence hearts)
@@ -179,8 +188,8 @@ Group Activities (``ProximityActivityManager``, whose authorization is a host-si
 invitee-key-bound token rather than the shared handshake). Feature payloads dispatch through a
 registry whose committed-slot gate is the security boundary — behind the payload door's attribution
 rule, which every frame of every family passes first (see the seat invariant above); the session end promotes the roster
-AND the session's unreviewed photos into the keep-as-friend review (``FriendMintingReview``,
-``KeepFriendsPromptSheet``, ``FriendPhotoReviewSheet``). **Nothing is on the wall until the person
+AND the session's unreviewed photos into the keep-as-friend review (``FriendMintingReview`` here,
+`KeepFriendsPromptSheet` and `FriendPhotoReviewSheet` in `FernletProximityUI`). **Nothing is on the wall until the person
 chooses** (2026-09-30, the owner: "None of the photos should be saved to the camera roll until this
 selection has been made", and the review must survive a process kill). Every session photo — taken
 here or received from a peer — is HELD from the moment it exists in the sealed pending corpus
@@ -220,11 +229,11 @@ only the candidate half, so a batch with photos still pending stays up. **The ap
 (session photos U3): one app-level presenter shows the session-end review in its own overlay window,
 above every tab and sheet, from these observable facts — `pendingFriendReview`, `isSessionLive`,
 `heldPhotosCanBeShown`, `isInSession` — never over a live session and never under a duress decoy.
-The package's half is ``FriendPhotoReviewSheet``'s: an optional `notNow` (the overlay's "Not now",
+The package's half is `FriendPhotoReviewSheet`'s (in `FernletProximityUI` since plan step A0.1): an optional `notNow` (the overlay's "Not now",
 which answers nothing and is also VoiceOver's escape gesture there; the camera's Develop sheet
 passes nil and keeps its own swipe-down, which is disabled while an answer runs), the title as a heading, spoken tile labels naming the
 sender through ``PeerNameDisplay``, and an "Ending the session..." working line
-(``FriendPhotoReviewWorkingMessage/endingSession``) while the host waits for the ended mesh to be
+(`FriendPhotoReviewWorkingMessage.endingSession`) while the host waits for the ended mesh to be
 left. The sheet reads `\.scenePhase` for its snapshot cover; a host outside the SwiftUI scene (the
 overlay window) injects it.
 **"The session end" is the MESH ending — ``MeshNetworkManager/isSessionLive``
@@ -248,9 +257,9 @@ the record, though a local link failure ends the link too; the outcome is audite
 best effort, not a delivery guarantee: a partner suspended at that moment reads nothing and ends by
 its own five-minute give-up, and a pair whose roster is not yet two — the founding window before the
 admission grant lands — sends a departure, which is not waited on.
-Photo-library save failures surface through one shared mapping —
-``FriendPhotoLibrarySaver``'s `userFacingFailure(for:photoCount:)` producing a
-``PhotoSaveFailure`` rendered by the `photoSaveFailureAlert(_:failure:)` view modifier — so every
+Photo-library save failures surface through one shared mapping in `FernletProximityUI` —
+`FriendPhotoLibrarySaver`'s `userFacingFailure(for:photoCount:)` producing a
+`PhotoSaveFailure` rendered by the `photoSaveFailureAlert(_:failure:)` view modifier — so every
 save surface (review sheets and the album carousel) shows identical wording.
 
 **Store bans answer to their evidence (2026-09-24).** ``ModerationBanStore/reconcile(rows:localSigningKey:)``
@@ -410,7 +419,7 @@ and a new manager in this subsystem inherits all three:
 
 ### Localization: nothing on the wire is display copy
 
-The module owns a `Localizable.xcstrings` (added by the 2026-08-22 accessibility review's §4.0) and one copy vault, `ProximityUICopy`, for the three SwiftUI surfaces it ships — the friend-photo review sheet, the keep-friends prompt, and the photo-save failure alert — plus the two name placeholders ``PeerNameDisplay`` hands the app's in-person surfaces ("Someone nearby", "Someone you met"; `ProximityUICopy.Peer`, nonisolated because the helper is). A placeholder is resolved display text and never a token: it must not be persisted, put in a roster or vault row, or sent. Those were bare literals, and a `LocalizedStringKey` literal inside an SPM module resolves against `Bundle.main`, which never consults this module's catalog: untranslatable English with a clean build. Six of them were hiding inside ternaries (`Button(isKept ? "Keeping" : "Keep")`) or in `LocalizedStringKey`-typed properties, where no call-site scan could see them; `LocalizationBoundaryTests.packageDisplayLiteralsPassModuleBundle()` now catches both shapes. **The vault is display copy only.** Nothing below may go in it.
+The module owns a `Localizable.xcstrings` (added by the 2026-08-22 accessibility review's §4.0) and one copy vault, `ProximityUICopy`, for the three strings it hands out already resolved: the camera's hold-failure line (`ProximityUICopy.Camera`, which `MeshNetworkManager` publishes as `meshError`) and the two name placeholders ``PeerNameDisplay`` hands the app's in-person surfaces ("Someone nearby", "Someone you met"; `ProximityUICopy.Peer`, nonisolated because the helper is). A placeholder is resolved display text and never a token: it must not be persisted, put in a roster or vault row, or sent. The vault used to serve the three SwiftUI surfaces this module shipped — the friend-photo review sheet, the keep-friends prompt, and the photo-save failure alert — and their 28 keys moved with them, byte for byte, to `FernletProximityUI` (`FernletProximityUICopy` and that module's own catalog) in plan step A0.1. Those strings were bare literals once, and a `LocalizedStringKey` literal inside an SPM module resolves against `Bundle.main`, which never consults the module's catalog: untranslatable English with a clean build. Six of them were hiding inside ternaries (`Button(isKept ? "Keeping" : "Keep")`) or in `LocalizedStringKey`-typed properties, where no call-site scan could see them; `LocalizationBoundaryTests.packageDisplayLiteralsPassModuleBundle()` now catches both shapes. **The vault is display copy only.** Nothing below may go in it.
 
 This module ships English sentences that a bulk localization pass will read as UI strings and that
 must never become `String(localized:)`. Every ``PayloadSummary`` title — "Recipe share",
@@ -2500,12 +2509,6 @@ the retired wire payload, **frozen and parked** (decoded, never dispatched, neve
 
 - ``TrainerExportPayload``
 
-### Review UI
+### Peer names on screen
 
 - ``PeerNameDisplay``
-- ``KeepFriendsPromptSheet``
-- ``FriendPhotoReviewSheet``
-- ``FriendPhotoReviewWorkingMessage``
-- ``FriendPhotoLibrarySaver``
-- ``PhotoSaveFailure``
-- ``FingerprintText``
