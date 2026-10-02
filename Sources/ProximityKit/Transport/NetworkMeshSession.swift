@@ -1450,13 +1450,21 @@ private extension NetworkMeshSession {
     }
 }
 
-// MARK: - Tunnels
+// MARK: - Heartbeat
 
-private extension NetworkMeshSession {
+extension NetworkMeshSession {
 
     /// The heartbeat datagram's fixed payload. A frozen wire token, never localized, and filtered
     /// out of the inbound path so it never reaches a decoder as an app frame.
+    ///
+    /// Internal rather than private only so `ProximityNamespaceGoldenTests` can pin its bytes before
+    /// plan step A0.2 moves the value into the host-supplied namespace.
     static var heartbeatDatagram: Data { Data("fernlet-mesh-heartbeat".utf8) }
+}
+
+// MARK: - Tunnels
+
+private extension NetworkMeshSession {
 
     /// Opens an outbound QUIC tunnel to a cached endpoint.
     ///
