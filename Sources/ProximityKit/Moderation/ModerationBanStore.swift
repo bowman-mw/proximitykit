@@ -265,16 +265,16 @@ public final class ModerationBanStore {
     /// - Returns: false when the peer rows could not be enumerated at all, or when any enumerated
     ///   row survived its delete (R7: the funnel reports it as an incomplete store instead of
     ///   promising a clean wipe over a record still in the keychain). The enumeration leg matters
-    ///   as much as the delete leg: `KeychainItem.loadAll` collapses a failed enumeration into
+    ///   as much as the delete leg: `ProximityKeychainItem.loadAll` collapses a failed enumeration into
     ///   `[]`, which here would mean zero accounts to delete, zero failures, and a CLEAN result
     ///   reported over surviving peer bans — so this goes through
-    ///   `KeychainItem.loadAllDistinguishingFailure` instead. `errSecItemNotFound` is not a
+    ///   `ProximityKeychainItem.loadAllDistinguishingFailure` instead. `errSecItemNotFound` is not a
     ///   failure: a service holding no rows is genuinely clear. In practice the wipe runs
     ///   post-unlock in the foreground, where the data-protection keychain is available, so a real
     ///   enumeration failure is rare — but "rare" is not "reported honestly".
     public func clearPeerBansForDeleteAll() -> Bool {
         let peerAccounts: [String]
-        switch KeychainItem.loadAllDistinguishingFailure(service: service) {
+        switch ProximityKeychainItem.loadAllDistinguishingFailure(service: service) {
         case .rows(let rows):
             // Bounded: one pass over the finite row set the keychain returned. Labeled-tuple member
             // access, not destructuring — only the account names matter here, and taking them now
@@ -288,7 +288,7 @@ public final class ModerationBanStore {
         }
         var failures = 0
         for account in peerAccounts
-        where KeychainItem.deleteReportingStatus(account: account, service: service) != errSecSuccess {
+        where ProximityKeychainItem.deleteReportingStatus(account: account, service: service) != errSecSuccess {
             // `deleteReportingStatus` normalizes not-found to success, so this is a genuine survivor.
             failures += 1
         }
@@ -306,7 +306,7 @@ public final class ModerationBanStore {
     /// Deliberately NOT called from "Reset everything": a self-ban must survive a data reset (that is
     /// the whole point). Exposed only for tests to clean up the shared keychain service.
     public func clearAllForTesting() {
-        KeychainItem.deleteAll(service: service)
+        ProximityKeychainItem.deleteAll(service: service)
     }
 
     // MARK: - Internals
@@ -417,7 +417,7 @@ public final class ModerationBanStore {
     }
 
     private func load(account: String) -> BanRecord? {
-        guard let data = KeychainItem.load(account: account, service: service) else { return nil }
+        guard let data = ProximityKeychainItem.load(account: account, service: service) else { return nil }
         do {
             return try JSONDecoder().decode(BanRecord.self, from: data)
         } catch {
@@ -435,7 +435,7 @@ public final class ModerationBanStore {
             ProximityAudit.log("storeBan.encodeFailed", context: ["account": account])
             return false
         }
-        let status = KeychainItem.store(
+        let status = ProximityKeychainItem.store(
             data, account: account, service: service,
             accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, synchronizable: false)
         guard status == errSecSuccess else {

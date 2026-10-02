@@ -15,7 +15,7 @@ import Foundation
 /// ``HeartDropSidecarSeal`` keeps its key under the same `com.fernlet.heartdrop` service as
 /// ``HeartPrekeyStore``'s blob precisely so both share the delete-all fate —
 /// `HeartDropService.wipeForDeleteAll()` removes the files AND, via
-/// `HeartPrekeyStore.wipeForDeleteAll()`'s `KeychainItem.deleteAll(service:)`, the key. A scope that
+/// `HeartPrekeyStore.wipeForDeleteAll()`'s `ProximityKeychainItem.deleteAll(service:)`, the key. A scope that
 /// isolated only the directory would therefore be cosmetic: a wipe elsewhere in the process still
 /// deletes the shared key, and the isolated file then fails to open — the outbox quarantines it and
 /// latches `dataLossOccurred`, which is strictly worse than losing the file outright.

@@ -1,7 +1,6 @@
 import Foundation
 import CryptoKit
 import Security
-import FernletFoundation
 
 /// One-time X25519 prekeys for forward-secret heart drops (bitchat adoptions Increment 3 — the
 /// pattern bitchat landed after shipping no-FS sealed mail: gossip signed one-time prekey
@@ -241,7 +240,7 @@ public final class HeartPrekeyStore {
 
     /// Delete-all seam (Docs/PrivacyWipeCoverage.md).
     public func wipeForDeleteAll() {
-        KeychainItem.deleteAll(service: keychainService)
+        ProximityKeychainItem.deleteAll(service: keychainService)
         cachedState = nil
     }
 
@@ -282,7 +281,7 @@ public final class HeartPrekeyStore {
     /// undecodable blob both read as an empty state; any other status fails closed.
     private func loadState() -> StoredState? {
         if let cachedState { return cachedState }
-        switch KeychainItem.loadDistinguishingAbsence(account: Self.keychainAccount, service: keychainService) {
+        switch ProximityKeychainItem.loadDistinguishingAbsence(account: Self.keychainAccount, service: keychainService) {
         case .absent:
             return StoredState(bundles: [])
         case .unreadable(let status):
@@ -304,7 +303,7 @@ public final class HeartPrekeyStore {
     /// No `@discardableResult` (R7): the Bool IS the durability signal every caller must consume.
     private func persist(_ state: StoredState) -> Bool {
         guard let data = try? JSONEncoder().encode(state) else { return false }
-        let status = KeychainItem.store(
+        let status = ProximityKeychainItem.store(
             data,
             account: Self.keychainAccount,
             service: keychainService,

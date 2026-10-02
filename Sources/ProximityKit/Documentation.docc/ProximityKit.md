@@ -626,6 +626,27 @@ still reaches the stores. The two stores and their two scope files no longer imp
 `ProximityNamespaceGoldenTests` runs the A0.2.0 column vectors through the copy and checks that it
 and `ColumnCrypto` open each other's blobs and refuse alike.
 
+**The keychain mechanism (step A0.2.11).** This module's key stores (the identity's four device rows
+and its backup-escrow rows, the two mesh seal keys, the heart-drop prekey blob and sidecar seal key,
+the moderation bans) reach the keychain through ``ProximityKeychainItem`` (`Support/`),
+FernletFoundation's `KeychainItem` mechanism copied member for member: delete-then-add `store` with
+its `synchronizable:` and `replacing:` scopes, `load`, `loadDistinguishingAbsence`, `loadAll`,
+`loadAllDistinguishingFailure`, `delete`, `deleteReportingStatus`, `deleteAll` and
+`deleteAllReportingStatus`, the scope and result types they use, and the same empty-name guards and
+status handling. Each query dictionary is built in one place and is FernletFoundation's for the
+same call (a generic password keyed by service and account, the caller's accessibility class and
+synchronizable flag, the data-protection keychain), so every row written before this step reads
+back unchanged and a host may still read or clear these services with its own accessor, as
+Fernlet's tests do. A failed `delete` or `deleteAll` is audited through ``ProximityAudit``
+as `keychain.delete.failed` or `keychain.deleteAll.failed`, with FernletFoundation's context keys.
+Fernlet's catalogue stayed behind: its `Account` names, typed overloads and service constants, the
+device sealing-key mint and the update-in-place primitive. The copy holds no account, service or
+class of its own; each store passes its row's names and class, where the key-custody walls read
+them. Five of the six key-store files no longer import FernletFoundation; the moderation store
+still does, for its clock, until step A0.4. `ProximityNamespaceGoldenTests` holds every query
+dictionary to the one FernletFoundation's source spells, and checks that the two read, list and
+delete each other's rows and fail and audit alike.
+
 ## Topics
 
 ### Host seam and app integration
@@ -650,6 +671,7 @@ and `ColumnCrypto` open each other's blobs and refuse alike.
 
 - ``IdentityService``
 - ``IdentityError``
+- ``ProximityKeychainItem``
 - ``ReplayCache``
 
 ### Wire envelope and sealing

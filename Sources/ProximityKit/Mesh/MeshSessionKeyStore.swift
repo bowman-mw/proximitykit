@@ -10,7 +10,6 @@
 
 import CryptoKit
 import Foundation
-import FernletFoundation
 import Security
 
 // MARK: - MeshSessionStorageScope
@@ -192,7 +191,7 @@ nonisolated enum MeshSessionSealKey {
     /// - Returns: The key, a deferral (keychain unreadable — retry), or a refusal (row absent or
     ///   malformed, so these bytes are terminally unopenable).
     static func forOpen(service: String, account: String) -> MeshSessionSealKeyOutcome {
-        switch KeychainItem.loadDistinguishingAbsence(account: account, service: service) {
+        switch ProximityKeychainItem.loadDistinguishingAbsence(account: account, service: service) {
         case .found(let data) where data.count == keyByteCount:
             return .available(SymmetricKey(data: data))
         case .found:
@@ -217,7 +216,7 @@ nonisolated enum MeshSessionSealKey {
     ///     `installation.keychain.meshSessionSealKey.account` (plan step A0.2.8).
     /// - Returns: The key, a deferral, or a refusal naming why no key could be established.
     static func forSeal(service: String, account: String) -> MeshSessionSealKeyOutcome {
-        switch KeychainItem.loadDistinguishingAbsence(account: account, service: service) {
+        switch ProximityKeychainItem.loadDistinguishingAbsence(account: account, service: service) {
         case .found(let data) where data.count == keyByteCount:
             return .available(SymmetricKey(data: data))
         case .found:
@@ -235,7 +234,7 @@ nonisolated enum MeshSessionSealKey {
     ///
     /// - Parameter service: The scope's keychain service.
     static func wipe(service: String) {
-        KeychainItem.deleteAll(service: service)
+        ProximityKeychainItem.deleteAll(service: service)
     }
 
     /// Mints, stores and READ-BACK-VERIFIES a fresh key.
@@ -247,7 +246,7 @@ nonisolated enum MeshSessionSealKey {
         // a CryptoKit key is needed. `UInt8.random(in:)` draws from `SystemRandomNumberGenerator`,
         // the platform CSPRNG — the same source `SymmetricKey` uses.
         let keyData = Data((0..<keyByteCount).map { _ in UInt8.random(in: UInt8.min...UInt8.max) })
-        let status = KeychainItem.store(
+        let status = ProximityKeychainItem.store(
             keyData,
             account: account,
             service: service,
@@ -257,7 +256,7 @@ nonisolated enum MeshSessionSealKey {
         guard status == errSecSuccess else {
             return .deferred(.sealKeyTransientlyUnreadable)
         }
-        guard case .found(let echoed) = KeychainItem.loadDistinguishingAbsence(
+        guard case .found(let echoed) = ProximityKeychainItem.loadDistinguishingAbsence(
             account: account,
             service: service
         ), echoed == keyData else {

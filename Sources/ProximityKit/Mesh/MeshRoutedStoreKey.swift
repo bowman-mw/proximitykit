@@ -11,13 +11,12 @@
 // files then open for nobody.
 //
 // Its OWN keychain service, not a lodger under `com.fernlet.mesh-session`: one fate per service is
-// the only arrangement a service-wide `KeychainItem.deleteAll(service:)` can express honestly, and
+// the only arrangement a service-wide `ProximityKeychainItem.deleteAll(service:)` can express honestly, and
 // sharing would let a session wipe silently orphan routed ciphertext this device is holding for
 // other people.
 
 import CryptoKit
 import Foundation
-import FernletFoundation
 import Security
 
 // MARK: - MeshRoutedStorageScope
@@ -196,7 +195,7 @@ nonisolated enum MeshRoutedSealKey {
     /// - Returns: The key, a deferral (keychain unreadable — retry), or a refusal (row absent or
     ///   malformed, so these bytes are terminally unopenable).
     static func forOpen(service: String, account: String) -> MeshRoutedSealKeyOutcome {
-        switch KeychainItem.loadDistinguishingAbsence(account: account, service: service) {
+        switch ProximityKeychainItem.loadDistinguishingAbsence(account: account, service: service) {
         case .found(let data) where data.count == keyByteCount:
             return .available(SymmetricKey(data: data))
         case .found:
@@ -221,7 +220,7 @@ nonisolated enum MeshRoutedSealKey {
     ///     `installation.keychain.meshRoutedSealKey.account` (plan step A0.2.8).
     /// - Returns: The key, a deferral, or a refusal naming why no key could be established.
     static func forSeal(service: String, account: String) -> MeshRoutedSealKeyOutcome {
-        switch KeychainItem.loadDistinguishingAbsence(account: account, service: service) {
+        switch ProximityKeychainItem.loadDistinguishingAbsence(account: account, service: service) {
         case .found(let data) where data.count == keyByteCount:
             return .available(SymmetricKey(data: data))
         case .found:
@@ -239,7 +238,7 @@ nonisolated enum MeshRoutedSealKey {
     ///
     /// - Parameter service: The scope's keychain service.
     static func wipe(service: String) {
-        KeychainItem.deleteAll(service: service)
+        ProximityKeychainItem.deleteAll(service: service)
     }
 
     /// Mints, stores and READ-BACK-VERIFIES a fresh key.
@@ -252,7 +251,7 @@ nonisolated enum MeshRoutedSealKey {
         // a CryptoKit key is needed. `UInt8.random(in:)` draws from `SystemRandomNumberGenerator`,
         // the platform CSPRNG — the same source `SymmetricKey` uses.
         let keyData = Data((0..<keyByteCount).map { _ in UInt8.random(in: UInt8.min...UInt8.max) })
-        let status = KeychainItem.store(
+        let status = ProximityKeychainItem.store(
             keyData,
             account: account,
             service: service,
@@ -262,7 +261,7 @@ nonisolated enum MeshRoutedSealKey {
         guard status == errSecSuccess else {
             return .deferred(.sealKeyTransientlyUnreadable)
         }
-        guard case .found(let echoed) = KeychainItem.loadDistinguishingAbsence(
+        guard case .found(let echoed) = ProximityKeychainItem.loadDistinguishingAbsence(
             account: account,
             service: service
         ), echoed == keyData else {

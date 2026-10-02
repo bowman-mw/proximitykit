@@ -17,7 +17,6 @@
 
 import Foundation
 import FernletCrypto
-import FernletFoundation
 import CryptoKit
 import Security
 import FernletDomainModel
@@ -58,7 +57,7 @@ public enum IdentityError: Error, Equatable {
     /// A keychain READ the identity depends on failed with an `OSStatus` other than
     /// `errSecItemNotFound`, carrying that status. Raised by ``IdentityService/ensureProvisioned()``
     /// instead of treating the row as absent: every non-`found` answer there leads to a mint, and a
-    /// mint `KeychainItem.store`s each identity row **delete-then-add** — so a transient read error
+    /// mint `ProximityKeychainItem.store`s each identity row **delete-then-add** — so a transient read error
     /// (`errSecInteractionNotAllowed` before first unlock, `errSecNotAvailable`, an I/O failure)
     /// that fell through would overwrite the live identity and silently orphan every trust
     /// relationship built on it. Nothing is written when this is thrown; the next launch retries.
@@ -666,8 +665,8 @@ public final class IdentityService {
     /// The open/restore path must never mint (see `loadBackupEscrowKeyForOpen`).
     ///
     /// **Fail closed on an unreadable row (F-1, P5 close-out).** Every case below Case 1 mints, and a
-    /// mint `KeychainItem.store`s each identity row delete-then-add. The two identity-row reads and
-    /// Case 3's legacy read therefore use `KeychainItem.loadDistinguishingAbsence`: only
+    /// mint `ProximityKeychainItem.store`s each identity row delete-then-add. The two identity-row reads and
+    /// Case 3's legacy read therefore use `ProximityKeychainItem.loadDistinguishingAbsence`: only
     /// `errSecItemNotFound` is absence, and any other status throws
     /// ``IdentityError/keychainReadFailed(_:)`` with nothing written. The decision is
     /// ``classifyDeviceIdentityRows(signing:keyAgreement:accounts:)``, pure and tested on its own.
@@ -759,8 +758,8 @@ public final class IdentityService {
     ///     (plan step A0.2.8).
     /// - Returns: what provisioning may do — see ``DeviceIdentityRead`` for the precedence.
     static func classifyDeviceIdentityRows(
-        signing: KeychainItem.ReadResult,
-        keyAgreement: KeychainItem.ReadResult,
+        signing: ProximityKeychainItem.ReadResult,
+        keyAgreement: ProximityKeychainItem.ReadResult,
         accounts: ProximityNamespace.Keychain.IdentityRows
     ) -> DeviceIdentityRead {
         let signingRow = accounts.signingPrivateKey
@@ -789,14 +788,14 @@ public final class IdentityService {
     /// Throws ``IdentityError/keychainReadFailed(_:)`` when either row is **unreadable**: a
     /// transient keychain error is not absence, and the mint cases delete-then-add every identity
     /// row, so falling through would destroy the live identity. Reads with
-    /// `KeychainItem.loadDistinguishingAbsence`, never the nil-collapsing `load` — the wall in
+    /// `ProximityKeychainItem.loadDistinguishingAbsence`, never the nil-collapsing `load` — the wall in
     /// `IdentityProvisioningReadTests` pins that.
     private func loadExistingDeviceIdentity() throws
     -> (signing: Curve25519.Signing.PrivateKey, keyAgreement: Curve25519.KeyAgreement.PrivateKey)? {
-        let signingRow = KeychainItem.loadDistinguishingAbsence(
+        let signingRow = ProximityKeychainItem.loadDistinguishingAbsence(
             account: accounts.signingPrivateKey, service: keychainService
         )
-        let keyAgreementRow = KeychainItem.loadDistinguishingAbsence(
+        let keyAgreementRow = ProximityKeychainItem.loadDistinguishingAbsence(
             account: accounts.keyAgreementPrivateKey, service: keychainService
         )
         switch Self.classifyDeviceIdentityRows(signing: signingRow, keyAgreement: keyAgreementRow, accounts: accounts) {
@@ -817,11 +816,11 @@ public final class IdentityService {
 
     /// Case 3's read of the legacy synced key-agreement row, on the same fail-closed rule as
     /// ``loadExistingDeviceIdentity()``: an unreadable row throws rather than falling through to
-    /// Case 4, whose `KeychainItem.store(…, replacing: .any)` would delete the synced row it could
+    /// Case 4, whose `ProximityKeychainItem.store(…, replacing: .any)` would delete the synced row it could
     /// not read. Absent, or present but unparseable, is nil — Case 4 is then the right answer.
     private func loadLegacyKeyAgreementKey() throws -> Curve25519.KeyAgreement.PrivateKey? {
         let row = accounts.keyAgreementPrivateKey
-        switch KeychainItem.loadDistinguishingAbsence(account: row, service: keychainService) {
+        switch ProximityKeychainItem.loadDistinguishingAbsence(account: row, service: keychainService) {
         case .absent:
             return nil
         case .found(let data):
@@ -845,11 +844,11 @@ public final class IdentityService {
         _ keyAgreement: Curve25519.KeyAgreement.PrivateKey,
         accessibility: CFString
     ) {
-        let status = KeychainItem.store(keyAgreement.rawRepresentation,
-                                        account: accounts.keyAgreementPrivateKey,
-                                        service: keychainService,
-                                        accessibility: accessibility,
-                                        synchronizable: false)
+        let status = ProximityKeychainItem.store(keyAgreement.rawRepresentation,
+                                                 account: accounts.keyAgreementPrivateKey,
+                                                 service: keychainService,
+                                                 accessibility: accessibility,
+                                                 synchronizable: false)
         guard status != errSecSuccess else { return }
         ProximityAudit.log("identity.keychain.storeFailed", context: [
             "row": accounts.keyAgreementPrivateKey,
@@ -862,11 +861,11 @@ public final class IdentityService {
     /// Throws on a failed write so the caller does not adopt an escrow key that is not on disk —
     /// sealing under a key nothing persisted makes those backups permanently unrecoverable.
     private func promoteLegacyKeyAgreementKeyToEscrow(_ legacyKey: Curve25519.KeyAgreement.PrivateKey) throws {
-        let status = KeychainItem.store(legacyKey.rawRepresentation,
-                                        account: Self.escrowKeychainAccount(forPublicKey: legacyKey.publicKey.rawRepresentation),
-                                        service: keychainService,
-                                        accessibility: kSecAttrAccessibleAfterFirstUnlock,
-                                        synchronizable: true)
+        let status = ProximityKeychainItem.store(legacyKey.rawRepresentation,
+                                                 account: Self.escrowKeychainAccount(forPublicKey: legacyKey.publicKey.rawRepresentation),
+                                                 service: keychainService,
+                                                 accessibility: kSecAttrAccessibleAfterFirstUnlock,
+                                                 synchronizable: true)
         guard status != errSecSuccess else { return }
         ProximityAudit.log("identity.escrow.legacyPromoteFailed", context: ["status": "\(status)"])
         throw IdentityError.keychainWriteFailed
@@ -888,8 +887,8 @@ public final class IdentityService {
             (accounts.keyAgreementPublicKeyCache, keyAgreement.publicKey.rawRepresentation)
         ]
         for row in rows {
-            let status = KeychainItem.store(row.data, account: row.account,
-                                            service: keychainService, accessibility: accessibility)
+            let status = ProximityKeychainItem.store(row.data, account: row.account,
+                                                     service: keychainService, accessibility: accessibility)
             guard status == errSecSuccess else {
                 ProximityAudit.log("identity.keychain.storeFailed",
                                    context: ["row": row.account, "status": "\(status)"])
@@ -966,20 +965,20 @@ public final class IdentityService {
                                                contentAddressed: isContentAddressed)
             }
         }
-        for (account, data) in KeychainItem.loadAll(service: keychainService, synchronizable: .synced)
+        for (account, data) in ProximityKeychainItem.loadAll(service: keychainService, synchronizable: .synced)
         where account.hasPrefix(Self.escrowSlotPrefix) {
             ingest(account: account, data: data, synced: true)
         }
-        for (account, data) in KeychainItem.loadAll(service: keychainService, synchronizable: .local)
+        for (account, data) in ProximityKeychainItem.loadAll(service: keychainService, synchronizable: .local)
         where account.hasPrefix(Self.escrowSlotPrefix) {
             ingest(account: account, data: data, synced: false)
         }
         // Legacy fixed account — READ ONLY for back-compat with pre-content-addressing devices.
         let legacy = IdentityKeychainKey.backupEscrowPrivateKey.rawValue
-        if let data = KeychainItem.load(account: legacy, service: keychainService, synchronizable: .synced) {
+        if let data = ProximityKeychainItem.load(account: legacy, service: keychainService, synchronizable: .synced) {
             ingest(account: legacy, data: data, synced: true)
         }
-        if let data = KeychainItem.load(account: legacy, service: keychainService, synchronizable: .local) {
+        if let data = ProximityKeychainItem.load(account: legacy, service: keychainService, synchronizable: .local) {
             ingest(account: legacy, data: data, synced: false)
         }
         return byData.values.sorted { lhs, rhs in
@@ -1011,11 +1010,11 @@ public final class IdentityService {
         if backupEscrowKey == nil {
             let minted = Curve25519.KeyAgreement.PrivateKey()
             let account = Self.escrowKeychainAccount(forPublicKey: minted.publicKey.rawRepresentation)
-            let status = KeychainItem.store(minted.rawRepresentation,
-                                            account: account,
-                                            service: keychainService,
-                                            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-                                            synchronizable: false)
+            let status = ProximityKeychainItem.store(minted.rawRepresentation,
+                                                     account: account,
+                                                     service: keychainService,
+                                                     accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                                                     synchronizable: false)
             // Adopt the minted key ONLY once it is provably on disk. Adopting an unwritten key
             // seals every backup generation under a key that exists nowhere after relaunch —
             // permanently unrecoverable records. Empty return = "no escrow key", which the seal
@@ -1024,7 +1023,7 @@ public final class IdentityService {
                 ProximityAudit.log("identity.escrow.mintFailed", context: ["status": "\(status)"])
                 return Data()
             }
-            guard KeychainItem.load(account: account, service: keychainService, synchronizable: .local)
+            guard ProximityKeychainItem.load(account: account, service: keychainService, synchronizable: .local)
                     == minted.rawRepresentation else {
                 ProximityAudit.log("identity.escrow.mintVerifyFailed")
                 return Data()
@@ -1120,8 +1119,8 @@ public final class IdentityService {
                 // account (the publish below would otherwise leave it lingering). Removing only the .local
                 // row for THIS key's account cannot disturb any other (different) key.
                 if only.hasLocalRow && only.contentAddressed {
-                    KeychainItem.delete(account: Self.escrowKeychainAccount(forPublicKey: only.publicKey),
-                                        service: keychainService, synchronizable: .local)
+                    ProximityKeychainItem.delete(account: Self.escrowKeychainAccount(forPublicKey: only.publicKey),
+                                                 service: keychainService, synchronizable: .local)
                 }
                 // Migrate a genuine key that still lives ONLY at the legacy fixed account onto its
                 // content-addressed slot, so legacy-origin keys gain the same overwrite-immunity as newly
@@ -1131,11 +1130,11 @@ public final class IdentityService {
                 // raises no false conflict and preserves zero-config recovery. Idempotent: once a CA row
                 // exists, `only.contentAddressed` is true and this no-ops.
                 if !only.contentAddressed {
-                    let status = KeychainItem.store(only.data,
-                                                    account: Self.escrowKeychainAccount(forPublicKey: only.publicKey),
-                                                    service: keychainService,
-                                                    accessibility: kSecAttrAccessibleAfterFirstUnlock,
-                                                    synchronizable: true, replacing: .local)
+                    let status = ProximityKeychainItem.store(only.data,
+                                                             account: Self.escrowKeychainAccount(forPublicKey: only.publicKey),
+                                                             service: keychainService,
+                                                             accessibility: kSecAttrAccessibleAfterFirstUnlock,
+                                                             synchronizable: true, replacing: .local)
                     // Log what actually happened: the pre-fix code logged the migration as done
                     // even when nothing was written.
                     if status == errSecSuccess {
@@ -1153,14 +1152,14 @@ public final class IdentityService {
             // removed only after the publish is confirmed. The old delete-then-add order meant a failed
             // publish destroyed that last copy.
             let account = Self.escrowKeychainAccount(forPublicKey: only.publicKey)
-            let status = KeychainItem.store(only.data, account: account, service: keychainService,
-                                            accessibility: kSecAttrAccessibleAfterFirstUnlock,
-                                            synchronizable: true, replacing: .synced)
+            let status = ProximityKeychainItem.store(only.data, account: account, service: keychainService,
+                                                     accessibility: kSecAttrAccessibleAfterFirstUnlock,
+                                                     synchronizable: true, replacing: .synced)
             guard status == errSecSuccess else {
                 ProximityAudit.log("identity.escrow.promoteFailed", context: ["status": "\(status)"])
                 return .promotedLocal
             }
-            KeychainItem.delete(account: account, service: keychainService, synchronizable: .local)
+            ProximityKeychainItem.delete(account: account, service: keychainService, synchronizable: .local)
             ProximityAudit.log("identity.escrow.promotedLocal")
             return .promotedLocal
         default:
@@ -1184,8 +1183,8 @@ public final class IdentityService {
         let candidates = gatherEscrowCandidates()
         guard let chosen = candidates.first(where: { $0.synced }) else { return nil }
         for candidate in candidates where !candidate.synced && candidate.contentAddressed && candidate.data != chosen.data {
-            KeychainItem.delete(account: Self.escrowKeychainAccount(forPublicKey: candidate.publicKey),
-                                service: keychainService, synchronizable: .local)
+            ProximityKeychainItem.delete(account: Self.escrowKeychainAccount(forPublicKey: candidate.publicKey),
+                                         service: keychainService, synchronizable: .local)
         }
         backupEscrowKey = chosen.key
         ProximityAudit.log("identity.escrow.adoptedSynced")
@@ -1201,7 +1200,7 @@ public final class IdentityService {
     ///
     /// - Throws: ``IdentityError/keychainDeleteFailed(_:)`` when the keychain rows survive.
     public func wipe() throws {
-        let status = KeychainItem.deleteAllReportingStatus(service: keychainService)
+        let status = ProximityKeychainItem.deleteAllReportingStatus(service: keychainService)
         signingKey = nil
         keyAgreementKey = nil
         backupEscrowKey = nil
