@@ -110,7 +110,7 @@ nonisolated enum MeshChunker {
         for manifest: MeshRoutedManifest,
         identity: IdentityService
     ) throws -> MeshChunk {
-        let count = try validated(blob: blob, manifest: manifest, origin: identity.localFingerprint)
+        let count = try validated(blob: blob, manifest: manifest, origin: identity.localFingerprint, in: identity.purposes)
         return try mint(of: blob, at: index, count: count, for: manifest, identity: identity)
     }
 
@@ -124,7 +124,7 @@ nonisolated enum MeshChunker {
     /// - Returns: `ceil(manifest.size / 256 KiB)` signed chunks.
     /// - Throws: ``MeshChunkMintError`` or the identity's signing error.
     ///
-    /// The guard chain runs **once per item, never once per chunk**: ``validated(blob:manifest:origin:)``
+    /// The guard chain runs **once per item, never once per chunk**: ``validated(blob:manifest:origin:in:)``
     /// hashes the WHOLE blob, so re-running it inside the loop would cost `chunkCount + 1` passes
     /// over the item — 1025 SHA-256 passes over 256 MiB for a maximal one, on the main actor — for
     /// a chain whose every clause but the index is loop-invariant. The loop mints through the
@@ -135,7 +135,7 @@ nonisolated enum MeshChunker {
         for manifest: MeshRoutedManifest,
         identity: IdentityService
     ) throws -> [MeshChunk] {
-        let count = try validated(blob: blob, manifest: manifest, origin: identity.localFingerprint)
+        let count = try validated(blob: blob, manifest: manifest, origin: identity.localFingerprint, in: identity.purposes)
         var minted: [MeshChunk] = []
         minted.reserveCapacity(count)
         for index in 0..<count {
@@ -145,7 +145,7 @@ nonisolated enum MeshChunker {
     }
 
     /// Mints one chunk over an ALREADY-validated `(blob, manifest, origin)` and the count
-    /// ``validated(blob:manifest:origin:)`` derived — the loop body, and the whole mint apart from
+    /// ``validated(blob:manifest:origin:in:)`` derived — the loop body, and the whole mint apart from
     /// that chain.
     ///
     /// Private on purpose: every caller reaches it through a function that has just validated, so
@@ -167,7 +167,7 @@ nonisolated enum MeshChunker {
             meshID: manifest.meshID, itemID: manifest.itemID,
             originFingerprint: manifest.originFingerprint, contentHash: manifest.contentHash,
             chunkIndex: UInt32(index), chunkCount: UInt32(count),
-            chunkHash: MeshRoutedContentDigest.chunkHash(of: payload),
+            chunkHash: MeshRoutedContentDigest.chunkHash(of: payload, in: identity.purposes),
             expiresAt: manifest.expiresAt, payload: payload, signature: Data()
         )
         let signature = try identity.sign(
@@ -183,12 +183,16 @@ nonisolated enum MeshChunker {
     /// Runs **once per item**. Its content-hash clause is a pass over the whole blob, which is why
     /// ``chunks(of:for:identity:)`` derives the count here and then mints through
     /// ``mint(of:at:count:for:identity:)`` rather than re-entering the public primitive per index.
-    private static func validated(blob: Data, manifest: MeshRoutedManifest, origin: String) throws -> Int {
+    /// The blob is measured under `purposes`, the origin identity's namespace labels (plan step
+    /// A0.2.6), the same ones the mint hashes each slice under.
+    private static func validated(
+        blob: Data, manifest: MeshRoutedManifest, origin: String, in purposes: ProximityNamespace.Purposes
+    ) throws -> Int {
         guard !blob.isEmpty else { throw MeshChunkMintError.emptyBlob }
         guard UInt64(blob.count) == manifest.size else {
             throw MeshChunkMintError.sizeMismatch(blobByteCount: blob.count, manifestSize: manifest.size)
         }
-        guard MeshRoutedContentDigest.contentHash(of: blob) == manifest.contentHash else {
+        guard MeshRoutedContentDigest.contentHash(of: blob, in: purposes) == manifest.contentHash else {
             throw MeshChunkMintError.contentHashMismatch
         }
         guard origin == manifest.originFingerprint else {

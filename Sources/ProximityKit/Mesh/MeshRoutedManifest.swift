@@ -74,7 +74,7 @@ nonisolated enum MeshRoutedManifestFormat {
 /// Lives INSIDE ``MeshRoutedManifest/keyWraps`` and is bound into the origin's signature, so the
 /// signature also fixes who can open the item. The wrap is additionally self-binding: its AEAD
 /// authenticates the mesh id, item id, origin and ``recipientFingerprint``
-/// (``MeshRoutedContentKeyWrapper/additionalData(binding:recipientFingerprint:)``), so a wrap
+/// (``MeshRoutedContentKeyWrapper/additionalData(binding:recipientFingerprint:in:)``), so a wrap
 /// lifted out of one manifest cannot be opened under another, and one relabelled to a different
 /// recipient cannot be opened by anyone. Carries no epoch, no group-key reference, no format
 /// marker — the `.v1` in the wrap purposes is the version. Never on the wire alone: it has no
@@ -153,7 +153,7 @@ nonisolated struct MeshRoutedManifest: Codable, Equatable, Sendable {
     let originFingerprint: String
     /// Frozen English routed-type token (item 11's registry gives it meaning; this file bounds it).
     let typeToken: String
-    /// ``MeshRoutedContentDigest/contentHash(of:)`` over the **complete sealed blob**:
+    /// ``MeshRoutedContentDigest/contentHash(of:in:)`` over the **complete sealed blob**:
     /// `SHA-256(lp(Hash.meshRoutedContentV1) ‖ blob)`, 32 bytes. **Never a bare `SHA256.hash`** for
     /// routed bytes (P5 item 2, C12) — a manifest minted with an untagged digest is accepted by
     /// every verifier (this field is opaque here, D2) and then no chunk can ever be minted for it
@@ -409,7 +409,7 @@ extension MeshRoutedManifest {
     ///   - meshID: The session's mesh id.
     ///   - target: The delivery target built from the derived roster; `target.contentID` is the item id.
     ///   - typeToken: Frozen English routed-type token.
-    ///   - contentHash: ``MeshRoutedContentDigest/contentHash(of:)`` over the complete sealed blob
+    ///   - contentHash: ``MeshRoutedContentDigest/contentHash(of:in:)`` over the complete sealed blob
     ///     — `SHA-256(lp(Hash.meshRoutedContentV1) ‖ blob)`, 32 bytes. Never a bare `SHA256.hash`
     ///     (P5 item 2, C12): unchecked here, and a mismatch surfaces only at the chunk mint.
     ///   - size: Ciphertext byte count.
@@ -453,7 +453,8 @@ extension MeshRoutedManifest {
         let rule = types.entry(for: typeToken)?.expiry ?? .meshHardDeadlinePlusGrace
         let binding = MeshRoutedWrapBinding(meshID: meshID, itemID: target.contentID, originFingerprint: origin)
         let wraps = try mintWraps(
-            for: target.destinations, binding: binding, contentKey: contentKey, recipientKeys: recipientKeys
+            for: target.destinations, binding: binding, contentKey: contentKey, recipientKeys: recipientKeys,
+            in: identity.purposes
         )
         let unsigned = MeshRoutedManifest(
             meshID: meshID, itemID: target.contentID, originFingerprint: origin, typeToken: typeToken,
@@ -525,12 +526,14 @@ extension MeshRoutedManifest {
     }
 
     /// One wrap per destination, in destination order. Bounded by the destination cap; a
-    /// destination with no handshake-verified key refuses the whole mint by name (D1).
+    /// destination with no handshake-verified key refuses the whole mint by name (D1). Each wrap is
+    /// minted under `purposes`, the origin identity's namespace labels (plan step A0.2.6).
     private static func mintWraps(
         for destinations: [String],
         binding: MeshRoutedWrapBinding,
         contentKey: Data,
-        recipientKeys: [String: Data]
+        recipientKeys: [String: Data],
+        in purposes: ProximityNamespace.Purposes
     ) throws -> [MeshRecipientKeyWrap] {
         var wraps: [MeshRecipientKeyWrap] = []
         wraps.reserveCapacity(destinations.count)
@@ -542,7 +545,8 @@ extension MeshRoutedManifest {
                 contentKey: contentKey,
                 recipientFingerprint: fingerprint,
                 recipientKeyAgreementPublicKey: key,
-                binding: binding
+                binding: binding,
+                in: purposes
             ))
         }
         return wraps

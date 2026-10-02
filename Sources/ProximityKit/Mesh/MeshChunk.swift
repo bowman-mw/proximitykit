@@ -32,7 +32,6 @@
 // bounds and its digests.
 
 import CryptoKit
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshChunkFormat
@@ -112,12 +111,17 @@ nonisolated enum MeshChunkFormat {
 /// `canonicalInventoryDigestBytes` does — the post-standardization house rule
 /// (`MeshPhotoReassembly`'s bare SHA-256 is the pre-standardization form and is not the model).
 ///
+/// **Whose labels.** Since ProximityKit plan step A0.2.6 every function here takes its domain from
+/// the caller's `in purposes:` — the host namespace's `purposes.hash.<field>`, with no default —
+/// rather than from FernletCrypto's registry, so two apps of different families never derive the
+/// same digest or id from the same bytes.
+///
 /// The prefix is **writer-produced** (a ``CanonicalByteWriter`` with one
 /// `appendLengthPrefixed`), then the body is *streamed* into the hasher rather than appended to a
 /// buffer: a 256 KiB `appendLengthPrefixed(payload)` would copy the payload once per hash, and a
 /// streaming `SHA256()` does not. No length bytes are hand-rolled.
 ///
-/// **The blob contract, frozen by item 2 (C12).** ``contentHash(of:)`` and
+/// **The blob contract, frozen by item 2 (C12).** ``contentHash(of:in:)`` and
 /// `MeshRoutedManifest.size` measure the **complete sealed blob** — the exact bytes a custodian
 /// stores, a chunker splits and a recipient hashes before decrypting. The blob is therefore
 /// **self-contained**: its seal's nonce and tag live *inside* it, because the manifest carries no
@@ -126,21 +130,23 @@ nonisolated enum MeshChunkFormat {
 /// freeze buys.
 nonisolated enum MeshRoutedContentDigest {
 
-    /// The zero id ``chunkID(itemID:chunkIndex:)`` falls back to if it is ever handed a short
+    /// The zero id ``chunkID(itemID:chunkIndex:in:)`` falls back to if it is ever handed a short
     /// digest. Unreachable: SHA-256 is 32 bytes. Present so no `!` is needed (Power of 10 R5).
     private static let zeroID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     /// `SHA-256(lp(Hash.meshRoutedContentV1) ‖ blob)` — the digest a
-    /// ``MeshRoutedManifest/contentHash`` carries, over the **complete sealed blob** (C12).
-    static func contentHash(of blob: Data) -> Data {
-        digest(FernletCryptoPurpose.Hash.meshRoutedContentV1, over: blob)
+    /// ``MeshRoutedManifest/contentHash`` carries, over the **complete sealed blob** (C12). The
+    /// domain is the host namespace's `purposes.hash.meshRoutedContentV1` (plan step A0.2.6).
+    static func contentHash(of blob: Data, in purposes: ProximityNamespace.Purposes) -> Data {
+        digest(purposes.hash.meshRoutedContentV1, over: blob)
     }
 
     /// `SHA-256(lp(Hash.meshRoutedChunkV1) ‖ payload)` — the digest one ``MeshChunk`` carries over
-    /// its own slice. A different domain from ``contentHash(of:)`` so a one-chunk item's two
-    /// digests can never be interchanged.
-    static func chunkHash(of payload: Data) -> Data {
-        digest(FernletCryptoPurpose.Hash.meshRoutedChunkV1, over: payload)
+    /// its own slice. A different domain from ``contentHash(of:in:)`` so a one-chunk item's two
+    /// digests can never be interchanged. The domain is the host namespace's
+    /// `purposes.hash.meshRoutedChunkV1` (plan step A0.2.6).
+    static func chunkHash(of payload: Data, in purposes: ProximityNamespace.Purposes) -> Data {
+        digest(purposes.hash.meshRoutedChunkV1, over: payload)
     }
 
     /// One chunk's replay-window id: `SHA-256(lp(Hash.meshRoutedChunkIDV1) ‖ uuid(itemID) ‖
@@ -158,10 +164,11 @@ nonisolated enum MeshRoutedContentDigest {
     /// at the same `(itemID, index)` are two.
     ///
     /// The result is **not** an RFC-4122 versioned UUID: it is a 128-bit dedup key that happens to
-    /// have `UUID`'s shape, which is what `MeshFrameReplayWindow` takes.
-    static func chunkID(itemID: UUID, chunkIndex: UInt32) -> UUID {
+    /// have `UUID`'s shape, which is what `MeshFrameReplayWindow` takes. The domain is the host
+    /// namespace's `purposes.hash.meshRoutedChunkIDV1` (plan step A0.2.6).
+    static func chunkID(itemID: UUID, chunkIndex: UInt32, in purposes: ProximityNamespace.Purposes) -> UUID {
         var writer = CanonicalByteWriter()
-        writer.appendLengthPrefixed(FernletCryptoPurpose.Hash.meshRoutedChunkIDV1.data)
+        writer.appendLengthPrefixed(purposes.hash.meshRoutedChunkIDV1.data)
         writer.appendUUID(itemID)
         writer.appendUInt64(UInt64(chunkIndex))
         return uuid(fromFirst16: Data(SHA256.hash(data: writer.bytes)))
@@ -169,7 +176,7 @@ nonisolated enum MeshRoutedContentDigest {
 
     /// `SHA-256` over the purpose's length-prefixed spelling followed by `body`, streamed so the
     /// body is never copied into an intermediate buffer.
-    private static func digest(_ purpose: CryptographicPurpose, over body: Data) -> Data {
+    private static func digest(_ purpose: ProximityCryptographicPurpose, over body: Data) -> Data {
         var writer = CanonicalByteWriter()
         writer.appendLengthPrefixed(purpose.data)
         var hasher = SHA256()
@@ -203,7 +210,7 @@ nonisolated enum MeshRoutedContentDigest {
 /// origin's does not.
 ///
 /// **The payload is excluded from the signed transcript and bound through ``chunkHash``.** The
-/// receiver checks `chunkHash == MeshRoutedContentDigest.chunkHash(of: payload)`, so the
+/// receiver checks `chunkHash == MeshRoutedContentDigest.chunkHash(of: payload, in: purposes)`, so the
 /// signature is a statement about the bytes *through* that hash — 96 bytes of signature and hash
 /// per 256 KiB slice (0.04 %), and no 256 KiB copy into a signing buffer. The reassembled blob is
 /// checked against the manifest's `contentHash` before any completion is reported.
@@ -218,8 +225,8 @@ nonisolated enum MeshRoutedContentDigest {
 /// fixed 256 KiB boundary is the same information without a second source of truth under one
 /// signature), no type token (the type gate happened at the manifest — one registry, not two), no
 /// key epoch, branch or partition (invariants §3.2/§3.3), no custodian, hop count or TTL
-/// (increment 2's vocabulary, deliberately off the wire), and no explicit chunk id (``chunkID`` is
-/// derived). Records carry **no schema integer**: the `.v1` in the domain IS the version, so a
+/// (increment 2's vocabulary, deliberately off the wire), and no explicit chunk id (``chunkID(in:)``
+/// is derived). Records carry **no schema integer**: the `.v1` in the domain IS the version, so a
 /// later field means a whole `routed-chunk.v2` family beside v1 — never an optional `Codable`
 /// field, which outside the canonical bytes would be unsigned and forgeable.
 ///
@@ -350,12 +357,14 @@ nonisolated struct MeshChunk: Codable, Equatable, Sendable {
         now <= expiresAt
     }
 
-    /// This chunk's replay-window id — see ``MeshRoutedContentDigest/chunkID(itemID:chunkIndex:)``.
-    /// Derived, never a wire field. P5 item 12 wires it as
-    /// `window.admit(frameID: chunk.chunkID, from: chunk.originFingerprint, meshID: context.meshID,
-    /// expiresAt: chunk.expiresAt, now: now)` — the id, the author and the expiry come off the
-    /// chunk, and the author is the **origin**, never the forwarding envelope's sender; the mesh id
-    /// is the **ingest session's own** (`currentMesh.meshID`), not the frame's claimed one.
+    /// This chunk's replay-window id — see ``MeshRoutedContentDigest/chunkID(itemID:chunkIndex:in:)``.
+    /// Derived, never a wire field, and a function rather than a property since ProximityKit plan
+    /// step A0.2.6: it hashes the caller's `purposes.hash.meshRoutedChunkIDV1`, which a value
+    /// decoded off the wire does not carry. P5 item 12 wires it as
+    /// `window.admit(frameID: chunk.chunkID(in: purposes), from: chunk.originFingerprint, meshID:
+    /// context.meshID, expiresAt: chunk.expiresAt, now: now)` — the id, the author and the expiry come
+    /// off the chunk, and the author is the **origin**, never the forwarding envelope's sender; the
+    /// mesh id is the **ingest session's own** (`currentMesh.meshID`), not the frame's claimed one.
     ///
     /// That last parameter makes the window's own mesh guard inert on this path by construction:
     /// the routed window is built with `context.meshID` and probed with it, so
@@ -372,8 +381,12 @@ nonisolated struct MeshChunk: Codable, Equatable, Sendable {
     /// a **named degradation, never a refusal**: the manager's probe acts on `.replayed` alone and
     /// every other verdict falls through to the unchanged verify-and-store path, so no legitimate
     /// chunk can be dropped by this defence at any window size.
-    var chunkID: UUID {
-        MeshRoutedContentDigest.chunkID(itemID: itemID, chunkIndex: chunkIndex)
+    ///
+    /// - Parameter purposes: The caller's namespace labels, with no default: ProximityKit holds no
+    ///   namespace of its own.
+    /// - Returns: The derived 128-bit dedup id.
+    func chunkID(in purposes: ProximityNamespace.Purposes) -> UUID {
+        MeshRoutedContentDigest.chunkID(itemID: itemID, chunkIndex: chunkIndex, in: purposes)
     }
 
     /// The one place the chunk-boundary rule lives: how many bytes the chunk at `index` of `count`

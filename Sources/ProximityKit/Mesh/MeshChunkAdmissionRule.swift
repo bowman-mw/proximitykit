@@ -9,7 +9,7 @@
 // the same decision is written twice, the ten refusal tokens drift. C13 names that as a binding
 // constraint on item 3, so the verdicts moved here and BOTH doors call them:
 //
-//   • `MeshChunkAssembly.admit(_:)`  and  `MeshRoutedStore.stagingChunk(_:now:)`      → `verdict`
+//   • `MeshChunkAssembly.admit(_:in:)`  and  `MeshRoutedStore.stagingChunk(_:now:in:)` → `verdict`
 //   • `MeshChunkAssembly.bind(to:)`  and  `MeshRoutedStore.admittingManifest(_:now:)` → `bindingVerdict`
 //
 // The extraction is behaviour-preserving by construction: item 2's `MeshChunkAssemblyTests` pass
@@ -157,8 +157,9 @@ nonisolated enum MeshChunkAdmissionRule {
     ///
     /// - Parameters:
     ///   - chunk: The chunk being offered. Must be one `MeshChunkVerifier` already accepted.
-    ///   - payloadHash: `MeshRoutedContentDigest.chunkHash(of: chunk.payload)`, computed **once**
-    ///     by the caller and used for both the duplicate check and the hash guard.
+    ///   - payloadHash: `MeshRoutedContentDigest.chunkHash(of: chunk.payload, in: purposes)`,
+    ///     computed **once** by the caller, under its namespace's labels, and used for both the
+    ///     duplicate check and the hash guard.
     ///   - shape: The held set's state at `chunk.chunkIndex`.
     ///   - receivedCount: How many indices are held right now, before this chunk.
     /// - Returns: `admitted` with the post-insertion count, `duplicate` with the unchanged count,

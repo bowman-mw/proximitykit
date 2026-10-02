@@ -108,6 +108,7 @@ nonisolated struct MeshChunkVerifier: Sendable {
     let manifest: MeshRoutedManifest?
     /// The labels the origin's signature is checked under: this verifier's own copy of its host
     /// namespace's purposes (plan step A0.2.5), handed in at construction and never looked up.
+    /// Since step A0.2.6 the payload's chunk hash is re-derived under the same copy.
     let purposes: ProximityNamespace.Purposes
 
     /// Binds the verifier to one session, optionally to one already-verified manifest. All five
@@ -155,7 +156,7 @@ nonisolated struct MeshChunkVerifier: Sendable {
         ) else {
             return .signatureInvalid
         }
-        guard MeshRoutedContentDigest.chunkHash(of: chunk.payload) == chunk.chunkHash else {
+        guard MeshRoutedContentDigest.chunkHash(of: chunk.payload, in: purposes) == chunk.chunkHash else {
             return .chunkHashMismatch
         }
         guard MeshRoutedManifest.floored(chunk.expiresAt)

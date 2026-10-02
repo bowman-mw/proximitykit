@@ -28,7 +28,6 @@
 // purpose).
 
 import CryptoKit
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshCustodyReceiptFormat
@@ -181,17 +180,25 @@ nonisolated struct MeshCustodyReceipt: Codable, Equatable, Sendable {
     ///
     /// The result is **not** an RFC-4122 versioned UUID: it is a 128-bit dedup key that happens to
     /// have `UUID`'s shape, which is what `MeshFrameReplayWindow` takes.
-    var receiptID: UUID {
+    ///
+    /// A function rather than a property since ProximityKit plan step A0.2.6: the domain is the
+    /// caller's `purposes.hash.meshCustodyReceiptIDV1`, which a receipt decoded off the wire does
+    /// not carry.
+    ///
+    /// - Parameter purposes: The caller's namespace labels, with no default: ProximityKit holds no
+    ///   namespace of its own.
+    /// - Returns: The derived 128-bit dedup id.
+    func receiptID(in purposes: ProximityNamespace.Purposes) -> UUID {
         var writer = CanonicalByteWriter()
-        writer.appendLengthPrefixed(FernletCryptoPurpose.Hash.meshCustodyReceiptIDV1.data)
+        writer.appendLengthPrefixed(purposes.hash.meshCustodyReceiptIDV1.data)
         writer.appendUUID(itemID)
         writer.appendString(originFingerprint)
         writer.appendString(custodianFingerprint)
         return Self.uuid(fromFirst16: Data(SHA256.hash(data: writer.bytes)))
     }
 
-    /// The zero id ``receiptID`` falls back to if it is ever handed a short digest. Unreachable:
-    /// SHA-256 is 32 bytes. Present so no `!` is needed (Power of 10 R5).
+    /// The zero id ``receiptID(in:)`` falls back to if it is ever handed a short digest.
+    /// Unreachable: SHA-256 is 32 bytes. Present so no `!` is needed (Power of 10 R5).
     private static let zeroID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     /// The first 16 bytes of `data` as a `UUID`, via the tuple form — never `withUnsafeBytes`
@@ -269,7 +276,7 @@ extension MeshCustodyReceipt {
     /// Mints a custodian-signed receipt for durable custody that **has already been proved**.
     ///
     /// The `witness` parameter is the whole gate: it can only be obtained from
-    /// `MeshRoutedStore.committingCustody(item:custodian:now:)`, whose returned value is the one
+    /// `MeshRoutedStore.committingCustody(item:custodian:now:in:)`, whose returned value is the one
     /// place a `MeshCustodyDurabilityWitness` is ever constructed. That is plan §3.6 in the type
     /// system rather than in a comment — there is no argument list that produces a receipt for bytes
     /// no durable write returned.

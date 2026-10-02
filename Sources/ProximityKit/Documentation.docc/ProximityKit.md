@@ -518,6 +518,28 @@ host `verify`, the query key `d` and the payload version 1 stay this module's fo
 three ceremonies read one value each: the manager its stored namespace, ``CoachVerificationCeremony``
 and the app's duress flow their identity's.
 
+**Hashes, seals, salts and the epoch (step A0.2.6).** The routed family's hash and id domains, the
+five AEAD labels, the three HKDF salts and the epoch id's domain read the namespace too, so among the
+core labels only the TLS exporter label (A0.2.7) and the two column seals (A0.2.9) are still read off
+FernletCrypto's registry. ``MeshRoutedContentDigest``'s three statics,
+``MeshRoutedContentHasher/init(purposes:)``, ``MeshChunkAssembly/admit(_:in:)`` and
+``MeshChunkAssembly/completion(against:in:)`` take the caller's purposes, and the three ids that hash a
+label became functions — ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)`` and
+``MeshRecipientReceipt/receiptID(in:)`` — because a value decoded off the wire carries no namespace
+(`Codable` stays namespace-free). ``MeshRoutedItemSealer`` and ``MeshRoutedContentKeyWrapper`` take
+`in purposes:` on every door: seal, open and the authenticated data; wrap, unwrap (the HKDF salt
+included) and the authenticated data. ``MeshChunkVerifier`` re-derives the chunk hash under its own
+copy, and the routed store's three hashing verbs (`stagingChunk`, `committingCustody` and
+`assembledBlob`) take the caller's, because the store's scope carries no namespace until A0.2.8.
+``IdentityService``'s transport seal and open and its group-key wrap and unwrap read its own
+``IdentityService/purposes``, and the encrypted-metadata door authenticates under the manager's stored
+namespace. `MeshEpochBounds.derivationDomain` is gone:
+``MeshEpochRef/minted(counter:coordinatorFingerprint:meshID:in:)``,
+``MeshEpochRef/successor(coordinatorFingerprint:meshID:in:)`` and
+``MeshRotationPolicy/plan(head:coordinatorFingerprint:meshID:presentedRoster:in:)`` derive every
+epoch id under `purposes.hash.meshEpochIDV1`, raw, while parsing and decoding an epoch derive nothing.
+The manager hands every reader it calls its stored namespace; a builder, its identity's.
+
 ## Topics
 
 ### Host seam and app integration
@@ -2051,7 +2073,7 @@ built with — which since item 11 is ``MeshRoutedTypeRegistry``'s `tokens`, the
 ack-stage table projects. The routed store keys on the signed pair
 `(originFingerprint, itemID)`, never on `itemID` alone — the frame is unsealed and any admitted
 member can mint under its own key reusing another origin's id. Verification needs public material only;
-``MeshRoutedContentKeyWrapper/unwrap(_:binding:localFingerprint:localKeyAgreementPublicKey:staticAgreement:)``
+``MeshRoutedContentKeyWrapper/unwrap(_:binding:localFingerprint:localKeyAgreementPublicKey:staticAgreement:in:)``
 is the separate, private-key half. The type carries no epoch, branch, custody or first-seen; nothing
 persists it yet (item 3); nothing dispatches it yet (item 6).
 
@@ -2064,7 +2086,7 @@ from the signed transcript and bound **through** `chunkHash`, so a 256 KiB slice
 bytes and a custodian forwards the exact object — signature included — inside its own envelope. Two
 domain-tagged digests keep the item hash and a slice hash apart even for a one-chunk item
 (``MeshRoutedContentDigest``), and the replay-window id P5 item 12 keys on is **derived**
-(``MeshChunk/chunkID``), never a wire field — `SHA-256(purpose ‖ itemID ‖ index)`, with the origin
+(``MeshChunk/chunkID(in:)``), never a wire field — `SHA-256(purpose ‖ itemID ‖ index)`, with the origin
 deliberately left out because the window separates by author, so the real key is the pair
 `(origin, chunkID)`. Item 12's routed instance is sized on that pair: 1056 ids per author carries a
 maximal item's 1024 chunks plus its manifest, and a full axis falls through rather than refusing, so
@@ -2221,12 +2243,12 @@ about the **origin's** item — the one routed record whose subject did not auth
 mesh, item, origin, the item's `contentHash`, the custodian, the durable custody instant and the
 item's expiry, and nothing else: no destination set, no chunk index, no hop count, no key epoch, no
 schema integer (the `.v1` in the domain *is* the version). Its dedup id
-(``MeshCustodyReceipt/receiptID``) is derived from `(itemID, origin, custodian)`, excluding both the
+(``MeshCustodyReceipt/receiptID(in:)``) is derived from `(itemID, origin, custodian)`, excluding both the
 hedged signature and `custodiedAt`, so a re-mint of the same claim is the same id.
 
 The order is a **type rule, not a comment**: the mint takes a ``MeshCustodyDurabilityWitness``, whose
 initializer is `fileprivate` to `Mesh/MeshRoutedCustodyCommit.swift` — the file holding
-``MeshRoutedStore/committingCustody(item:custodian:now:)`` and nothing else. No witness ⇒ no receipt.
+``MeshRoutedStore/committingCustody(item:custodian:now:in:)`` and nothing else. No witness ⇒ no receipt.
 The mirror-image gate is `MeshRoutedStore.LoadToken`'s own `fileprivate` initializer in
 `Mesh/MeshRoutedStore.swift`, so the commit verb cannot mint its own write token either: two
 `fileprivate` gates in two files, neither able to open the other's door. A grep-wall

@@ -23,7 +23,6 @@
 // is built from — never the store type, its key provider or a byte of its data.
 
 import CryptoKit
-import FernletCrypto
 import Foundation
 import PrivateMediaStore
 
@@ -33,7 +32,7 @@ import PrivateMediaStore
 ///
 /// The layout is `marker(5) ‖ nonce(12) ‖ ciphertext(N) ‖ tag(16)`, so a sealed blob is always
 /// `overheadByteCount + N` bytes and that total is what ``MeshRoutedManifest/size`` claims and
-/// ``MeshRoutedContentDigest/contentHash(of:)`` measures.
+/// ``MeshRoutedContentDigest/contentHash(of:in:)`` measures.
 ///
 /// **One number bounds both ends** (D-13.19). ``maxPlaintextByteCount`` is *derived* from
 /// ``maxResidentBlobByteCount``, so the seal refuses exactly what the open would refuse. Deriving
@@ -96,7 +95,7 @@ nonisolated enum MeshRoutedItemSealFormat {
         + MeshRoutedItemBodyFormat.maxFramedHeaderByteCount
         + overheadByteCount
 
-    /// The largest plaintext ``MeshRoutedItemSealer/seal(_:contentKey:binding:typeToken:)`` will
+    /// The largest plaintext ``MeshRoutedItemSealer/seal(_:contentKey:binding:typeToken:in:)`` will
     /// take: `maxResidentBlobByteCount − overheadByteCount`. Derived, never written twice.
     static let maxPlaintextByteCount = maxResidentBlobByteCount - overheadByteCount
 }
@@ -173,17 +172,20 @@ nonisolated enum MeshRoutedItemSealer {
     /// never injected and never derived: a 256-bit single-use content key separates nothing further
     /// than the authenticated data already does.
     ///
+    /// - Parameter purposes: The caller's namespace labels, whose `aead.meshRoutedItemV1` fronts the
+    ///   authenticated data (plan step A0.2.6), with no default.
     /// - Returns: `marker ‖ nonce ‖ ciphertext ‖ tag` — the complete blob a manifest measures.
     static func seal(
         _ plaintext: Data,
         contentKey: Data,
         binding: MeshRoutedWrapBinding,
-        typeToken: String
+        typeToken: String,
+        in purposes: ProximityNamespace.Purposes
     ) throws -> Data {
         let key = try validatedPlaintext(plaintext, contentKey: contentKey)
-        let aad = additionalData(binding: binding, typeToken: typeToken)
+        let aad = additionalData(binding: binding, typeToken: typeToken, in: purposes)
         let sealedBox = try AES.GCM.seal(plaintext, using: key, authenticating: aad)
-        // AAD: FernletCryptoPurpose.AEAD.meshRoutedItemV1 ‖ binding ‖ typeToken.
+        // AAD: purposes.aead.meshRoutedItemV1 ‖ binding ‖ typeToken.
         // `combined` is rebuilt from the parts rather than read as an Optional (Power of 10 R5).
         return MeshRoutedItemSealFormat.marker
             + Data(sealedBox.nonce) + sealedBox.ciphertext + sealedBox.tag
@@ -194,20 +196,24 @@ nonisolated enum MeshRoutedItemSealer {
     /// Order is fixed: marker, minimum width, resident bound (**before** any plaintext is
     /// allocated), then the primitive. Every AEAD refusal collapses to
     /// ``MeshRoutedItemSealError/openFailed``.
+    ///
+    /// - Parameter purposes: The caller's namespace labels, whose `aead.meshRoutedItemV1` fronts the
+    ///   authenticated data (plan step A0.2.6), with no default.
     static func open(
         _ blob: Data,
         contentKey: Data,
         binding: MeshRoutedWrapBinding,
-        typeToken: String
+        typeToken: String,
+        in purposes: ProximityNamespace.Purposes
     ) throws -> Data {
         try validateBlobShape(blob)
         let key = SymmetricKey(data: contentKey)
-        let aad = additionalData(binding: binding, typeToken: typeToken)
+        let aad = additionalData(binding: binding, typeToken: typeToken, in: purposes)
         do {
             let combined = blob.dropFirst(MeshRoutedItemSealFormat.markerByteCount)
             let sealedBox = try AES.GCM.SealedBox(combined: combined)
             return try AES.GCM.open(sealedBox, using: key, authenticating: aad)
-            // AAD: FernletCryptoPurpose.AEAD.meshRoutedItemV1 ‖ binding ‖ typeToken.
+            // AAD: purposes.aead.meshRoutedItemV1 ‖ binding ‖ typeToken.
         } catch {
             throw MeshRoutedItemSealError.openFailed
         }
@@ -215,18 +221,21 @@ nonisolated enum MeshRoutedItemSealer {
 
     /// The authenticated data: `AEAD.meshRoutedItemV1.data ‖ meshID ‖ itemID ‖ lp(origin) ‖ lp(typeToken)`.
     ///
-    /// Byte for byte ``MeshRoutedContentKeyWrapper/additionalData(binding:recipientFingerprint:)``
+    /// Byte for byte ``MeshRoutedContentKeyWrapper/additionalData(binding:recipientFingerprint:in:)``
     /// with the type token in the recipient's slot: the purpose is a raw prefix, as in every other
     /// authenticated-data blob in the tree, and the four binding fields are written with
     /// ``CanonicalByteWriter`` so the layout is unambiguous by length prefix. Frozen wire-bearing
-    /// bytes, pinned by an independently derived golden.
-    static func additionalData(binding: MeshRoutedWrapBinding, typeToken: String) -> Data {
+    /// bytes, pinned by an independently derived golden. The purpose is the host namespace's
+    /// `purposes.aead.meshRoutedItemV1` (plan step A0.2.6).
+    static func additionalData(
+        binding: MeshRoutedWrapBinding, typeToken: String, in purposes: ProximityNamespace.Purposes
+    ) -> Data {
         var writer = CanonicalByteWriter()
         writer.appendUUID(binding.meshID)
         writer.appendUUID(binding.itemID)
         writer.appendString(binding.originFingerprint)
         writer.appendString(typeToken)
-        return FernletCryptoPurpose.AEAD.meshRoutedItemV1.data + writer.bytes
+        return purposes.aead.meshRoutedItemV1.data + writer.bytes
     }
 
     /// The seal's guard chain, returning the key it validated (the `MeshChunker.validated(…)`

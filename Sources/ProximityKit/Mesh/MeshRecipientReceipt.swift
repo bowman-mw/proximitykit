@@ -28,7 +28,6 @@
 // TTL (increment 2's vocabulary, off the wire on purpose).
 
 import CryptoKit
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshRecipientReceiptFormat
@@ -180,21 +179,29 @@ nonisolated struct MeshRecipientReceipt: Codable, Equatable, Sendable {
     ///
     /// The result is **not** an RFC-4122 versioned UUID: it is a 128-bit dedup key that happens to
     /// have `UUID`'s shape, which is what `MeshFrameReplayWindow` takes.
-    var receiptID: UUID {
+    ///
+    /// A function rather than a property since ProximityKit plan step A0.2.6: the domain is the
+    /// caller's `purposes.hash.meshRecipientReceiptIDV1`, which a receipt decoded off the wire does
+    /// not carry.
+    ///
+    /// - Parameter purposes: The caller's namespace labels, with no default: ProximityKit holds no
+    ///   namespace of its own.
+    /// - Returns: The derived 128-bit dedup id.
+    func receiptID(in purposes: ProximityNamespace.Purposes) -> UUID {
         var writer = CanonicalByteWriter()
-        writer.appendLengthPrefixed(FernletCryptoPurpose.Hash.meshRecipientReceiptIDV1.data)
+        writer.appendLengthPrefixed(purposes.hash.meshRecipientReceiptIDV1.data)
         writer.appendUUID(itemID)
         writer.appendString(originFingerprint)
         writer.appendString(recipientFingerprint)
         return Self.uuid(fromFirst16: Data(SHA256.hash(data: writer.bytes)))
     }
 
-    /// The zero id ``receiptID`` falls back to if it is ever handed a short digest. Unreachable:
-    /// SHA-256 is 32 bytes. Present so no `!` is needed (Power of 10 R5).
+    /// The zero id ``receiptID(in:)`` falls back to if it is ever handed a short digest.
+    /// Unreachable: SHA-256 is 32 bytes. Present so no `!` is needed (Power of 10 R5).
     private static let zeroID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     /// The first 16 bytes of `data` as a `UUID`, via the tuple form — never `withUnsafeBytes`
-    /// (Power of 10 R9). The same reader ``MeshCustodyReceipt/receiptID`` keeps.
+    /// (Power of 10 R9). The same reader ``MeshCustodyReceipt/receiptID(in:)`` keeps.
     private static func uuid(fromFirst16 data: Data) -> UUID {
         guard data.count >= 16 else { return zeroID }
         let bytes = [UInt8](data.prefix(16))

@@ -131,10 +131,13 @@ public final class IdentityService {
     /// envelope, the admission token, the membership, quorum and key-agreement records) and the
     /// envelope's `verify` read their labels from its ``purposes``; since A0.2.5 the six routed
     /// builders do too, and a verify QR made from this identity carries this namespace's scheme and
-    /// QR label (the coach and duress ceremonies scan and answer under it as well). A0.2's later
-    /// commits route the identity's own seal and group-key labels and its row names through it too,
-    /// each byte-identical for Fernlet. `nonisolated`: inert `Sendable` value data, which the
-    /// nonisolated verifiers and serializers read without a hop to the main actor.
+    /// QR label (the coach and duress ceremonies scan and answer under it as well); and since A0.2.6
+    /// the identity's own transport ``seal(_:to:format:)`` and ``open(_:from:format:)`` and its
+    /// group-key ``encryptGroupKey(_:for:)`` and ``decryptGroupKey(_:)`` take their HKDF salts and
+    /// AEAD labels from its ``purposes``, as do the routed chunks, content hashes and key wraps its
+    /// builders mint. A0.2's later commits route its row names through it too, each byte-identical
+    /// for Fernlet. `nonisolated`: inert `Sendable` value data, which the nonisolated verifiers and
+    /// serializers read without a hop to the main actor.
     public nonisolated let namespace: ProximityNamespace
 
     /// The namespace's domain-separation labels, `namespace.family.purposes`, by consumer family.
@@ -351,6 +354,8 @@ public final class IdentityService {
     /// Wire form: ephemeralPubKey (32 B) || sealedBox.combined (nonce 12 B || ciphertext || tag 16 B).
     /// `format: .wire2` deflate-compresses + bucket-pads the plaintext before sealing
     /// (`SealedPayloadFraming`); pass it only when the peer advertised the `wire2` capability.
+    /// The HKDF salt is this identity's `purposes.keyDerivation.proximityTransportV1` and the
+    /// authenticated data `purposes.aead.proximityTransportV2` ‖ the sender's key (plan step A0.2.6).
     public func seal(_ plaintext: Data, to peerKeyAgreementPublicKey: Data, format: SealedPayloadFormat = .legacy) throws -> Data {
         guard let senderKey = keyAgreementKey else { throw IdentityError.notProvisioned }
         guard let peerPubKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerKeyAgreementPublicKey) else {
@@ -366,12 +371,12 @@ public final class IdentityService {
         let sharedSecret = try ephemeralKey.sharedSecretFromKeyAgreement(with: peerPubKey)
         let symKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: FernletCryptoPurpose.KeyDerivation.proximityTransportV1.data,
+            salt: purposes.keyDerivation.proximityTransportV1.data,
             sharedInfo: senderKey.publicKey.rawRepresentation + peerKeyAgreementPublicKey,
             outputByteCount: 32
         )
 
-        let aad = FernletCryptoPurpose.AEAD.proximityTransportV2.data
+        let aad = purposes.aead.proximityTransportV2.data
             + senderKey.publicKey.rawRepresentation
         let sealedBox = try ChaChaPoly.seal(body, using: symKey, authenticating: aad)
         return Self.proximityTransportFormatV2 + ephemeralKey.publicKey.rawRepresentation + sealedBox.combined
@@ -405,7 +410,7 @@ public final class IdentityService {
         let sharedSecret = try recipientKey.sharedSecretFromKeyAgreement(with: ephemeralPeerPubKey)
         let symKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: FernletCryptoPurpose.KeyDerivation.proximityTransportV1.data,
+            salt: purposes.keyDerivation.proximityTransportV1.data,
             sharedInfo: peerKeyAgreementPublicKey + recipientKey.publicKey.rawRepresentation,
             outputByteCount: 32
         )
@@ -413,7 +418,7 @@ public final class IdentityService {
         let plaintext: Data
         do {
             let sealedBox = try ChaChaPoly.SealedBox(combined: combined)
-            let aad = FernletCryptoPurpose.AEAD.proximityTransportV2.data + peerKeyAgreementPublicKey
+            let aad = purposes.aead.proximityTransportV2.data + peerKeyAgreementPublicKey
             plaintext = try ChaChaPoly.open(sealedBox, using: symKey, authenticating: aad)
         } catch {
             throw IdentityError.openFailed
@@ -562,6 +567,8 @@ public final class IdentityService {
 
     /// Wraps a 32-byte group key for one recipient using ephemeral X25519 ECDH → HKDF-SHA256 → AES-256-GCM.
     /// Wire form: ephemeralPubKey (32 B) || nonce (12 B) || ciphertext (32 B) || tag (16 B) = 92 B total.
+    /// The HKDF salt is this identity's `purposes.keyDerivation.meshGroupKeyWrapV1` and the
+    /// authenticated data `purposes.aead.meshGroupKeyWrapV2`, alone (plan step A0.2.6).
     public func encryptGroupKey(_ key: Data, for recipientPublicKey: Data) throws -> Data {
         guard key.count == 32 else { throw IdentityError.sealFailed }
         guard let recipientKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: recipientPublicKey) else {
@@ -571,7 +578,7 @@ public final class IdentityService {
         let sharedSecret = try ephemeralKey.sharedSecretFromKeyAgreement(with: recipientKey)
         let symKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: FernletCryptoPurpose.KeyDerivation.meshGroupKeyWrapV1.data,
+            salt: purposes.keyDerivation.meshGroupKeyWrapV1.data,
             sharedInfo: ephemeralKey.publicKey.rawRepresentation + recipientPublicKey,
             outputByteCount: 32
         )
@@ -580,7 +587,7 @@ public final class IdentityService {
             key,
             using: symKey,
             nonce: gcmNonce,
-            authenticating: FernletCryptoPurpose.AEAD.meshGroupKeyWrapV2.data
+            authenticating: purposes.aead.meshGroupKeyWrapV2.data
         )
 
         var bundle = Self.groupKeyWrapFormatV2
@@ -621,7 +628,7 @@ public final class IdentityService {
         let recipientPublicKey = recipientKey.publicKey.rawRepresentation
         let symKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: FernletCryptoPurpose.KeyDerivation.meshGroupKeyWrapV1.data,
+            salt: purposes.keyDerivation.meshGroupKeyWrapV1.data,
             sharedInfo: Data(ephPubData) + recipientPublicKey,
             outputByteCount: 32
         )
@@ -632,7 +639,7 @@ public final class IdentityService {
             return try AES.GCM.open(
                 sealedBox,
                 using: symKey,
-                authenticating: FernletCryptoPurpose.AEAD.meshGroupKeyWrapV2.data
+                authenticating: purposes.aead.meshGroupKeyWrapV2.data
             )
         } catch {
             throw IdentityError.openFailed

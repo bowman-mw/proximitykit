@@ -18,7 +18,6 @@
 // key's keychain protection is never weakened for a background decrypt (walls: locked device).
 
 import CryptoKit
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshRoutedWrapBinding
@@ -78,10 +77,11 @@ nonisolated enum MeshRoutedKeyWrapError: Error, Equatable, Sendable {
 ///
 /// Mirrors `IdentityService.encryptGroupKey` primitive for primitive with the routed purposes and a
 /// binding-carrying AAD substituted; unlike the group-key wrap it is `nonisolated` and static: the
-/// recipient's private key never enters this type — ``unwrap(_:binding:localFingerprint:localKeyAgreementPublicKey:staticAgreement:)``
+/// recipient's private key never enters this type — ``unwrap(_:binding:localFingerprint:localKeyAgreementPublicKey:staticAgreement:in:)``
 /// takes the static-agreement closure (`IdentityService.heartDropStaticAgreement(withEphemeralPublicKey:)`),
 /// the `HeartDropSealer.open` shape. Wrapping needs public keys only. Both directions name their
-/// purposes at the primitive.
+/// purposes at the primitive, and since ProximityKit plan step A0.2.6 both read them from the
+/// caller's `in purposes:` — the host namespace's `keyDerivation` and `aead` labels, with no default.
 nonisolated enum MeshRoutedContentKeyWrapper {
 
     /// A fresh 32-byte content key from the platform CSPRNG (the `MeshSessionKeyStore` mint idiom —
@@ -97,12 +97,15 @@ nonisolated enum MeshRoutedContentKeyWrapper {
     /// Seals `contentKey` (32 bytes) to one destination.
     ///
     /// One fresh X25519 ephemeral and one fresh GCM nonce per wrap (D4). The authenticated data is
-    /// ``additionalData(binding:recipientFingerprint:)``.
+    /// ``additionalData(binding:recipientFingerprint:in:)``. `purposes` is the caller's namespace
+    /// labels, whose `keyDerivation.meshRoutedContentKeyWrapV1` salts the derivation and whose
+    /// `aead.meshRoutedContentKeyWrapV1` fronts the authenticated data (plan step A0.2.6).
     static func wrap(
         contentKey: Data,
         recipientFingerprint: String,
         recipientKeyAgreementPublicKey: Data,
-        binding: MeshRoutedWrapBinding
+        binding: MeshRoutedWrapBinding,
+        in purposes: ProximityNamespace.Purposes
     ) throws -> MeshRecipientKeyWrap {
         guard let recipientKey = try? Curve25519.KeyAgreement.PublicKey(
             rawRepresentation: recipientKeyAgreementPublicKey
@@ -117,12 +120,12 @@ nonisolated enum MeshRoutedContentKeyWrapper {
         let shared = try ephemeralKey.sharedSecretFromKeyAgreement(with: recipientKey)
         let kek = wrappingKey(
             shared: shared, ephemeralPublicKey: ephemeralPublicKey,
-            recipientPublicKey: recipientKeyAgreementPublicKey
+            recipientPublicKey: recipientKeyAgreementPublicKey, in: purposes
         )
         let gcmNonce = AES.GCM.Nonce()
-        let aad = additionalData(binding: binding, recipientFingerprint: recipientFingerprint)
+        let aad = additionalData(binding: binding, recipientFingerprint: recipientFingerprint, in: purposes)
         let sealedBox = try AES.GCM.seal(contentKey, using: kek, nonce: gcmNonce, authenticating: aad)
-        // AAD: FernletCryptoPurpose.AEAD.meshRoutedContentKeyWrapV1 ‖ binding ‖ recipient.
+        // AAD: purposes.aead.meshRoutedContentKeyWrapV1 ‖ binding ‖ recipient.
         return MeshRecipientKeyWrap(
             recipientFingerprint: recipientFingerprint,
             ephemeralPublicKey: ephemeralPublicKey,
@@ -139,31 +142,33 @@ nonisolated enum MeshRoutedContentKeyWrapper {
     ///
     /// Every CryptoKit refusal collapses to ``MeshRoutedKeyWrapError/openFailed`` (the
     /// `decryptGroupKey` idiom); the closure's own error propagates, so an unprovisioned identity
-    /// reads as `IdentityError.notProvisioned` rather than as a failed open.
+    /// reads as `IdentityError.notProvisioned` rather than as a failed open. `purposes` is the
+    /// caller's namespace labels, the same two the wrap was minted under (plan step A0.2.6).
     static func unwrap(
         _ wrap: MeshRecipientKeyWrap,
         binding: MeshRoutedWrapBinding,
         localFingerprint: String,
         localKeyAgreementPublicKey: Data,
-        staticAgreement: (Data) throws -> SharedSecret
+        staticAgreement: (Data) throws -> SharedSecret,
+        in purposes: ProximityNamespace.Purposes
     ) throws -> Data {
         guard wrap.recipientFingerprint == localFingerprint else { throw MeshRoutedKeyWrapError.notAddressedToMe }
         guard wrap.isWellFormed else { throw MeshRoutedKeyWrapError.malformed }
         let shared = try staticAgreement(wrap.ephemeralPublicKey)
         let kek = wrappingKey(
             shared: shared, ephemeralPublicKey: wrap.ephemeralPublicKey,
-            recipientPublicKey: localKeyAgreementPublicKey
+            recipientPublicKey: localKeyAgreementPublicKey, in: purposes
         )
         let ciphertext = wrap.sealedKey.prefix(MeshRoutedManifestFormat.contentKeyByteCount)
         let tag = wrap.sealedKey.suffix(
             MeshRoutedManifestFormat.sealedKeyByteCount - MeshRoutedManifestFormat.contentKeyByteCount
         )
-        let aad = additionalData(binding: binding, recipientFingerprint: wrap.recipientFingerprint)
+        let aad = additionalData(binding: binding, recipientFingerprint: wrap.recipientFingerprint, in: purposes)
         do {
             let nonce = try AES.GCM.Nonce(data: wrap.nonce)
             let sealedBox = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ciphertext, tag: tag)
             return try AES.GCM.open(sealedBox, using: kek, authenticating: aad)
-            // AAD: FernletCryptoPurpose.AEAD.meshRoutedContentKeyWrapV1 ‖ binding ‖ recipient.
+            // AAD: purposes.aead.meshRoutedContentKeyWrapV1 ‖ binding ‖ recipient.
         } catch {
             throw MeshRoutedKeyWrapError.openFailed
         }
@@ -173,26 +178,32 @@ nonisolated enum MeshRoutedContentKeyWrapper {
     ///
     /// The purpose is a raw prefix, as in every other AAD in the tree; the four binding fields are
     /// written with `CanonicalByteWriter` so the layout is unambiguous by length prefix. Frozen
-    /// wire-bearing bytes, pinned by an independently derived golden.
-    static func additionalData(binding: MeshRoutedWrapBinding, recipientFingerprint: String) -> Data {
+    /// wire-bearing bytes, pinned by an independently derived golden. The purpose is the host
+    /// namespace's `purposes.aead.meshRoutedContentKeyWrapV1` (plan step A0.2.6).
+    static func additionalData(
+        binding: MeshRoutedWrapBinding, recipientFingerprint: String, in purposes: ProximityNamespace.Purposes
+    ) -> Data {
         var writer = CanonicalByteWriter()
         writer.appendUUID(binding.meshID)
         writer.appendUUID(binding.itemID)
         writer.appendString(binding.originFingerprint)
         writer.appendString(recipientFingerprint)
-        return FernletCryptoPurpose.AEAD.meshRoutedContentKeyWrapV1.data + writer.bytes
+        return purposes.aead.meshRoutedContentKeyWrapV1.data + writer.bytes
     }
 
     /// The single HKDF site: the X25519 shared secret → the AES-256 key-wrapping key, salted with
-    /// the routed derivation purpose and bound to both public keys in `sharedInfo`.
+    /// the routed derivation purpose — the host namespace's
+    /// `purposes.keyDerivation.meshRoutedContentKeyWrapV1` (plan step A0.2.6) — and bound to both
+    /// public keys in `sharedInfo`.
     private static func wrappingKey(
         shared: SharedSecret,
         ephemeralPublicKey: Data,
-        recipientPublicKey: Data
+        recipientPublicKey: Data,
+        in purposes: ProximityNamespace.Purposes
     ) -> SymmetricKey {
         shared.hkdfDerivedSymmetricKey(
             using: SHA256.self,
-            salt: FernletCryptoPurpose.KeyDerivation.meshRoutedContentKeyWrapV1.data,
+            salt: purposes.keyDerivation.meshRoutedContentKeyWrapV1.data,
             sharedInfo: ephemeralPublicKey + recipientPublicKey,
             outputByteCount: MeshRoutedManifestFormat.contentKeyByteCount
         )

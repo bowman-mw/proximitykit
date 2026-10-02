@@ -2,7 +2,6 @@ import Foundation
 import Observation
 import UIKit
 import CryptoKit
-import FernletCrypto
 import FernletDomainModel
 import FernletFoundation
 import PrivateMediaStore
@@ -346,8 +345,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// membership verifiers, the ledger adoption and the admission-token check run under; since
     /// A0.2.5 the six routed verifiers too, the QR ceremony's scan, response and check, and the
     /// channel introduction this manager signs as the transport's ``MeshIntroductionAuthority``
-    /// (whose requirement it satisfies, so the transport checks the peer's under the same labels).
-    /// A0.2's later commits route the rest of this manager's labels and names through it.
+    /// (whose requirement it satisfies, so the transport checks the peer's under the same labels);
+    /// since A0.2.6 the routed item it seals and hashes, the chunk and receipt ids its replay window
+    /// keys on, the routed store's three hashing verbs, the encrypted-metadata door's AAD and every
+    /// epoch id it mints or plans. A0.2's later commits route the rest of this manager's labels and
+    /// names through it.
     /// `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
@@ -6905,7 +6907,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func ingestRoutedChunk(_ payload: MeshChunkPayload, in context: RoutedIngestContext) {
         let chunk = payload.chunk
         let frame = RoutedReplayRef(
-            id: chunk.chunkID, author: chunk.originFingerprint,
+            id: chunk.chunkID(in: namespace.family.purposes), author: chunk.originFingerprint,
             expiresAt: chunk.expiresAt, type: .meshRoutedChunk
         )
         if routedFrameIsReplayed(frame, in: context) { return }
@@ -6936,7 +6938,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             return
         }
-        let outcome = store.stagingChunk(chunk, now: context.now)
+        let outcome = store.stagingChunk(chunk, now: context.now, in: namespace.family.purposes)
         recordRoutedOutcome(
             outcome, type: .meshRoutedChunk, key: key, in: context, verdict: RoutedDrainVerdict.of
         )
@@ -6955,7 +6957,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) {
         let receipt = payload.receipt
         let frame = RoutedReplayRef(
-            id: receipt.receiptID, author: receipt.custodianFingerprint,
+            id: receipt.receiptID(in: namespace.family.purposes), author: receipt.custodianFingerprint,
             expiresAt: receipt.expiresAt, type: .meshCustodyReceipt
         )
         if routedFrameIsReplayed(frame, in: context) { return }
@@ -6993,7 +6995,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) {
         let receipt = payload.receipt
         let frame = RoutedReplayRef(
-            id: receipt.receiptID, author: receipt.recipientFingerprint,
+            id: receipt.receiptID(in: namespace.family.purposes), author: receipt.recipientFingerprint,
             expiresAt: receipt.expiresAt, type: .meshRecipientReceipt
         )
         if routedFrameIsReplayed(frame, in: context) { return }
@@ -7806,11 +7808,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             meshID: meshID, itemID: target.contentID, originFingerprint: identity.localFingerprint
         )
         let blob = try MeshRoutedItemSealer.seal(
-            body, contentKey: contentKey, binding: binding, typeToken: typeToken
+            body, contentKey: contentKey, binding: binding, typeToken: typeToken, in: namespace.family.purposes
         )
         let manifest = try MeshRoutedManifest.signed(
             meshID: meshID, target: target, typeToken: typeToken,
-            contentHash: MeshRoutedContentDigest.contentHash(of: blob), size: UInt64(blob.count),
+            contentHash: MeshRoutedContentDigest.contentHash(of: blob, in: namespace.family.purposes), size: UInt64(blob.count),
             createdAt: now, hardDeadline: hardDeadline, contentKey: contentKey,
             recipientKeys: recipientKeys, identity: identity, types: routedTypes
         )
@@ -7840,7 +7842,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         // R2: bounded by the item's own chunk count, itself capped at `maxChunkCount`.
         for chunk in chunks {
-            switch store.stagingChunk(chunk, now: now) {
+            switch store.stagingChunk(chunk, now: now, in: namespace.family.purposes) {
             case .completed: continue
             case .refused(let refusal): return refusedOwnRoutedItem(refusal, key: key, at: now)
             case .unavailable: return .refused(.storeUnavailable)
@@ -8502,7 +8504,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             return nil
         }
-        let outcome = routedStore().committingCustody(item: key, custodian: me, now: now)
+        let outcome = routedStore().committingCustody(item: key, custodian: me, now: now, in: namespace.family.purposes)
         forgetRepairedRoutedItem(key, manifest: manifest, after: outcome)
         guard case .completed(.committed(let witness)) = outcome else {
             FernletAuditLog.log("mesh.routedDrain.custodyNotCommitted", context: ["type": manifest.typeToken])
@@ -8560,7 +8562,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func forgetRepairedRoutedSlot(_ key: MeshRoutedItemKey, index: UInt32) {
         guard var window = routedReplayWindow else { return }
         window.forget(
-            frameID: MeshRoutedContentDigest.chunkID(itemID: key.itemID, chunkIndex: index),
+            frameID: MeshRoutedContentDigest.chunkID(itemID: key.itemID, chunkIndex: index, in: namespace.family.purposes),
             from: key.originFingerprint
         )
         routedReplayWindow = window
@@ -8590,7 +8592,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // R2: bounded by the chunk format's own maximal item.
         for index in 0..<min(count, MeshChunkFormat.maxChunkCount) {
             window.forget(
-                frameID: MeshRoutedContentDigest.chunkID(itemID: key.itemID, chunkIndex: UInt32(index)),
+                frameID: MeshRoutedContentDigest.chunkID(itemID: key.itemID, chunkIndex: UInt32(index), in: namespace.family.purposes),
                 from: key.originFingerprint
             )
         }
@@ -8638,7 +8640,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameters:
     ///   - now: The injected instant.
     ///   - excluding: A key the caller is about to commit custody for itself, one line later. One
-    ///     item, one commit, per evaluation: ``MeshRoutedStore/committingCustody(item:custodian:now:)``
+    ///     item, one commit, per evaluation: ``MeshRoutedStore/committingCustody(item:custodian:now:in:)``
     ///     re-streams the whole item before it finds a stored stamp, so committing twice is up to
     ///     256 MiB re-read on the main actor and two signed receipts.
     private func claimHandedOffCustody(now: Date, excluding pending: MeshRoutedItemKey? = nil) {
@@ -9237,7 +9239,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func routedProjectionBlob(
         key: MeshRoutedItemKey, manifest: MeshRoutedManifest
     ) -> Data? {
-        switch routedStore().assembledBlob(item: key, expecting: manifest) {
+        switch routedStore().assembledBlob(item: key, expecting: manifest, in: namespace.family.purposes) {
         case .completed(let held):
             return held
         case .unavailable(let cause):
@@ -14596,8 +14598,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// The seal half retired with `sendEncryptedMetadata` (P5 item 13) — its only two call sites
     /// were the photo manifest and request, which the routed drain replaced — so this device opens
-    /// wrapped control metadata and never writes any.
-    private static func decryptPayload(_ ciphertextWithTag: Data, nonce: Data, key: MeshGroupKey) throws -> Data {
+    /// wrapped control metadata and never writes any. The authenticated data is the caller's
+    /// `purposes.aead.meshEncryptedMetadataV2`, alone; the manager hands it its stored
+    /// ``namespace``'s (plan step A0.2.6).
+    private static func decryptPayload(
+        _ ciphertextWithTag: Data, nonce: Data, key: MeshGroupKey, in purposes: ProximityNamespace.Purposes
+    ) throws -> Data {
         guard ciphertextWithTag.starts(with: Self.groupMetadataFormatV2) else {
             throw MeshEncryptionError.legacyWireFormat
         }
@@ -14611,7 +14617,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return try AES.GCM.open(
             box,
             using: symKey,
-            authenticating: FernletCryptoPurpose.AEAD.meshEncryptedMetadataV2.data
+            authenticating: purposes.aead.meshEncryptedMetadataV2.data
         )
     }
 
@@ -14626,7 +14632,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// STAYS, because the two surviving arms have no routed successor and deleting it over them
     /// would be loosening a gate in place — the one move the wall forbids.
     ///
-    /// It is not redundant either. ``decryptPayload(_:nonce:key:)`` authenticates the metadata AEAD
+    /// It is not redundant either. ``decryptPayload(_:nonce:key:in:)`` authenticates the metadata AEAD
     /// purpose **alone** and takes the key it is handed, so a wrapper sealed under the CURRENT key
     /// but stamped with a foreign epoch would open and dispatch — including into
     /// ``handleAdmissionGrant(_:slot:senderSigningPublicKey:)``. The compare is what drops it.
@@ -14642,7 +14648,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard wrapper.keyEpoch == currentGroupKey?.epoch, let key = currentGroupKey else { return }
         let plaintext: Data
         do {
-            plaintext = try Self.decryptPayload(wrapper.ciphertext, nonce: wrapper.nonce, key: key)
+            plaintext = try Self.decryptPayload(wrapper.ciphertext, nonce: wrapper.nonce, key: key, in: namespace.family.purposes)
         } catch MeshEncryptionError.legacyWireFormat {
             // Mirrors `mesh.encryptedMetadata.sealFailed` on the send side (R7): the one open
             // failure with a nameable cause is named, instead of joining the silent drop that also
@@ -14891,7 +14897,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             head: rotationBasisHead,
             coordinatorFingerprint: coordinator,
             meshID: meshID,
-            presentedRoster: presentedRotationRoster()
+            presentedRoster: presentedRotationRoster(),
+            in: namespace.family.purposes
         )
         if case .refuse(let refusal) = plan {
             recordRotationBlock(refusal.diagnosticDescription)
@@ -15130,7 +15137,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return MeshEpochRef.minted(
             counter: UInt32(clamping: counter),
             coordinatorFingerprint: coordinator,
-            meshID: meshID
+            meshID: meshID,
+            in: namespace.family.purposes
         )
     }
 

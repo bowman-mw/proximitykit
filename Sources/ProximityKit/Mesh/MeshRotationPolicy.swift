@@ -191,7 +191,7 @@ nonisolated enum MeshRotationRefusal: Equatable, Sendable {
 /// What the coordinator should do when a trigger fires.
 ///
 /// ``terminate`` is the case plan §8.4's counter cap demands and the reason
-/// ``MeshEpochRef/successor(coordinatorFingerprint:meshID:)`` returns an optional rather than
+/// ``MeshEpochRef/successor(coordinatorFingerprint:meshID:in:)`` returns an optional rather than
 /// trapping: a mesh that cannot mint another epoch cannot retire the key it is serving, and a
 /// session that cannot retire its key must end rather than keep going with one that is now
 /// permanent. It is a refusal escalated to the session, never a crash.
@@ -230,19 +230,22 @@ nonisolated enum MeshRotationPolicy {
     ///   - presentedRoster: The roster this device would present with the rotation. It must contain
     ///     the coordinator and the coordinator must be its lowest fingerprint, or
     ///     ``MeshEpochAcceptance`` refuses — the same test every receiver applies.
+    ///   - purposes: The caller's namespace labels, under whose `hash.meshEpochIDV1` the next
+    ///     epoch's id is derived (plan step A0.2.6), with no default.
     static func plan(
         head: MeshEpochRef?,
         coordinatorFingerprint: String,
         meshID: UUID,
-        presentedRoster: [String]
+        presentedRoster: [String],
+        in purposes: ProximityNamespace.Purposes
     ) -> MeshRotationPlan {
         let next: MeshEpochRef?
         if let head {
             guard head.counter < MeshEpochBounds.counterCap else { return .terminate }
-            next = head.successor(coordinatorFingerprint: coordinatorFingerprint, meshID: meshID)
+            next = head.successor(coordinatorFingerprint: coordinatorFingerprint, meshID: meshID, in: purposes)
         } else {
             next = MeshEpochRef.minted(
-                counter: 1, coordinatorFingerprint: coordinatorFingerprint, meshID: meshID
+                counter: 1, coordinatorFingerprint: coordinatorFingerprint, meshID: meshID, in: purposes
             )
         }
         guard let presented = next else { return .refuse(.coordinatorFingerprintNotCanonical) }

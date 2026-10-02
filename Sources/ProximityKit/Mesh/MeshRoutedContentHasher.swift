@@ -2,7 +2,7 @@
 // ProximityKit/Mesh
 //
 // Network migration P5 item 3 (plan §11): the streaming sibling of
-// `MeshRoutedContentDigest.contentHash(of:)`.
+// `MeshRoutedContentDigest.contentHash(of:in:)`.
 //
 // One domain, two shapes — never a second domain. The one-shot form hashes a blob that is already
 // resident; the durable store never holds one (256 MiB), so it feeds the same domain one chunk file
@@ -10,19 +10,18 @@
 // check and the origin's manifest field measured different things.
 
 import CryptoKit
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshRoutedContentHasher
 
-/// An incremental accumulator over exactly ``MeshRoutedContentDigest/contentHash(of:)``'s domain:
+/// An incremental accumulator over exactly ``MeshRoutedContentDigest/contentHash(of:in:)``'s domain:
 /// `SHA-256(lp(Hash.meshRoutedContentV1) ‖ blob)`, fed one slice at a time so a 256 MiB item is
 /// never resident.
 ///
-/// Seeded at ``init()`` with the length-prefixed purpose exactly as the one-shot form is, then fed
-/// the item's payload slices **in index order**. The two agree byte for byte for any split of the
-/// same bytes — the property `MeshRoutedStore.committingCustody` rests its whole-item verdict on,
-/// and the one a test pins across several split points.
+/// Seeded at ``init(purposes:)`` with the length-prefixed purpose exactly as the one-shot form is,
+/// then fed the item's payload slices **in index order**. The two agree byte for byte for any split
+/// of the same bytes — the property `MeshRoutedStore.committingCustody` rests its whole-item verdict
+/// on, and the one a test pins across several split points.
 ///
 /// Pure value, no clock, no I/O: the caller owns the file reads and hands over `Data` slices.
 nonisolated struct MeshRoutedContentHasher {
@@ -31,10 +30,14 @@ nonisolated struct MeshRoutedContentHasher {
     private var hasher: SHA256
 
     /// Starts an accumulator seeded with `lp(Hash.meshRoutedContentV1)`, the same prefix the
-    /// one-shot digest writes before the body.
-    init() {
+    /// one-shot digest writes before the body. The domain is the host namespace's
+    /// `purposes.hash.meshRoutedContentV1` (plan step A0.2.6).
+    ///
+    /// - Parameter purposes: The caller's namespace labels, with no default: ProximityKit holds no
+    ///   namespace of its own.
+    init(purposes: ProximityNamespace.Purposes) {
         var writer = CanonicalByteWriter()
-        writer.appendLengthPrefixed(FernletCryptoPurpose.Hash.meshRoutedContentV1.data)
+        writer.appendLengthPrefixed(purposes.hash.meshRoutedContentV1.data)
         var seeded = SHA256()
         seeded.update(data: writer.bytes)
         hasher = seeded
@@ -50,8 +53,8 @@ nonisolated struct MeshRoutedContentHasher {
 
     /// The 32-byte digest over everything fed so far.
     ///
-    /// - Returns: The same bytes ``MeshRoutedContentDigest/contentHash(of:)`` returns for the
-    ///   concatenation of every slice passed to ``update(_:)``.
+    /// - Returns: The same bytes ``MeshRoutedContentDigest/contentHash(of:in:)`` returns, under the
+    ///   same purposes, for the concatenation of every slice passed to ``update(_:)``.
     func finalized() -> Data {
         Data(hasher.finalize())
     }

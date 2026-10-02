@@ -15,7 +15,7 @@
 // Chunk bytes live in MEMORY here. Item 3 re-backs the byte custody with its sealed sidecar — the
 // four-state load plus the fifth "seal refused" distinction — and reuses this file's verdicts
 // LITERALLY: both per-chunk admission and manifest binding moved into `MeshChunkAdmissionRule`
-// (C13), which `admit(_:)` and `bind(to:)` now call, so the durable form cannot answer differently.
+// (C13), which `admit(_:in:)` and `bind(to:)` now call, so the durable form cannot answer differently.
 // This file keeps the bytes, the completion over them, and nothing else that could drift.
 //
 // What is deliberately NOT here: any capacity verdict. The assembly's own bound IS
@@ -45,7 +45,7 @@ nonisolated enum MeshChunkRefusal: String, CaseIterable, Equatable, Sendable {
     /// MINT of the same chunk: CryptoKit's Ed25519 signing is hedged, so two mints of one logical
     /// chunk agree on every field except the 64-byte signature, and item 6 streams with
     /// ``MeshChunker/chunk(of:at:for:identity:)`` precisely so it need not retain what it minted.
-    /// This token is an integrity claim about CONTENT; see ``MeshChunkAssembly/admit(_:)``.
+    /// This token is an integrity claim about CONTENT; see ``MeshChunkAssembly/admit(_:in:)``.
     case conflictingChunk
     /// ``MeshChunk/chunkHash`` does not cover the payload. Re-checked here even though
     /// ``MeshChunkVerifier`` checks it, because this is the boundary item 3 gates durable custody
@@ -85,7 +85,7 @@ nonisolated enum MeshChunkRefusal: String, CaseIterable, Equatable, Sendable {
 
 // MARK: - Verdicts
 
-/// What ``MeshChunkAssembly/admit(_:)`` did with one chunk. Every input gets one of these; nothing
+/// What ``MeshChunkAssembly/admit(_:in:)`` did with one chunk. Every input gets one of these; nothing
 /// is silently dropped.
 nonisolated enum MeshChunkAdmission: Equatable, Sendable {
     /// The chunk was stored. `received` of `expected` indices are now held.
@@ -108,7 +108,7 @@ nonisolated enum MeshChunkBinding: Equatable, Sendable {
     case refused(MeshChunkRefusal)
 }
 
-/// What ``MeshChunkAssembly/completion(against:)`` found.
+/// What ``MeshChunkAssembly/completion(against:in:)`` found.
 nonisolated enum MeshChunkCompletion: Equatable, Sendable {
     /// Every index is held and the reassembled ciphertext matches the bound manifest's size and
     /// content hash.
@@ -134,24 +134,24 @@ nonisolated enum MeshChunkCompletion: Equatable, Sendable {
 /// A bounded value: at most ``MeshChunkFormat/maxChunkCount`` (1024) chunks of at most
 /// ``MeshChunkFormat/maxChunkPayloadBytes`` (256 KiB) each, which is
 /// `MeshRoutedManifestFormat.maxContentByteCount` rather than a second cap of its own. **Both
-/// halves are checked at the ``admit(_:)`` door itself**, not left to the verifier precondition
+/// halves are checked at the ``admit(_:in:)`` door itself**, not left to the verifier precondition
 /// below: the count against this assembly's, and the per-chunk 256 KiB in the bound branch (exact
 /// length) *and* the unbound one (1 … 256 KiB). The bound is held to the same standard as the
 /// chunk hash for the same reason — this is the boundary item 3 gates durable custody on.
 ///
 /// **Two preconditions, neither re-checked here.**
 ///
-/// 1. ``admit(_:)`` takes a chunk ``MeshChunkVerifier`` has already accepted. It re-checks only
+/// 1. ``admit(_:in:)`` takes a chunk ``MeshChunkVerifier`` has already accepted. It re-checks only
 ///    what is about *this assembly* — plus the chunk hash, because that is the check item 3 gates
 ///    durable custody on.
-/// 2. ``bind(to:)`` and ``completion(against:)`` take a manifest
+/// 2. ``bind(to:)`` and ``completion(against:in:)`` take a manifest
 ///    ``MeshRoutedManifestVerifier/verify(_:)`` has already accepted: *it is the only authority on
 ///    `contentHash`, `size` and the derived chunk count, and none of them is re-derived here.*
 ///    Without it, ``MeshChunkCompletion/complete(blob:)`` degrades from "whole and authentic" to
 ///    "self-consistent with whatever manifest the caller handed in".
 ///
 /// **Item 3's seam:** chunk bytes live in memory here. Item 3 re-backs the byte custody with its
-/// sealed sidecar and reaches the SAME decisions through ``MeshChunkAdmissionRule`` — ``admit(_:)``
+/// sealed sidecar and reaches the SAME decisions through ``MeshChunkAdmissionRule`` — ``admit(_:in:)``
 /// and ``bind(to:)`` are thin wrappers over ``MeshChunkAdmissionRule/verdict(for:payloadHash:in:receivedCount:)``
 /// and ``MeshChunkAdmissionRule/bindingVerdict(for:in:)``, so the durable form is the same function
 /// over a shape built from index records rather than from held chunks (C13).
@@ -243,8 +243,14 @@ nonisolated struct MeshChunkAssembly: Equatable, Sendable {
     ///
     /// - Important: `chunk` must be one ``MeshChunkVerifier/verify(_:)`` has already accepted —
     ///   see the type's precondition 1.
-    mutating func admit(_ chunk: MeshChunk) -> MeshChunkAdmission {
-        let payloadHash = MeshRoutedContentDigest.chunkHash(of: chunk.payload)
+    ///
+    /// - Parameters:
+    ///   - chunk: The verified chunk.
+    ///   - purposes: The caller's namespace labels, whose `hash.meshRoutedChunkV1` the payload is
+    ///     re-hashed under (plan step A0.2.6), with no default.
+    /// - Returns: The admission verdict.
+    mutating func admit(_ chunk: MeshChunk, in purposes: ProximityNamespace.Purposes) -> MeshChunkAdmission {
+        let payloadHash = MeshRoutedContentDigest.chunkHash(of: chunk.payload, in: purposes)
         let verdict = MeshChunkAdmissionRule.verdict(
             for: chunk,
             payloadHash: payloadHash,
@@ -284,7 +290,13 @@ nonisolated struct MeshChunkAssembly: Equatable, Sendable {
     /// - Important: `manifest` must be one ``MeshRoutedManifestVerifier/verify(_:)`` has already
     ///   accepted, and `.complete` is **necessary, never sufficient** for a custody receipt: it is
     ///   a verdict over in-memory bytes, so durability (plan §3.6) is a second gate item 3 owns.
-    func completion(against manifest: MeshRoutedManifest) -> MeshChunkCompletion {
+    ///
+    /// - Parameters:
+    ///   - manifest: The item's verified manifest.
+    ///   - purposes: The caller's namespace labels, whose `hash.meshRoutedContentV1` the reassembled
+    ///     blob is measured under (plan step A0.2.6), with no default.
+    /// - Returns: The completion verdict.
+    func completion(against manifest: MeshRoutedManifest, in purposes: ProximityNamespace.Purposes) -> MeshChunkCompletion {
         guard let size = boundSize else { return .refused(.notBound) }
         guard manifest.itemID == itemID,
               manifest.originFingerprint == originFingerprint,
@@ -296,7 +308,7 @@ nonisolated struct MeshChunkAssembly: Equatable, Sendable {
             return .incomplete(received: chunks.count, expected: Int(chunkCount))
         }
         guard UInt64(blob.count) == manifest.size else { return .refused(.sizeMismatch) }
-        guard MeshRoutedContentDigest.contentHash(of: blob) == manifest.contentHash else {
+        guard MeshRoutedContentDigest.contentHash(of: blob, in: purposes) == manifest.contentHash else {
             return .refused(.contentHashMismatch)
         }
         return .complete(blob: blob)

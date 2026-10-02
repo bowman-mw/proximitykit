@@ -214,7 +214,7 @@ nonisolated struct MeshRoutedManifestAdmission: Equatable, Sendable {
 
 // MARK: - MeshRoutedCustodyOutcome
 
-/// What ``MeshRoutedStore/committingCustody(item:custodian:now:)`` found. The durable twin of
+/// What ``MeshRoutedStore/committingCustody(item:custodian:now:in:)`` found. The durable twin of
 /// `MeshChunkCompletion`, value for value — where the in-memory form returns a blob, this returns
 /// proof that a durable write happened.
 nonisolated enum MeshRoutedCustodyOutcome: Equatable, Sendable {
@@ -481,9 +481,14 @@ nonisolated extension MeshRoutedStore {
     /// - Parameters:
     ///   - chunk: The verified chunk.
     ///   - now: The injected instant.
+    ///   - purposes: The caller's namespace labels, whose `hash.meshRoutedChunkV1` the payload is
+    ///     re-hashed under (plan step A0.2.6), with no default: the store's scope carries no namespace
+    ///     yet.
     /// - Returns: the same `MeshChunkAdmission` the in-memory assembly would produce, or a store
     ///   refusal, or the store's unavailability.
-    func stagingChunk(_ chunk: MeshChunk, now: Date) -> MeshRoutedOutcome<MeshChunkAdmission> {
+    func stagingChunk(
+        _ chunk: MeshChunk, now: Date, in purposes: ProximityNamespace.Purposes
+    ) -> MeshRoutedOutcome<MeshChunkAdmission> {
         var index: MeshRoutedIndex
         let token: LoadToken
         switch indexForWriting() {
@@ -498,7 +503,7 @@ nonisolated extension MeshRoutedStore {
             return .refused(.duplicateItemID)
         }
         let verdict = MeshChunkAdmissionRule.verdict(
-            for: chunk, payloadHash: MeshRoutedContentDigest.chunkHash(of: chunk.payload),
+            for: chunk, payloadHash: MeshRoutedContentDigest.chunkHash(of: chunk.payload, in: purposes),
             in: stagingShape(for: chunk, existing: existing), receivedCount: existing?.receivedCount ?? 0
         )
         guard case .admitted = verdict else { return .completed(verdict) }
@@ -516,7 +521,7 @@ nonisolated extension MeshRoutedStore {
                              token: token, now: now)
     }
 
-    /// The write half of ``stagingChunk(_:now:)``: seal the file, add the descriptor, save the index,
+    /// The write half of ``stagingChunk(_:now:in:)``: seal the file, add the descriptor, save the index,
     /// and on a failed save remove the file this call just wrote.
     private func stagedOutcome(
         _ chunk: MeshChunk,

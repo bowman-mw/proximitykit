@@ -21,8 +21,8 @@ nonisolated enum MeshEpochBounds {
 
     /// Highest counter a mesh may ever mint (plan §8.4).
     ///
-    /// **A counter at the cap does not trap.** ``MeshEpochRef/minted(counter:coordinatorFingerprint:meshID:)``
-    /// and ``MeshEpochRef/successor(coordinatorFingerprint:meshID:)`` return `nil`, which the
+    /// **A counter at the cap does not trap.** ``MeshEpochRef/minted(counter:coordinatorFingerprint:meshID:in:)``
+    /// and ``MeshEpochRef/successor(coordinatorFingerprint:meshID:in:)`` return `nil`, which the
     /// caller reads as *rotation refused*: a mesh that has exhausted its counters cannot rotate,
     /// and a session that cannot rotate must terminate at its next membership change rather than
     /// keep serving a key it can no longer retire. Reaching it takes 4096 rotations inside one
@@ -46,10 +46,6 @@ nonisolated enum MeshEpochBounds {
     /// Longest canonical string form: four counter digits, two separators, the two hex halves.
     /// Must stay ≤ `MeshChannelIntroductionFormat.maxEpochRefLength`; a test pins that.
     static let canonicalStringMaxLength = 4 + 1 + epochIDHexLength + 1 + fingerprintHexLength
-
-    /// The frozen English domain string mixed into a derived ``MeshEpochRef/epochID``. A persisted
-    /// and on-wire derivation input, never display copy — it never localizes.
-    static let derivationDomain = "fernlet.mesh.epoch.v1"
 
     /// The canonical separator between the three halves of the string form. Chosen because it
     /// appears in neither a decimal counter nor lowercase hex, so parsing is unambiguous.
@@ -98,7 +94,9 @@ nonisolated enum MeshEpochRefParseError: Error, Equatable, Sendable {
 /// change: every member of one branch computes the *same* id, and two branches differ because their
 /// deterministic coordinators — the lowest fingerprint of each partition's roster — cannot be the
 /// same member. It is a 128-bit name-based identifier carried in `UUID`'s shape, deliberately NOT
-/// an RFC 4122 version-tagged UUID; nothing reads its version bits.
+/// an RFC 4122 version-tagged UUID; nothing reads its version bits. The domain is the host
+/// namespace's `purposes.hash.meshEpochIDV1`, a raw prefix (ProximityKit plan step A0.2.6), so the
+/// minting doors take the caller's `in purposes:`; parsing and `Codable` derive nothing and take none.
 ///
 /// ## Canonical string form
 ///
@@ -128,7 +126,7 @@ nonisolated struct MeshEpochRef: Codable, Hashable, Sendable {
 
     /// Builds a ref from **already-validated** parts.
     ///
-    /// The three doors that take untrusted input — ``minted(counter:coordinatorFingerprint:meshID:)``,
+    /// The three doors that take untrusted input — ``minted(counter:coordinatorFingerprint:meshID:in:)``,
     /// ``init(canonical:)`` and `init(from:)` — each validate and then call this one, so a
     /// `MeshEpochRef` built through them is in bounds and round-trips through its canonical string.
     /// This initializer itself checks nothing: call it only with parts you have already checked
@@ -145,25 +143,36 @@ nonisolated struct MeshEpochRef: Codable, Hashable, Sendable {
     ///   - counter: The Lamport counter this epoch takes.
     ///   - coordinatorFingerprint: The minting coordinator's canonical 16-hex fingerprint.
     ///   - meshID: The mesh, so two meshes at the same counter never share an epoch id.
+    ///   - purposes: The caller's namespace labels, whose `hash.meshEpochIDV1` is the derivation's
+    ///     domain (plan step A0.2.6), with no default.
     /// - Returns: `nil` when the counter is over ``MeshEpochBounds/counterCap`` or the fingerprint
     ///   is not canonical — **rotation refused**, never a trap.
-    static func minted(counter: UInt32, coordinatorFingerprint: String, meshID: UUID) -> MeshEpochRef? {
+    static func minted(
+        counter: UInt32, coordinatorFingerprint: String, meshID: UUID, in purposes: ProximityNamespace.Purposes
+    ) -> MeshEpochRef? {
         guard counter <= MeshEpochBounds.counterCap,
               isCanonicalFingerprint(coordinatorFingerprint),
               let id = derivedEpochID(
-                  counter: counter, coordinatorFingerprint: coordinatorFingerprint, meshID: meshID
+                  counter: counter, coordinatorFingerprint: coordinatorFingerprint, meshID: meshID, in: purposes
               ) else { return nil }
         return MeshEpochRef(counter: counter, epochID: id, coordinatorFingerprint: coordinatorFingerprint)
     }
 
     /// Mints `counter + 1` for the same mesh under a (possibly different) coordinator.
     ///
+    /// - Parameters:
+    ///   - coordinatorFingerprint: The minting coordinator's canonical 16-hex fingerprint.
+    ///   - meshID: The mesh.
+    ///   - purposes: The caller's namespace labels, whose `hash.meshEpochIDV1` is the derivation's
+    ///     domain (plan step A0.2.6), with no default.
     /// - Returns: `nil` at the cap — the documented "rotation refused" answer of
     ///   ``MeshEpochBounds/counterCap``.
-    func successor(coordinatorFingerprint: String, meshID: UUID) -> MeshEpochRef? {
+    func successor(
+        coordinatorFingerprint: String, meshID: UUID, in purposes: ProximityNamespace.Purposes
+    ) -> MeshEpochRef? {
         guard counter < MeshEpochBounds.counterCap else { return nil }
         return Self.minted(
-            counter: counter + 1, coordinatorFingerprint: coordinatorFingerprint, meshID: meshID
+            counter: counter + 1, coordinatorFingerprint: coordinatorFingerprint, meshID: meshID, in: purposes
         )
     }
 
@@ -262,15 +271,17 @@ nonisolated extension MeshEpochRef {
     /// Derives the epoch id from the three values every member of a branch already agrees on.
     ///
     /// SHA-256 over `domain ‖ meshID ‖ counter (big-endian) ‖ coordinator fingerprint`, truncated
-    /// to 16 bytes. Not a key and not a signature: it names an epoch, so it registers no crypto
-    /// purpose. The domain string is what keeps it from colliding with any other digest this app
-    /// computes over the same inputs.
+    /// to 16 bytes. Not a key and not a signature: it names an epoch. The domain is what keeps it
+    /// from colliding with any other digest this app computes over the same inputs: the host
+    /// namespace's `purposes.hash.meshEpochIDV1`, written raw with no count (plan step A0.2.6; until
+    /// then the ProximityKit-local `MeshEpochBounds.derivationDomain`, the same bytes for Fernlet).
     private static func derivedEpochID(
         counter: UInt32,
         coordinatorFingerprint: String,
-        meshID: UUID
+        meshID: UUID,
+        in purposes: ProximityNamespace.Purposes
     ) -> UUID? {
-        var input = Data(MeshEpochBounds.derivationDomain.utf8)
+        var input = purposes.hash.meshEpochIDV1.data
         input.append(Data(meshID.uuidString.lowercased().utf8))
         for shift in stride(from: 24, through: 0, by: -8) {
             input.append(UInt8(truncatingIfNeeded: counter >> UInt32(shift)))
