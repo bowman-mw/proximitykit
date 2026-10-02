@@ -23,7 +23,6 @@
 
 import CryptoKit
 import Foundation
-import FernletFoundation
 
 // MARK: - MeshRoutedRetryBounds
 
@@ -571,7 +570,7 @@ nonisolated extension MeshRoutedStore {
     /// item 3 ships no poller for, especially as a caller's retry would write a second copy.
     private func removingOrphanedChunkFile(named name: String) {
         let removed = removeChunkFile(named: name)
-        FernletAuditLog.log(
+        ProximityAudit.log(
             removed ? "mesh.routedStore.orphanRemoved" : "mesh.routedStore.orphanRemovalFailed",
             context: ["file": name]
         )
@@ -964,7 +963,7 @@ nonisolated extension MeshRoutedStore {
             return unavailability(from: error)
         }
         removeChunkFile(named: stored.fileName)
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedStore.chunkRepaired",
             context: ["index": String(stored.descriptor.chunkIndex)]
         )
@@ -1028,7 +1027,7 @@ nonisolated extension MeshRoutedStore {
         } catch {
             return .unavailable(unavailability(from: error))
         }
-        FernletAuditLog.log("mesh.routedStore.itemDropped", context: ["reason": reason])
+        ProximityAudit.log("mesh.routedStore.itemDropped", context: ["reason": reason])
         let removal = removeChunkFiles(named: names)
         return .completed(
             MeshRoutedSweepReport(itemsRemoved: 1, chunkFilesRemoved: removal.removed,
@@ -1079,7 +1078,7 @@ nonisolated extension MeshRoutedStore {
         } catch {
             return .unavailable(unavailability(from: error))
         }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedStore.itemDropped", context: ["reason": reason, "items": String(removed)]
         )
         let removal = removeChunkFiles(named: names)

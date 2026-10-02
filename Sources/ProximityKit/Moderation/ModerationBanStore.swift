@@ -234,8 +234,8 @@ public final class ModerationBanStore {
         }
         guard save(record, account: subject.account) else { return }   // R7: an unwritten lift lifted nothing
         guard lifts else { return }
-        FernletAuditLog.log("storeBan.liftedByWithdrawal",
-                            context: ["subject": subject.label, "withdrawn": "\(withdrawn.count)"])
+        ProximityAudit.log("storeBan.liftedByWithdrawal",
+                           context: ["subject": subject.label, "withdrawn": "\(withdrawn.count)"])
     }
 
     /// The currently-qualifying artwork hashes to record IF a (re)ban should fire now, else nil. The
@@ -283,7 +283,7 @@ public final class ModerationBanStore {
         case .unreadable(let status):
             // No account names were read, so nothing identifying can reach the audit trail here even
             // by accident — only the status that stopped the enumeration.
-            FernletAuditLog.log("storeBan.peerClearEnumerationFailed", context: ["status": "\(status)"])
+            ProximityAudit.log("storeBan.peerClearEnumerationFailed", context: ["status": "\(status)"])
             return false
         }
         var failures = 0
@@ -295,11 +295,11 @@ public final class ModerationBanStore {
         guard failures == 0 else {
             // Counts only — the fingerprint inside the account name is exactly the data being erased,
             // so it must not ride into the audit trail.
-            FernletAuditLog.log("storeBan.peerClearFailed",
-                                context: ["failures": "\(failures)", "total": "\(peerAccounts.count)"])
+            ProximityAudit.log("storeBan.peerClearFailed",
+                               context: ["failures": "\(failures)", "total": "\(peerAccounts.count)"])
             return false
         }
-        FernletAuditLog.log("storeBan.peerBansCleared", context: ["count": "\(peerAccounts.count)"])
+        ProximityAudit.log("storeBan.peerBansCleared", context: ["count": "\(peerAccounts.count)"])
         return true
     }
 
@@ -346,7 +346,7 @@ public final class ModerationBanStore {
         record.evidenceSalt = salt
         record.priorHandledContentHashes = prior
         guard save(record, account: account) else { return }   // R7: never report an unwritten ban as applied
-        FernletAuditLog.log("storeBan.applied", context: ["subject": subject, "days": "\(durationDays)"])
+        ProximityAudit.log("storeBan.applied", context: ["subject": subject, "days": "\(durationDays)"])
     }
 
     /// The opaque tag a reporter's signing key is recorded under in ONE ban record's evidence:
@@ -388,7 +388,7 @@ public final class ModerationBanStore {
             // clock is later rolled back.
             let gap = max(0, nowWall - record.lastCheckWall)
             record.creditedWall += min(gap, Self.maxRebootGapCreditSeconds)
-            FernletAuditLog.log("storeBan.rebootFallback", context: ["account": account])
+            ProximityAudit.log("storeBan.rebootFallback", context: ["account": account])
         }
 
         record.maxObservedWall = max(record.maxObservedWall, nowWall)
@@ -399,8 +399,8 @@ public final class ModerationBanStore {
             // keeps the ban unexpired below until the wall clock climbs back to the high-water mark.
             record.creditedWall = 0
             record.tamperCount += 1
-            FernletAuditLog.log("storeBan.clockRegressionDetected",
-                                context: ["account": account, "tamperCount": "\(record.tamperCount)"])
+            ProximityAudit.log("storeBan.clockRegressionDetected",
+                               context: ["account": account, "tamperCount": "\(record.tamperCount)"])
         }
 
         record.lastCheckMonotonic = nowMono
@@ -423,7 +423,7 @@ public final class ModerationBanStore {
         } catch {
             // Every caller reads nil as "not banned", so a corrupt row silently LIFTS a ban.
             // It still lifts (there is nothing left to enforce against), but not silently.
-            FernletAuditLog.log("storeBan.corruptRecord", context: ["account": account])
+            ProximityAudit.log("storeBan.corruptRecord", context: ["account": account])
             return nil
         }
     }
@@ -432,15 +432,15 @@ public final class ModerationBanStore {
     /// effect at all, so the caller must not report it as applied (R7).
     private func save(_ record: BanRecord, account: String) -> Bool {
         guard let data = try? JSONEncoder().encode(record) else {
-            FernletAuditLog.log("storeBan.encodeFailed", context: ["account": account])
+            ProximityAudit.log("storeBan.encodeFailed", context: ["account": account])
             return false
         }
         let status = KeychainItem.store(
             data, account: account, service: service,
             accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, synchronizable: false)
         guard status == errSecSuccess else {
-            FernletAuditLog.log("storeBan.saveFailed",
-                                context: ["account": account, "status": "\(status)"])
+            ProximityAudit.log("storeBan.saveFailed",
+                               context: ["account": account, "status": "\(status)"])
             return false
         }
         return true

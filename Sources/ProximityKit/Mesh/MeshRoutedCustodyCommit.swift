@@ -27,7 +27,6 @@
 
 import CryptoKit
 import Foundation
-import FernletFoundation
 
 // MARK: - MeshCustodyDurabilityWitness
 
@@ -224,7 +223,7 @@ nonisolated extension MeshRoutedStore {
             try save(index, token: token)
         } catch {
             let cause = unavailability(from: error)
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedStore.custodyNotWritten",
                 context: ["cause": cause.logToken, "error": String(describing: error)]
             )

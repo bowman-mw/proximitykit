@@ -14,7 +14,6 @@
 
 import CryptoKit
 import Foundation
-import FernletFoundation
 
 // MARK: - MeshSessionSealRefusal
 
@@ -418,7 +417,7 @@ public nonisolated struct MeshSessionStore: Sendable {
         do {
             try mutableURL.setResourceValues(values)
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.sessionContext.backupExclusionFailed",
                 context: ["error": String(describing: error)]
             )
@@ -445,7 +444,7 @@ public nonisolated struct MeshSessionStore: Sendable {
             try manager.removeItem(at: quarantineURL)
         }
         try manager.moveItem(at: fileURL, to: quarantineURL)
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.sessionContext.quarantined",
             context: ["detail": String(describing: corruption.detail)]
         )
@@ -479,7 +478,7 @@ public nonisolated struct MeshSessionStore: Sendable {
             try FileManager.default.removeItem(at: url)
             return true
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.sessionContext.wipeFailed",
                 context: ["error": String(describing: error)]
             )

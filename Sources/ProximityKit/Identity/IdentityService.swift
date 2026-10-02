@@ -805,10 +805,10 @@ public final class IdentityService {
         case .absent:
             return nil
         case .unparseable(let row):
-            FernletAuditLog.log("identity.keychain.unparseableRow", context: ["row": row, "stage": "provisioning"])
+            ProximityAudit.log("identity.keychain.unparseableRow", context: ["row": row, "stage": "provisioning"])
             return nil
         case .unreadable(let row, let status):
-            FernletAuditLog.log("identity.keychain.readFailed", context: [
+            ProximityAudit.log("identity.keychain.readFailed", context: [
                 "row": row, "stage": "provisioning", "status": "\(status)"
             ])
             throw IdentityError.keychainReadFailed(status)
@@ -826,12 +826,12 @@ public final class IdentityService {
             return nil
         case .found(let data):
             guard let key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: data) else {
-                FernletAuditLog.log("identity.keychain.unparseableRow", context: ["row": row, "stage": "legacyKeyAgreement"])
+                ProximityAudit.log("identity.keychain.unparseableRow", context: ["row": row, "stage": "legacyKeyAgreement"])
                 return nil
             }
             return key
         case .unreadable(let status):
-            FernletAuditLog.log("identity.keychain.readFailed", context: [
+            ProximityAudit.log("identity.keychain.readFailed", context: [
                 "row": row, "stage": "legacyKeyAgreement", "status": "\(status)"
             ])
             throw IdentityError.keychainReadFailed(status)
@@ -851,7 +851,7 @@ public final class IdentityService {
                                         accessibility: accessibility,
                                         synchronizable: false)
         guard status != errSecSuccess else { return }
-        FernletAuditLog.log("identity.keychain.storeFailed", context: [
+        ProximityAudit.log("identity.keychain.storeFailed", context: [
             "row": accounts.keyAgreementPrivateKey,
             "stage": "deviceOnlyMigration",
             "status": "\(status)"
@@ -868,7 +868,7 @@ public final class IdentityService {
                                         accessibility: kSecAttrAccessibleAfterFirstUnlock,
                                         synchronizable: true)
         guard status != errSecSuccess else { return }
-        FernletAuditLog.log("identity.escrow.legacyPromoteFailed", context: ["status": "\(status)"])
+        ProximityAudit.log("identity.escrow.legacyPromoteFailed", context: ["status": "\(status)"])
         throw IdentityError.keychainWriteFailed
     }
 
@@ -891,8 +891,8 @@ public final class IdentityService {
             let status = KeychainItem.store(row.data, account: row.account,
                                             service: keychainService, accessibility: accessibility)
             guard status == errSecSuccess else {
-                FernletAuditLog.log("identity.keychain.storeFailed",
-                                    context: ["row": row.account, "status": "\(status)"])
+                ProximityAudit.log("identity.keychain.storeFailed",
+                                   context: ["row": row.account, "status": "\(status)"])
                 throw IdentityError.keychainWriteFailed
             }
         }
@@ -1021,16 +1021,16 @@ public final class IdentityService {
             // permanently unrecoverable records. Empty return = "no escrow key", which the seal
             // path already treats as refuse-to-seal (`sealedBackupKey` throws `notProvisioned`).
             guard status == errSecSuccess else {
-                FernletAuditLog.log("identity.escrow.mintFailed", context: ["status": "\(status)"])
+                ProximityAudit.log("identity.escrow.mintFailed", context: ["status": "\(status)"])
                 return Data()
             }
             guard KeychainItem.load(account: account, service: keychainService, synchronizable: .local)
                     == minted.rawRepresentation else {
-                FernletAuditLog.log("identity.escrow.mintVerifyFailed")
+                ProximityAudit.log("identity.escrow.mintVerifyFailed")
                 return Data()
             }
             backupEscrowKey = minted
-            FernletAuditLog.log("identity.escrow.mintedLocal")
+            ProximityAudit.log("identity.escrow.mintedLocal")
         }
         return backupEscrowKey?.publicKey.rawRepresentation ?? Data()
     }
@@ -1139,9 +1139,9 @@ public final class IdentityService {
                     // Log what actually happened: the pre-fix code logged the migration as done
                     // even when nothing was written.
                     if status == errSecSuccess {
-                        FernletAuditLog.log("identity.escrow.migratedLegacyToContentAddressed")
+                        ProximityAudit.log("identity.escrow.migratedLegacyToContentAddressed")
                     } else {
-                        FernletAuditLog.log("identity.escrow.migrateFailed", context: ["status": "\(status)"])
+                        ProximityAudit.log("identity.escrow.migrateFailed", context: ["status": "\(status)"])
                     }
                 }
                 return .usingSynced
@@ -1157,11 +1157,11 @@ public final class IdentityService {
                                             accessibility: kSecAttrAccessibleAfterFirstUnlock,
                                             synchronizable: true, replacing: .synced)
             guard status == errSecSuccess else {
-                FernletAuditLog.log("identity.escrow.promoteFailed", context: ["status": "\(status)"])
+                ProximityAudit.log("identity.escrow.promoteFailed", context: ["status": "\(status)"])
                 return .promotedLocal
             }
             KeychainItem.delete(account: account, service: keychainService, synchronizable: .local)
-            FernletAuditLog.log("identity.escrow.promotedLocal")
+            ProximityAudit.log("identity.escrow.promotedLocal")
             return .promotedLocal
         default:
             // ≥2 distinct keys coexist — content-addressing kept them all alive (none overwrote another).
@@ -1169,7 +1169,7 @@ public final class IdentityService {
             // the user resolves via `adoptSyncedBackupEscrowKey`. Restore meanwhile still works against any
             // of the surviving keys, so no data is stranded while the conflict is unresolved.
             backupEscrowKey = candidates[0].key
-            FernletAuditLog.log("identity.escrow.conflictDetected")
+            ProximityAudit.log("identity.escrow.conflictDetected")
             return .conflict
         }
     }
@@ -1188,7 +1188,7 @@ public final class IdentityService {
                                 service: keychainService, synchronizable: .local)
         }
         backupEscrowKey = chosen.key
-        FernletAuditLog.log("identity.escrow.adoptedSynced")
+        ProximityAudit.log("identity.escrow.adoptedSynced")
         return chosen.publicKey
     }
 
@@ -1206,7 +1206,7 @@ public final class IdentityService {
         keyAgreementKey = nil
         backupEscrowKey = nil
         guard status != errSecSuccess else { return }
-        FernletAuditLog.log("identity.wipe.keychainDeleteFailed", context: ["status": "\(status)"])
+        ProximityAudit.log("identity.wipe.keychainDeleteFailed", context: ["status": "\(status)"])
         throw IdentityError.keychainDeleteFailed(status)
     }
 

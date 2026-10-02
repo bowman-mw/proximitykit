@@ -1,5 +1,4 @@
 import Foundation
-import FernletFoundation
 
 /// Cached prekey bundles gossiped by friends, plus this device's per-friend consumed-prekey
 /// marking (bitchat adoptions Increment 3). Provenance: a bundle is only ever stored from a
@@ -113,7 +112,7 @@ public final class HeartDropPeerBundleCache {
         guard bundle.keys.allSatisfy({ $0.publicKey.count == Self.rawCurve25519KeyByteCount }),
               bundle.signedPrekey.map({ $0.publicKey.count == Self.rawCurve25519KeyByteCount }) ?? true,
               Set(bundle.keys.map(\.id)).count == bundle.keys.count else {
-            FernletAuditLog.log("heartdrop.peerBundles.rejectedMalformed")
+            ProximityAudit.log("heartdrop.peerBundles.rejectedMalformed")
             return
         }
         let currentTime = now()
@@ -174,7 +173,7 @@ public final class HeartDropPeerBundleCache {
             // Benign — the bundle re-gossips at the friend's next verified intro — but a bundle
             // that silently never cached would degrade every heart to that friend to the static
             // key with no trace (R7).
-            FernletAuditLog.log("heartdrop.peerBundles.storeNotPersisted")
+            ProximityAudit.log("heartdrop.peerBundles.storeNotPersisted")
         }
     }
 
@@ -216,7 +215,7 @@ public final class HeartDropPeerBundleCache {
             }
             // The LRU touch is bookkeeping only — the signed prekey is reusable and nothing was
             // burned — so the seal proceeds either way; the failure is named, not swallowed (R7).
-            if !touched { FernletAuditLog.log("heartdrop.peerBundles.lruTouchNotPersisted") }
+            if !touched { ProximityAudit.log("heartdrop.peerBundles.lruTouchNotPersisted") }
             return (spk.id, spk.publicKey, false)
         }
         return nil
@@ -237,7 +236,7 @@ public final class HeartDropPeerBundleCache {
         if !returned {
             // The key stays burned: one fewer one-time prekey for this friend, never a
             // correctness problem — but it is forward secrecy quietly lost, so name it (R7).
-            FernletAuditLog.log("heartdrop.peerBundles.returnNotPersisted")
+            ProximityAudit.log("heartdrop.peerBundles.returnNotPersisted")
         }
     }
 

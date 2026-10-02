@@ -232,7 +232,7 @@ public final class HeartPrekeyStore {
         guard state.bundles.count != bundlesBefore
                 || (state.signedPrekeys ?? []).count != signedBefore else { return }
         if persist(state) {
-            FernletAuditLog.log("heartdrop.prekeys.pruned", context: [
+            ProximityAudit.log("heartdrop.prekeys.pruned", context: [
                 "bundles": "\(bundlesBefore - state.bundles.count)",
                 "signed": "\(signedBefore - (state.signedPrekeys ?? []).count)"
             ])
@@ -286,13 +286,13 @@ public final class HeartPrekeyStore {
         case .absent:
             return StoredState(bundles: [])
         case .unreadable(let status):
-            FernletAuditLog.log("heartdrop.prekeys.readFailed", context: ["status": "\(status)"])
+            ProximityAudit.log("heartdrop.prekeys.readFailed", context: ["status": "\(status)"])
             return nil
         case .found(let data):
             guard let state = try? JSONDecoder().decode(StoredState.self, from: data) else {
                 // A corrupt blob is unrecoverable either way: the private halves in it can't be
                 // parsed, so treating it as empty (and minting fresh) is the only forward path.
-                FernletAuditLog.log("heartdrop.prekeys.corrupt")
+                ProximityAudit.log("heartdrop.prekeys.corrupt")
                 return StoredState(bundles: [])
             }
             cachedState = state
@@ -315,7 +315,7 @@ public final class HeartPrekeyStore {
             // Never cache a state that isn't on disk: the next read must see the keychain's truth
             // rather than an in-memory bundle whose private halves were lost.
             cachedState = nil
-            FernletAuditLog.log("heartdrop.prekeys.writeFailed", context: ["status": "\(status)"])
+            ProximityAudit.log("heartdrop.prekeys.writeFailed", context: ["status": "\(status)"])
             return false
         }
         cachedState = state

@@ -24,7 +24,6 @@
 import Foundation
 import Observation
 import FernletDomainModel
-import FernletFoundation
 
 /// The state + logic brain for Group Activities (Phase 6): hosting, joining, offers, pending
 /// join requests, and host-authoritative roster convergence — riding the friend mesh with no
@@ -224,8 +223,8 @@ public final class ProximityActivityManager {
         } catch {
             // R7: `host()`/`admitJoin()` surface signing failures; a silent no-op removal would
             // leave the host believing the participant is gone.
-            FernletAuditLog.log("activity.removeParticipant.signFailed",
-                                context: ["error": String(describing: error)])
+            ProximityAudit.log("activity.removeParticipant.signFailed",
+                               context: ["error": String(describing: error)])
             activityError = "Couldn't update the activity."
             return
         }
@@ -311,8 +310,8 @@ public final class ProximityActivityManager {
             )
         } catch {
             // R7: the orphaned member stays orphaned; say so instead of returning silently.
-            FernletAuditLog.log("activity.regrant.signFailed",
-                                context: ["error": String(describing: error)])
+            ProximityAudit.log("activity.regrant.signFailed",
+                               context: ["error": String(describing: error)])
             activityError = "Couldn't update the activity."
             return
         }

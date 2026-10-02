@@ -28,7 +28,6 @@
 // as a parameter and every mutation is a value transformation the store then seals.
 
 import Foundation
-import FernletFoundation
 
 // MARK: - MeshRoutedIndexSchema
 
@@ -506,7 +505,7 @@ nonisolated struct MeshRoutedItemRecord: Codable, Equatable, Sendable {
         case .restored(let target):
             return target
         case .refused(let refusal):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedStore.deliveryRestoreRefused",
                 context: ["refusal": refusal.rawValue]
             )

@@ -261,7 +261,7 @@ nonisolated enum MeshSessionSealKey {
             account: account,
             service: service
         ), echoed == keyData else {
-            FernletAuditLog.log("mesh.sessionContext.sealKey.verifyFailed")
+            ProximityAudit.log("mesh.sessionContext.sealKey.verifyFailed")
             return .refused(.sealKeyNotPersisted)
         }
         return .available(SymmetricKey(data: keyData))

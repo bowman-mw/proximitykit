@@ -2,7 +2,6 @@ import Foundation
 import Observation
 import UIKit
 import FernletDomainModel
-import FernletFoundation
 
 /// One live recipe-share pairing: the peer, its channel + coordinator, and (once the handshake
 /// completes) the verified fingerprint and KA key.
@@ -228,8 +227,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         } catch {
             // Benign: every session start re-attempts provisioning and fails visibly
             // (`fail(error.localizedDescription)`) — but the FIRST failure must not vanish.
-            FernletAuditLog.log("recipeShare.identity.provisionFailed",
-                                context: ["error": String(describing: error)])
+            ProximityAudit.log("recipeShare.identity.provisionFailed",
+                               context: ["error": String(describing: error)])
         }
         self.identity = id
         setupSession()

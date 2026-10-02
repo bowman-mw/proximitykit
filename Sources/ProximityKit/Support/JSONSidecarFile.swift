@@ -7,7 +7,6 @@
 // repeated verbatim; each store keeps its own PersistedState shape and post-decode mapping.
 
 import Foundation
-import FernletFoundation
 
 /// Best-effort JSON file persistence for a device-local sidecar in Application Support
 /// (`.completeFileProtection`, never synced) — the shared plumbing behind ``FriendStateCache``,
@@ -100,7 +99,7 @@ struct JSONSidecarFile<State: Codable> {
     /// One audit line per sidecar failure. Carries the sidecar's file NAME (a fixed constant per
     /// store, never user content) and the error description — no path, no state.
     private func logFailure(_ event: String, _ error: Error) {
-        FernletAuditLog.log(
+        ProximityAudit.log(
             event,
             context: ["file": fileURL.lastPathComponent, "error": String(describing: error)]
         )

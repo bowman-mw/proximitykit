@@ -10,7 +10,6 @@
 import Foundation
 import FernletCrypto
 import FernletDomainModel
-import FernletFoundation
 
 /// One report row plus the reporter's Ed25519 signature over its canonical bytes.
 ///
@@ -139,7 +138,7 @@ public enum ModerationReportRelay {
         // is named once per payload rather than vanishing inside the `compactMap`. Counts only — the
         // reporter fingerprint is sensitive social data and does not belong in the audit log.
         if rows.count < payload.reports.count {
-            FernletAuditLog.log("moderation.relay.rowsRejected", context: [
+            ProximityAudit.log("moderation.relay.rowsRejected", context: [
                 "received": String(payload.reports.count),
                 "kept": String(rows.count)
             ])

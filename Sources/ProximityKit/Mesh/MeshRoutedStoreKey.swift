@@ -266,7 +266,7 @@ nonisolated enum MeshRoutedSealKey {
             account: account,
             service: service
         ), echoed == keyData else {
-            FernletAuditLog.log("mesh.routedStore.sealKey.verifyFailed")
+            ProximityAudit.log("mesh.routedStore.sealKey.verifyFailed")
             return .refused(.sealKeyNotPersisted)
         }
         return .available(SymmetricKey(data: keyData))

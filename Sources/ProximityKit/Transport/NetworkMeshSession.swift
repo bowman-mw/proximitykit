@@ -6,7 +6,6 @@ import Network
 import os
 import Security
 import FernletDomainModel
-import FernletFoundation
 
 // MARK: - NetworkMeshWire
 
@@ -2015,7 +2014,7 @@ private extension NetworkMeshSession {
                     continue
                 }
                 guard Self.withinWireCeiling(payload.count) else {
-                    FernletAuditLog.log(
+                    ProximityAudit.log(
                         "mesh.quic.droppedOversizedDatagram",
                         context: ["bytes": "\(payload.count)"]
                     )
@@ -2217,7 +2216,7 @@ private extension NetworkMeshSession {
         on connection: NetworkConnection<QUIC>
     ) async {
         guard let key = tunnelKey(for: connection), let id = claimInboundTransfer(key) else {
-            FernletAuditLog.log("mesh.quic.refusedTransferStream")
+            ProximityAudit.log("mesh.quic.refusedTransferStream")
             return
         }
         defer { tunnels[key]?.transfers.closeInbound(id) }
@@ -2229,7 +2228,7 @@ private extension NetworkMeshSession {
             noteTransfer("received", bytes: length, streamID: stream.streamID, key: key)
             try await stream.send(MeshTransferStreamTable.ack, endOfStream: true)
         } catch {
-            FernletAuditLog.log("mesh.quic.transferStreamFailed")
+            ProximityAudit.log("mesh.quic.transferStreamFailed")
             noteTransfer("dropped", bytes: 0, streamID: stream.streamID, key: key)
         }
     }

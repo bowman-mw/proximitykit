@@ -28,7 +28,6 @@
 
 import CryptoKit
 import Foundation
-import FernletFoundation
 
 // MARK: - MeshRoutedSealRefusal
 
@@ -528,7 +527,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
         do {
             try mutableURL.setResourceValues(values)
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedStore.backupExclusionFailed",
                 context: ["error": String(describing: error)]
             )
@@ -578,7 +577,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
             guard let chunk else { return .unauthentic(.authenticationFailed) }
             guard MeshChunkDescriptor(chunk) == stored.descriptor,
                   chunk.payload.count == stored.payloadByteCount else {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.routedStore.chunkFileMismatch",
                     context: ["index": String(stored.descriptor.chunkIndex)]
                 )
@@ -690,7 +689,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
             try manager.removeItem(at: quarantineURL)
         }
         try manager.moveItem(at: indexURL, to: quarantineURL)
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedStore.quarantined",
             context: ["detail": String(describing: corruption.detail)]
         )
@@ -726,7 +725,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
             try FileManager.default.removeItem(at: url)
             return true
         } catch {
-            FernletAuditLog.log(token, context: ["error": String(describing: error)])
+            ProximityAudit.log(token, context: ["error": String(describing: error)])
             return false
         }
     }

@@ -303,7 +303,7 @@ public final class PresenceManager: ProximityPayloadHandling {
             do {
                 try id.ensureProvisioned()
             } catch {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "presence.identity.provisionFailed",
                     context: ["error": String(describing: error)]
                 )
@@ -767,7 +767,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         } catch {
             presencePosture = nil
             postureMintFailedEpoch = epoch
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "presence.posture.mintFailed",
                 context: ["error": String(describing: error)]
             )

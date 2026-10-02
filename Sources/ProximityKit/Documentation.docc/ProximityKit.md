@@ -417,6 +417,26 @@ and a new manager in this subsystem inherits all three:
 `unowned` host; rule ML5 fails a test that builds a manager over an inline host expression.
 ``ProximityManagerDeallocationTests`` measures HP2 directly, with the beacon loop armed.
 
+### Audit: every line goes to the host's sink
+
+This module writes its audit lines (event names such as `mesh.routedDrain.rejected`, frozen English
+tokens, with counts, reasons and salted labels as context, which a sink keeps private because a few
+lines name a peer) through ``ProximityAudit``, and ``ProximityAudit`` hands each one to the
+``ProximityAuditSink`` the host installed with ``ProximityAudit/install(_:)``. It names no host's log
+and keeps none of its own: with no sink installed, a line is dropped. Delivery is synchronous, on
+the emitting executor, with no hop: the sink is read under a `Mutex` the slot owns and called after
+the lock is released, so it may re-enter or block, and the requirement is `nonisolated` because the
+routed and session stores that log are `nonisolated` value types.
+
+It is a process-wide slot, unlike ``ProximityNamespace``, which the host hands down. Audit lines come
+from over four hundred call sites, including static helpers that hold no host, and a host's tests
+build this module's objects directly and still need to see every line; installing once at launch
+reaches all of them. Fernlet's sink is `FernletAuditBridge` in `FernletConnections`, installed first
+thing in `FernletApp.init` and not behind the UI-test harness check, so the unit tests, hosted in the
+app, see every line in `FernletAuditLog`'s capture registry exactly as they did when this module
+named `FernletAuditLog` itself. `ProximityAuditBridgeTests` is the canary for that install: every
+test asserting that an event was not logged would pass vacuously without it.
+
 ### Localization: nothing on the wire is display copy
 
 The module owns a `Localizable.xcstrings` (added by the 2026-08-22 accessibility review's §4.0) and one copy vault, `ProximityUICopy`, for the three strings it hands out already resolved: the camera's hold-failure line (`ProximityUICopy.Camera`, which `MeshNetworkManager` publishes as `meshError`) and the two name placeholders ``PeerNameDisplay`` hands the app's in-person surfaces ("Someone nearby", "Someone you met"; `ProximityUICopy.Peer`, nonisolated because the helper is). A placeholder is resolved display text and never a token: it must not be persisted, put in a roster or vault row, or sent. The vault used to serve the three SwiftUI surfaces this module shipped — the friend-photo review sheet, the keep-friends prompt, and the photo-save failure alert — and their 28 keys moved with them, byte for byte, to `FernletProximityUI` (`FernletProximityUICopy` and that module's own catalog) in plan step A0.1. Those strings were bare literals once, and a `LocalizedStringKey` literal inside an SPM module resolves against `Bundle.main`, which never consults the module's catalog: untranslatable English with a clean build. Six of them were hiding inside ternaries (`Button(isKept ? "Keeping" : "Keep")`) or in `LocalizedStringKey`-typed properties, where no call-site scan could see them; `LocalizationBoundaryTests.packageDisplayLiteralsPassModuleBundle()` now catches both shapes. **The vault is display copy only.** Nothing below may go in it.
@@ -617,6 +637,8 @@ and `ColumnCrypto` open each other's blobs and refuse alike.
 - ``ProximitySupportLayout``
 - ``MeshContinuationRaising``
 - ``MeshSessionContinuationReading``
+- ``ProximityAudit``
+- ``ProximityAuditSink``
 
 ### Protocol namespace
 

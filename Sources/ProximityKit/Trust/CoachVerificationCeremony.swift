@@ -1,5 +1,4 @@
 import Foundation
-import FernletFoundation
 
 /// Verification ceremony for the in-person coach session (Increment 10 of
 /// Docs/Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26.md).
@@ -64,7 +63,7 @@ public final class CoachVerificationCeremony {
     public func clearDisplay() {
         guard activeDisplay != nil else { return }
         activeDisplay = nil
-        FernletAuditLog.log("coach.verify.displayCleared")
+        ProximityAudit.log("coach.verify.displayCleared")
     }
 
     /// An inbound sealed challenge arrived from the session peer whose envelope VERIFIED as
@@ -77,21 +76,21 @@ public final class CoachVerificationCeremony {
     ) -> ChallengeVerdict {
         // Only honor a challenge quoting the QR THIS device is displaying right now.
         guard let active = activeDisplay, active.nonce == payload.qrNonce else {
-            FernletAuditLog.log("coach.verify.staleChallengeDropped")
+            ProximityAudit.log("coach.verify.staleChallengeDropped")
             return .droppedStale
         }
         // Displayer-side expiry: the QR's own timestamp only bounds what an honest scanner
         // accepts. abs() so a backwards clock jump can't resurrect a display.
         guard abs(now().timeIntervalSince(active.issuedAt)) <= ProximityVerifyQR.freshnessWindow else {
             activeDisplay = nil
-            FernletAuditLog.log("coach.verify.expiredChallengeDropped")
+            ProximityAudit.log("coach.verify.expiredChallengeDropped")
             return .droppedExpired
         }
         // The sheet named ONE peer. A challenge from anyone else is a third party who can see
         // this screen — drop it WITHOUT clearing, so the named peer keeps their round. Checked
         // BEFORE anything is signed.
         guard senderSigningPublicKey == active.peerSigningKey else {
-            FernletAuditLog.log("coach.verify.wrongPeerChallengeDropped")
+            ProximityAudit.log("coach.verify.wrongPeerChallengeDropped")
             return .droppedWrongPeer
         }
         // Fixed-length fields only — the transcript has no length prefixes, and nothing is signed
@@ -99,7 +98,7 @@ public final class CoachVerificationCeremony {
         guard ProximityVerifySignature.isWellFormedChallenge(
             payload, scannerKeyAgreementPublicKey: senderKeyAgreementPublicKey
         ) else {
-            FernletAuditLog.log("coach.verify.malformedChallengeDropped")
+            ProximityAudit.log("coach.verify.malformedChallengeDropped")
             return .droppedStale
         }
         let message = ProximityVerifySignature.message(
@@ -109,11 +108,11 @@ public final class CoachVerificationCeremony {
             in: identity.purposes
         )
         guard let signature = try? identity.sign(message, purpose: identity.purposes.signature.proximityQRResponseV1) else {
-            FernletAuditLog.log("coach.verify.signFailed")
+            ProximityAudit.log("coach.verify.signFailed")
             return .droppedStale
         }
         activeDisplay = nil // single use, spent only on the named peer's genuine round
-        FernletAuditLog.log("coach.verify.responded")
+        ProximityAudit.log("coach.verify.responded")
         return .respond(VerifyResponsePayload(challengeNonce: payload.challengeNonce, signature: signature))
     }
 
@@ -129,17 +128,17 @@ public final class CoachVerificationCeremony {
     ) -> VerifyChallengePayload? {
         guard let payload = ProximityVerifyQR.parse(scannedURL, in: identity.namespace),
               ProximityVerifyQR.isValid(payload, at: now(), in: identity.purposes) else {
-            FernletAuditLog.log("coach.verify.invalidScanned")
+            ProximityAudit.log("coach.verify.invalidScanned")
             return nil
         }
         guard !expectedPeerSigningKey.isEmpty, payload.signingPublicKey == expectedPeerSigningKey else {
-            FernletAuditLog.log("coach.verify.qrPeerMismatch")
+            ProximityAudit.log("coach.verify.qrPeerMismatch")
             return nil
         }
         let challengeNonce = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })
         pendingRound = (qrNonce: payload.nonce, challengeNonce: challengeNonce,
                         expectedSigningKey: payload.signingPublicKey)
-        FernletAuditLog.log("coach.verify.challengeSent")
+        ProximityAudit.log("coach.verify.challengeSent")
         return VerifyChallengePayload(qrNonce: payload.nonce, challengeNonce: challengeNonce)
     }
 
@@ -152,7 +151,7 @@ public final class CoachVerificationCeremony {
         guard let pending = pendingRound,
               payload.challengeNonce == pending.challengeNonce,
               senderSigningPublicKey == pending.expectedSigningKey else {
-            FernletAuditLog.log("coach.verify.unexpectedResponseDropped")
+            ProximityAudit.log("coach.verify.unexpectedResponseDropped")
             return false
         }
         let message = ProximityVerifySignature.message(
@@ -164,11 +163,11 @@ public final class CoachVerificationCeremony {
         guard IdentityService.verify(payload.signature, of: message, by: pending.expectedSigningKey,
                                      purpose: identity.purposes.signature.proximityQRResponseV1) else {
             pendingRound = nil
-            FernletAuditLog.log("coach.verify.badResponseSignature")
+            ProximityAudit.log("coach.verify.badResponseSignature")
             return false
         }
         pendingRound = nil
-        FernletAuditLog.log("coach.verify.proven")
+        ProximityAudit.log("coach.verify.proven")
         return true
     }
 }

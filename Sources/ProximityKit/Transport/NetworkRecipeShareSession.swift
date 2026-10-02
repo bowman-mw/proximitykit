@@ -3,7 +3,6 @@ import Foundation
 import Network
 import os
 import Security
-import FernletFoundation
 
 // MARK: - RecipeShareRadioSession
 
@@ -458,7 +457,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
         isRunning = false
         isDiscoveryPaused = false
         guard stopped else { return }
-        FernletAuditLog.log("recipe.quic.stopped", context: [:])
+        ProximityAudit.log("recipe.quic.stopped", context: [:])
     }
 
     /// Stands the listener AND the browser down while keeping every live tunnel — the whole of
@@ -476,7 +475,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
         isDiscoveryPaused = true
         cancelBrowser()
         cancelListener()
-        FernletAuditLog.log("recipe.quic.paused", context: ["tunnels": String(tunnels.count)])
+        ProximityAudit.log("recipe.quic.paused", context: ["tunnels": String(tunnels.count)])
     }
 
     /// Reopens a paused radio under a **wholly new posture**: a fresh instance name, a fresh TLS
@@ -500,7 +499,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
             posture = fresh
             isDiscoveryPaused = false
             try startListener()
-            FernletAuditLog.log("recipe.quic.resumed", context: auditContext(for: fresh))
+            ProximityAudit.log("recipe.quic.resumed", context: auditContext(for: fresh))
         } catch {
             report("The recipe-share listener could not be resumed: \(error)")
         }
@@ -524,7 +523,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
             // The peer's identity aged out of the bounded map between the picker row being drawn
             // and the tap. The only branch of this audit that cannot name its peer: there is no
             // key left to take a label from.
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "recipe.quic.dialRefused",
                 context: ["peer": Self.unlabelledPeer, "reason": "identityAgedOut"]
             )
@@ -804,7 +803,7 @@ private extension NetworkRecipeShareSession {
     func startListener() throws {
         guard let posture else { throw MeshTransportError.tlsIdentityUnavailable }
         guard !radiosSuppressed else {
-            FernletAuditLog.log("recipe.quic.advertised", context: auditContext(for: posture))
+            ProximityAudit.log("recipe.quic.advertised", context: auditContext(for: posture))
             return
         }
         let fields = RecipeShareAdvertisement.publishedFields(
@@ -843,7 +842,7 @@ private extension NetworkRecipeShareSession {
                 self?.report("The recipe-share listener stopped: \(error)")
             }
         }
-        FernletAuditLog.log("recipe.quic.advertised", context: auditContext(for: posture))
+        ProximityAudit.log("recipe.quic.advertised", context: auditContext(for: posture))
     }
 
     /// Stands the listener down and forgets it, keeping every tunnel.
@@ -937,7 +936,7 @@ private extension NetworkRecipeShareSession {
     /// the failure is an honest stand-down and never a silently dark radio. There is no flap loop
     /// in it: a `.remove` follows an `.add`, and a republish that never registers never gets one.
     func republishListener() {
-        FernletAuditLog.log("recipe.quic.registrationWithdrawn", context: [:])
+        ProximityAudit.log("recipe.quic.registrationWithdrawn", context: [:])
         cancelListener()
         do {
             let fresh = try RecipeSharePosture.minted()
@@ -1012,14 +1011,14 @@ private extension NetworkRecipeShareSession {
     func reportBrowserFailure(_ message: String) {
         cancelBrowser()
         let busy = !tunnels.isEmpty || hasConnectingPeers(besides: nil)
-        FernletAuditLog.log("recipe.quic.browserFailed", context: ["busy": String(busy)])
+        ProximityAudit.log("recipe.quic.browserFailed", context: ["busy": String(busy)])
         report(message)
     }
 
     /// The one audit line for a dial this radio would not make. A refusal, never a failure: it
     /// never reaches ``report(_:)`` and never stands the radio down.
     func auditDialRefused(_ key: MeshLinkKey, reason: String) {
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "recipe.quic.dialRefused",
             context: ["peer": peerLabel(for: key), "reason": reason]
         )
@@ -1088,7 +1087,7 @@ private extension NetworkRecipeShareSession {
         // CONTAINS the instance name the peer advertises; and it says only whether the record was
         // a recipe advertisement at all. Neither the peer's chosen name nor its session id is a
         // value a log is a good place to accumulate.
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "recipe.quic.sighted",
             context: [
                 "peer": peerLabel(for: key),
@@ -1311,7 +1310,7 @@ private extension NetworkRecipeShareSession {
     /// The one audit line for a collapsed duplicate, naming the peer by ``peerLabel(for:)`` and
     /// which half survived.
     func auditRedundantTunnelClosed(_ key: MeshLinkKey, kept: String) {
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "recipe.quic.redundantTunnelClosed",
             context: ["peer": peerLabel(for: key), "kept": kept]
         )
@@ -1321,7 +1320,7 @@ private extension NetworkRecipeShareSession {
     /// key — a connection id, not a browsed endpoint — because a refused dialer is by definition
     /// one this radio never resolved to a peer.
     func auditHelloRefused(_ pendingKey: MeshLinkKey) {
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "recipe.quic.helloRefused",
             context: ["connection": peerLabel(for: pendingKey)]
         )
@@ -1367,7 +1366,7 @@ private extension NetworkRecipeShareSession {
         tunnel.controlStream = stream
         tunnel.connection = connection
         tunnels[key] = tunnel
-        FernletAuditLog.log("recipe.quic.connected", context: ["tunnels": String(tunnels.count)])
+        ProximityAudit.log("recipe.quic.connected", context: ["tunnels": String(tunnels.count)])
         onPeerChannelReady?(tunnel.channel)
     }
 
@@ -1498,7 +1497,7 @@ private extension NetworkRecipeShareSession {
         on connection: NetworkConnection<QUIC>
     ) async {
         guard let key = tunnelKey(for: connection), let id = claimInboundTransfer(key) else {
-            FernletAuditLog.log("recipe.quic.transferStreamRefused", context: [:])
+            ProximityAudit.log("recipe.quic.transferStreamRefused", context: [:])
             return
         }
         defer { tunnels[key]?.transfers.closeInbound(id) }
@@ -1510,7 +1509,7 @@ private extension NetworkRecipeShareSession {
             noteTransfer("received", bytes: length, key: key)
             try await stream.send(MeshTransferStreamTable.ack, endOfStream: true)
         } catch {
-            FernletAuditLog.log("recipe.quic.transferStreamFailed", context: [:])
+            ProximityAudit.log("recipe.quic.transferStreamFailed", context: [:])
         }
     }
 
@@ -1534,7 +1533,7 @@ private extension NetworkRecipeShareSession {
     /// Records one transfer crossing: the verb, the payload size, and the opaque peer label. Byte
     /// counts only — no payload, no recipe title, no peer name.
     func noteTransfer(_ verb: String, bytes: Int, key: MeshLinkKey) {
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "recipe.quic.transferStream",
             context: ["verb": verb, "bytes": String(bytes), "peer": peerLabel(for: key)]
         )

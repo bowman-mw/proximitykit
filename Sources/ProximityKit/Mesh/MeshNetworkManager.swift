@@ -668,7 +668,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         do {
             try id.ensureProvisioned()
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.identity.provisionFailed",
                 context: ["error": String(describing: error)]
             )
@@ -751,7 +751,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .deferred:
             photoIndexDeferred = true
         case .unrecoverable:
-            FernletAuditLog.log("mesh.photoIndex.unrecoverable")
+            ProximityAudit.log("mesh.photoIndex.unrecoverable")
         }
         prunePhotoWallPreferences()
         loadHeldPhotoIndex(now: now)
@@ -766,7 +766,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         registerPayloadHandler(for: .clothingCatalog) { [weak self] envelope, plaintext, peer in
             guard let self else { return }
             guard let fingerprint = peer?.fingerprint else {
-                FernletAuditLog.log("mesh.clothingCatalog.droppedUnverifiedSender")
+                ProximityAudit.log("mesh.clothingCatalog.droppedUnverifiedSender")
                 return
             }
             guard !self.store.isBlockedFingerprint(fingerprint) else { return }
@@ -778,7 +778,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         registerPayloadHandler(for: .clothingCatalogRequest) { [weak self] _, _, peer in
             guard let self else { return }
             guard let fingerprint = peer?.fingerprint else {
-                FernletAuditLog.log("mesh.clothingCatalogRequest.droppedUnverifiedSender")
+                ProximityAudit.log("mesh.clothingCatalogRequest.droppedUnverifiedSender")
                 return
             }
             guard !self.store.isBlockedFingerprint(fingerprint) else { return }
@@ -795,7 +795,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         registerPayloadHandler(for: .itemReport) { [weak self] _, plaintext, peer in
             guard let self else { return }
             guard let peer else {
-                FernletAuditLog.log("mesh.itemReport.droppedUnverifiedSender")
+                ProximityAudit.log("mesh.itemReport.droppedUnverifiedSender")
                 return
             }
             guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
@@ -1035,7 +1035,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         do {
             return try MeshRoutedHeartBody(header: header).encoded()
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedShare.mintFailed",
                 context: ["type": typeToken, "error": String(describing: error)]
             )
@@ -1097,7 +1097,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         _ cause: SessionHeartFailure, _ friend: ProximityTrustedPeerRecord
     ) {
         sessionHeartState = .failed(cause, recipientName: friend.displayName)
-        FernletAuditLog.log("mesh.routedHeart.sendFailed", context: ["reason": cause.rawValue])
+        ProximityAudit.log("mesh.routedHeart.sendFailed", context: ["reason": cause.rawValue])
         scheduleSessionHeartStateClear()
     }
 
@@ -1487,7 +1487,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // R3: one entry per distinct fingerprint, but a peer that regenerates its identity and
             // re-commits (auto-dwell in proximity join) would otherwise add one entry per commit.
             guard sessionRoster.count < Self.maxSessionRosterEntries else {
-                FernletAuditLog.log("mesh.roster.capReached")
+                ProximityAudit.log("mesh.roster.capReached")
                 return
             }
             sessionRoster.append(MeshSessionRosterEntry(
@@ -1625,7 +1625,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let answer = applyPhotoAnswers(
             kept: answered.intersection(kept), discarded: answered.subtracting(kept), now: Date()
         )
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.session.photoReviewAnswered",
             context: ["kept": String(answer.keptOnWall.count), "discarded": String(answer.discarded.count),
                       "unreadable": String(answer.unreadable.count), "notApplied": String(answer.notApplied.count),
@@ -1713,7 +1713,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         batch.photos = Array((arriving + batch.photos).prefix(PendingSessionPhotoStore.maxHeldPhotos))
         pendingFriendReview = batch
         sessionPhotos.removeAll()
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.session.photosPendingReview",
             context: ["moved": String(arriving.count), "pending": String(batch.photos.count)]
         )
@@ -1750,7 +1750,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard gate != routedAccessGate else { return nil }
         let edge = MeshRoutedAccessEdge(from: routedAccessGate, to: gate)
         routedAccessGate = gate
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedAccess.gateChanged",
             context: heldMeshAuditContext(
                 ["protectedData": String(gate.protectedDataAvailable),
@@ -1826,7 +1826,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // wait keeps the review sheet up for up to its grace — would re-enter `handingOff`, sign a
         // second record and repeat the transfer and the wait. The leave in flight owns the ending.
         guard sessionState != .handingOff else {
-            FernletAuditLog.log("mesh.development.alreadyInFlight", context: heldMeshAuditContext())
+            ProximityAudit.log("mesh.development.alreadyInFlight", context: heldMeshAuditContext())
             return
         }
         let plan = developmentPlan(startedAt: clock())
@@ -1855,7 +1855,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 await awaitPartnerReceiptOfTermination(plan)
             } else {
                 handoff = handoff.notAnnounced()
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.development.handoffSuppressed", context: ["reason": "recordNotEmitted"]
                 )
             }
@@ -1909,7 +1909,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if !partners.isEmpty {
             outcome = await transport.awaitRemoteClose(of: partners, within: Self.terminationReceiptGraceSeconds)
         }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.development.partnerReceipt",
             context: heldMeshAuditContext(["outcome": outcome.rawValue, "partners": String(partners.count)])
         )
@@ -1942,7 +1942,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let outcome = plan.handoffOutcome(finishedAt: finishedAt)
         lastDevelopmentHandoffOutcome = outcome
         lastDevelopmentHandoff = handoff
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.development.handoff",
             context: [
                 "ending": plan.ending.rawValue,
@@ -1978,7 +1978,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard plan.ending == .departure else { return .none }
         guard !plan.handoffTargets.isEmpty else { return .suppressed(.noReachableCustodian) }
         guard !plan.handoffHasExpired(at: now) else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.development.handoffSuppressed", context: ["reason": "windowExpired"]
             )
             // Its own suppression, never `.none`: a device that held placeable items and ran out of
@@ -1991,7 +1991,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         switch routedStore().indexForWriting() {
         case .writable(let loaded, _): index = loaded
         case .unavailable(let cause):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.development.handoffSuppressed", context: ["state": cause.logToken]
             )
             return .suppressed(.storeUnavailable)
@@ -2013,14 +2013,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         _ planned: MeshCustodyHandoffPlan, unrestorable: Int, now: Date
     ) -> MeshCustodyHandoffResult {
         if !planned.unplacedItemKeys.isEmpty {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.development.handoffUnplaced",
                 context: ["items": String(planned.unplacedItemKeys.count)]
             )
             noteRoutedUnplaced(planned.unplacedItemKeys, at: now)
         }
         if unrestorable > 0 {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.deliveryUnrestorable", context: ["items": String(unrestorable)]
             )
         }
@@ -2031,19 +2031,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .completed(let report):
             // R2: bounded by the batch's own size.
             for refusal in report.refused {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.development.handoffRefused",
                     context: ["reason": refusal.refusal.token]
                 )
             }
             return Self.handoffResult(planned, transferred: report.advanced, unrestorable: unrestorable)
         case .refused(let refusal):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.development.handoffRefused", context: ["reason": refusal.rawValue]
             )
             return Self.handoffResult(planned, transferred: [], unrestorable: unrestorable)
         case .unavailable(let cause):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.development.handoffSuppressed", context: ["state": cause.logToken]
             )
             return .suppressed(.storeUnavailable)
@@ -2089,7 +2089,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         for custodian in plan.handoffTargets.prefix(MeshMembershipBounds.maxRosterMembers) {
             let now = clock()
             guard !plan.handoffHasExpired(at: now) else {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.development.handoffPushDeadline",
                     context: ["left": String(plan.handoffTargets.count - reached)]
                 )
@@ -2102,13 +2102,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             if await sendRoutedBulk(batch, to: custodian, now: now) {
                 frames += batch.frameCount
             } else if batch.frameCount > 0 {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.development.handoffPushBudgetSpent",
                     context: ["left": String(routedFramesRemaining(for: custodian))]
                 )
             }
         }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.development.handoffPushed",
             context: ["items": String(pushable.count),
                       "custodians": String(reached), "frames": String(frames)]
@@ -2125,7 +2125,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let local = MeshRoutedInventory(
             meshID: mesh.meshID, index: index, selfFingerprint: identity.localFingerprint, at: now
         ) else {
-            FernletAuditLog.log("mesh.routedDrain.inventoryOverCap")
+            ProximityAudit.log("mesh.routedDrain.inventoryOverCap")
             return nil
         }
         let bounds = MeshRoutedDrainBounds.increment1
@@ -2179,7 +2179,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             kept: answered.intersection(kept), discarded: answered.subtracting(kept), now: Date()
         )
         if !pendingIDs.isDisjoint(with: answered) {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.session.developAnsweredPendingPhotos",
                 context: ["answered": String(answered.intersection(pendingIDs).count)]
             )
@@ -2204,7 +2204,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// the next launch — an answer that did not persist, which is worse than no answer at all.
     public func deletePhoto(_ photoID: UUID) {
         guard heldPhotoIndex.heldPhoto(localID: photoID) == nil else {
-            FernletAuditLog.log("mesh.heldPhotos.deleteRefused")
+            ProximityAudit.log("mesh.heldPhotos.deleteRefused")
             return
         }
         let removed = meshPhotos.first { $0.id == photoID }
@@ -2243,7 +2243,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return
         }
         guard case .entries(let recovered) = photoCacheStore.loadIndex() else {
-            FernletAuditLog.log("mesh.photoIndex.saveSkippedWhileDeferred")
+            ProximityAudit.log("mesh.photoIndex.saveSkippedWhileDeferred")
             return
         }
         photoIndexDeferred = false
@@ -2320,7 +2320,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let now = Date()
         retryDeferredPhotoIndexes(now: now)
         guard !routedAccessGate.duressActive, heldPhotoIndexDeferral == nil else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.heldPhotos.holdRefused",
                 context: ["reason": routedAccessGate.duressActive ? "duress" : "pendingIndexDeferred"]
             )
@@ -2334,7 +2334,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let entry = HeldSessionPhoto(key: heldKey, heldAt: now, payload: local)
         let (outcome, next) = heldPhotoStore.hold(entry, imageData: imageData, into: heldPhotoIndex)
         guard outcome == .held else {
-            FernletAuditLog.log("mesh.heldPhotos.holdRefused", context: ["reason": Self.holdToken(outcome)])
+            ProximityAudit.log("mesh.heldPhotos.holdRefused", context: ["reason": Self.holdToken(outcome)])
             return outcome
         }
         heldPhotoIndex = next
@@ -2375,7 +2375,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func withHeldLocalID(_ photo: FriendPhotoPayload, imageData: Data) -> FriendPhotoPayload {
         let taken = heldPhotoIndex.heldLocalIDs.contains(photo.id) || meshPhotos.contains { $0.id == photo.id }
         guard taken else { return photo }
-        FernletAuditLog.log("mesh.heldPhotos.idCollision")
+        ProximityAudit.log("mesh.heldPhotos.idCollision")
         return FriendPhotoPayload(
             id: UUID(),
             imageData: imageData,
@@ -2399,7 +2399,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         batch.photos.insert(metadata, at: 0)
         batch.photos = Array(batch.photos.prefix(PendingSessionPhotoStore.maxHeldPhotos))
         pendingFriendReview = batch
-        FernletAuditLog.log("mesh.heldPhotos.heldAwaiting", context: ["pending": String(batch.photos.count)])
+        ProximityAudit.log("mesh.heldPhotos.heldAwaiting", context: ["pending": String(batch.photos.count)])
     }
 
     /// Re-reads whichever photo index could not be read before — the wall's, the pending corpus's,
@@ -2430,7 +2430,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         meshPhotos = merged.map { $0.withoutImageData() }
         if !unsaved.isEmpty { photoCacheStore.save(merged) }
         prunePhotoWallPreferences()
-        FernletAuditLog.log("mesh.photoIndex.recoveredAfterDeferral", context: ["photos": String(meshPhotos.count)])
+        ProximityAudit.log("mesh.photoIndex.recoveredAfterDeferral", context: ["photos": String(meshPhotos.count)])
     }
 
     /// Loads the pending index into the mirror, or records why it cannot be read.
@@ -2446,7 +2446,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .deferred(let deferral):
             heldPhotoIndexDeferral = deferral
         case .unrecoverable(let purged):
-            FernletAuditLog.log("mesh.heldPhotos.indexUnrecoverable", context: ["purged": String(purged)])
+            ProximityAudit.log("mesh.heldPhotos.indexUnrecoverable", context: ["purged": String(purged)])
             heldPhotoIndex = .empty
             heldPhotoIndexDeferral = nil
         }
@@ -2477,7 +2477,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             wallIDs.contains($0.localID) || wallHolds($0.key) || heldPhotoIndex.isAnswered($0.key)
         }
         if !stale.isEmpty {
-            FernletAuditLog.log("mesh.heldPhotos.reconciled", context: ["dropped": String(stale.count)])
+            ProximityAudit.log("mesh.heldPhotos.reconciled", context: ["dropped": String(stale.count)])
             commitHeldPhotoAnswers(Set(stale.map(\.key)), now: now)
             // Already offered over an unreadable wall: take the ones that turned out to be kept back
             // out of the review.
@@ -2493,7 +2493,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// all working — rather than never. See ``heldPhotosOfferedOverUnreadableWall`` for the cost.
     private func offerHeldPhotosOverUnreadableWallIfPersistent() {
         guard routedAccessGate.protectedDataAvailable, !heldPhotosOfferedOverUnreadableWall else { return }
-        FernletAuditLog.log("mesh.heldPhotos.offeredOverUnreadableWall")
+        ProximityAudit.log("mesh.heldPhotos.offeredOverUnreadableWall")
         heldPhotosOfferedOverUnreadableWall = true
         offerHeldPhotosAwaitingAnswer()
     }
@@ -2510,7 +2510,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         var batch = pendingFriendReview ?? MeshFriendReviewBatch(entries: [])
         batch.photos = Array((unlisted + batch.photos).prefix(PendingSessionPhotoStore.maxHeldPhotos))
         pendingFriendReview = batch
-        FernletAuditLog.log("mesh.heldPhotos.offeredFromIndex", context: ["photos": String(unlisted.count)])
+        ProximityAudit.log("mesh.heldPhotos.offeredFromIndex", context: ["photos": String(unlisted.count)])
     }
 
     /// Recomputes ``heldPhotosCanBeShown`` from its three inputs, writing only on a change so an
@@ -2565,7 +2565,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let purged = heldPhotoStore.purgeAll()
         if purged { heldPhotoIndexDeferral = nil }
         refreshHeldPhotosCanBeShown()
-        FernletAuditLog.log("mesh.heldPhotos.purgedForDeleteAll", context: ["purged": String(purged)])
+        ProximityAudit.log("mesh.heldPhotos.purgedForDeleteAll", context: ["purged": String(purged)])
         return purged
     }
 
@@ -2599,12 +2599,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let asked = kept.union(discarded)
         guard !asked.isEmpty else { return .nothing }
         guard routedAccessGate.isOpen else {
-            FernletAuditLog.log("mesh.heldPhotos.answerRefused", context: ["reason": "gateClosed"])
+            ProximityAudit.log("mesh.heldPhotos.answerRefused", context: ["reason": "gateClosed"])
             return Self.answerNotApplied(asked.intersection(heldPhotoIndex.heldLocalIDs))
         }
         retryDeferredPhotoIndexes(now: now)
         guard heldPhotoIndexDeferral == nil else {
-            FernletAuditLog.log("mesh.heldPhotos.answerRefused", context: ["reason": "pendingIndexDeferred"])
+            ProximityAudit.log("mesh.heldPhotos.answerRefused", context: ["reason": "pendingIndexDeferred"])
             return Self.answerNotApplied(asked.intersection(heldPhotoIndex.heldLocalIDs))
         }
         let heldKept = heldPhotoIndex.photos.filter { kept.contains($0.localID) }
@@ -2658,7 +2658,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func keepHeldPhotosOnWall(_ held: [HeldSessionPhoto]) -> HeldKeepOutcome {
         guard !held.isEmpty else { return HeldKeepOutcome() }
         guard !photoIndexDeferred else {
-            FernletAuditLog.log("mesh.heldPhotos.keepRefused", context: ["reason": "wallDeferred"])
+            ProximityAudit.log("mesh.heldPhotos.keepRefused", context: ["reason": "wallDeferred"])
             return HeldKeepOutcome(notLanded: held, failure: .keepUnavailable)
         }
         let read = readHeldPhotosForKeep(held)
@@ -2668,10 +2668,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let landed = held.filter { result.keptOnWall.contains($0.localID) }
         let notLanded = held.filter { !result.keptOnWall.contains($0.localID) && !unreadableIDs.contains($0.localID) }
         if !read.gone.isEmpty {
-            FernletAuditLog.log("mesh.heldPhotos.unreadableAtKeep", context: ["count": String(read.gone.count)])
+            ProximityAudit.log("mesh.heldPhotos.unreadableAtKeep", context: ["count": String(read.gone.count)])
         }
         if !notLanded.isEmpty {
-            FernletAuditLog.log("mesh.heldPhotos.keepNotLanded", context: [
+            ProximityAudit.log("mesh.heldPhotos.keepNotLanded", context: [
                 "count": String(notLanded.count), "unavailable": String(read.unavailableCount)
             ])
         }
@@ -2729,7 +2729,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             heldPhotoIndex = next
             return
         }
-        FernletAuditLog.log("mesh.heldPhotos.answerNotPersisted", context: ["count": String(keys.count)])
+        ProximityAudit.log("mesh.heldPhotos.answerNotPersisted", context: ["count": String(keys.count)])
         heldPhotoIndex = PendingSessionPhotoStore.answering(keys, in: heldPhotoIndex, now: now)
     }
 
@@ -2879,7 +2879,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// destinations, it holds nothing, and End Session retires it. Named rather than closed;
     /// closing it wants a context writer that can delete, which is a schema question.
     private func abandonUnpersistedSession() {
-        FernletAuditLog.log("mesh.session.abandonedNotDurable")
+        ProximityAudit.log("mesh.session.abandonedNotDurable")
         currentMesh = nil
         membershipVerifier = nil
         sessionQuotaMeshID = nil
@@ -3010,7 +3010,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         disconnectUncommittedSlotsForHold()
         cancelSessionGiveUpClock()
         transport.pauseDiscovery()
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.session.linksHeld",
             context: ["slots": "\(slots.count)", "committed": "\(hasCommittedPeer)"]
         )
@@ -3097,7 +3097,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// mesh un-ends it (`startSearching()` clears the flag).
     public func endSessionAfterDiscoveryTimeout() {
         guard !hasCommittedPeer else { return }
-        FernletAuditLog.log("mesh.session.endedByDiscoveryTimeout")
+        ProximityAudit.log("mesh.session.endedByDiscoveryTimeout")
         sessionSearchGaveUp = true
         cancelSessionGiveUpClock()
         stopJoin()
@@ -3130,7 +3130,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         sessionGiveUpTask?.cancel()
         sessionGiveUpDeadline = now.addingTimeInterval(Self.discoveryGiveUpInterval)
-        FernletAuditLog.log("mesh.session.giveUpClockArmed")
+        ProximityAudit.log("mesh.session.giveUpClockArmed")
         // host-pin: timer — stored handle, synchronous main-actor body (`evaluateSessionGiveUp`) (HP2)
         sessionGiveUpTask = Task { @MainActor [weak self] in
             do {
@@ -3455,7 +3455,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Bounded by the session quota: every skip is one of at most `maxPhotosPerSenderPerSession`
         // captures, and the count leaves with the session.
         photosKeptOnThisPhone += 1
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedShare.skipped",
             context: heldMeshAuditContext(["reason": skip.rawValue, "type": "friendPhoto"])
         )
@@ -3473,7 +3473,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         routedShareRefusal = refusal
         var context = ["reason": refusal.rawValue]
         if let error { context["error"] = String(describing: error) }
-        FernletAuditLog.log("mesh.routedShare.refused", context: context)
+        ProximityAudit.log("mesh.routedShare.refused", context: context)
     }
 
     /// Dismisses the share refusal the app has shown.
@@ -3525,7 +3525,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             // Recovery is "no grant" — the requester keeps waiting — so the drop is NAMED (R7);
             // without this the admitter looks like it simply ignored the request.
-            FernletAuditLog.log("mesh.admissionGrant.signFailed", context: ["error": String(describing: error)])
+            ProximityAudit.log("mesh.admissionGrant.signFailed", context: ["error": String(describing: error)])
             meshError = Self.admissionGrantFailureMessage
             return
         }
@@ -3533,7 +3533,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // P3 item 7, plan §3.6: the admitter files its own admission record — durably — BEFORE the
         // grant goes out, and the record is what carries the joiner onto every member's roster.
         guard recordGrantedAdmission(token) else {
-            FernletAuditLog.log("mesh.admissionGrant.droppedNotDurable")
+            ProximityAudit.log("mesh.admissionGrant.droppedNotDurable")
             meshError = Self.admissionGrantFailureMessage
             return
         }
@@ -3577,7 +3577,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             // The grant still goes out (the joiner is admitted, keyless) — but a wrap failure means
             // they will decrypt nothing until the next rotation, so name it (R7).
-            FernletAuditLog.log("mesh.admissionGrant.keyWrapFailed", context: ["error": String(describing: error)])
+            ProximityAudit.log("mesh.admissionGrant.keyWrapFailed", context: ["error": String(describing: error)])
             return (nil, groupKey.epoch)
         }
     }
@@ -3660,7 +3660,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // been commit-side (`onSlotConnected`, `announcePromotedMesh`), so nothing honest
             // targets an uncommitted slot; the gate only closes the receive half of that asymmetry.
             guard slot.fingerprint != nil else {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.vouchList.droppedUncommittedSlot",
                     context: heldMeshAuditContext(["type": payloadType.rawValue])
                 )
@@ -3727,7 +3727,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             reason = "noSlot"
         }
         guard let reason else { return slot }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.dispatch.droppedUnattributable",
             context: heldMeshAuditContext(["type": type.rawValue, "reason": reason])
         )
@@ -3790,7 +3790,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // `onSlotConnected`'s post-commit send nor `announcePromotedMesh` reaches this slot
             // again — P8 item 0, device finding (a).
             guard slot?.fingerprint != nil else {
-                FernletAuditLog.log("mesh.meshDescriptor.droppedUncommittedSlot")
+                ProximityAudit.log("mesh.meshDescriptor.droppedUncommittedSlot")
                 return
             }
             if let payload = try? decoder.decode(MeshStateChangePayload.self, from: plaintext) {
@@ -4270,7 +4270,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         _ event: PayloadType, custodyHandoff: MeshCustodyHandoffSummary = .none
     ) async -> Bool {
         guard let mesh = currentMesh else {
-            FernletAuditLog.log("mesh.membershipEvent.emitNoMesh", context: ["type": event.rawValue])
+            ProximityAudit.log("mesh.membershipEvent.emitNoMesh", context: ["type": event.rawValue])
             return false
         }
         do {
@@ -4283,7 +4283,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 return true
             case .meshTerminated:
                 guard MeshDevelopmentPlan.permitsTermination(membershipVerifier?.roster) else {
-                    FernletAuditLog.log("mesh.membershipEvent.terminationRefusedRosterAboveTwo")
+                    ProximityAudit.log("mesh.membershipEvent.terminationRefusedRosterAboveTwo")
                     return false
                 }
                 let record = try SignedTerminationRecord.signed(
@@ -4294,14 +4294,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 await broadcastMembershipFrame(event, MeshTerminationPayload(record: record))
                 return true
             default:
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.membershipEvent.emitUnsupported", context: ["type": event.rawValue]
                 )
                 return false
             }
         } catch {
             // A membership event this device could not SIGN is never sent, and never silent (R7).
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
                 context: ["type": event.rawValue, "error": String(describing: error)]
             )
@@ -4484,7 +4484,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             emitRemovalRecord(record)
             return record
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
                 context: ["type": "removal-record", "error": String(describing: error)]
             )
@@ -4525,7 +4525,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             evaluateRemovalQuorum(proposal.proposalID, now: now)
             return proposal
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.removalQuorum.signFailed",
                 context: ["type": PayloadType.meshRemovalProposalSigned.rawValue,
                           "error": String(describing: error)]
@@ -4558,7 +4558,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             evaluateRemovalQuorum(proposalID, now: now)
             return vote
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.removalQuorum.signFailed",
                 context: ["type": PayloadType.meshRemovalVote.rawValue,
                           "error": String(describing: error)]
@@ -4662,7 +4662,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Records one quorum refusal. Never silent (R7): a vote that did not count is a thing a
     /// developer has to be able to see in a log.
     private func logQuorumRejection(_ rejection: MeshRemovalQuorumRejection, type: PayloadType) {
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.removalQuorum.rejected",
             context: ["type": type.rawValue, "reason": rejection.diagnosticDescription]
         )
@@ -4692,7 +4692,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let before = membershipVerifier?.roster
         let rejections = membershipVerifier?.merge(other) ?? []
         for rejection in rejections {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.rejected",
                 context: ["type": "merge", "reason": rejection.diagnosticDescription]
             )
@@ -4911,7 +4911,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let rejections = mergeMembershipLedger(offer.ledger, now: now)
         requestMergeRotationForDivergentHeads()
         advanceMergeWindowAfterFold(previousDigest: previousDigest)
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.merge.applied",
             context: ["entry": entry.rawValue, "rejected": String(rejections.count)]
         )
@@ -4969,7 +4969,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard roster.status != .terminated,
               roster.contains(fingerprint: identity.localFingerprint) else { return }
         guard MeshEpochAcceptance.isDivergent(unresolvedEpochHeads) else { return }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.merge.epochsDivergent",
             context: ["heads": String(unresolvedEpochHeads.count)]
         )
@@ -4998,7 +4998,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             await broadcastMembershipFrame(.meshEpochHeads, payload, to: recipients)
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
                 context: ["type": PayloadType.meshEpochHeads.rawValue,
                           "error": String(describing: error)]
@@ -5015,7 +5015,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func receiveEpochHeads(_ payload: MeshEpochHeadsPayload) {
         guard let verifier = membershipVerifier else { return }
         if let rejection = verifier.verify(payload) {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.rejected",
                 context: ["type": PayloadType.meshEpochHeads.rawValue,
                           "reason": rejection.diagnosticDescription]
@@ -5023,7 +5023,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return
         }
         foldEpochHeads(payload.heads)
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.merge.epochHeadsFolded", context: ["count": String(payload.heads.count)]
         )
         requestMergeRotationForDivergentHeads()
@@ -5108,7 +5108,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         adoptKeyAdvertisements(result.set)
         guard persistSessionContext(addingEpochHead: nil) else {
             rollBackKeyAdvertisements(to: rollback, version: rollbackVersion)
-            FernletAuditLog.log("mesh.keyAgreement.notDurable", context: heldMeshAuditContext())
+            ProximityAudit.log("mesh.keyAgreement.notDurable", context: heldMeshAuditContext())
             return false
         }
         return true
@@ -5178,7 +5178,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // R2: bounded by the frame's own clamp (`MeshKeyAgreementAdvertisementSet.capacity`).
         for outcome in outcomes {
             guard let token = outcome.auditToken else { continue }
-            FernletAuditLog.log(token, context: heldMeshAuditContext(outcome.auditContext))
+            ProximityAudit.log(token, context: heldMeshAuditContext(outcome.auditContext))
         }
     }
 
@@ -5226,7 +5226,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return commitKeyAdvertisementFold(result)
         } catch {
             // An advertisement this device could not SIGN is never folded, and never silent (R7).
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
                 context: ["type": PayloadType.meshKeyAgreement.rawValue,
                           "error": String(describing: error)]
@@ -5257,7 +5257,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // nothing happened, and the summary below already carries the counts.
         auditKeyAdvertisementOutcomes(result.outcomes.filter { $0.isRefusal })
         adoptKeyAdvertisements(result.set)
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.sessionRestore.keyAdvertisementsRestored",
             context: ["count": String(result.set.count), "dropped": String(
                 result.outcomes.filter { $0.isRefusal }.count
@@ -5375,7 +5375,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         keyAdvertisementSelfMintAttempts += 1
         guard armOwnKeyAdvertisement() else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.keyAgreement.selfMintUnavailable",
                 context: heldMeshAuditContext(
                     ["attempt": String(keyAdvertisementSelfMintAttempts)]
@@ -5455,7 +5455,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             guard outcome == .refused(.signerNotAdmitted) else { continue }
             let parked = parkedKeyAdvertisements.parking(advertisement, from: senderFingerprint)
             guard let token = parked.auditToken else { continue }
-            FernletAuditLog.log(token, context: heldMeshAuditContext(parked.auditContext))
+            ProximityAudit.log(token, context: heldMeshAuditContext(parked.auditContext))
         }
     }
 
@@ -5498,7 +5498,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // then returns on. A `currentMesh?` read here could only ever have described an
         // unreachable nil, and would have made these lines look conditionally scopeable.
         let held = verifier.meshID.uuidString
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.keyAgreement.parkedReoffered",
             context: ["count": String(offers.count), "held": held]
         )
@@ -5508,7 +5508,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let committed = commitKeyAdvertisementFold(result)
         guard !result.changed || committed else {
             parkedKeyAdvertisements = restore
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.keyAgreement.parkRolledBack",
                 context: ["count": String(offers.count), "held": held]
             )
@@ -5544,7 +5544,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let dropped = parkedKeyAdvertisements.reparkFailed(unproven)
         guard dropped > 0 else { return }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.keyAgreement.parkDropped",
             context: ["count": String(dropped), "held": held]
         )
@@ -5599,7 +5599,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// - Parameter rejection: Why the frame was refused.
     private func refuseKeyAdvertisementFrame(_ rejection: MeshMembershipRecordRejection) {
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.keyAgreement.rejected",
             context: heldMeshAuditContext(["reason": rejection.diagnosticDescription])
         )
@@ -5618,13 +5618,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let spent = keyAdvertisementFramesBySender[senderFingerprint]
         guard spent != nil || keyAdvertisementFramesBySender.count < MeshMembershipBounds.maxRosterMembers
         else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.keyAgreement.senderBudgetSpent", context: heldMeshAuditContext()
             )
             return false
         }
         guard (spent ?? 0) < MeshKeyAdvertisementReceiveBounds.framesPerSenderPerSession else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.keyAgreement.senderBudgetSpent", context: heldMeshAuditContext()
             )
             return false
@@ -5655,7 +5655,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // observable is bit-identical to P4's on the verifier-less and empty-recipient paths.
         mergeWindow = .opened(at: now)
         guard let verifier = membershipVerifier else { return }
-        FernletAuditLog.log("mesh.merge.exchangeOpened", context: ["entry": resolved.rawValue])
+        ProximityAudit.log("mesh.merge.exchangeOpened", context: ["entry": resolved.rawValue])
         let recipients = Set(activeSlots.compactMap(\.fingerprint))
         guard !recipients.isEmpty else { return }
         mergeWindow = mergeWindow?.asking(recipients).advertised(verifier.localInventoryDigest)
@@ -5694,7 +5694,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         lastMergeClosure = closure
         clearMergeWindow()
         pendingMergeEntry = nil
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.merge.converged",
             context: ["closure": closure.rawValue,
                       "asked": String(window.asked.count),
@@ -5797,7 +5797,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Still no routed twin — bulk on a door sized for three asks is what the paragraph above
         // refuses, and an advertisement carries no bulk.
         spawnHostPinned { [weak self] in await self?.sendKeyAdvertisements(to: peers) }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.merge.proofReadvertised", context: ["peers": String(peers.count)]
         )
     }
@@ -5856,7 +5856,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             armOwnKeyAdvertisement()
             return true
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
                 context: ["type": "founder-admission", "error": String(describing: error)]
             )
@@ -5909,10 +5909,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // `recordVerifiedAdmissionDurably()`, so the one save that acknowledges the join
             // carries the addressing too. `handleAdmissionGrant`'s rollback unwinds both.
             armOwnKeyAdvertisement(now: now, persisting: false)
-            FernletAuditLog.log("mesh.membershipLedger.bootstrapped")
+            ProximityAudit.log("mesh.membershipLedger.bootstrapped")
             return true
         case .refused(let refusal):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipLedger.bootstrapRefused",
                 context: ["reason": refusal.diagnosticDescription]
             )
@@ -5935,7 +5935,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             await broadcastMembershipFrame(.meshInventoryDigest, payload, to: recipients)
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
                 context: ["type": PayloadType.meshInventoryDigest.rawValue,
                           "error": String(describing: error)]
@@ -5986,7 +5986,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 .meshTerminated, MeshTerminationPayload(record: record), to: recipients
             )
         }
-        FernletAuditLog.log("mesh.membershipLedger.reGossiped", context: ["frames": String(sent)])
+        ProximityAudit.log("mesh.membershipLedger.reGossiped", context: ["frames": String(sent)])
     }
 
     /// The most record frames one re-gossip may send: exactly a full ledger at plan §9's caps
@@ -6130,7 +6130,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .refused(let refusal): state = .refused(refusal)
         }
         guard reason.logsSuppression else { return nil }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedStore.readSuppressed",
             context: ["reason": reason.rawValue, "state": state.logToken]
         )
@@ -6166,7 +6166,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // R2: bounded by the roster cap.
             for peer in told { recordRoutedAdvertisement(to: peer, at: payload.sentAt) }
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.signFailed",
                 context: ["type": PayloadType.meshRoutedInventoryDigest.rawValue,
                           "error": String(describing: error)]
@@ -6232,14 +6232,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // deliberately BEFORE the `currentMesh` guard below, so a frame on an uncommitted slot
             // is dropped whether or not this device holds a mesh. A drop with no mesh carries no
             // key and no cell counts it — which is honest, not a gap.
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.droppedUncommittedSlot",
                 context: heldMeshAuditContext(["type": type.rawValue])
             )
             return
         }
         guard let mesh = currentMesh, let verifier = membershipVerifier else {
-            FernletAuditLog.log("mesh.routedDrain.droppedNoLedger", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.routedDrain.droppedNoLedger", context: ["type": type.rawValue])
             return
         }
         if type == .meshRoutedInventoryDigest || type == .meshRoutedDrainAnswer {
@@ -6249,7 +6249,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return
         }
         guard let hardDeadline = routedHardDeadline else {
-            FernletAuditLog.log("mesh.routedDrain.droppedNoCeiling", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.routedDrain.droppedNoCeiling", context: ["type": type.rawValue])
             return
         }
         let context = RoutedIngestContext(
@@ -6271,13 +6271,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         switch type {
         case .meshRoutedInventoryDigest:
             guard let payload = try? decoder.decode(MeshRoutedInventoryPayload.self, from: plaintext) else {
-                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                ProximityAudit.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
                 return
             }
             receiveRoutedInventory(payload, from: senderFingerprint, now: now)
         default:
             guard let payload = try? decoder.decode(MeshRoutedDrainAnswerPayload.self, from: plaintext) else {
-                FernletAuditLog.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                ProximityAudit.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
                 return
             }
             receiveRoutedDrainAnswer(payload, from: senderFingerprint)
@@ -6399,7 +6399,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             expiresAt: frame.expiresAt, now: context.now
         )
         guard verdict == .replayed else { return false }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedDrain.rejected",
             context: ["type": frame.type.rawValue, "reason": "replayed"]
         )
@@ -6437,19 +6437,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         in context: RoutedIngestContext,
         charge: Bool = true
     ) {
-        FernletAuditLog.log(event, context: auditContext)
+        ProximityAudit.log(event, context: auditContext)
         guard charge else { return }
         let reason = auditContext["reason"] ?? auditContext["type"] ?? "unknown"
         switch routedRefusalBudget.charge(context.sender) {
         case .charged, .alreadySpent:
             return
         case .spent:
-            FernletAuditLog.log("mesh.routedDrain.refusalBudgetSpent", context: ["reason": reason])
+            ProximityAudit.log("mesh.routedDrain.refusalBudgetSpent", context: ["reason": reason])
         case .untracked:
             // Unreachable through `dispatchRoutedContent`'s gate, which refuses a row-less sender on
             // a full axis before any door runs; kept so the switch is exhaustive and the bug's
             // signature has a name if that gate is ever loosened.
-            FernletAuditLog.log("mesh.routedDrain.refusalBudgetUntracked", context: ["reason": reason])
+            ProximityAudit.log("mesh.routedDrain.refusalBudgetUntracked", context: ["reason": reason])
         }
     }
 
@@ -6502,7 +6502,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // outgrew the cap) are different faults and look identical without it. The count is
         // unchanged by a refused admission, so reading it here is the same reading as before it.
         let full = window.recordedCount(for: frame.author) >= routedReplayCapacity
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedDrain.replayWindowFull",
             context: ["type": frame.type.rawValue, "axis": full ? "frames" : "senders"]
         )
@@ -6565,7 +6565,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let mesh = currentMesh, let verifier = membershipVerifier else { return }
         let door = MeshRoutedInventoryVerifier(meshID: mesh.meshID, ledger: verifier.ledger, purposes: namespace.family.purposes)
         if let rejection = door.verify(payload) {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.rejected",
                 context: ["type": PayloadType.meshRoutedInventoryDigest.rawValue,
                           "reason": rejection.rawValue]
@@ -6574,7 +6574,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         // A digest describes the sender's own disk and nobody forwards one on its behalf.
         guard payload.senderFingerprint == senderFingerprint else {
-            FernletAuditLog.log("mesh.routedDrain.rejected", context: ["reason": "senderMismatch"])
+            ProximityAudit.log("mesh.routedDrain.rejected", context: ["reason": "senderMismatch"])
             return
         }
         let stale = routedInventoryStampIsStale(payload, from: senderFingerprint)
@@ -6625,7 +6625,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // here, synchronously. It omits the key rather than writing a fallback for the rule's sake
         // — an unscopeable line must not look scoped — and the three scoped `== 0` cells in
         // `MeshRoutedDrainTests` rest on that guard, not on a maybe.
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedInventory.staleSentAt", context: heldMeshAuditContext()
         )
         return true
@@ -6746,7 +6746,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let mesh = currentMesh, let verifier = membershipVerifier else { return }
         let door = MeshRoutedDrainAnswerVerifier(meshID: mesh.meshID, ledger: verifier.ledger, purposes: namespace.family.purposes)
         if let rejection = door.verify(payload) {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.rejected",
                 context: ["type": PayloadType.meshRoutedDrainAnswer.rawValue,
                           "reason": rejection.rawValue]
@@ -6757,13 +6757,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
               payload.answer.advertiserFingerprint == identity.localFingerprint,
               var state = peerRoutedInventories[senderFingerprint],
               state.advertisedAt == payload.answer.advertisedAt else {
-            FernletAuditLog.log("mesh.merge.routedQuiescentUnbound", context: ["peer": "redacted"])
+            ProximityAudit.log("mesh.merge.routedQuiescentUnbound", context: ["peer": "redacted"])
             return
         }
         state.reportsQuiescent = payload.answer.quiescent
         state.quiescentAsOf = payload.answer.advertisedAt
         peerRoutedInventories[senderFingerprint] = state
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.merge.routedQuiescent",
             context: heldMeshAuditContext(
                 ["peerQuiescent": String(payload.answer.quiescent),
@@ -7077,19 +7077,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) {
         switch outcome {
         case .completed(let value):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.admitted",
                 context: ["type": type.rawValue, "verdict": verdict(value)]
             )
         case .refused(let refusal):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.refused",
                 context: ["type": type.rawValue, "reason": refusal.rawValue]
             )
             guard Self.routedCapacityRefusals.contains(refusal) else { return }
             noteRoutedCapacityRefusal(refusal, key: key, from: context.sender, at: context.now)
         case .unavailable(let cause):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.unavailable",
                 context: ["type": type.rawValue, "state": cause.logToken]
             )
@@ -7137,7 +7137,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 || routedRefusedKeys.count < MeshMembershipBounds.maxRosterMembers else { return }
         var keys = routedRefusedKeys[peer] ?? []
         guard keys.contains(key) || keys.count < MeshRoutedInventoryFormat.maxEntries else {
-            FernletAuditLog.log("mesh.routedDrain.refusedSetFull", context: ["reason": refusal.rawValue])
+            ProximityAudit.log("mesh.routedDrain.refusedSetFull", context: ["reason": refusal.rawValue])
             return
         }
         keys.insert(key)
@@ -7157,7 +7157,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 || routedHeldBackKeys.count < MeshRoutedStoreFormat.maxItems else {
             // Its one production caller is the routed drain's capacity refusal, which runs inside
             // the mesh this device holds, so the bound is named with `held` on the line.
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.heldBackSetFull", context: heldMeshAuditContext()
             )
             refreshRoutedDeliveryHold(at: now)
@@ -7174,7 +7174,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         for key in keys {
             guard routedUnplacedKeys.contains(key)
                     || routedUnplacedKeys.count < MeshRoutedStoreFormat.maxItems else {
-                FernletAuditLog.log("mesh.development.unplacedSetFull")
+                ProximityAudit.log("mesh.development.unplacedSetFull")
                 break
             }
             routedUnplacedKeys.insert(key)                            // R3: bounded set
@@ -7251,7 +7251,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         _ index: MeshRoutedIndex, in store: MeshRoutedStore, at now: Date, releaseOnly: Bool = false
     ) {
         let usage = store.capacityUsage(of: index, at: now)
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedStore.capacity",
             context: ["items": String(usage.itemCount), "parked": String(usage.parkedItemCount),
                       "uncompletable": String(usage.uncompletableItemCount),
@@ -7305,7 +7305,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .corrupt(let corruption): state = .corrupt(corruption)
         case .refused(let refusal): state = .refused(refusal)
         }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedStore.sweepSuppressed",
             context: ["verb": verb.rawValue, "state": state.logToken]
         )
@@ -7323,7 +7323,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard routedSweepsDeferredFingerprints.contains(peer)
                 || routedSweepsDeferredFingerprints.count < MeshMembershipBounds.maxRosterMembers
         else {
-            FernletAuditLog.log("mesh.routedStore.sweepDeferredSetFull")
+            ProximityAudit.log("mesh.routedStore.sweepDeferredSetFull")
             return
         }
         routedSweepsDeferredFingerprints.insert(peer)             // R3: bounded set
@@ -7454,7 +7454,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .completed(let report):
             guard report.itemsRemoved > 0 || report.chunkFilesRemoved > 0
                     || report.chunkFilesFailed > 0 else { return report }
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedStore.swept",
                 context: ["reason": reason, "items": String(report.itemsRemoved),
                           "files": String(report.chunkFilesRemoved),
@@ -7462,12 +7462,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             return report
         case .refused(let refusal):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedStore.sweepRefused", context: ["reason": refusal.rawValue]
             )
             return nil
         case .unavailable(let cause):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedStore.sweepUnavailable", context: ["state": cause.logToken]
             )
             return nil
@@ -7555,7 +7555,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch is MeshRoutedItemSealError {
             return .refused(.sealFailed)
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedShare.mintFailed",
                 context: ["type": typeToken, "error": String(describing: error)]
             )
@@ -7640,7 +7640,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // user-facing refusal is the same `.mintFailed` — nothing they can act on differs —
             // which is why this widens the audit vocabulary and not `MeshRoutedShareRefusal`.
             case .refused(.recipientIsSelf):
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.routedShare.recipientIsSelf", context: ["type": typeToken]
                 )
                 return .answered(.refused(.mintFailed))
@@ -7651,7 +7651,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// The audience-vs-column mismatch's one answer, so the two arms above cannot drift apart.
     private func semanticsMismatch(_ typeToken: String) -> MeshRoutedOriginationOutcome {
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedShare.destinationSemanticsMismatch", context: ["type": typeToken]
         )
         return .refused(.mintFailed)
@@ -7719,20 +7719,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         for destination in destinations {
             guard !keyAdvertisements.isConflicted(destination),
                   !handshake.disagreeing.contains(destination) else {
-                FernletAuditLog.log("mesh.routedShare.keyMismatch")
+                ProximityAudit.log("mesh.routedShare.keyMismatch")
                 return .mismatched
             }
             let advertised = advertisedKeyAgreementKey(for: destination)
             if let live = handshake.keys[destination] {
                 guard advertised == nil || advertised == live else {
-                    FernletAuditLog.log("mesh.routedShare.keyMismatch")
+                    ProximityAudit.log("mesh.routedShare.keyMismatch")
                     return .mismatched
                 }
                 resolved[destination] = live
                 continue
             }
             guard let advertised else {
-                FernletAuditLog.log("mesh.routedShare.destinationNotAddressable")
+                ProximityAudit.log("mesh.routedShare.destinationNotAddressable")
                 return .notAddressable
             }
             resolved[destination] = advertised
@@ -7858,7 +7858,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func refusedOwnRoutedItem(
         _ refusal: MeshRoutedStoreRefusal, key: MeshRoutedItemKey, at now: Date
     ) -> MeshRoutedOriginationOutcome {
-        FernletAuditLog.log("mesh.routedShare.storeRefused", context: ["reason": refusal.rawValue])
+        ProximityAudit.log("mesh.routedShare.storeRefused", context: ["reason": refusal.rawValue])
         if Self.routedStoreFullRefusals.contains(refusal) { noteRoutedHeldBack(key, at: now) }
         return .refused(.storeRefused)
     }
@@ -7888,7 +7888,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         for peer in recipients.prefix(MeshMembershipBounds.maxRosterMembers) {
             guard let batch = originationPushBatch(to: peer, item: key, at: now),
                   batch.frameCount > 0 else { continue }
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedShare.pushed", context: ["frames": String(batch.frameCount)]
             )
             spawnHostPinned { [weak self] in
@@ -7912,7 +7912,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let local = MeshRoutedInventory(
             meshID: mesh.meshID, index: index, selfFingerprint: identity.localFingerprint, at: now
         ) else {
-            FernletAuditLog.log("mesh.routedDrain.inventoryOverCap")
+            ProximityAudit.log("mesh.routedDrain.inventoryOverCap")
             return nil
         }
         let remote = peerRoutedInventories[peer]?.inventory
@@ -7921,7 +7921,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             local: local, remote: remote,
             offerableToPeer: offerableKeys(to: peer, in: index, at: now).intersection([key])
         ) else {
-            FernletAuditLog.log("mesh.routedDrain.foreignMeshDelta")
+            ProximityAudit.log("mesh.routedDrain.foreignMeshDelta")
             return nil
         }
         let bounds = MeshRoutedDrainBounds.increment1
@@ -7973,7 +7973,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // rather than surviving the session. Pure in-memory re-derivation, so calling it on every
         // pass — including one where the sweeps already reached it — costs nothing.
         refreshRoutedDeliveryHold(at: now)
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedAccess.reentry",
             context: heldMeshAuditContext(
                 ["legs": edge.logToken, "restored": String(restored),
@@ -8262,7 +8262,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // R2: bounded by the store's item cap.
         for ref in refs where ref.firstSeenAt < armedAt {
             guard rotation.noteCarriedOver(ref.key) else {
-                FernletAuditLog.log("mesh.routedRetry.setFull", context: ["list": list.rawValue])
+                ProximityAudit.log("mesh.routedRetry.setFull", context: ["list": list.rawValue])
                 break
             }
         }
@@ -8271,7 +8271,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         routedRetryRotations[list] = rotation                         // R3: bounded, two keys
         if plan.deferredRetryCount > 0 {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedRetry.deferred",
                 context: ["list": list.rawValue, "deferred": String(plan.deferredRetryCount),
                           "new": String(plan.neverTriedCount), "retried": String(plan.retriedCount)]
@@ -8290,7 +8290,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func noteRoutedRetryDeferred(_ list: MeshRoutedRetryList, _ key: MeshRoutedItemKey) {
         var rotation = routedRetryRotations[list] ?? MeshRoutedRetryRotation()
         if !rotation.noteRetryable(key) {
-            FernletAuditLog.log("mesh.routedRetry.setFull", context: ["list": list.rawValue])
+            ProximityAudit.log("mesh.routedRetry.setFull", context: ["list": list.rawValue])
         }
         routedRetryRotations[list] = rotation
     }
@@ -8411,7 +8411,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let event = mayCommitRoutedHeartLedgerJudgement
             ? "mesh.routedAccess.heartStageEvaluable"
             : "mesh.routedAccess.heartStageDeferred"
-        FernletAuditLog.log(event, context: heldMeshAuditContext(["items": String(count)]))
+        ProximityAudit.log(event, context: heldMeshAuditContext(["items": String(count)]))
     }
 
     /// An item just became complete on this device: take whichever rungs this device is entitled to,
@@ -8499,7 +8499,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let me = identity.localFingerprint
         guard key.originFingerprint != me else { return nil }
         guard manifest.destinations.contains(me) || holdsHandedOffLeg(of: key, as: me) else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.heldWithoutCustodyClaim",
                 context: ["type": manifest.typeToken]
             )
@@ -8508,13 +8508,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let outcome = routedStore().committingCustody(item: key, custodian: me, now: now)
         forgetRepairedRoutedItem(key, manifest: manifest, after: outcome)
         guard case .completed(.committed(let witness)) = outcome else {
-            FernletAuditLog.log("mesh.routedDrain.custodyNotCommitted", context: ["type": manifest.typeToken])
+            ProximityAudit.log("mesh.routedDrain.custodyNotCommitted", context: ["type": manifest.typeToken])
             return nil
         }
         do {
             return try MeshCustodyReceipt.signed(witness: witness, manifest: manifest, identity: identity)
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.signFailed",
                 context: ["type": PayloadType.meshCustodyReceipt.rawValue,
                           "error": String(describing: error)]
@@ -8546,7 +8546,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func noteOriginServed(_ key: MeshRoutedItemKey) {
         guard originServedItems.contains(key)
                 || originServedItems.count < MeshRoutedStoreFormat.maxItems else {
-            FernletAuditLog.log("mesh.development.originServedSetFull")
+            ProximityAudit.log("mesh.development.originServedSetFull")
             return
         }
         originServedItems.insert(key)                                 // R3: bounded set
@@ -8661,7 +8661,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             in: index, from: leavers, originServed: originServedItems, at: now
         )
         if stranded > 0 {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.development.handoffClaimNotOriginServed", context: ["items": String(stranded)]
             )
         }
@@ -8678,7 +8678,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // tests are untouched) and the refusal is applied here, once, and named.
         let registered = claims.filter { routedTypeEntry(of: $0.item, in: index) != nil }
         if registered.count < claims.count {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.development.handoffClaimUnknownType",
                 context: ["items": String(claims.count - registered.count)]
             )
@@ -8694,25 +8694,25 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         switch routedStore().claimingHandedOffLegs(claims, now: now) {
         case .completed(let report):
             if !report.incomplete.isEmpty {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.development.handoffClaimIncomplete",
                     context: ["items": String(report.incomplete.count)]
                 )
             }
             // R2: bounded by the batch's own size.
             for refusal in report.refused {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.development.handoffClaimRefused",
                     context: ["reason": refusal.refusal.token]
                 )
             }
             mintClaimedCustody(report.advanced.filter { $0 != pending }, at: now)
         case .refused(let refusal):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.development.handoffClaimSuppressed", context: ["reason": refusal.rawValue]
             )
         case .unavailable(let cause):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.development.handoffClaimSuppressed", context: ["state": cause.logToken]
             )
         }
@@ -8753,7 +8753,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let cap = MeshRoutedDrainBounds.increment1.maxItems
         let overflow = Array(queued.dropFirst(cap).prefix(MeshRoutedStoreFormat.maxItems))
         if !overflow.isEmpty {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.development.handoffCommitDeferred", context: ["items": String(overflow.count)]
             )
         }
@@ -8802,7 +8802,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard case .completed(let commit) = outcome else { return nil }
         guard case .acknowledged(let witness) = commit else {
             if case .unsatisfied(let shortfall) = commit {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.routedDrain.deliveryPending",
                     context: ["shortfall": shortfall.diagnosticDescription]
                 )
@@ -8826,12 +8826,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             let stored = routedStore().recordingRecipientReceipt(item: key, receipt: receipt, now: now)
             guard stored.value != nil else {
-                FernletAuditLog.log("mesh.routedDrain.receiptNotStored", context: ["type": manifest.typeToken])
+                ProximityAudit.log("mesh.routedDrain.receiptNotStored", context: ["type": manifest.typeToken])
                 return nil
             }
             return receipt
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.signFailed",
                 context: ["type": PayloadType.meshRecipientReceipt.rawValue,
                           "error": String(describing: error)]
@@ -8963,7 +8963,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let ack = MeshRoutedHeartAck(
             outcome: outcome, giftID: manifest.itemID, ledger: ledger
         ) else {
-            FernletAuditLog.log("mesh.routedHeart.noJudgement")
+            ProximityAudit.log("mesh.routedHeart.noJudgement")
             return .none
         }
         onHeartJudgedForTesting?(ack)
@@ -9013,9 +9013,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func refusedHeart(
         _ key: MeshRoutedItemKey, reason: String
     ) -> MeshRoutedAckEvidence {
-        FernletAuditLog.log("mesh.routedHeart.refused", context: ["reason": reason])
+        ProximityAudit.log("mesh.routedHeart.refused", context: ["reason": reason])
         guard routedHeartRefusedKeys.count < MeshRoutedStoreFormat.maxItems else {
-            FernletAuditLog.log("mesh.routedHeart.refusedSetFull")
+            ProximityAudit.log("mesh.routedHeart.refusedSetFull")
             return .none
         }
         routedHeartRefusedKeys.insert(key)                            // R3: bounded set
@@ -9033,7 +9033,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 mayDecryptRoutedContent: mayDecryptRoutedContent
             )
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedHeart.openFailed",
                 context: ["type": manifest.typeToken, "error": String(describing: error)]
             )
@@ -9071,7 +9071,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // access edge can land in (P6 item 4 fix review, P2-1). Retryable and uncharged, because
         // this is the gate's own answer for every item rather than a fact about this one.
         guard !privacyWipeInProgress else {
-            FernletAuditLog.log("mesh.routedProjection.privacyWipeInProgress")
+            ProximityAudit.log("mesh.routedProjection.privacyWipeInProgress")
             return .refusedForNow
         }
         noteRoutedItemOffered(key)
@@ -9107,13 +9107,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         key: MeshRoutedItemKey, manifest: MeshRoutedManifest, seenAt: Date
     ) -> MeshRoutedProjectionVerdict {
         guard mayDecryptRoutedContent else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.deferred", context: ["type": manifest.typeToken]
             )
             return .refusedForNow
         }
         guard let entry = routedTypes.entry(for: manifest.typeToken) else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.noDispatchArm", context: ["type": manifest.typeToken]
             )
             return .refusedForGood
@@ -9129,7 +9129,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return .refusedForGood
         }
         guard manifest.size <= UInt64(MeshRoutedItemSealFormat.maxResidentBlobByteCount) else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.blobTooLarge", context: ["size": String(manifest.size)]
             )
             return .refusedForNow
@@ -9139,7 +9139,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // so refusing here decrypts nothing it would then discard. A stated behaviour change, not
         // a silent one: a locked device now defers before the unwrap rather than after it.
         guard mayMutateCanonicalStoreWithRoutedContent else {
-            FernletAuditLog.log("mesh.routedProjection.mutationDeferred")
+            ProximityAudit.log("mesh.routedProjection.mutationDeferred")
             return .refusedForNow
         }
         guard let blob = routedProjectionBlob(key: key, manifest: manifest) else {
@@ -9200,7 +9200,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // durable product rule about this recipient and the transcript it would have entered
             // belongs to this session.
             guard isChatAllowed else {
-                FernletAuditLog.log("mesh.routedProjection.transcriptAgeGated")
+                ProximityAudit.log("mesh.routedProjection.transcriptAgeGated")
                 return .refusedForGood
             }
             guard let body = openedRoutedTextBody(blob, manifest: manifest) else {
@@ -9217,7 +9217,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // call by the same derived fact. The arm stays because the `switch` is exhaustive over
             // a resolved value — and because an arm that refuses is the right answer for a future
             // store this build has no writer for.
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.noDispatchArm", context: ["type": manifest.typeToken]
             )
             return .refusedForNow
@@ -9244,13 +9244,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .completed(let held):
             return held
         case .unavailable(let cause):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.storeUnavailable",
                 context: ["type": manifest.typeToken, "state": cause.logToken]
             )
             return nil
         case .refused(let refusal):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.storeRefused",
                 context: ["type": manifest.typeToken, "reason": refusal.rawValue]
             )
@@ -9297,20 +9297,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let verifier = membershipVerifier,
               let author = (roster.members + roster.barred)
                 .first(where: { $0.fingerprint == manifest.originFingerprint }) else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.originUnresolvable",
                 context: heldMeshAuditContext(["type": manifest.typeToken])
             )
             return .notYet
         }
         guard !verifier.ledger.removals.memberFingerprints.contains(author.fingerprint) else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.originRemoved", context: heldMeshAuditContext()
             )
             return .refusedForGood
         }
         guard !store.isBlockedFingerprint(author.fingerprint) else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.blockedOrigin", context: heldMeshAuditContext()
             )
             return .refusedForGood
@@ -9342,7 +9342,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 mayDecryptRoutedContent: mayDecryptRoutedContent
             )
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.openFailed",
                 context: heldMeshAuditContext(
                     ["type": manifest.typeToken, "error": String(describing: error)]
@@ -9364,7 +9364,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let key = HeldPhotoKey(origin: manifest.originFingerprint, itemID: manifest.itemID)
         switch heldPhotoSettlement(key) {
         case .answered?:
-            FernletAuditLog.log("mesh.routedProjection.photoAlreadyAnswered", context: heldMeshAuditContext())
+            ProximityAudit.log("mesh.routedProjection.photoAlreadyAnswered", context: heldMeshAuditContext())
             return .refusedForGood
         case .alreadyHeld?:
             return .handedOn
@@ -9461,13 +9461,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .live:
             break
         case .endedForGood:
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.transcriptSessionEnded",
                 context: ["type": manifest.typeToken, "mesh": manifest.meshID.uuidString]
             )
             return .refusedForGood
         case .notLiveRightNow:
-            FernletAuditLog.log("mesh.routedProjection.transcriptNotLiveYet")
+            ProximityAudit.log("mesh.routedProjection.transcriptNotLiveYet")
             return .refusedForNow
         }
         guard allowIncomingRoutedText(body.header.id, from: manifest) else {
@@ -9490,7 +9490,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             seenAt: seenAt
         )
         if accepted != .appended {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.transcriptRefused",
                 context: ["reason": accepted.rawValue]
             )
@@ -9538,7 +9538,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 mayDecryptRoutedContent: mayDecryptRoutedContent
             )
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedProjection.openFailed",
                 context: heldMeshAuditContext(
                     ["type": manifest.typeToken, "error": String(describing: error)]
@@ -9577,12 +9577,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         var accepted = routedOriginTextQuota[budget] ?? []
         if accepted.contains(messageID) { return true }
         guard accepted.count < Self.maxTextMessagesPerSenderPerSession else {
-            FernletAuditLog.log("mesh.routedProjection.textQuotaSpent")
+            ProximityAudit.log("mesh.routedProjection.textQuotaSpent")
             return false
         }
         guard routedOriginTextQuota[budget] != nil
                 || routedOriginTextQuota.count < MeshRoutedStoreFormat.maxItems else {
-            FernletAuditLog.log("mesh.routedProjection.textQuotaMapFull")
+            ProximityAudit.log("mesh.routedProjection.textQuotaMapFull")
             return false
         }
         accepted.insert(messageID)
@@ -9602,7 +9602,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func noteRoutedItemOffered(_ key: MeshRoutedItemKey) {
         guard routedItemTranscriptGeneration[key] == nil else { return }
         guard routedItemTranscriptGeneration.count < MeshRoutedStoreFormat.maxItems else {
-            FernletAuditLog.log("mesh.routedProjection.generationMapFull")
+            ProximityAudit.log("mesh.routedProjection.generationMapFull")
             return
         }
         routedItemTranscriptGeneration[key] = transcriptGeneration    // R3: bounded map
@@ -9618,12 +9618,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         var accepted = routedOriginPhotoQuota[budget] ?? []
         if accepted.contains(photoID) { return true }
         guard accepted.count < Self.maxPhotosPerSenderPerSession else {
-            FernletAuditLog.log("mesh.routedProjection.quotaSpent")
+            ProximityAudit.log("mesh.routedProjection.quotaSpent")
             return false
         }
         guard routedOriginPhotoQuota[budget] != nil
                 || routedOriginPhotoQuota.count < MeshRoutedStoreFormat.maxItems else {
-            FernletAuditLog.log("mesh.routedProjection.quotaMapFull")
+            ProximityAudit.log("mesh.routedProjection.quotaMapFull")
             return false
         }
         accepted.insert(photoID)
@@ -9649,7 +9649,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// still projected on that very first pass.
     private func noteRoutedItemProjected(_ key: MeshRoutedItemKey) {
         guard routedProjectedItems.count < MeshRoutedStoreFormat.maxItems else {
-            FernletAuditLog.log("mesh.routedProjection.projectedSetFull")
+            ProximityAudit.log("mesh.routedProjection.projectedSetFull")
             return
         }
         routedProjectedItems.insert(key)                              // R3: bounded set
@@ -9696,7 +9696,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             .filter { self.routedTypeEntry(of: $0.key, in: index) == nil }
             .map(\.key)).count
         guard withheld > 0 else { return }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedDrain.unregisteredTypeNotOffered", context: ["items": String(withheld)]
         )
     }
@@ -9789,13 +9789,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let local = MeshRoutedInventory(
             meshID: mesh.meshID, index: index, selfFingerprint: identity.localFingerprint, at: now
         ) else {
-            FernletAuditLog.log("mesh.routedDrain.inventoryOverCap")
+            ProximityAudit.log("mesh.routedDrain.inventoryOverCap")
             return nil
         }
         guard let delta = MeshRoutedInventoryDelta.between(
             local: local, remote: remote, offerableToPeer: offerableKeys(to: peer, in: index, at: now)
         ) else {
-            FernletAuditLog.log("mesh.routedDrain.foreignMeshDelta")
+            ProximityAudit.log("mesh.routedDrain.foreignMeshDelta")
             return nil
         }
         noteUnrestorableDeliveries(index, at: now)
@@ -9814,7 +9814,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func noteUnrestorableDeliveries(_ index: MeshRoutedIndex, at now: Date) {
         let stranded = index.itemsWithUnrestorableDelivery(at: now).count
         guard stranded > 0 else { return }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.routedDrain.deliveryUnrestorable", context: ["items": String(stranded)]
         )
     }
@@ -9832,7 +9832,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             await broadcastMembershipFrame(.meshRoutedDrainAnswer, payload, to: [peer])
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.signFailed",
                 context: ["type": PayloadType.meshRoutedDrainAnswer.rawValue,
                           "error": String(describing: error)]
@@ -9873,18 +9873,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) async {
         guard plan.frameCount > 0 else { return }
         guard await sendRoutedBulk(plan, to: peer, now: now) else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.merge.routedAnswerBudgetSpent",
                 context: ["left": String(routedFramesRemaining(for: peer))]
             )
             return
         }
         if plan.truncated {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.merge.routedAnswerTruncated", context: ["frames": String(plan.frameCount)]
             )
         }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.merge.routedAnswered",
             context: ["manifests": String(plan.manifests.count),
                       "chunks": String(plan.chunks.count),
@@ -9902,16 +9902,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             switch store.forwardableManifest(item: key) {
             case .completed(let manifest):
                 guard let manifest else {
-                    FernletAuditLog.log("mesh.routedDrain.offerSkipped", context: ["reason": "parked"])
+                    ProximityAudit.log("mesh.routedDrain.offerSkipped", context: ["reason": "parked"])
                     continue
                 }
                 await broadcastMembershipFrame(
                     .meshRoutedManifest, MeshRoutedManifestPayload(manifest: manifest), to: [peer]
                 )
             case .refused(let refusal):
-                FernletAuditLog.log("mesh.routedDrain.offerSkipped", context: ["reason": refusal.rawValue])
+                ProximityAudit.log("mesh.routedDrain.offerSkipped", context: ["reason": refusal.rawValue])
             case .unavailable(let cause):
-                FernletAuditLog.log("mesh.routedDrain.unavailable", context: ["state": cause.logToken])
+                ProximityAudit.log("mesh.routedDrain.unavailable", context: ["state": cause.logToken])
                 return
             }
         }
@@ -9930,7 +9930,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 case .completed(let chunk):
                     guard let chunk else {
                         forgetRepairedRoutedSlot(send.key, index: index)
-                        FernletAuditLog.log("mesh.routedDrain.offerSkipped", context: ["reason": "slotNotHeld"])
+                        ProximityAudit.log("mesh.routedDrain.offerSkipped", context: ["reason": "slotNotHeld"])
                         continue
                     }
                     await broadcastMembershipFrame(
@@ -9938,9 +9938,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                     )
                 case .refused(let refusal):
                     if refusal == .chunkFileMismatch { forgetRepairedRoutedSlot(send.key, index: index) }
-                    FernletAuditLog.log("mesh.routedDrain.offerSkipped", context: ["reason": refusal.rawValue])
+                    ProximityAudit.log("mesh.routedDrain.offerSkipped", context: ["reason": refusal.rawValue])
                 case .unavailable(let cause):
-                    FernletAuditLog.log("mesh.routedDrain.unavailable", context: ["state": cause.logToken])
+                    ProximityAudit.log("mesh.routedDrain.unavailable", context: ["state": cause.logToken])
                     return
                 }
             }
@@ -9995,7 +9995,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         var context = ["kind": ref.kind.rawValue]
         if let cause = outcome.unavailability { context["state"] = cause.logToken }
         if let refusal = outcome.refusal { context["reason"] = refusal.rawValue }
-        FernletAuditLog.log("mesh.routedDrain.receiptSkipped", context: context)
+        ProximityAudit.log("mesh.routedDrain.receiptSkipped", context: context)
     }
 
     /// The custody receipt a reference names: another member's stored bytes, or — when the signer is
@@ -10015,7 +10015,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         switch store.forwardableManifest(item: ref.key) {
         case .completed(let held):
             guard let manifest = held else {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.routedDrain.receiptSkipped",
                     context: ["kind": ref.kind.rawValue, "reason": "parked"]
                 )
@@ -10023,13 +10023,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             }
             return commitLocalCustody(for: ref.key, manifest: manifest, now: now)
         case .refused(let refusal):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedDrain.receiptSkipped",
                 context: ["kind": ref.kind.rawValue, "reason": refusal.rawValue]
             )
             return nil
         case .unavailable(let cause):
-            FernletAuditLog.log("mesh.routedDrain.unavailable", context: ["state": cause.logToken])
+            ProximityAudit.log("mesh.routedDrain.unavailable", context: ["state": cause.logToken])
             return nil
         }
     }
@@ -10242,7 +10242,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func recordDroppedEpochHeads(_ count: Int) {
         guard count > 0 else { return }
         droppedEpochHeadCount += count
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.sessionContext.epochHeadsDropped", context: ["count": String(count)]
         )
     }
@@ -10409,7 +10409,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         switch transition {
         case .rejected(let rejection):
             lastSessionTransitionRejection = rejection
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.sessionState.rejected",
                 context: ["state": sessionState.rawValue, "reason": rejection.rawValue]
             )
@@ -10531,7 +10531,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // this device has never seen. An earlier match is evidence from before it left, so the
         // window may not close on it (P5 item 7, D-7.32).
         mergeWindow = mergeWindow?.reAsking(peer)
-        FernletAuditLog.log("mesh.merge.askedLateReconnect")
+        ProximityAudit.log("mesh.merge.askedLateReconnect")
         spawnHostPinned { [weak self] in
             await self?.sendInventoryDigest(to: [peer])
             await self?.sendEpochHeads(to: [peer])
@@ -10549,7 +10549,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard mergeWindow != nil || pendingMergeEntry != nil else { return }
         clearMergeWindow()
         pendingMergeEntry = nil
-        FernletAuditLog.log("mesh.merge.abandoned")
+        ProximityAudit.log("mesh.merge.abandoned")
     }
 
     /// Performs an effect list in order, abandoning the remainder at the first failure.
@@ -10558,7 +10558,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         for effect in effects.prefix(MeshSessionStateMachine.maxEffectsPerTransition) {
             guard performSessionEffect(effect, for: event) else {
                 lastSessionEffectFailure = effect
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.sessionState.effectAbandoned",
                     context: ["effect": effect.rawValue, "state": sessionState.rawValue]
                 )
@@ -10626,7 +10626,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func barRejoin(reason: MeshSessionTerminationReason) {
         guard let meshID = currentMesh?.meshID ?? restoredSessionContext?.meshID else { return }
         rejoinBar = MeshSessionRejoinBar(meshID: meshID, reason: reason)
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.sessionState.rejoinBarred",
             context: ["reason": reason.rawValue]
         )
@@ -10679,7 +10679,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
         }
         guard persistSessionContext(addingEpochHead: nil) else {
-            FernletAuditLog.log("mesh.admissionGrant.droppedNotDurable")
+            ProximityAudit.log("mesh.admissionGrant.droppedNotDurable")
             return false
         }
         return reassertCommitIntoAdoptedMesh(
@@ -10693,7 +10693,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         applySessionEvent(.joined)
         guard lastSessionEffectFailure == nil else {
             sessionState = .idle
-            FernletAuditLog.log("mesh.admissionGrant.droppedNotDurable")
+            ProximityAudit.log("mesh.admissionGrant.droppedNotDurable")
             return false
         }
         return true
@@ -10775,7 +10775,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let beaconWasRunning = beaconTimer != nil
         let rotationWasScheduled = rotationTimer != nil
         let nextRotationAt = lastKnownNextRotationAt
-        FernletAuditLog.log("mesh.sessionState.reassertedAdoptedCommit")
+        ProximityAudit.log("mesh.sessionState.reassertedAdoptedCommit")
         noteCommitIntoMesh(peer: committed)
         guard lastSessionEffectFailure == nil else {
             unwindRefusedReassert(
@@ -10784,7 +10784,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 rotationWasScheduled: rotationWasScheduled,
                 nextRotationAt: nextRotationAt
             )
-            FernletAuditLog.log("mesh.admissionGrant.reassertNotDurable")
+            ProximityAudit.log("mesh.admissionGrant.reassertNotDurable")
             return false
         }
         return true
@@ -10884,7 +10884,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) -> Bool {
         guard persistSessionContext(addingEpochHead: nil) else {
             membershipVerifier = snapshot
-            FernletAuditLog.log("mesh.membershipEvent.notDurable", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.membershipEvent.notDurable", context: ["type": type.rawValue])
             return false
         }
         return true
@@ -11035,7 +11035,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if verdict == .linksLost, transition.nextState == .partitioned, idleLapseDeadline != nil {
             idleLapseDeadline = now.addingTimeInterval(Self.idleWindowSeconds)
         }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.partition.verdict",
             context: ["verdict": verdict.rawValue, "state": sessionState.rawValue]
         )
@@ -11103,10 +11103,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @discardableResult
     public func restoreSessionContextOncePerLaunch(now: Date = Date()) -> Bool {
         guard sessionRestoreAttempts == 0 else {
-            FernletAuditLog.log("mesh.sessionRestore.launchMountRepeated")
+            ProximityAudit.log("mesh.sessionRestore.launchMountRepeated")
             return false
         }
-        FernletAuditLog.log("mesh.sessionRestore.launchMount")
+        ProximityAudit.log("mesh.sessionRestore.launchMount")
         restoreSessionContextAtLaunch(now: now)
         return true
     }
@@ -11132,7 +11132,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             for: sessionStore.load(), selfFingerprint: identity.localFingerprint, now: now
         )
         lastSessionRestoreOutcome = outcome
-        FernletAuditLog.log("mesh.sessionRestore.outcome", context: ["outcome": outcome.logToken])
+        ProximityAudit.log("mesh.sessionRestore.outcome", context: ["outcome": outcome.logToken])
         if case .quarantineCorruptFile(let corruption) = outcome {
             quarantineRestoredContext(corruption, store: sessionStore)
         }
@@ -11189,21 +11189,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // the nag survived every cold start while every unit pin stayed green (the item's blind
         // verify, BLOCKER, reproduced over three cold starts on a Simulator).
         guard let restored = lastSessionRestoreOutcome?.context else {
-            FernletAuditLog.log("mesh.sessionRestore.endingPresentedNotWritten", context: ["cause": "noRestoredContext"])
+            ProximityAudit.log("mesh.sessionRestore.endingPresentedNotWritten", context: ["cause": "noRestoredContext"])
             return
         }
         let sessionStore = MeshSessionStore(scope: store.meshSessionStorage)
         guard case .loaded(var context, let token) = sessionStore.load(), context.meshID == restored.meshID else {
-            FernletAuditLog.log("mesh.sessionRestore.endingPresentedNotWritten", context: ["cause": "load"])
+            ProximityAudit.log("mesh.sessionRestore.endingPresentedNotWritten", context: ["cause": "load"])
             return
         }
         guard !context.endingPresented else { return }
         context.endingPresented = true
         do {
             try sessionStore.save(context, token: token)
-            FernletAuditLog.log("mesh.sessionRestore.endingPresented")
+            ProximityAudit.log("mesh.sessionRestore.endingPresented")
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.sessionRestore.endingPresentedNotWritten",
                 context: ["cause": "seal", "error": String(describing: error)]
             )
@@ -11255,12 +11255,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // Armed here, spent by the first `beginMerge`: whichever door the user's resume uses,
             // the ledger being merged FROM came off the disk.
             pendingMergeEntry = .processRestart
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.sessionRestore.ledgerRestored",
                 context: ["members": String(verifier.roster.memberCount)]
             )
         case .refused(let refusal):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.sessionRestore.ledgerRefused",
                 context: ["reason": refusal.diagnosticDescription]
             )
@@ -11273,7 +11273,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         do {
             _ = try sessionStore.quarantineCorruptFile(corruption)
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.sessionRestore.quarantineFailed",
                 context: ["error": String(describing: error)]
             )
@@ -11292,7 +11292,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func retrySessionRestoreIfPending(now: Date) -> MeshSessionRestoreOutcome? {
         guard let last = lastSessionRestoreOutcome, last.isRetryable else { return nil }
         guard sessionRestoreAttempts < MeshSessionRestoreBounds.maxAttempts else {
-            FernletAuditLog.log("mesh.sessionRestore.attemptsExhausted")
+            ProximityAudit.log("mesh.sessionRestore.attemptsExhausted")
             return nil
         }
         return restoreSessionContextAtLaunch(now: now)
@@ -11368,11 +11368,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         now: Date = Date()
     ) {
         guard let senderFingerprint = slot?.fingerprint else {
-            FernletAuditLog.log("mesh.membershipEvent.droppedUncommittedSlot", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.membershipEvent.droppedUncommittedSlot", context: ["type": type.rawValue])
             return
         }
         guard let verifier = membershipVerifier else {
-            FernletAuditLog.log("mesh.membershipEvent.droppedNoLedger", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.membershipEvent.droppedNoLedger", context: ["type": type.rawValue])
             return
         }
         // The ONE frame in this family whose sender must be a member this device recognises, not
@@ -11392,7 +11392,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // A frame that did not decode is NAMED (R7). It used to be the one silent drop on this
             // door, and the family's own hazard shape: a forgotten `decodeMembershipFrame` arm
             // returns nil here and reads, in a transcript, exactly like a frame that never arrived.
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.droppedUndecodable", context: ["type": type.rawValue]
             )
             return
@@ -11556,7 +11556,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `.meshRemovalSecond` path takes when the vote names this device, so both paths end in one
     /// state. No rotation is requested: a device that is no longer a member has no key to hand out.
     private func applyVerifiedSelfRemoval() {
-        FernletAuditLog.log("mesh.membershipEvent.selfRemoved")
+        ProximityAudit.log("mesh.membershipEvent.selfRemoved")
         applySessionEvent(.removed)
         leaveSession()
     }
@@ -11570,7 +11570,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// and the other branch never reaches here. Ending mark, then teardown, then the permanent
     /// rejoin bar the mark raised: a terminated mesh can never be rejoined.
     private func applyVerifiedTermination() {
-        FernletAuditLog.log("mesh.membershipEvent.terminationVerified")
+        ProximityAudit.log("mesh.membershipEvent.terminationVerified")
         applySessionEvent(.terminationVerified)
         leaveSession()
     }
@@ -11647,7 +11647,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         membershipVerifier = adopted
         guard commitVerifiedRecord(rollingBackTo: snapshot, type: .meshMemberAdmission) else { return }
         pendingAdoptionLedger = .empty
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.membershipLedger.adopted",
             context: ["members": String(adopted.roster.memberCount)]
         )
@@ -11703,7 +11703,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func receiveInventoryDigest(_ payload: MeshInventoryDigestPayload) {
         guard let verifier = membershipVerifier else { return }
         if let rejection = verifier.verify(payload) {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.rejected",
                 context: ["type": PayloadType.meshInventoryDigest.rawValue,
                           "reason": rejection.diagnosticDescription]
@@ -11740,7 +11740,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Logs a refused record. Frozen English diagnostics, never user copy.
     private func recordRejection(_ rejection: MeshMembershipRecordRejection?, type: PayloadType) {
         guard let rejection else { return }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.membershipEvent.rejected",
             context: ["type": type.rawValue, "reason": rejection.diagnosticDescription]
         )
@@ -11760,14 +11760,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slot: PeerSlot?
     ) {
         guard slot?.fingerprint != nil, let senderFingerprint = peer?.fingerprint else {
-            FernletAuditLog.log("mesh.removalVote.droppedUncommittedSlot", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.removalVote.droppedUncommittedSlot", context: ["type": type.rawValue])
             return
         }
         switch type {
         case .meshRemovalProposal:
             guard let payload = try? decoder.decode(MeshRemovalProposalPayload.self, from: plaintext) else { return }
             guard payload.proposerFingerprint == senderFingerprint else {
-                FernletAuditLog.log("mesh.removalProposal.droppedForeignProposer")
+                ProximityAudit.log("mesh.removalProposal.droppedForeignProposer")
                 return
             }
             handleRemovalProposal(payload, rebroadcast: false)
@@ -11777,7 +11777,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 $0.id == payload.proposal.id
                     && $0.proposerFingerprint == payload.proposal.proposerFingerprint
             }) else {
-                FernletAuditLog.log("mesh.removalSecond.unknownProposal")
+                ProximityAudit.log("mesh.removalSecond.unknownProposal")
                 return
             }
             handleRemovalSecond(payload, senderFingerprint: senderFingerprint, rebroadcast: false)
@@ -11801,7 +11801,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slot: PeerSlot?
     ) {
         guard slot?.fingerprint != nil else {
-            FernletAuditLog.log("mesh.removalQuorum.droppedUncommittedSlot", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.removalQuorum.droppedUncommittedSlot", context: ["type": type.rawValue])
             return
         }
         switch type {
@@ -11848,7 +11848,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slot: PeerSlot?
     ) {
         guard slot?.fingerprint != nil else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.groupKey.droppedUncommittedSlot",
                 context: heldMeshAuditContext(["type": type.rawValue])
             )
@@ -11898,7 +11898,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slot: PeerSlot?
     ) {
         guard slot?.fingerprint != nil else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.registryPayload.droppedUncommittedSlot",
                 context: ["type": type.rawValue]
             )
@@ -12231,7 +12231,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // by one of them. The audit line fires only when a hold is actually being undone.
         let undoingAHold = !isAdmittingNewPeers
         if undoingAHold {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.session.linksResumed",
                 context: ["slots": "\(slots.count)", "committed": "\(hasCommittedPeer)"]
             )
@@ -12789,7 +12789,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // The `else` of `currentMesh == nil`: this line is written while a mesh IS held, so it
             // carries `held` and a cell's `== N` over it is a claim about its own rig, not the
             // process. The guard's NAME reads like a no-mesh door; its branch is the opposite one.
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.promotion.refusedExistingMesh", context: heldMeshAuditContext()
             )
             return false
@@ -12913,7 +12913,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public func clearActiveVerifyQR() {
         guard activeVerifyQR != nil else { return }
         activeVerifyQR = nil
-        FernletAuditLog.log("mesh.verifyQR.displayCleared")
+        ProximityAudit.log("mesh.verifyQR.displayCleared")
     }
 
     /// Drops the binding when its slot goes away. The ceremony already fails closed without this
@@ -12960,23 +12960,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public func beginQRVerification(with url: URL, slotID: UUID) -> Bool {
         guard let payload = ProximityVerifyQR.parse(url, in: namespace),
               ProximityVerifyQR.isValid(payload, in: namespace.family.purposes) else {
-            FernletAuditLog.log("mesh.verifyQR.invalidScanned")
+            ProximityAudit.log("mesh.verifyQR.invalidScanned")
             return false
         }
         guard let slot = slots.first(where: { $0.id == slotID }),
               let peer = manualCommitPeer(of: slot) else {
-            FernletAuditLog.log("mesh.verifyQR.noAwaitingSlotMatch")
+            ProximityAudit.log("mesh.verifyQR.noAwaitingSlotMatch")
             return false
         }
         guard peer.signingPublicKey == payload.signingPublicKey else {
-            FernletAuditLog.log("mesh.verifyQR.qrPeerMismatch")
+            ProximityAudit.log("mesh.verifyQR.qrPeerMismatch")
             return false
         }
         let challengeNonce = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })
         pendingQRVerifications[slot.id] = (payload.nonce, challengeNonce, payload.signingPublicKey)
         let challenge = VerifyChallengePayload(qrNonce: payload.nonce, challengeNonce: challengeNonce)
         spawnHostPinned { await self.sendVerifyEnvelope(.verifyChallenge, encodable: challenge, to: peer, via: slot) }
-        FernletAuditLog.log("mesh.verifyQR.challengeSent")
+        ProximityAudit.log("mesh.verifyQR.challengeSent")
         return true
     }
 
@@ -12986,7 +12986,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Only honor a challenge quoting the QR THIS device is displaying right now — a
         // photographed QR is useless once the sheet closed.
         guard let active = activeVerifyQR, active.nonce == payload.qrNonce else {
-            FernletAuditLog.log("mesh.verifyQR.staleChallengeDropped")
+            ProximityAudit.log("mesh.verifyQR.staleChallengeDropped")
             return
         }
         // Displayer-side expiry: the QR's own timestamp bounds what the SCANNER accepts, which a
@@ -12994,14 +12994,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // display either.
         guard abs(Date().timeIntervalSince(active.issuedAt)) <= ProximityVerifyQR.freshnessWindow else {
             activeVerifyQR = nil
-            FernletAuditLog.log("mesh.verifyQR.expiredChallengeDropped")
+            ProximityAudit.log("mesh.verifyQR.expiredChallengeDropped")
             return
         }
         // The sheet named ONE peer, so a challenge on any other slot is a third party who can see
         // this screen. Drop it WITHOUT clearing: burning the nonce here is exactly how such a peer
         // would deny the named peer its genuine round.
         guard active.slotID == slot.id else {
-            FernletAuditLog.log("mesh.verifyQR.wrongSlotChallengeDropped")
+            ProximityAudit.log("mesh.verifyQR.wrongSlotChallengeDropped")
             return
         }
         // Fixed-length fields only — the transcript has no length prefixes, and nothing is signed
@@ -13009,7 +13009,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard ProximityVerifySignature.isWellFormedChallenge(
             payload, scannerKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey
         ) else {
-            FernletAuditLog.log("mesh.verifyQR.malformedChallengeDropped")
+            ProximityAudit.log("mesh.verifyQR.malformedChallengeDropped")
             return
         }
         let message = ProximityVerifySignature.message(
@@ -13024,7 +13024,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             // Recovery is "no response" — the scanner never commits — so name it (R7) instead of
             // leaving the ceremony to die silently.
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.verifyQR.signFailed",
                 context: ["error": String(describing: error)]
             )
@@ -13047,7 +13047,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // ceremony proof — commit this side too.
         if case .awaitingManualCommit = slot.coordinator.state {
             commitManualProximity(slotID: slot.id)
-            FernletAuditLog.log("mesh.verifyQR.displayerCommitted")
+            ProximityAudit.log("mesh.verifyQR.displayerCommitted")
         }
     }
 
@@ -13066,14 +13066,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard IdentityService.verify(payload.signature, of: message, by: pending.expectedSigningKey,
                                      purpose: namespace.family.purposes.signature.proximityQRResponseV1) else {
             pendingQRVerifications[slot.id] = nil
-            FernletAuditLog.log("mesh.verifyQR.badResponseSignature")
+            ProximityAudit.log("mesh.verifyQR.badResponseSignature")
             return
         }
         pendingQRVerifications[slot.id] = nil
         if case .awaitingManualCommit = slot.coordinator.state {
             commitManualProximity(slotID: slot.id)
         }
-        FernletAuditLog.log("mesh.verifyQR.scannerCommitted")
+        ProximityAudit.log("mesh.verifyQR.scannerCommitted")
     }
 
     private func sendVerifyEnvelope(
@@ -13114,7 +13114,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             auditSendFailure: true
         )
         if !sent {
-            FernletAuditLog.log("mesh.verifyQR.sendFailed", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.verifyQR.sendFailed", context: ["type": type.rawValue])
         }
     }
 
@@ -13218,14 +13218,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // name are attacker-chosen, displayed, re-gossiped to every slot, and (adopted wholesale
         // when we have no mesh yet) become OUR descriptor.
         guard descriptor.members.count <= Self.maxMeshMembers else {
-            FernletAuditLog.log("mesh.descriptor.droppedOversizedMembership")
+            ProximityAudit.log("mesh.descriptor.droppedOversizedMembership")
             return
         }
         // P3 item 6, plan §8.2: a mesh this device developed, left or saw terminated is never
         // re-entered, so its descriptor is not adopted or merged — not even after a relaunch, which
         // re-derives the bar from the sealed context.
         if let reason = rejoinRefusal(for: descriptor.meshID) {
-            FernletAuditLog.log("mesh.descriptor.droppedRejoinBarred", context: ["reason": reason.rawValue])
+            ProximityAudit.log("mesh.descriptor.droppedRejoinBarred", context: ["reason": reason.rawValue])
             return
         }
         let incoming = Self.sanitizedDescriptor(descriptor)
@@ -13239,7 +13239,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let advertisedBeforeMerge = currentDiscoveryInfo()
         if let existing = currentMesh {
             if yieldsNewbornMesh(existing, to: incoming, from: senderFingerprint) {
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.descriptor.yieldedNewbornMesh",
                     context: ["adopted": incoming.meshID.uuidString]
                 )
@@ -13310,7 +13310,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// of ours goes out, and a peer that re-opens is answered once per re-open.
     private func reassertLocallyClosedMode() {
         guard userClosedThisSession, currentMesh?.mode == .open else { return }
-        FernletAuditLog.log("mesh.mode.reassertedLocalClose")
+        ProximityAudit.log("mesh.mode.reassertedLocalClose")
         setMeshMode(.closed)
     }
 
@@ -13388,7 +13388,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return false
         }
         guard holdsNoRoutedItem(mintedIn: local.meshID) else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.descriptor.yieldRefusedRoutedContent", context: ["held": local.meshID.uuidString]
             )
             return false
@@ -13460,12 +13460,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let key = "\(sender)|\(incoming.meshID.uuidString)"
         guard reannouncedNewbornMeshKeys.count < Self.maxNewbornReannouncements,
               reannouncedNewbornMeshKeys.insert(key).inserted else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.descriptor.reannounceSpent", context: ["offered": incoming.meshID.uuidString]
             )
             return
         }
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.descriptor.reannouncedToNewbornPeer",
             context: ["held": local.meshID.uuidString, "offered": incoming.meshID.uuidString]
         )
@@ -13481,7 +13481,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // mesh before an existing member's descriptor arrived — and a device that has reached it
         // will drop every later descriptor for that mesh, so it must be visible.
         guard existing.meshID == incoming.meshID else {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.descriptor.droppedForeignMesh",
                 context: ["held": existing.meshID.uuidString, "offered": incoming.meshID.uuidString]
             )
@@ -13691,11 +13691,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             IdentityService.fingerprint(of: request.requesterSigningPublicKey),
             request.requesterFingerprint
         ) else {
-            FernletAuditLog.log("mesh.admissionRequest.droppedKeyFingerprintMismatch")
+            ProximityAudit.log("mesh.admissionRequest.droppedKeyFingerprintMismatch")
             return
         }
         guard pendingAdmissionRequests.count < Self.maxPendingAdmissionRequests else {
-            FernletAuditLog.log("mesh.admissionRequest.droppedQueueFull")
+            ProximityAudit.log("mesh.admissionRequest.droppedQueueFull")
             return
         }
         let isKnown = pendingAdmissionRequests.contains {
@@ -13719,7 +13719,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         pendingAdmissionRequests.append(queued)
         // P6 item 2: the founding pair's ONE admission needs no tap. Everything else still prompts.
         guard autoGrantsFoundingAdmission(queued) else { return }
-        FernletAuditLog.log("mesh.admissionRequest.autoGrantedFoundingPair")
+        ProximityAudit.log("mesh.admissionRequest.autoGrantedFoundingPair")
         allowAdmission(queued)
     }
 
@@ -13775,20 +13775,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                                             slot: PeerSlot?,
                                             senderSigningPublicKey: Data?) -> Bool {
         guard let slot, let senderKey = senderSigningPublicKey else {
-            FernletAuditLog.log("mesh.admissionGrant.droppedUnattributed")
+            ProximityAudit.log("mesh.admissionGrant.droppedUnattributed")
             return false
         }
         guard outstandingAdmissionRequestBySlot[slot.id] == grant.meshID else {
-            FernletAuditLog.log("mesh.admissionGrant.droppedUnsolicited")
+            ProximityAudit.log("mesh.admissionGrant.droppedUnsolicited")
             return false
         }
         guard grant.token.admitterSigningPublicKey == senderKey else {
-            FernletAuditLog.log("mesh.admissionGrant.droppedAdmitterNotSender")
+            ProximityAudit.log("mesh.admissionGrant.droppedAdmitterNotSender")
             return false
         }
         if let mesh = currentMesh {
             guard mesh.members.contains(where: { $0.signingPublicKey == senderKey }) else {
-                FernletAuditLog.log("mesh.admissionGrant.droppedAdmitterNotMember")
+                ProximityAudit.log("mesh.admissionGrant.droppedAdmitterNotMember")
                 return false
             }
         }
@@ -13802,7 +13802,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // P3 item 6, plan §8.2: a developed or terminated mesh can never be rejoined, and the bar
         // is re-derived from the sealed context at launch, so a restart does not lift it.
         if let reason = rejoinRefusal(for: grant.meshID) {
-            FernletAuditLog.log("mesh.admissionGrant.droppedRejoinBarred", context: ["reason": reason.rawValue])
+            ProximityAudit.log("mesh.admissionGrant.droppedRejoinBarred", context: ["reason": reason.rawValue])
             return
         }
         guard admissionGrantIsAuthorized(grant, slot: slot, senderSigningPublicKey: senderSigningPublicKey) else {
@@ -13817,7 +13817,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                                    expectedAdmitterSigningPublicKey: senderSigningPublicKey,
                                    in: namespace.family.purposes)
         } catch {
-            FernletAuditLog.log("mesh.admissionGrant.droppedTokenVerifyFailed")
+            ProximityAudit.log("mesh.admissionGrant.droppedTokenVerifyFailed")
             return
         }
 
@@ -13827,7 +13827,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // replaying an old epoch would roll a joined member back onto a retired key.
         guard grant.currentKeyEpoch > (currentGroupKey?.epoch ?? -1),
               grant.currentKeyEpoch >= localJoinedEpoch else {
-            FernletAuditLog.log("mesh.admissionGrant.droppedStaleEpoch")
+            ProximityAudit.log("mesh.admissionGrant.droppedStaleEpoch")
             return
         }
         // P3 item 7, plan §8.3/§20.4.4: the admission is verified, so this device arms its ledger
@@ -14260,14 +14260,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // The 13+ age gate. The compose bar is withheld below the line, so this is the defense-in-depth
         // re-check at the point of use rather than the primary gate; the projection re-applies it.
         guard isChatAllowed else {
-            FernletAuditLog.log("mesh.routedShare.textBlockedAgeGated")
+            ProximityAudit.log("mesh.routedShare.textBlockedAgeGated")
             return noteTextSendOutcome(.ageGated)
         }
         let sanitized = SessionMessageStore.sanitize(rawText)
         let text = MeshRoutedTextBody.boundedText(sanitized)
         guard !text.isEmpty else { return noteTextSendOutcome(.empty) }
         if text != sanitized {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedShare.textByteBounded",
                 context: ["characters": String(sanitized.count),
                           "bytes": String(sanitized.utf8.count)]
@@ -14288,7 +14288,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 text: text
             ).encoded()
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedShare.textRefused",
                 context: ["reason": MeshRoutedShareRefusal.sealFailed.rawValue,
                           "error": String(describing: error)]
@@ -14307,7 +14307,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .skipped:
             return noteTextSendOutcome(.noDestinations)
         case .refused(let refusal):
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedShare.textRefused", context: ["reason": refusal.rawValue]
             )
             return noteTextSendOutcome(.refused(refusal))
@@ -14387,13 +14387,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             if !saturated {
                 privacyWipeOverflow += 1
             }
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.privacyWipe.depthExceeded",
                 context: ["overflow": String(privacyWipeOverflow),
                           "saturated": String(saturated)]
             )
         }
-        FernletAuditLog.log("mesh.privacyWipe.began", context: ["depth": String(privacyWipeDepth)])
+        ProximityAudit.log("mesh.privacyWipe.began", context: ["depth": String(privacyWipeDepth)])
         clearSessionTranscript()
     }
 
@@ -14414,7 +14414,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard privacyWipeDepth > 0 else { return }
         privacyWipeDepth -= 1
         guard privacyWipeDepth == 0 else { return }
-        FernletAuditLog.log("mesh.privacyWipe.ended")
+        ProximityAudit.log("mesh.privacyWipe.ended")
     }
 
     // MARK: - Envelope sending
@@ -14535,7 +14535,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return true
         } catch {
             if auditSendFailure {
-                FernletAuditLog.log("mesh.sendEnvelope.failed", context: ["type": type.rawValue, "error": error.localizedDescription])
+                ProximityAudit.log("mesh.sendEnvelope.failed", context: ["type": type.rawValue, "error": error.localizedDescription])
             }
             return false
         }
@@ -14544,7 +14544,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// One audit line per non-transport send failure, naming the stage that failed. Carries only
     /// the payload type — never payload content or peer identity.
     private func logSendFailure(_ type: PayloadType, stage: String) {
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "mesh.sendEnvelope.failed",
             context: ["type": type.rawValue, "stage": stage]
         )
@@ -14654,7 +14654,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // Mirrors `mesh.encryptedMetadata.sealFailed` on the send side (R7): the one open
             // failure with a nameable cause is named, instead of joining the silent drop that also
             // covers a wrong key and a tampered wrapper.
-            FernletAuditLog.log("mesh.encryptedMetadata.droppedLegacyWireFormat")
+            ProximityAudit.log("mesh.encryptedMetadata.droppedLegacyWireFormat")
             return
         } catch {
             return
@@ -15003,7 +15003,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             } catch {
                 // That member simply gets no copy this epoch (they rejoin on the next grant) —
                 // named rather than silent (R7). Context carries no fingerprint.
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.keyRotation.wrapFailed",
                     context: ["error": String(describing: error)]
                 )
@@ -15047,7 +15047,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// rotation is never silent).
     private func recordRotationBlock(_ reason: String) {
         lastRotationBlockReason = reason
-        FernletAuditLog.log("mesh.keyRotation.blocked", context: ["reason": reason])
+        ProximityAudit.log("mesh.keyRotation.blocked", context: ["reason": reason])
     }
 
     /// Plan §8.4's counter cap, reached: this mesh can mint no further epoch, so it cannot retire
@@ -15073,7 +15073,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         do {
             return try identity.decryptGroupKey(bundle)
         } catch IdentityError.legacyWireFormat {
-            FernletAuditLog.log("mesh.admissionGrant.droppedLegacyKeyWrap")
+            ProximityAudit.log("mesh.admissionGrant.droppedLegacyKeyWrap")
             return nil
         } catch {
             return nil
@@ -15092,7 +15092,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             adoptEpoch(ref, key: newKey)
             recordEpoch(newKey.epoch, since: newKey.activeSince)
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.keyRotation.selfUnwrapFailed",
                 context: ["error": String(describing: error)]
             )
@@ -15117,7 +15117,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             try keyring.rotate(to: ref, key: key, at: Date())
             epochKeyring = keyring
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.epochKeyring.rotationRefused",
                 context: ["reason": String(describing: error)]
             )
@@ -15185,7 +15185,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Epochs only ever move FORWARD (R5): a replayed or crafted rotation with an older/equal
         // epoch would otherwise roll the group key back and grow `epochLog` on every replay.
         guard payload.newEpoch > (currentGroupKey?.epoch ?? localJoinedEpoch) else {
-            FernletAuditLog.log("mesh.keyRotation.staleEpochDropped")
+            ProximityAudit.log("mesh.keyRotation.staleEpochDropped")
             return
         }
 
@@ -15207,7 +15207,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // Silently keeping the OLD key desyncs us from every peer: encrypted photos and
             // metadata are then dropped at the epoch guards with nothing visible. Surface it and
             // rejoin instead (R7) — the same recovery as the "excluded" branch above.
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.keyRotation.unwrapFailed",
                 context: ["error": String(describing: error)]
             )
@@ -15242,7 +15242,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let ref = epochRef(
             counter: payload.newEpoch, coordinatorFingerprint: payload.coordinatorFingerprint
         ) else {
-            FernletAuditLog.log("mesh.epochKeyring.refNotDerivable")
+            ProximityAudit.log("mesh.epochKeyring.refNotDerivable")
             return
         }
         adoptEpoch(ref, key: key)
@@ -15297,12 +15297,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                     // — see ``maySeatVerifiedPeer(signingPublicKey:)``. The slot's `fingerprint`
                     // stays nil, so nothing downstream reads it as committed.
                     guard maySeatVerifiedPeer(signingPublicKey: peerIdentity.signingPublicKey) else {
-                        FernletAuditLog.log("mesh.slot.refusedClosedMeshStranger")
+                        ProximityAudit.log("mesh.slot.refusedClosedMeshStranger")
                         refused.append(slots[index])
                         continue
                     }
                     if let reason = reseatRefusal(at: index, identity: peerIdentity) {
-                        FernletAuditLog.log(
+                        ProximityAudit.log(
                             "mesh.slot.returningMemberRefusedAtSeat", context: heldMeshAuditContext(["reason": reason])
                         )
                         refused.append(slots[index])
@@ -15310,7 +15310,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                     }
                     // EVERY seat, whoever asked for the commit — see ``seatTransportRefusal(at:identity:)``.
                     if let reason = seatTransportRefusal(at: index, identity: peerIdentity) {
-                        FernletAuditLog.log(
+                        ProximityAudit.log(
                             "mesh.slot.refusedUnprovenIdentityAtSeat", context: heldMeshAuditContext(["reason": reason])
                         )
                         refused.append(slots[index])
@@ -15401,13 +15401,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                   let proven = transport.verifiedSigningPublicKey(for: slots[index].peer) else { continue }
             guard proven == peer.signingPublicKey else {
                 slots[index].returningMemberReseat = .refusedMismatchedKey
-                FernletAuditLog.log(
+                ProximityAudit.log(
                     "mesh.slot.returningMemberRefusedMismatchedKey", context: heldMeshAuditContext()
                 )
                 continue
             }
             slots[index].returningMemberReseat = .commitRequested(signingPublicKey: proven)
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.slot.returningMemberCommitted",
                 context: heldMeshAuditContext(["state": sessionState.rawValue])
             )
@@ -16001,13 +16001,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard slots.indices.contains(index) else { return }
         let fingerprint = IdentityService.fingerprint(of: peer.localSigningPublicKey)
         guard maySeatVerifiedPeer(signingPublicKey: peer.localSigningPublicKey) else {
-            FernletAuditLog.log("mesh.slot.refusedClosedMeshStranger")
+            ProximityAudit.log("mesh.slot.refusedClosedMeshStranger")
             removeSlot(slots[index])
             return
         }
         let proven = transport.verifiedSigningPublicKey(for: slots[index].peer) ?? peer.localSigningPublicKey
         if let reason = Self.seatTransportRefusal(committedKey: peer.localSigningPublicKey, provenKey: proven) {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.slot.refusedUnprovenIdentityAtSeat", context: heldMeshAuditContext(["reason": reason])
             )
             removeSlot(slots[index])
@@ -16450,7 +16450,7 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
     private func legacyIntroductionRoster() -> MeshIntroductionRoster {
         if !loggedLegacyRosterFallback {
             loggedLegacyRosterFallback = true
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.introductionAuthority.legacyRosterFallback",
                 context: ["members": String(currentMesh?.members.count ?? 0)]
             )
@@ -16582,7 +16582,7 @@ extension MeshNetworkManager {
             )
             return persistSessionContext(addingEpochHead: nil)
         } catch {
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
                 context: ["type": "harness-removal", "error": String(describing: error)]
             )

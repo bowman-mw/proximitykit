@@ -22,7 +22,6 @@
 // No timer, no plaintext, nothing routed, no default collapsing a verdict.
 
 import Foundation
-import FernletFoundation
 
 // MARK: - MeshSessionPollReport
 
@@ -190,7 +189,7 @@ extension MeshNetworkManager {
     /// One audit line per poll that moved something — never one per tick.
     private func auditSessionPoll(_ report: MeshSessionPollReport, partition: MeshPartitionVerdict) {
         guard report.ceilingReached || report.idleLapsed || report.partitionMoved else { return }
-        FernletAuditLog.log("mesh.sessionPoll.moved", context: [
+        ProximityAudit.log("mesh.sessionPoll.moved", context: [
             "ceiling": String(report.ceilingReached),
             "idle": String(report.idleLapsed),
             "partition": partition.rawValue,
@@ -220,7 +219,7 @@ extension MeshNetworkManager {
             hardDeadline: mesh.createdAt.addingTimeInterval(MeshSessionCeiling.ceilingSeconds),
             startedAt: now
         )
-        FernletAuditLog.log("mesh.sessionCeiling.armedFromAdoptedMesh")
+        ProximityAudit.log("mesh.sessionCeiling.armedFromAdoptedMesh")
         return true
     }
 }

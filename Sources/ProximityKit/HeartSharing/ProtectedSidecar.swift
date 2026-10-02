@@ -2,7 +2,6 @@ import Foundation
 #if canImport(UIKit)
 import UIKit
 #endif
-import FernletFoundation
 
 /// Sealing hooks for a sidecar file at rest (Increment 4 of
 /// Docs/Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26.md). The keychain-backed production
@@ -76,8 +75,8 @@ enum SidecarFileWriter {
         do {
             try mutableURL.setResourceValues(values)
         } catch {
-            FernletAuditLog.log("\(auditPrefix).backupExclusionFailed",
-                                context: ["error": String(describing: error)])
+            ProximityAudit.log("\(auditPrefix).backupExclusionFailed",
+                               context: ["error": String(describing: error)])
         }
     }
 }
@@ -272,7 +271,7 @@ public final class ProtectedSidecar<Value: Codable> {
         switch storage {
         case .unloaded:
             // Logged here so a dropped mutation is never silent, whichever caller hit it.
-            FernletAuditLog.log("\(auditPrefix).mutateRefused")
+            ProximityAudit.log("\(auditPrefix).mutateRefused")
             return .refused
         case .ready(let value), .dirty(let value):
             var updated = value
@@ -404,7 +403,7 @@ public final class ProtectedSidecar<Value: Codable> {
                 // value is still the truth; `.dirty` retries the sealed rewrite, and the
                 // plaintext file stays readable in the meantime.
                 storage = .dirty(value)
-                FernletAuditLog.log("\(auditPrefix).sealMigrationDeferred")
+                ProximityAudit.log("\(auditPrefix).sealMigrationDeferred")
                 return
             }
             storage = .ready(value)
@@ -415,7 +414,7 @@ public final class ProtectedSidecar<Value: Codable> {
         // and audit-log the count (locked decision O4 — a corrupt blob is not quarantined,
         // because nobody can act on it and keeping plaintext is a second friend-key surface).
         if let salvage, let (value, lostCount) = salvage(plaintext) {
-            FernletAuditLog.log("\(auditPrefix).corrupt", context: [
+            ProximityAudit.log("\(auditPrefix).corrupt", context: [
                 "salvaged": "\(salvagedCount(of: value))", "lost": "\(lostCount)"
             ])
             if lostCount > 0 { dataLossOccurred = true }
@@ -426,7 +425,7 @@ public final class ProtectedSidecar<Value: Codable> {
             }
             return
         }
-        FernletAuditLog.log("\(auditPrefix).corrupt", context: ["salvaged": "0", "lost": "all"])
+        ProximityAudit.log("\(auditPrefix).corrupt", context: ["salvaged": "0", "lost": "all"])
         dataLossOccurred = true
         removeItemLoggingFailure(at: fileURL, what: "corruptDiscard")
         storage = .ready(empty())
@@ -442,7 +441,7 @@ public final class ProtectedSidecar<Value: Codable> {
         } catch CocoaError.fileNoSuchFile {
             return
         } catch {
-            FernletAuditLog.log("\(auditPrefix).removeFailed", context: [
+            ProximityAudit.log("\(auditPrefix).removeFailed", context: [
                 "what": what, "error": String(describing: error)
             ])
         }
@@ -451,7 +450,7 @@ public final class ProtectedSidecar<Value: Codable> {
     private func deferLoad(reason: String) {
         lastFailedLoadAt = now()
         if case .unloaded = storage {} else { storage = .unloaded }
-        FernletAuditLog.log("\(auditPrefix).readDeferred", context: ["reason": reason])
+        ProximityAudit.log("\(auditPrefix).readDeferred", context: ["reason": reason])
     }
 
     private func handleUnopenableSealedFile(_ raw: Data) {
@@ -462,17 +461,17 @@ public final class ProtectedSidecar<Value: Codable> {
             removeItemLoggingFailure(at: quarantineURL, what: "staleQuarantine")
             do {
                 try FileManager.default.moveItem(at: fileURL, to: quarantineURL)
-                FernletAuditLog.log("\(auditPrefix).quarantined")
+                ProximityAudit.log("\(auditPrefix).quarantined")
             } catch {
                 // The durable marker could not be parked: the unopenable bytes stay at fileURL
                 // and the next persist overwrites them (the delete policy's outcome). Say so
                 // rather than logging "quarantined" for something that never moved.
-                FernletAuditLog.log("\(auditPrefix).quarantineFailed",
-                                    context: ["error": String(describing: error)])
+                ProximityAudit.log("\(auditPrefix).quarantineFailed",
+                                   context: ["error": String(describing: error)])
             }
         } else {
             removeItemLoggingFailure(at: fileURL, what: "unopenableDiscard")
-            FernletAuditLog.log("\(auditPrefix).unopenableDiscarded")
+            ProximityAudit.log("\(auditPrefix).unopenableDiscarded")
         }
         storage = .ready(empty())
     }
@@ -501,8 +500,8 @@ public final class ProtectedSidecar<Value: Codable> {
         } catch {
             // Logged at the seam, so every write failure is named once regardless of which
             // mutation path hit it (`mutate`, `mutateIfPersisted`, or a `.dirty` re-persist).
-            FernletAuditLog.log("\(auditPrefix).writeFailed",
-                                context: ["error": String(describing: error)])
+            ProximityAudit.log("\(auditPrefix).writeFailed",
+                               context: ["error": String(describing: error)])
             return false
         }
     }

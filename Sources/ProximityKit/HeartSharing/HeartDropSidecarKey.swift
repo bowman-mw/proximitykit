@@ -104,7 +104,7 @@ public enum HeartDropSidecarSeal {
     /// lost but not which format lost it.
     private static func refusal(for data: Data) -> SidecarSeal.SealError {
         guard data.starts(with: legacyMagic) else { return .openFailed }
-        FernletAuditLog.log("heartdrop.sidecar.legacyFormatRefused")
+        ProximityAudit.log("heartdrop.sidecar.legacyFormatRefused")
         return .legacyFormatRetired
     }
 
@@ -154,7 +154,7 @@ public enum HeartDropSidecarSeal {
             // drop the row, and sealing against an unverified key writes ciphertext nothing can
             // ever open (bitchat's MessageOutboxStore does the same).
             guard case .found(let echoed) = KeychainItem.loadDistinguishingAbsence(account: keychainAccount, service: service), echoed == keyData else {
-                FernletAuditLog.log("heartdrop.sidecarKey.verifyFailed")
+                ProximityAudit.log("heartdrop.sidecarKey.verifyFailed")
                 throw SidecarSeal.SealError.sealFailed
             }
             return key

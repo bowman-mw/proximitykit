@@ -30,7 +30,6 @@
 // refuses to judge one gift twice.
 
 import Foundation
-import FernletFoundation
 
 // MARK: - MeshRecipientDeliveryWitness
 
@@ -261,7 +260,7 @@ nonisolated extension MeshRoutedStore {
             try save(index, token: token)
         } catch {
             let cause = unavailability(from: error)
-            FernletAuditLog.log(
+            ProximityAudit.log(
                 "mesh.routedStore.deliveryNotWritten",
                 context: ["cause": cause.logToken, "error": String(describing: error)]
             )

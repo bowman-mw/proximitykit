@@ -4,7 +4,6 @@ import Foundation
 import Network
 import os
 import Security
-import FernletFoundation
 
 // MARK: - PresenceRadioSession
 
@@ -349,7 +348,7 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
             return
         }
         guard rotated else { return }
-        FernletAuditLog.log("presence.quic.rotated", context: auditContext(for: posture))
+        ProximityAudit.log("presence.quic.rotated", context: auditContext(for: posture))
     }
 
     /// Tears the radio down and drops everything it was holding — including the posture, so a
@@ -369,7 +368,7 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
         posture = nil
         isRunning = false
         guard stopped else { return }
-        FernletAuditLog.log("presence.quic.stopped", context: [:])
+        ProximityAudit.log("presence.quic.stopped", context: [:])
     }
 
     // MARK: - Dialing
@@ -622,7 +621,7 @@ private extension NetworkPresenceSession {
                 self?.report("The presence listener stopped: \(error)")
             }
         }
-        FernletAuditLog.log("presence.quic.advertised", context: auditContext(for: posture))
+        ProximityAudit.log("presence.quic.advertised", context: auditContext(for: posture))
     }
 
     /// Stands the listener down and forgets it, keeping every tunnel.
@@ -809,7 +808,7 @@ private extension NetworkPresenceSession {
         // exists to break; "no identities in any log line" has to hold for the peer's identifiers
         // as strictly as it does for ours. Logging `key.rawValue` here is what P9 item 2's tier-2
         // run caught: every observed line read `peer=fn-<the peer's own name>…`.
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "presence.quic.sighted",
             context: [
                 "peer": peerLabel(for: key),
@@ -999,7 +998,7 @@ private extension NetworkPresenceSession {
     /// which half survived. Never the endpoint key, which carries the peer's advertised instance
     /// name verbatim — see ``noteBrowsed(_:key:at:)``.
     func auditRedundantTunnelClosed(_ key: MeshLinkKey, kept: String) {
-        FernletAuditLog.log(
+        ProximityAudit.log(
             "presence.quic.redundantTunnelClosed",
             context: ["peer": peerLabel(for: key), "kept": kept]
         )
@@ -1031,7 +1030,7 @@ private extension NetworkPresenceSession {
         guard var tunnel = tunnels[key] else { return }
         tunnel.controlStream = stream
         tunnels[key] = tunnel
-        FernletAuditLog.log("presence.quic.connected", context: ["tunnels": String(tunnels.count)])
+        ProximityAudit.log("presence.quic.connected", context: ["tunnels": String(tunnels.count)])
         onPeerChannelReady?(tunnel.channel)
     }
 
