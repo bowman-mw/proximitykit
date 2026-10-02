@@ -437,6 +437,31 @@ RECEIVING side: map that token to a `String(localized:)` label at render time, a
 raw summary for tokens this build has no case for (`isUnknownPayloadType` — a newer peer's payload
 type has no local label). Senders keep emitting frozen English forever.
 
+### Protocol namespace: the host's identity on the wire, in the keychain and on disk
+
+``ProximityNamespace`` (`Namespace/`, plan step A0.2) holds every byte string by which this module's
+wire, keychain and disk formats identify the app it runs in. Its ``ProximityNamespace/Family`` is what
+every interoperating app shares — the 39 domain-separation labels as
+``ProximityCryptographicPurpose`` values, the three radios' service types and ALPNs, the mesh
+heartbeat and the QR scheme — and its ``ProximityNamespace/Installation`` is what belongs to one app
+on one device: keychain rows, storage names and the log subsystem. A label is a `StaticString`
+source literal minted by a group initializer, and the field it fills fixes its role, so a host
+supplies bytes and never decides how ProximityKit consumes them. The initializer is total and
+records ``ProximityNamespace/soundness`` (labels well-formed, distinct and prefix-free; radio, QR,
+keychain and storage values well-formed and distinct);
+``ProximityNamespace/validated(family:installation:)`` throws the same violations, and
+``ProximityNamespace/familyCollisions(with:)`` and ``ProximityNamespace/installationCollisions(with:)``
+let a host's own tests show it overlaps no other app.
+
+ProximityKit holds no instance and offers no default: no global, no slot, no `@TaskLocal`. The host
+builds one value and hands it down, and every reader keeps its own copy. Step A0.2.1 adds the type
+and nothing reads it yet; A0.2's later commits route this module's reads through it — the host's
+supply path, the signed transcripts, the hashes and seals, the radios and the at-rest names — each
+byte-identical for Fernlet. Fernlet's own value is not in this module and never will be: it lands
+in a `FernletConnections` module that depends on this one (step A0.2.2), so ProximityKit cannot
+name it. `ProximityNamespaceSoundnessTests` holds the rules, the byte rules of each framing and the
+collision checks, over namespaces built only from literals.
+
 ## Topics
 
 ### Host seam and app integration
@@ -445,6 +470,12 @@ type has no local label). Senders keep emitting frozen English forever.
 - ``ProximitySupportLayout``
 - ``MeshContinuationRaising``
 - ``MeshSessionContinuationReading``
+
+### Protocol namespace
+
+- ``ProximityNamespace``
+- ``ProximityCryptographicPurpose``
+- ``ProximityNamespaceError``
 
 ### Identity and signing
 
