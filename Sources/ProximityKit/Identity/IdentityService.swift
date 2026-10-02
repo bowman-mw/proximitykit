@@ -24,16 +24,14 @@ import FernletDomainModel
 
 // MARK: - Keychain key identifiers
 
-/// Fixed keychain account names for the identity key material (content-addressed escrow slots
-/// are derived separately from the escrow key's own public key).
+/// The fixed keychain account name of the legacy escrow row (content-addressed escrow slots are
+/// derived separately from the escrow key's own public key). The four device-identity accounts are
+/// the host namespace's `installation.keychain.identity` since ProximityKit plan step A0.2.8 — see
+/// ``IdentityService/accounts`` — and the escrow rows leave with the backup side in step A0.4.
 ///
 /// The `backupEscrowPrivateKey` account is legacy: read for back-compat, never written by this
 /// build.
 private enum IdentityKeychainKey: String {
-    case signingPrivateKey          = "signingPrivateKey"
-    case keyAgreementPrivateKey     = "keyAgreementPrivateKey"
-    case signingPublicKeyCache      = "signingPublicKeyCache"
-    case keyAgreementPublicKeyCache = "keyAgreementPublicKeyCache"
     case backupEscrowPrivateKey     = "backupEscrowPrivateKey"
 }
 
@@ -135,13 +133,19 @@ public final class IdentityService {
     /// the identity's own transport ``seal(_:to:format:)`` and ``open(_:from:format:)`` and its
     /// group-key ``encryptGroupKey(_:for:)`` and ``decryptGroupKey(_:)`` take their HKDF salts and
     /// AEAD labels from its ``purposes``, as do the routed chunks, content hashes and key wraps its
-    /// builders mint. A0.2's later commits route its row names through it too, each byte-identical
-    /// for Fernlet. `nonisolated`: inert `Sendable` value data, which the nonisolated verifiers and
+    /// builders mint; and since A0.2.8 the identity's four device rows' ``accounts``, each
+    /// byte-identical for Fernlet. `nonisolated`: inert `Sendable` value data, which the nonisolated verifiers and
     /// serializers read without a hop to the main actor.
     public nonisolated let namespace: ProximityNamespace
 
     /// The namespace's domain-separation labels, `namespace.family.purposes`, by consumer family.
     public nonisolated var purposes: ProximityNamespace.Purposes { namespace.family.purposes }
+
+    /// The accounts of this identity's four device rows, the namespace's
+    /// `installation.keychain.identity` (plan step A0.2.8): the signing and key-agreement private keys
+    /// and their public-key caches. They sit under ``keychainService``, never under the rows' own
+    /// `service`, so a test's throwaway service holds the namespace's accounts too.
+    nonisolated var accounts: ProximityNamespace.Keychain.IdentityRows { namespace.installation.keychain.identity }
 
     /// The keychain service holding this identity's rows: the namespace's identity service, unless
     /// the initializer was handed another (a test's throwaway service).
@@ -666,7 +670,7 @@ public final class IdentityService {
     /// Case 3's legacy read therefore use `KeychainItem.loadDistinguishingAbsence`: only
     /// `errSecItemNotFound` is absence, and any other status throws
     /// ``IdentityError/keychainReadFailed(_:)`` with nothing written. The decision is
-    /// ``classifyDeviceIdentityRows(signing:keyAgreement:)``, pure and tested on its own.
+    /// ``classifyDeviceIdentityRows(signing:keyAgreement:accounts:)``, pure and tested on its own.
     public func ensureProvisioned() throws {
         if signingKey != nil && keyAgreementKey != nil { return }
 
@@ -749,15 +753,18 @@ public final class IdentityService {
     /// The pure half of Case 1: classifies the two identity-row reads.
     ///
     /// - Parameters:
-    ///   - signing: The `signingPrivateKey` row's read.
-    ///   - keyAgreement: The `keyAgreementPrivateKey` row's read.
+    ///   - signing: The signing private key row's read.
+    ///   - keyAgreement: The key-agreement private key row's read.
+    ///   - accounts: The identity's accounts (``accounts``), which name the row a refusal carries
+    ///     (plan step A0.2.8).
     /// - Returns: what provisioning may do — see ``DeviceIdentityRead`` for the precedence.
     static func classifyDeviceIdentityRows(
         signing: KeychainItem.ReadResult,
-        keyAgreement: KeychainItem.ReadResult
+        keyAgreement: KeychainItem.ReadResult,
+        accounts: ProximityNamespace.Keychain.IdentityRows
     ) -> DeviceIdentityRead {
-        let signingRow = IdentityKeychainKey.signingPrivateKey.rawValue
-        let keyAgreementRow = IdentityKeychainKey.keyAgreementPrivateKey.rawValue
+        let signingRow = accounts.signingPrivateKey
+        let keyAgreementRow = accounts.keyAgreementPrivateKey
         if case .unreadable(let status) = signing {
             return .unreadable(row: signingRow, status: status)
         }
@@ -787,12 +794,12 @@ public final class IdentityService {
     private func loadExistingDeviceIdentity() throws
     -> (signing: Curve25519.Signing.PrivateKey, keyAgreement: Curve25519.KeyAgreement.PrivateKey)? {
         let signingRow = KeychainItem.loadDistinguishingAbsence(
-            account: IdentityKeychainKey.signingPrivateKey.rawValue, service: keychainService
+            account: accounts.signingPrivateKey, service: keychainService
         )
         let keyAgreementRow = KeychainItem.loadDistinguishingAbsence(
-            account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue, service: keychainService
+            account: accounts.keyAgreementPrivateKey, service: keychainService
         )
-        switch Self.classifyDeviceIdentityRows(signing: signingRow, keyAgreement: keyAgreementRow) {
+        switch Self.classifyDeviceIdentityRows(signing: signingRow, keyAgreement: keyAgreementRow, accounts: accounts) {
         case .found(let signing, let keyAgreement):
             return (signing, keyAgreement)
         case .absent:
@@ -813,7 +820,7 @@ public final class IdentityService {
     /// Case 4, whose `KeychainItem.store(…, replacing: .any)` would delete the synced row it could
     /// not read. Absent, or present but unparseable, is nil — Case 4 is then the right answer.
     private func loadLegacyKeyAgreementKey() throws -> Curve25519.KeyAgreement.PrivateKey? {
-        let row = IdentityKeychainKey.keyAgreementPrivateKey.rawValue
+        let row = accounts.keyAgreementPrivateKey
         switch KeychainItem.loadDistinguishingAbsence(account: row, service: keychainService) {
         case .absent:
             return nil
@@ -839,13 +846,13 @@ public final class IdentityService {
         accessibility: CFString
     ) {
         let status = KeychainItem.store(keyAgreement.rawRepresentation,
-                                        account: IdentityKeychainKey.keyAgreementPrivateKey.rawValue,
+                                        account: accounts.keyAgreementPrivateKey,
                                         service: keychainService,
                                         accessibility: accessibility,
                                         synchronizable: false)
         guard status != errSecSuccess else { return }
         FernletAuditLog.log("identity.keychain.storeFailed", context: [
-            "row": IdentityKeychainKey.keyAgreementPrivateKey.rawValue,
+            "row": accounts.keyAgreementPrivateKey,
             "stage": "deviceOnlyMigration",
             "status": "\(status)"
         ])
@@ -875,10 +882,10 @@ public final class IdentityService {
         accessibility: CFString
     ) throws {
         let rows: [(account: String, data: Data)] = [
-            (IdentityKeychainKey.signingPrivateKey.rawValue, signing.rawRepresentation),
-            (IdentityKeychainKey.signingPublicKeyCache.rawValue, signing.publicKey.rawRepresentation),
-            (IdentityKeychainKey.keyAgreementPrivateKey.rawValue, keyAgreement.rawRepresentation),
-            (IdentityKeychainKey.keyAgreementPublicKeyCache.rawValue, keyAgreement.publicKey.rawRepresentation)
+            (accounts.signingPrivateKey, signing.rawRepresentation),
+            (accounts.signingPublicKeyCache, signing.publicKey.rawRepresentation),
+            (accounts.keyAgreementPrivateKey, keyAgreement.rawRepresentation),
+            (accounts.keyAgreementPublicKeyCache, keyAgreement.publicKey.rawRepresentation)
         ]
         for row in rows {
             let status = KeychainItem.store(row.data, account: row.account,

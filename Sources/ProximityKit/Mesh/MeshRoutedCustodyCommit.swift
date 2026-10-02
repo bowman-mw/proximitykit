@@ -5,7 +5,7 @@
 //
 // This file holds ONE type and ONE function on purpose. `MeshCustodyDurabilityWitness`'s initialiser
 // is `fileprivate`, and `fileprivate` is FILE scope — so the only way anywhere in the app to hold a
-// witness is to have completed `MeshRoutedStore.committingCustody(item:custodian:now:in:)`, which lives
+// witness is to have completed `MeshRoutedStore.committingCustody(item:custodian:now:)`, which lives
 // here beside it. `MeshCustodyReceipt.signed(witness:manifest:identity:)` takes a witness as a
 // parameter, so the forbidden order — receipt first, durability later — is not merely discouraged,
 // it is unwritable.
@@ -34,7 +34,7 @@ import FernletFoundation
 /// Proof that a durable custody commit **returned** (plan §3.6).
 ///
 /// Its initialiser is `fileprivate` and it is declared in `Mesh/MeshRoutedCustodyCommit.swift`, the
-/// file that holds ``MeshRoutedStore/committingCustody(item:custodian:now:in:)`` and nothing else — so
+/// file that holds ``MeshRoutedStore/committingCustody(item:custodian:now:)`` and nothing else — so
 /// the only way to hold one is to have completed that verb. This is durable-before-acknowledged in
 /// the type system: no witness ⇒ no ``MeshCustodyReceipt`` ⇒ the forbidden order is unwritable,
 /// here and in items 4, 6 and 8.
@@ -127,19 +127,19 @@ nonisolated extension MeshRoutedStore {
     /// (or the named refusal), mints no witness, and has its `custodiedAt` cleared. A failed index
     /// write mints no witness either: nothing is acknowledged for state a restart would lose.
     ///
+    /// The streamed bytes are measured under the scope namespace's
+    /// `family.purposes.hash.meshRoutedContentV1` (plan step A0.2.8; step A0.2.6 took the caller's
+    /// labels while the scope carried no namespace).
+    ///
     /// - Parameters:
     ///   - item: The signed pair.
     ///   - custodian: This device's fingerprint. The mint re-checks it against the signing identity.
     ///   - now: The injected instant — the value stamped as `custodiedAt` on a first commit.
-    ///   - purposes: The caller's namespace labels, whose `hash.meshRoutedContentV1` the streamed
-    ///     bytes are measured under (plan step A0.2.6), with no default: the store's scope carries no
-    ///     namespace yet.
     /// - Returns: the witness, the incompleteness, or a named refusal; or the store's unavailability.
     func committingCustody(
         item: MeshRoutedItemKey,
         custodian: String,
-        now: Date,
-        in purposes: ProximityNamespace.Purposes
+        now: Date
     ) -> MeshRoutedOutcome<MeshRoutedCustodyOutcome> {
         var index: MeshRoutedIndex
         let token: LoadToken
@@ -157,15 +157,15 @@ nonisolated extension MeshRoutedStore {
         switch openKey() {
         case .available(let key): contentKey = key
         case .deferred(let reason):
-            return .unavailable(.deferred(MeshRoutedDeferral(reason: reason, detail: Self.chunkDirectoryName)))
+            return .unavailable(.deferred(MeshRoutedDeferral(reason: reason, detail: chunkDirectoryName)))
         case .refused(let cause):
             return .unavailable(.refused(MeshRoutedSealRefusal(operation: .open, cause: cause)))
         }
         return committed(record, manifest: manifest, custodian: custodian, now: now,
-                         index: &index, token: token, contentKey: contentKey, purposes: purposes)
+                         index: &index, token: token, contentKey: contentKey)
     }
 
-    /// The measuring half of ``committingCustody(item:custodian:now:in:)``: stream, gate on size then
+    /// The measuring half of ``committingCustody(item:custodian:now:)``: stream, gate on size then
     /// content hash, stamp `custodiedAt` once, and only then mint the witness.
     private func committed(
         _ record: MeshRoutedItemRecord,
@@ -174,11 +174,10 @@ nonisolated extension MeshRoutedStore {
         now: Date,
         index: inout MeshRoutedIndex,
         token: LoadToken,
-        contentKey: SymmetricKey,
-        purposes: ProximityNamespace.Purposes
+        contentKey: SymmetricKey
     ) -> MeshRoutedOutcome<MeshRoutedCustodyOutcome> {
         let measured: (bytes: UInt64, contentHash: Data)
-        switch streamedContentHash(of: record, in: &index, token: token, contentKey: contentKey, purposes: purposes) {
+        switch streamedContentHash(of: record, in: &index, token: token, contentKey: contentKey) {
         case .measured(let bytes, let hash): measured = (bytes, hash)
         case .incomplete(let received, let expected):
             return .completed(.incomplete(received: received, expected: expected))
@@ -262,10 +261,9 @@ nonisolated extension MeshRoutedStore {
         of record: MeshRoutedItemRecord,
         in index: inout MeshRoutedIndex,
         token: LoadToken,
-        contentKey: SymmetricKey,
-        purposes: ProximityNamespace.Purposes
+        contentKey: SymmetricKey
     ) -> MeshRoutedStreamResult {
-        var hasher = MeshRoutedContentHasher(purposes: purposes)
+        var hasher = MeshRoutedContentHasher(purposes: scope.namespace.family.purposes)
         var bytes: UInt64 = 0
         // R2: bounded by `maxChunksPerItem`.
         for slot in 0..<Int(record.chunkCount) {
@@ -305,17 +303,17 @@ nonisolated extension MeshRoutedStore {
     /// blob is returned **only** when the re-measured digest equals the manifest's, so a caller can
     /// never open bytes this store cannot re-authenticate.
     ///
+    /// The bytes are re-measured under the scope namespace's `family.purposes.hash.meshRoutedContentV1`
+    /// (plan step A0.2.8; step A0.2.6 took the caller's labels while the scope carried no namespace).
+    ///
     /// - Parameters:
     ///   - item: The signed pair.
     ///   - manifest: The origin's manifest, whose `size` and `contentHash` the bytes must meet.
-    ///   - purposes: The caller's namespace labels, whose `hash.meshRoutedContentV1` the bytes are
-    ///     re-measured under (plan step A0.2.6), with no default.
     /// - Returns: the blob, `nil` when the item is incomplete or does not measure up, or the
     ///   store's unavailability.
     func assembledBlob(
         item: MeshRoutedItemKey,
-        expecting manifest: MeshRoutedManifest,
-        in purposes: ProximityNamespace.Purposes
+        expecting manifest: MeshRoutedManifest
     ) -> MeshRoutedOutcome<Data?> {
         var index: MeshRoutedIndex
         let token: LoadToken
@@ -329,18 +327,17 @@ nonisolated extension MeshRoutedStore {
         switch openKey() {
         case .available(let key): contentKey = key
         case .deferred(let reason):
-            return .unavailable(.deferred(MeshRoutedDeferral(reason: reason, detail: Self.chunkDirectoryName)))
+            return .unavailable(.deferred(MeshRoutedDeferral(reason: reason, detail: chunkDirectoryName)))
         case .refused(let cause):
             return .unavailable(.refused(MeshRoutedSealRefusal(operation: .open, cause: cause)))
         }
-        return assembled(record, manifest: manifest, index: &index, token: token, contentKey: contentKey,
-                         purposes: purposes)
+        return assembled(record, manifest: manifest, index: &index, token: token, contentKey: contentKey)
     }
 
-    /// The streaming half of ``assembledBlob(item:expecting:in:)``: read every slot in index order,
+    /// The streaming half of ``assembledBlob(item:expecting:)``: read every slot in index order,
     /// hash while concatenating, and hand back the bytes only if they measure up.
     ///
-    /// The repair branch is ``streamedContentHash(of:in:token:contentKey:purposes:)``'s, verbatim: a missing
+    /// The repair branch is ``streamedContentHash(of:in:token:contentKey:)``'s, verbatim: a missing
     /// or unauthentic file drops the descriptor and clears `custodiedAt`, because the index is
     /// authoritative over what this device has and bytes it cannot authenticate are bytes it does
     /// not have.
@@ -349,10 +346,9 @@ nonisolated extension MeshRoutedStore {
         manifest: MeshRoutedManifest,
         index: inout MeshRoutedIndex,
         token: LoadToken,
-        contentKey: SymmetricKey,
-        purposes: ProximityNamespace.Purposes
+        contentKey: SymmetricKey
     ) -> MeshRoutedOutcome<Data?> {
-        var hasher = MeshRoutedContentHasher(purposes: purposes)
+        var hasher = MeshRoutedContentHasher(purposes: scope.namespace.family.purposes)
         var blob = Data()
         // R2: bounded by `maxChunksPerItem`.
         for slot in 0..<Int(record.chunkCount) {

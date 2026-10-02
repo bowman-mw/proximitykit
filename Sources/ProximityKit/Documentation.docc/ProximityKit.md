@@ -531,7 +531,7 @@ label became functions — ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/rece
 `in purposes:` on every door: seal, open and the authenticated data; wrap, unwrap (the HKDF salt
 included) and the authenticated data. ``MeshChunkVerifier`` re-derives the chunk hash under its own
 copy, and the routed store's three hashing verbs (`stagingChunk`, `committingCustody` and
-`assembledBlob`) take the caller's, because the store's scope carries no namespace until A0.2.8.
+`assembledBlob`) took the caller's until step A0.2.8 gave the store's scope its namespace.
 ``IdentityService``'s transport seal and open and its group-key wrap and unwrap read its own
 ``IdentityService/purposes``, and the encrypted-metadata door authenticates under the manager's stored
 namespace. `MeshEpochBounds.derivationDomain` is gone:
@@ -555,6 +555,27 @@ the radio held no namespace. The three managers build their radio from their sto
 the manager that signs a tunnel's introduction and the radio that checks the peer's read one
 namespace. The Bonjour instance prefixes, the TLS certificate's common name and the `"Fernlet"`
 display default stay as they are until A0.3.
+
+**At rest: names and rows (step A0.2.8).** ``MeshSessionStorageScope`` and ``MeshRoutedStorageScope``
+carry the host's namespace beside their two isolation axes (`init(namespace:directory:keychainService:)`),
+and the two stores read their names off it: ``MeshSessionStore`` its file
+(`installation.storage.meshSessionContextFileName`), ``MeshRoutedStore`` its index and chunk directory
+(`meshRoutedIndexFileName`, `meshRoutedChunkDirectoryName`), and each its seal key's account
+(`installation.keychain.meshSessionSealKey.account`, `.meshRoutedSealKey.account`), which the seal-key
+helpers now take as `account:`. The routed store measures under `scope.namespace.family.purposes`, so
+`stagingChunk(_:now:)`, `committingCustody(item:custodian:now:)` and `assembledBlob(item:expecting:)`
+lost the `in purposes:` step A0.2.6 gave them: a store holds one source of its labels, not two.
+``MeshSessionStorageScope/production(for:)`` and ``MeshRoutedStorageScope/production(for:)`` replace
+the static `production` and `productionKeychainService` — the namespace's `defaultDirectory` and
+seal-key service — and `keychainService(besideHeartDrop:in:)` maps the production heart-drop service
+to the namespace's. ``ProximityHost``'s extension defaults build the sidecar root
+(`installation.storage.defaultDirectory`) and both scopes from ``ProximityHost/proximityNamespace``.
+``IdentityService`` keeps its four device rows under the namespace's `installation.keychain.identity`
+accounts, and `classifyDeviceIdentityRows` names a refusing row by the accounts it is handed. The two
+unused mirror tokens (`MeshSessionContextSchema.token`, `MeshRoutedIndexSchema.token`) are deleted;
+the column seals themselves stay FernletCrypto's until step A0.2.9 copies `ColumnCrypto`.
+`ProximitySupportLayout.defaultDirectory` stays for the heart-drop scope and the feature ledgers
+until step A0.4.
 
 ## Topics
 
@@ -1673,7 +1694,8 @@ old blanket "ProximityKit persists nothing" rule (plan §17.3), and the reversal
 purpose. `MeshSessionContext` — mesh id, protocol version, `createdAt`/`hardDeadline`, the
 membership ledger, epoch heads, the develop bar — is sealed at rest by ``MeshSessionStore`` under
 `FernletCryptoPurpose.KeyDerivation.meshSessionContextV1`, on a per-instance
-``MeshSessionStorageScope`` (directory *and* keychain service, so a wipe takes both together).
+``MeshSessionStorageScope`` (directory *and* keychain service, so a wipe takes both together; since
+step A0.2.8 it also carries the host's namespace, which names the file and the seal key's account).
 `MeshGroupKey`, `PeerSlot`, `MeshSessionRosterEntry`/`MeshFriendReviewBatch` and the
 `SessionMessageStore` transcript are **still never persisted**, and `MeshGroupKey`'s doc guard is
 now load-bearing by contrast: content never depends on the control key, so resume reconnects and
@@ -1689,7 +1711,8 @@ session's — one fate per service is the only arrangement a service-wide delete
 Its schema is its own from day one (``MeshRoutedIndexSchema``, version **2** since P5 item 4 added the
 durable ack instant and the recipient-receipt evidence set — an older file is `corrupt`, never
 migrated, because reinterpreting one would produce a record whose two new fields the next save
-silently drops; the at-rest *token* does not move, since it names the key-derivation domain);
+silently drops; the column seal does not move, since it is the key-derivation domain — the unused
+at-rest *token* that mirrored it was deleted in step A0.2.8);
 `MeshSessionContext` stays at schema 2 and gains nothing. Chunk file names are opaque random UUIDs recorded in the index, so no
 fingerprint, item id, index or hash appears in a path component; and because `ColumnCrypto`'s AAD is
 purpose ‖ install binding with **no file name in it**, every read compares the opened chunk's
@@ -2264,7 +2287,7 @@ hedged signature and `custodiedAt`, so a re-mint of the same claim is the same i
 
 The order is a **type rule, not a comment**: the mint takes a ``MeshCustodyDurabilityWitness``, whose
 initializer is `fileprivate` to `Mesh/MeshRoutedCustodyCommit.swift` — the file holding
-``MeshRoutedStore/committingCustody(item:custodian:now:in:)`` and nothing else. No witness ⇒ no receipt.
+``MeshRoutedStore/committingCustody(item:custodian:now:)`` and nothing else. No witness ⇒ no receipt.
 The mirror-image gate is `MeshRoutedStore.LoadToken`'s own `fileprivate` initializer in
 `Mesh/MeshRoutedStore.swift`, so the commit verb cannot mint its own write token either: two
 `fileprivate` gates in two files, neither able to open the other's door. A grep-wall

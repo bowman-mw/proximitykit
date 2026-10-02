@@ -15,12 +15,13 @@ import Foundation
 
 /// The at-rest schema constants for ``MeshSessionContext``.
 ///
-/// ``token`` is a **frozen English wire/at-rest token** (localization wall): it is the same
-/// spelling as the sealing purpose `FernletCryptoPurpose.KeyDerivation.meshSessionContextV1`, and
-/// it names the shape of the JSON inside the sealed blob. ``current`` is the integer actually
-/// written into every context, and the ONLY value the decoder accepts — a context stamped with any
-/// other version is refused as corrupt rather than partially decoded, because a partially decoded
-/// membership ledger is a roster that silently lost members.
+/// ``current`` is the integer actually written into every context, and the ONLY value the decoder
+/// accepts — a context stamped with any other version is refused as corrupt rather than partially
+/// decoded, because a partially decoded membership ledger is a roster that silently lost members.
+/// The blob's sealing domain is its store's column seal (`fernlet.mesh.session-context.v1` for
+/// Fernlet), which a schema bump never changes; the unused `token` that mirrored it was deleted in
+/// ProximityKit plan step A0.2.8, and `ProximityNamespaceGoldenTests` pins that spelling as a
+/// literal row against the label instead.
 ///
 /// **Bumping it is a deliberate act.** Adding a field with a default is *usually* compatible and
 /// needs no bump; changing the MEANING of a field, or narrowing one, always does. The third
@@ -58,14 +59,6 @@ nonisolated enum MeshSessionContextSchema {
     /// The schema version this build writes and the only one it reads. See the type's discussion
     /// for what v2 and v3 changed, and why an older file is refused rather than migrated.
     static let current = 3
-
-    /// The frozen token naming this at-rest shape. English forever — it is a persisted format
-    /// name, never display copy.
-    ///
-    /// It stays `…v1` across the schema bump on purpose: this token is the **sealing domain**,
-    /// spelled identically to `FernletCryptoPurpose.KeyDerivation.meshSessionContextV1`, and the
-    /// key that opens the blob did not change. ``current`` is the value that carries the shape.
-    static let token = "fernlet.mesh.session-context.v1"
 
     /// Epoch branch heads retained (plan §9 caps the keyring; 8 is the roster cap, and a mesh
     /// cannot have more live branches than it has members).

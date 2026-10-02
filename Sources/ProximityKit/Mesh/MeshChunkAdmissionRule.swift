@@ -9,7 +9,7 @@
 // the same decision is written twice, the ten refusal tokens drift. C13 names that as a binding
 // constraint on item 3, so the verdicts moved here and BOTH doors call them:
 //
-//   • `MeshChunkAssembly.admit(_:in:)`  and  `MeshRoutedStore.stagingChunk(_:now:in:)` → `verdict`
+//   • `MeshChunkAssembly.admit(_:in:)`  and  `MeshRoutedStore.stagingChunk(_:now:)` → `verdict`
 //   • `MeshChunkAssembly.bind(to:)`  and  `MeshRoutedStore.admittingManifest(_:now:)` → `bindingVerdict`
 //
 // The extraction is behaviour-preserving by construction: item 2's `MeshChunkAssemblyTests` pass

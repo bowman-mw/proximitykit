@@ -6939,7 +6939,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             return
         }
-        let outcome = store.stagingChunk(chunk, now: context.now, in: namespace.family.purposes)
+        let outcome = store.stagingChunk(chunk, now: context.now)
         recordRoutedOutcome(
             outcome, type: .meshRoutedChunk, key: key, in: context, verdict: RoutedDrainVerdict.of
         )
@@ -7843,7 +7843,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         // R2: bounded by the item's own chunk count, itself capped at `maxChunkCount`.
         for chunk in chunks {
-            switch store.stagingChunk(chunk, now: now, in: namespace.family.purposes) {
+            switch store.stagingChunk(chunk, now: now) {
             case .completed: continue
             case .refused(let refusal): return refusedOwnRoutedItem(refusal, key: key, at: now)
             case .unavailable: return .refused(.storeUnavailable)
@@ -8505,7 +8505,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             return nil
         }
-        let outcome = routedStore().committingCustody(item: key, custodian: me, now: now, in: namespace.family.purposes)
+        let outcome = routedStore().committingCustody(item: key, custodian: me, now: now)
         forgetRepairedRoutedItem(key, manifest: manifest, after: outcome)
         guard case .completed(.committed(let witness)) = outcome else {
             FernletAuditLog.log("mesh.routedDrain.custodyNotCommitted", context: ["type": manifest.typeToken])
@@ -8641,7 +8641,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameters:
     ///   - now: The injected instant.
     ///   - excluding: A key the caller is about to commit custody for itself, one line later. One
-    ///     item, one commit, per evaluation: ``MeshRoutedStore/committingCustody(item:custodian:now:in:)``
+    ///     item, one commit, per evaluation: ``MeshRoutedStore/committingCustody(item:custodian:now:)``
     ///     re-streams the whole item before it finds a stored stamp, so committing twice is up to
     ///     256 MiB re-read on the main actor and two signed receipts.
     private func claimHandedOffCustody(now: Date, excluding pending: MeshRoutedItemKey? = nil) {
@@ -9240,7 +9240,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func routedProjectionBlob(
         key: MeshRoutedItemKey, manifest: MeshRoutedManifest
     ) -> Data? {
-        switch routedStore().assembledBlob(item: key, expecting: manifest, in: namespace.family.purposes) {
+        switch routedStore().assembledBlob(item: key, expecting: manifest) {
         case .completed(let held):
             return held
         case .unavailable(let cause):

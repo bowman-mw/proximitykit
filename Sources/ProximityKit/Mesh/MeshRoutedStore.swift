@@ -264,20 +264,29 @@ public nonisolated struct MeshRoutedStore: Sendable {
         case deferred(MeshRoutedDeferral)
     }
 
-    /// Name of the sealed catalogue inside the scope's directory.
-    static let indexFileName = "MeshRoutedIndex.sealed"
+    /// Name of the sealed catalogue inside the scope's directory: the scope namespace's
+    /// `installation.storage.meshRoutedIndexFileName` (plan step A0.2.8; Fernlet's
+    /// `MeshRoutedIndex.sealed`).
+    var indexFileName: String { scope.namespace.installation.storage.meshRoutedIndexFileName }
 
     /// Extension appended when a corrupt index is set aside.
     static let quarantineExtension = "corrupt"
 
-    /// Directory holding the sealed payload files, one per held chunk.
-    static let chunkDirectoryName = "MeshRoutedChunks"
+    /// Directory holding the sealed payload files, one per held chunk: the scope namespace's
+    /// `installation.storage.meshRoutedChunkDirectoryName` (plan step A0.2.8; Fernlet's
+    /// `MeshRoutedChunks`).
+    var chunkDirectoryName: String { scope.namespace.installation.storage.meshRoutedChunkDirectoryName }
 
     /// Extension every payload file carries. The stem is a fresh random UUID and means nothing.
     static let chunkFileExtension = "chunk"
 
-    /// This store's directory + keychain service.
+    /// This store's namespace + directory + keychain service.
     let scope: MeshRoutedStorageScope
+
+    /// The seal key's account under ``MeshRoutedStorageScope/keychainService``: the scope
+    /// namespace's `installation.keychain.meshRoutedSealKey.account` (plan step A0.2.8; Fernlet's
+    /// `meshRoutedStoreKey`).
+    var sealKeyAccount: String { scope.namespace.installation.keychain.meshRoutedSealKey.account }
 
     /// The one sealing path, bound to this surface's reviewed purpose. **The only `ColumnCrypto` in
     /// the routed store**, and the reason a grep-wall can assert the store names no decryption seam.
@@ -297,8 +306,9 @@ public nonisolated struct MeshRoutedStore: Sendable {
     /// Builds a store on one scope.
     ///
     /// - Parameters:
-    ///   - scope: Directory + keychain service. Pass ``MeshRoutedStorageScope/production`` in the
-    ///     app; tests pass a temp directory and a unique service.
+    ///   - scope: Namespace + directory + keychain service. Pass
+    ///     ``MeshRoutedStorageScope/production(for:)`` in the app; tests pass a temp directory and a
+    ///     unique service.
     ///   - capacity: The cap model this store's doors refuse at. Shipping code takes the default;
     ///     a test drives a door to its bound in milliseconds by injecting a small one.
     init(scope: MeshRoutedStorageScope, capacity: MeshRoutedCapacity = .production) {
@@ -308,7 +318,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
 
     /// The sealed catalogue.
     var indexURL: URL {
-        scope.directory.appendingPathComponent(Self.indexFileName, isDirectory: false)
+        scope.directory.appendingPathComponent(indexFileName, isDirectory: false)
     }
 
     /// Where a corrupt index is moved so it is preserved rather than destroyed.
@@ -318,7 +328,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
 
     /// The directory of sealed payload files.
     var chunkDirectory: URL {
-        scope.directory.appendingPathComponent(Self.chunkDirectoryName, isDirectory: true)
+        scope.directory.appendingPathComponent(chunkDirectoryName, isDirectory: true)
     }
 
     /// The file one opaque chunk name resolves to.
@@ -356,11 +366,11 @@ public nonisolated struct MeshRoutedStore: Sendable {
         guard !raw.isEmpty else {
             return .corrupt(MeshRoutedCorruption(detail: .emptyFile))
         }
-        switch MeshRoutedSealKey.forOpen(service: scope.keychainService) {
+        switch MeshRoutedSealKey.forOpen(service: scope.keychainService, account: sealKeyAccount) {
         case .available(let key):
             return openIndex(from: raw, contentKey: key)
         case .deferred(let reason):
-            return .deferred(MeshRoutedDeferral(reason: reason, detail: Self.indexFileName))
+            return .deferred(MeshRoutedDeferral(reason: reason, detail: indexFileName))
         case .refused(let cause):
             return .refused(MeshRoutedSealRefusal(operation: .open, cause: cause))
         }
@@ -387,7 +397,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
             return Self.loadState(forOpenError: error)
         } catch is DeviceBindingID.ReadError {
             return .deferred(
-                MeshRoutedDeferral(reason: .installBindingReadError, detail: Self.indexFileName)
+                MeshRoutedDeferral(reason: .installBindingReadError, detail: indexFileName)
             )
         } catch let error as DecodingError {
             return .corrupt(MeshRoutedCorruption(detail: .undecodableJSON(String(describing: error))))
@@ -446,12 +456,12 @@ public nonisolated struct MeshRoutedStore: Sendable {
     ///
     /// - Throws: ``MeshRoutedSealRefusal`` or ``MeshRoutedSaveError/deferred(_:)``.
     func sealKey() throws -> SymmetricKey {
-        switch MeshRoutedSealKey.forSeal(service: scope.keychainService) {
+        switch MeshRoutedSealKey.forSeal(service: scope.keychainService, account: sealKeyAccount) {
         case .available(let key):
             return key
         case .deferred(let reason):
             throw MeshRoutedSaveError.deferred(
-                MeshRoutedDeferral(reason: reason, detail: Self.indexFileName)
+                MeshRoutedDeferral(reason: reason, detail: indexFileName)
             )
         case .refused(let cause):
             throw MeshRoutedSealRefusal(operation: .seal, cause: cause)
@@ -461,7 +471,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
     /// The key for OPENING sealed bytes, as an outcome rather than a throw — the read paths branch
     /// on all three answers and never mint.
     func openKey() -> MeshRoutedSealKeyOutcome {
-        MeshRoutedSealKey.forOpen(service: scope.keychainService)
+        MeshRoutedSealKey.forOpen(service: scope.keychainService, account: sealKeyAccount)
     }
 
     /// Seals any value under this store's one purpose, translating `ColumnCrypto`'s D4 refusal into

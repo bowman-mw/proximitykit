@@ -276,7 +276,7 @@ extension MeshCustodyReceipt {
     /// Mints a custodian-signed receipt for durable custody that **has already been proved**.
     ///
     /// The `witness` parameter is the whole gate: it can only be obtained from
-    /// `MeshRoutedStore.committingCustody(item:custodian:now:in:)`, whose returned value is the one
+    /// `MeshRoutedStore.committingCustody(item:custodian:now:)`, whose returned value is the one
     /// place a `MeshCustodyDurabilityWitness` is ever constructed. That is plan §3.6 in the type
     /// system rather than in a comment — there is no argument list that produces a receipt for bytes
     /// no durable write returned.

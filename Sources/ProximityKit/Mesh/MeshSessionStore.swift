@@ -225,29 +225,37 @@ public nonisolated struct MeshSessionStore: Sendable {
         case deferred(MeshSessionDeferral)
     }
 
-    /// Name of the sealed sidecar inside the scope's directory.
-    static let fileName = "MeshSessionContext.sealed"
+    /// Name of the sealed sidecar inside the scope's directory: the scope namespace's
+    /// `installation.storage.meshSessionContextFileName` (plan step A0.2.8; Fernlet's
+    /// `MeshSessionContext.sealed`).
+    var fileName: String { scope.namespace.installation.storage.meshSessionContextFileName }
 
     /// Extension appended when a corrupt file is set aside.
     static let quarantineExtension = "corrupt"
 
-    /// This store's directory + keychain service.
+    /// This store's namespace + directory + keychain service.
     let scope: MeshSessionStorageScope
+
+    /// The seal key's account under ``MeshSessionStorageScope/keychainService``: the scope
+    /// namespace's `installation.keychain.meshSessionSealKey.account` (plan step A0.2.8; Fernlet's
+    /// `meshSessionContextKey`).
+    var sealKeyAccount: String { scope.namespace.installation.keychain.meshSessionSealKey.account }
 
     /// The one sealing path, bound to this surface's reviewed purpose.
     private let crypto = ColumnCrypto(purpose: FernletCryptoPurpose.KeyDerivation.meshSessionContextV1)
 
     /// Builds a store on one scope.
     ///
-    /// - Parameter scope: Directory + keychain service. Pass ``MeshSessionStorageScope/production``
-    ///   in the app; tests pass a temp directory and a unique service.
+    /// - Parameter scope: Namespace + directory + keychain service. Pass
+    ///   ``MeshSessionStorageScope/production(for:)`` in the app; tests pass a temp directory and a
+    ///   unique service.
     init(scope: MeshSessionStorageScope) {
         self.scope = scope
     }
 
     /// The sealed context file.
     var fileURL: URL {
-        scope.directory.appendingPathComponent(Self.fileName, isDirectory: false)
+        scope.directory.appendingPathComponent(fileName, isDirectory: false)
     }
 
     /// Where a corrupt file is moved so it is preserved rather than destroyed.
@@ -277,11 +285,11 @@ public nonisolated struct MeshSessionStore: Sendable {
         guard !raw.isEmpty else {
             return .corrupt(MeshSessionCorruption(detail: .emptyFile))
         }
-        switch MeshSessionSealKey.forOpen(service: scope.keychainService) {
+        switch MeshSessionSealKey.forOpen(service: scope.keychainService, account: sealKeyAccount) {
         case .available(let key):
             return openContext(from: raw, contentKey: key)
         case .deferred(let reason):
-            return .deferred(MeshSessionDeferral(reason: reason, detail: Self.fileName))
+            return .deferred(MeshSessionDeferral(reason: reason, detail: fileName))
         case .refused(let cause):
             return .refused(MeshSessionSealRefusal(operation: .open, cause: cause))
         }
@@ -304,7 +312,7 @@ public nonisolated struct MeshSessionStore: Sendable {
         } catch let error as ColumnCrypto.SealedColumnOpenError {
             return Self.loadState(forOpenError: error)
         } catch is DeviceBindingID.ReadError {
-            return .deferred(MeshSessionDeferral(reason: .installBindingReadError, detail: Self.fileName))
+            return .deferred(MeshSessionDeferral(reason: .installBindingReadError, detail: fileName))
         } catch let error as DecodingError {
             return .corrupt(MeshSessionCorruption(detail: .undecodableJSON(String(describing: error))))
         } catch {
@@ -354,11 +362,11 @@ public nonisolated struct MeshSessionStore: Sendable {
     func save(_ context: MeshSessionContext, token: LoadToken) throws {
         guard token.fileURL == fileURL else { throw MeshSessionSaveError.tokenFromAnotherStore }
         let contentKey: SymmetricKey
-        switch MeshSessionSealKey.forSeal(service: scope.keychainService) {
+        switch MeshSessionSealKey.forSeal(service: scope.keychainService, account: sealKeyAccount) {
         case .available(let key):
             contentKey = key
         case .deferred(let reason):
-            throw MeshSessionSaveError.deferred(MeshSessionDeferral(reason: reason, detail: Self.fileName))
+            throw MeshSessionSaveError.deferred(MeshSessionDeferral(reason: reason, detail: fileName))
         case .refused(let cause):
             throw MeshSessionSealRefusal(operation: .seal, cause: cause)
         }

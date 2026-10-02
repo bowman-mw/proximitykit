@@ -36,7 +36,10 @@ import FernletFoundation
 /// `MeshSessionContext` (whose schema stays 2).
 ///
 /// A file this build does not own is refused **as a whole**, never partially reinterpreted, and
-/// lands in `corrupt`, never `absent`. Older is corrupt, not migrated, and the justification is
+/// lands in `corrupt`, never `absent`. Its sealing domain is the store's column seal
+/// (`fernlet.mesh.routed-store.v1` for Fernlet); the unused `token` that mirrored it was deleted in
+/// ProximityKit plan step A0.2.8, and `ProximityNamespaceGoldenTests` pins that spelling as a
+/// literal row against the label instead. Older is corrupt, not migrated, and the justification is
 /// temporal and true today: no build that wrote an older version ever ran on a device.
 ///
 /// P5 item 4 moved it 1 → **2** for the two durable fields a final acknowledgement needs
@@ -47,10 +50,6 @@ import FernletFoundation
 nonisolated enum MeshRoutedIndexSchema {
     /// The version this build writes and the only version it reads.
     static let current = 2
-    /// Frozen English at-rest token — the same spelling as the sealing purpose
-    /// (`KeyDerivation.meshRoutedStoreV1`), so the file's format and its key derivation are one
-    /// vocabulary. Never localized, never displayed.
-    static let token = "fernlet.mesh.routed-store.v1"
 }
 
 // MARK: - MeshRoutedStoreFormat
