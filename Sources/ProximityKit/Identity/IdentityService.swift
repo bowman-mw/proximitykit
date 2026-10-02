@@ -19,7 +19,6 @@ import Foundation
 import FernletCrypto
 import CryptoKit
 import Security
-import FernletDomainModel
 
 // MARK: - Keychain key identifiers
 
@@ -200,8 +199,9 @@ public final class IdentityService {
     ///
     /// **Transitional** (plan step A0.2.3). A namespace label signs through the
     /// `ProximityCryptographicPurpose` overload below; this one stays for FernletCrypto's registry:
-    /// the feature labels until plan step A0.4, the app's duress and probe purposes until C1, the
-    /// core labels until A0.2's later commits re-point their builders, and the tests that name them.
+    /// the feature labels until plan step A0.4, the app's duress and probe purposes until C1, and
+    /// the tests that name them. Every core label's builder signs through the namespace overload
+    /// since step A0.2.5.
     /// The purpose's type picks the overload. No deprecation attribute: warnings are errors.
     public func sign(_ data: Data, purpose: CryptographicPurpose) throws -> Data {
         guard let key = signingKey else { throw IdentityError.notProvisioned }

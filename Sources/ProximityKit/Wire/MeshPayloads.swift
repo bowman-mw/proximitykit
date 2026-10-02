@@ -1,5 +1,4 @@
 import Foundation
-import FernletDomainModel
 
 // WI-9: every wire payload below is marked `nonisolated, Sendable`. ProximityKit declares
 // `.defaultIsolation(MainActor.self)`, which would otherwise make these value types and their

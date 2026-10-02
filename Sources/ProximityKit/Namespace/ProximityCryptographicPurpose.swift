@@ -6,7 +6,8 @@
 // `CryptographicPurpose` exactly — the same `data`, the same three framings, the same positional
 // `signingBytes` test — but the host supplies the bytes, as a source literal handed to a
 // `ProximityNamespace` group initializer, and ProximityKit decides how each label is consumed.
-// Nothing reads it yet: A0.2's later commits route ProximityKit's reads through the namespace.
+// A0.2's later commits routed ProximityKit's label reads through the namespace, so every protocol
+// label ProximityKit consumes is one of these.
 
 import Foundation
 

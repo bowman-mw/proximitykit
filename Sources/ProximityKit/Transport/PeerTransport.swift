@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import FernletDomainModel
 
 /// Namespace for shared Bonjour service-type constants.
 ///

@@ -2,8 +2,8 @@
 // ProximityKit/Namespace
 //
 // The family half of `ProximityNamespace`: what every interoperating app shares. The labels are
-// grouped and named like FernletCrypto's registry (Signature, KeyDerivation, AEAD, Hash), so a read
-// site that A0.2's later commits re-point only re-cases the family name. Every label initializer takes
+// grouped and named like FernletCrypto's registry (Signature, KeyDerivation, AEAD, Hash), so each read
+// site A0.2's later commits re-pointed only re-cased the family name. Every label initializer takes
 // `StaticString` and mints each purpose with the role its field fixes; nothing here takes a role.
 
 import Foundation

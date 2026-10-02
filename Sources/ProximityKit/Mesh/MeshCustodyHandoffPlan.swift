@@ -17,7 +17,6 @@
 // `MeshRoutedDrainBounds.increment1` — because a new number is a new policy nobody decided.
 
 import Foundation
-import FernletDomainModel
 
 // MARK: - MeshCustodyHandoffScope
 

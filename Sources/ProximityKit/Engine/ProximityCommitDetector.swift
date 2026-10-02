@@ -1,5 +1,4 @@
 import Foundation
-import FernletDomainModel
 
 /// Dwell gate over a stream of distance samples: fires once the peer has stayed inside a
 /// distance threshold for a minimum dwell time and sample count.

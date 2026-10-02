@@ -21,7 +21,6 @@
 // `routedAccessGate`), any store, any canonical-store mutation, any clock. What comes out is a
 // value; who may be TOLD about it is the manager's second predicate.
 
-import CryptoKit
 import Foundation
 
 // MARK: - MeshRoutedDeliveryError

@@ -1,5 +1,4 @@
 import Foundation
-import FernletDomainModel
 
 // Wire payload for live-session temporary chat messages (mesh redesign Phase 5,
 // Docs/Proximity-Mesh-Redesign-2026-07-10.md). Mirrors RecipeSharePayloads / ClothingSharePayloads.

@@ -4,8 +4,8 @@
 // ProximityKit plan step A0.2.1 (Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md §4 A0.2, §13 item
 // 1): the host's protocol identity — every byte string by which ProximityKit's wire, keychain and disk
 // formats identify the app it runs in — as ONE `Sendable` value that the host builds once and hands
-// down. This commit adds the type alone. No read changes: A0.2's later commits route ProximityKit's
-// reads through it, one consumer family at a time, each byte-identical for the app that ships today.
+// down. Step A0.2.1 added the type alone; A0.2's later commits routed ProximityKit's reads through
+// it, one consumer family at a time, each byte-identical for Fernlet.
 
 import Foundation
 
@@ -25,9 +25,10 @@ import Foundation
 /// composition root and hands it down through the seams ProximityKit already has, and every reader
 /// keeps its own copy, so no read hops an actor and no reader can see a namespace its root did not
 /// hand it. A host that supplies none gets a compile error, never another app's identity. Plan step
-/// A0.2.1 added the type; since A0.2.3 the host supplies it as ``ProximityHost/proximityNamespace``,
-/// the managers keep a copy and `IdentityService` takes its keychain service from it, and A0.2's
-/// later commits route the remaining reads.
+/// A0.2.1 added the type; since A0.2.3 the host supplies it as ``ProximityHost/proximityNamespace``
+/// and the managers keep a copy, and by the end of A0.2 every protocol label, radio value, keychain
+/// row and storage name ProximityKit reads comes from it (`ProximityNamespaceBoundaryTests` keeps it
+/// that way).
 ///
 /// **Total, and judged once.** ``init(family:installation:)`` never throws or traps: it runs every
 /// soundness rule once and records the verdict in ``soundness``. A host that prefers to fail at launch

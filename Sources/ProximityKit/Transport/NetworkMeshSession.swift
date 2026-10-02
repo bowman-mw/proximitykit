@@ -5,7 +5,6 @@ import Foundation
 import Network
 import os
 import Security
-import FernletDomainModel
 
 // MARK: - NetworkMeshWire
 

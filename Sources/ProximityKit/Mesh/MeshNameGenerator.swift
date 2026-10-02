@@ -1,5 +1,4 @@
 import Foundation
-import FernletDomainModel
 
 /// Generates friendly two-word default names ("sunny-meadow") for freshly created meshes.
 ///

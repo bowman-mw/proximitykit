@@ -25,7 +25,6 @@
 import Foundation
 import Observation
 import FernletDomainModel
-import FernletFoundation
 
 /// One received heart. `senderDisplayName` is sanitized at the wire boundary before it is
 /// handed to the ledger (see `PresenceManager`), so nothing peer-controlled lands here raw.

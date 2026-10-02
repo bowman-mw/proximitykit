@@ -5,7 +5,6 @@
 // The dateProvider is injectable so tests can simulate clock advancement.
 
 import Foundation
-import FernletDomainModel
 
 /// Rolling 24-hour cache of seen envelope IDs, the live-radio replay-attack defense.
 ///

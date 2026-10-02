@@ -1,5 +1,4 @@
 import Foundation
-import FernletDomainModel
 
 /// The transport's own stable notion of *one remote endpoint*, opaque to everything above it.
 ///

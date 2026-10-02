@@ -170,8 +170,8 @@ public final class PresenceManager: ProximityPayloadHandling {
     @ObservationIgnored private unowned let store: any ProximityHost
     /// The host's protocol identity, read once from ``store`` at construction and kept as this
     /// manager's own copy (ProximityKit plan step A0.2.3), so no later read reaches back to the
-    /// host. The default identity is built from it; A0.2's later commits route the rest of this
-    /// manager's labels and names through it. `nonisolated`: inert `Sendable` value data.
+    /// host. The default identity is built from it, and since A0.2.7 so is the radio, which reads
+    /// its service type, ALPN and log subsystem off it. `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     @ObservationIgnored private let identity: IdentityService
     @ObservationIgnored private let ledger: ProximityHeartLedger

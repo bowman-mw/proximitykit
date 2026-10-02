@@ -349,8 +349,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// keys on, the routed store's three hashing verbs, the encrypted-metadata door's AAD and every
     /// epoch id it mints or plans; since A0.2.7 the radio it builds by default, which reads its wire
     /// values off it and checks the peer's introduction under its labels, the labels this manager
-    /// signs this side's under. A0.2's later commits route the rest of this manager's labels and
-    /// names through it.
+    /// signs this side's under; since A0.2.8 the storage scopes its host builds carry it too. What
+    /// this manager still spells itself, its features' values and the photo stores' names, leaves
+    /// with those features (plan steps A0.4 and A0.5).
     /// `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in

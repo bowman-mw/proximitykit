@@ -1,7 +1,6 @@
 import Foundation
 import Combine
 import simd
-import FernletDomainModel
 
 /// A single distance reading from a ranging provider: either a measured distance in meters
 /// (with an optional UWB direction vector) or no reading at all.

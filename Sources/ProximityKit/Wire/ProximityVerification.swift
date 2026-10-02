@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 
 /// QR verification ceremony (bitchat adoptions Increment 4,
 /// Docs/Plan-Bitchat-Adoptions-2026-07-25.md — bitchat's signed verify-QR + in-session
