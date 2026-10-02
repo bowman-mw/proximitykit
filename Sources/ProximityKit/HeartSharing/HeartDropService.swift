@@ -135,13 +135,19 @@ public final class HeartDropService {
     @ObservationIgnored private var fetchFailureStreak = 0
     @ObservationIgnored private var fetchFailingSince: Date?
 
+    /// The dead-drop service over one host's ledger, consent, roster and identity.
+    ///
+    /// `identity` has no default since ProximityKit plan step A0.2.3: ProximityKit holds no
+    /// namespace to build one from, so the host passes the identity built from its own (the app's
+    /// `FernletStore.heartDropService` passes `IdentityService(namespace: proximityNamespace)`, and
+    /// every test passes one on a throwaway keychain service).
     public init(
         ledger: ProximityHeartLedger,
         isEnabled: @escaping () -> Bool,
         activeFriends: @escaping () -> [ProximityTrustedPeerRecord],
         localDayKey: @escaping (Date) -> String,
         displayName: @escaping () -> String,
-        identity: IdentityService = IdentityService(),
+        identity: IdentityService,
         storage: HeartDropStorageScope = .production,
         prekeys: HeartPrekeyStore? = nil,
         peerBundles: HeartDropPeerBundleCache? = nil,

@@ -10,7 +10,9 @@ import FernletDomainModel
 ///
 /// Mirrors the existing `ProximityTrustPolicy` / `WorkoutSyncContext` host-protocol
 /// pattern. Surface is exactly what `MeshNetworkManager` + `ProximityRecipeShareManager`
-/// consume: display name, trusted peers + vault, and the block/fingerprint checks.
+/// consume: display name, trusted peers + vault, and the block/fingerprint checks — and, since
+/// ProximityKit plan step A0.2.3, the host's protocol identity, ``proximityNamespace``, the one
+/// requirement with no default.
 @MainActor
 public protocol ProximityHost: AnyObject {
     var proximityDisplayName: String { get }
@@ -73,6 +75,24 @@ public protocol ProximityHost: AnyObject {
     /// ``meshSessionStorage`` is; the default below keeps a test double's scope private to its own
     /// sidecar root.
     var meshRoutedStorage: MeshRoutedStorageScope { get }
+
+    /// The host's protocol identity (ProximityKit plan step A0.2.3): every byte string by which this
+    /// module's wire, keychain and disk formats identify the app it runs in, as the one
+    /// ``ProximityNamespace`` the host builds at its composition root.
+    ///
+    /// **Deliberately no default.** The extension below hands a host that carries no value of its
+    /// own the hearts settings, the sidecar root and the two storage scopes; it hands out no
+    /// namespace, and never will. ProximityKit holds no namespace instance and keeps no global, so a
+    /// host that supplies none gets a compile error, never another app's identity. Fernlet's app
+    /// supplies `ProximityNamespace.fernlet` (the `FernletConnections` module) in
+    /// `ProximityHostAdapter.swift`, and every test double supplies the same value.
+    ///
+    /// Read once, at construction: ``MeshNetworkManager``, ``PresenceManager`` and
+    /// ``ProximityRecipeShareManager`` each keep their own copy and build the identity they own by
+    /// default from it, so no later read reaches back to the host. Since step A0.2.3 the one value
+    /// read off it is the identity's keychain service; A0.2's later commits route the rest of the
+    /// module's reads through the same copy.
+    var proximityNamespace: ProximityNamespace { get }
 }
 
 public extension ProximityHost {

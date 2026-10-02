@@ -168,6 +168,11 @@ public final class PresenceManager: ProximityPayloadHandling {
     static let heartReinviteDelaySeconds: TimeInterval = 2
 
     @ObservationIgnored private unowned let store: any ProximityHost
+    /// The host's protocol identity, read once from ``store`` at construction and kept as this
+    /// manager's own copy (ProximityKit plan step A0.2.3), so no later read reaches back to the
+    /// host. The default identity is built from it; A0.2's later commits route the rest of this
+    /// manager's labels and names through it. `nonisolated`: inert `Sendable` value data.
+    @ObservationIgnored nonisolated let namespace: ProximityNamespace
     @ObservationIgnored private let identity: IdentityService
     @ObservationIgnored private let ledger: ProximityHeartLedger
     @ObservationIgnored private let replayCache = ReplayCache()
@@ -285,10 +290,12 @@ public final class PresenceManager: ProximityPayloadHandling {
     public init(store: any ProximityHost, ledger: ProximityHeartLedger, identity: IdentityService? = nil) {
         self.store = store
         self.ledger = ledger
+        let namespace = store.proximityNamespace
+        self.namespace = namespace
         if let identity {
             self.identity = identity
         } else {
-            let id = IdentityService()
+            let id = IdentityService(namespace: namespace)
             // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
             // otherwise every later presence tag and heart send fails with no visible cause.
             do {

@@ -340,6 +340,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored public private(set) var routedAccessGate: MeshRoutedAccessGate = .closed
 
     @ObservationIgnored private unowned let store: any ProximityHost
+    /// The host's protocol identity, read once from ``store`` at construction and kept as this
+    /// manager's own copy (ProximityKit plan step A0.2.3), so no later read reaches back to the
+    /// host. The default identity is built from it; A0.2's later commits route the rest of this
+    /// manager's labels and names through it. `nonisolated`: inert `Sendable` value data.
+    @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
     /// its body. `NetworkMeshSession` since the MC→QUIC cutover (2026-09-21), and the only radio a
     /// build can construct since the deletion round (2026-09-22) took the MultipeerConnectivity
@@ -621,8 +626,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// gap where manager-level invite behaviour could not be asserted at tier 1 at all.
     ///
     /// `identity` is the same kind of seam for the device's own keys, and exists for one reason: a
-    /// device has exactly ONE proximity identity, so the default ``IdentityService`` is keyed on one
-    /// process-wide keychain service — and two managers built in a single test process are therefore
+    /// device has exactly ONE proximity identity, so the default ``IdentityService`` — built from the
+    /// host's ``ProximityHost/proximityNamespace`` — is keyed on its one process-wide keychain
+    /// service, and two managers built in a single test process are therefore
     /// literally the same device, sharing a fingerprint. That makes a two-node tier-1 scenario
     /// (P4 item 2's wire exchange, `MeshMergeExchangeTests`) impossible to state honestly. Passing a
     /// distinctly-keyed identity is the only thing that separates them. Nothing in shipping code
@@ -634,9 +640,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// the corpus's deferral and purge branches without touching the process-wide row.
     ///
     /// - Parameters:
-    ///   - store: The host this manager's roots and vaults hang off.
+    ///   - store: The host this manager's roots, vaults and namespace hang off.
     ///   - transport: The radio, or nil for the one this build selects.
-    ///   - identity: The device identity, or nil for this device's own.
+    ///   - identity: The device identity, or nil for this device's own under the host's namespace.
     ///   - heldPhotoKeys: The pending corpus's key provider, or nil for the keychain row.
     init(
         store: any ProximityHost,
@@ -646,7 +652,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) {
         self.store = store
         self.transport = transport ?? NetworkMeshSession()
-        let id = identity ?? IdentityService()
+        let namespace = store.proximityNamespace
+        self.namespace = namespace
+        let id = identity ?? IdentityService(namespace: namespace)
         // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
         // otherwise every later sign/seal on this identity fails with no visible cause.
         do {

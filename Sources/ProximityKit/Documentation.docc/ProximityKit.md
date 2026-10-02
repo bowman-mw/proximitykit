@@ -454,13 +454,34 @@ keychain and storage values well-formed and distinct);
 let a host's own tests show it overlaps no other app.
 
 ProximityKit holds no instance and offers no default: no global, no slot, no `@TaskLocal`. The host
-builds one value and hands it down, and every reader keeps its own copy. Step A0.2.1 adds the type
-and nothing reads it yet; A0.2's later commits route this module's reads through it — the host's
-supply path, the signed transcripts, the hashes and seals, the radios and the at-rest names — each
-byte-identical for Fernlet. Fernlet's own value is not in this module and never will be: it lives
-in `FernletConnections` (`ProximityNamespace.fernlet`, step A0.2.2), a module that depends on this
-one, so ProximityKit cannot name it. `ProximityNamespaceSoundnessTests` holds the rules, the byte
-rules of each framing and the collision checks, over namespaces built only from literals.
+builds one value and hands it down, and every reader keeps its own copy. Step A0.2.1 added the type;
+A0.2's later commits route this module's reads through it — the signed transcripts, the hashes and
+seals, the radios and the at-rest names — each byte-identical for Fernlet. Fernlet's own value is
+not in this module and never will be: it lives in `FernletConnections` (`ProximityNamespace.fernlet`,
+step A0.2.2), a module that depends on this one, so ProximityKit cannot name it.
+`ProximityNamespaceSoundnessTests` holds the rules, the byte rules of each framing and the collision
+checks, over namespaces built only from literals.
+
+**The supply path (step A0.2.3).** The value enters through the host seam:
+``ProximityHost/proximityNamespace`` is the one ``ProximityHost`` requirement with **no default** in
+the protocol extension, so a host that supplies none fails to compile instead of running under
+another app's identity (Fernlet's app answers `.fernlet` in `ProximityHostAdapter.swift`, as every
+test double does). ``MeshNetworkManager``, ``PresenceManager`` and ``ProximityRecipeShareManager``
+read it once in `init`, keep it as a `nonisolated let namespace`, and build the identity they own by
+default from it; their construction calls do not change. ``IdentityService`` now takes it in
+``IdentityService/init(namespace:keychainService:)``, which replaced `init(keychainService:)` and its
+`"com.fernlet.identity"` default: a `nil` service means the namespace's
+`installation.keychain.identity.service`, the first value this module reads off the namespace, and
+``IdentityService/purposes`` hands its labels to the signers that A0.2's next commits re-point.
+`HeartDropService` lost its identity default with the same move: the host passes one. Signing and
+verification gained overloads that take a ``ProximityCryptographicPurpose``: `sign` refuses — with
+the `invalidKeyData` a misframed transcript has always thrown — a misframed transcript, a verify-only
+`.signature(.absent)` label and any label in a non-signature role, and `verify` checks the label's
+framing with `signingBytes`, so a non-signature label verifies nothing and a legacy label accepts what
+a pre-separation format carries. The `CryptographicPurpose` overloads stay, unchanged and without a
+deprecation attribute (warnings are errors), for FernletCrypto's feature labels, the app's duress and
+probe purposes and the tests until their labels move. `ProximityNamespaceGoldenTests` pins the
+keychain read and both overloads' treatment of every `.fernlet` label.
 
 ## Topics
 

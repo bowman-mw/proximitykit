@@ -24,8 +24,10 @@ import Foundation
 /// keeps no global: no `static var`, no slot, no `@TaskLocal`. The host builds one value at its
 /// composition root and hands it down through the seams ProximityKit already has, and every reader
 /// keeps its own copy, so no read hops an actor and no reader can see a namespace its root did not
-/// hand it. A host that supplies none gets a compile error, never another app's identity. As of plan
-/// step A0.2.1 the type exists and nothing reads it; A0.2's later commits route the reads.
+/// hand it. A host that supplies none gets a compile error, never another app's identity. Plan step
+/// A0.2.1 added the type; since A0.2.3 the host supplies it as ``ProximityHost/proximityNamespace``,
+/// the managers keep a copy and `IdentityService` takes its keychain service from it, and A0.2's
+/// later commits route the remaining reads.
 ///
 /// **Total, and judged once.** ``init(family:installation:)`` never throws or traps: it runs every
 /// soundness rule once and records the verdict in ``soundness``. A host that prefers to fail at launch
