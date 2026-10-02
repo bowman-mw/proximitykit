@@ -464,8 +464,8 @@ checks, over namespaces built only from literals.
 
 **The supply path (step A0.2.3).** The value enters through the host seam:
 ``ProximityHost/proximityNamespace`` is the one ``ProximityHost`` requirement with **no default** in
-the protocol extension, so a host that supplies none fails to compile instead of running under
-another app's identity (Fernlet's app answers `.fernlet` in `ProximityHostAdapter.swift`, as every
+the protocol extension (step A0.2.9 adds a second, the install binding), so a host that supplies
+none fails to compile instead of running under another app's identity (Fernlet's app answers `.fernlet` in `ProximityHostAdapter.swift`, as every
 test double does). ``MeshNetworkManager``, ``PresenceManager`` and ``ProximityRecipeShareManager``
 read it once in `init`, keep it as a `nonisolated let namespace`, and build the identity they own by
 default from it; their construction calls do not change. ``IdentityService`` now takes it in
@@ -573,15 +573,47 @@ to the namespace's. ``ProximityHost``'s extension defaults build the sidecar roo
 ``IdentityService`` keeps its four device rows under the namespace's `installation.keychain.identity`
 accounts, and `classifyDeviceIdentityRows` names a refusing row by the accounts it is handed. The two
 unused mirror tokens (`MeshSessionContextSchema.token`, `MeshRoutedIndexSchema.token`) are deleted;
-the column seals themselves stay FernletCrypto's until step A0.2.9 copies `ColumnCrypto`.
+the column seals themselves stayed FernletCrypto's until step A0.2.9 copied `ColumnCrypto`.
 `ProximitySupportLayout.defaultDirectory` stays for the heart-drop scope and the feature ledgers
 until step A0.4.
+
+**The column seal and the install binding (step A0.2.9).** The two sealed mesh stores seal through
+``ProximityColumnCrypto`` (`Support/`), FernletCrypto's `ColumnCrypto` copied byte for byte: the
+`0x03` ‖ nonce ‖ ciphertext ‖ tag blob, the salt-free HKDF-SHA256 column key with the label as
+`info`, `label ‖ binding` as the authenticated data, the marker classified before the binding is
+read, and the open's three named refusals and the seal's one. It takes a
+``ProximityCryptographicPurpose`` in the ``ProximityCryptographicPurpose/Role/columnSeal`` role, so
+``MeshSessionStore`` seals under its scope namespace's `family.purposes.keyDerivation.meshSessionContextV1`
+and ``MeshRoutedStore`` under `.meshRoutedStoreV1`, the last two core labels this module read off
+FernletCrypto's registry. `init(label:)`, `deriveColumnKey(info:)`, the string seal and the census
+helpers stayed behind, and there was no legacy reader to leave out: `ColumnCrypto` has opened V3
+alone since its Phase 3, so a `0x02` or unprefixed blob is refused by name in both. The install
+binding comes from the host as a ``ProximityInstallBinding``: one synchronous
+``ProximityInstallBinding/read(for:)`` whose ``ProximityInstallBindingAccess/seal`` answer may mint
+and is `nil` without a durable binding (the seal refuses, owner decision D4), and whose
+``ProximityInstallBindingAccess/open`` answer never mints, is `nil` for an absent binding (the open
+refuses) and throws the retryable ``ProximityInstallBindingReadError`` for a failed read (the open
+defers). It reaches the stores through their scopes: ``MeshSessionStorageScope`` and
+``MeshRoutedStorageScope`` take `installBinding:` in `init` and in `production(for:installBinding:)`,
+and are no longer `Equatable`, since a capability has no equality; ``ProximityHost`` gains
+``ProximityHost/proximityInstallBinding``, the second requirement with no default, from which the
+extension's default scopes are built. ProximityKit keeps no binding row and no global: an install
+has one binding, shared with whatever else the host seals under it, so the host reads it. Fernlet's
+app answers `FernletDeviceBindingAdapter()` (`FernletConnections`), which delegates to
+FernletCrypto's `DeviceBindingID` at each call, so the row its private stores share, its cache and
+its task-local test seam stay the only ones, and an override flipped in the middle of an operation
+still reaches the stores. The two stores and their two scope files no longer import FernletCrypto.
+`ProximityNamespaceGoldenTests` runs the A0.2.0 column vectors through the copy and checks that it
+and `ColumnCrypto` open each other's blobs and refuse alike.
 
 ## Topics
 
 ### Host seam and app integration
 
 - ``ProximityHost``
+- ``ProximityInstallBinding``
+- ``ProximityInstallBindingAccess``
+- ``ProximityInstallBindingReadError``
 - ``ProximitySupportLayout``
 - ``MeshContinuationRaising``
 - ``MeshSessionContinuationReading``
@@ -1693,9 +1725,11 @@ reaches the manager as an ordinary roster change that rotates the key.
 old blanket "ProximityKit persists nothing" rule (plan §17.3), and the reversal is narrow on
 purpose. `MeshSessionContext` — mesh id, protocol version, `createdAt`/`hardDeadline`, the
 membership ledger, epoch heads, the develop bar — is sealed at rest by ``MeshSessionStore`` under
-`FernletCryptoPurpose.KeyDerivation.meshSessionContextV1`, on a per-instance
-``MeshSessionStorageScope`` (directory *and* keychain service, so a wipe takes both together; since
-step A0.2.8 it also carries the host's namespace, which names the file and the seal key's account).
+its scope namespace's `family.purposes.keyDerivation.meshSessionContextV1` (Fernlet's
+`fernlet.mesh.session-context.v1`, FernletCrypto's registry purpose until step A0.2.9), on a
+per-instance ``MeshSessionStorageScope`` (directory *and* keychain service, so a wipe takes both
+together; since step A0.2.8 it also carries the host's namespace, which names the file and the seal
+key's account, and since step A0.2.9 the host's install binding).
 `MeshGroupKey`, `PeerSlot`, `MeshSessionRosterEntry`/`MeshFriendReviewBatch` and the
 `SessionMessageStore` transcript are **still never persisted**, and `MeshGroupKey`'s doc guard is
 now load-bearing by contrast: content never depends on the control key, so resume reconnects and
@@ -1704,8 +1738,9 @@ rotates rather than reloading a secret.
 P5 item 3 added the **second** durable surface, on the same floor and with its own everything:
 ``MeshRoutedStore`` seals `MeshRoutedIndex.sealed` (the catalogue of routed items this device is
 holding for other people, their delivery maps and the receipts other members signed) plus one
-`MeshRoutedChunks/<uuid>.chunk` file per held slice, under
-`FernletCryptoPurpose.KeyDerivation.meshRoutedStoreV1`, on a per-instance ``MeshRoutedStorageScope``
+`MeshRoutedChunks/<uuid>.chunk` file per held slice, under its scope namespace's
+`family.purposes.keyDerivation.meshRoutedStoreV1` (Fernlet's `fernlet.mesh.routed-store.v1`,
+FernletCrypto's registry purpose until step A0.2.9), on a per-instance ``MeshRoutedStorageScope``
 whose keychain service is its **own** (`com.fernlet.mesh-routed`) rather than a lodger under the
 session's — one fate per service is the only arrangement a service-wide delete can express honestly.
 Its schema is its own from day one (``MeshRoutedIndexSchema``, version **2** since P5 item 4 added the
@@ -1714,13 +1749,14 @@ migrated, because reinterpreting one would produce a record whose two new fields
 silently drops; the column seal does not move, since it is the key-derivation domain — the unused
 at-rest *token* that mirrored it was deleted in step A0.2.8);
 `MeshSessionContext` stays at schema 2 and gains nothing. Chunk file names are opaque random UUIDs recorded in the index, so no
-fingerprint, item id, index or hash appears in a path component; and because `ColumnCrypto`'s AAD is
+fingerprint, item id, index or hash appears in a path component; and because ``ProximityColumnCrypto``'s AAD is
 purpose ‖ install binding with **no file name in it**, every read compares the opened chunk's
 descriptor and payload length against the ones holding its slot — a comparison that is not redundant
 and must not be removed.
 
-**Loading either of them has five states, and three of them are not "empty".** `ColumnCrypto` is
-V3-only and *refuses* to seal without a `DeviceBindingID` (owner decision D4), so before first unlock
+**Loading either of them has five states, and three of them are not "empty".** ``ProximityColumnCrypto`` is
+V3-only and *refuses* to seal without the host's install binding (Fernlet's `DeviceBindingID`; owner
+decision D4), so before first unlock
 neither file can be written at all. ``MeshRoutedLoad`` mirrors ``MeshSessionLoad`` case for case and
 its refusal, deferral and corruption vocabularies carry the **same frozen rawValues** (a test asserts
 the sets are equal), because invariant 7 is stated once and enforced everywhere:
@@ -2396,6 +2432,7 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 - ``MeshNetworkManager``
 - ``MeshSessionStore``
 - ``MeshSessionStorageScope``
+- ``ProximityColumnCrypto``
 - ``MeshSessionState``
 - ``MeshSessionEvent``
 - ``MeshSessionEffect``

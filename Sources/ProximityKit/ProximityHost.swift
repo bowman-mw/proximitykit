@@ -11,8 +11,9 @@ import FernletDomainModel
 /// Mirrors the existing `ProximityTrustPolicy` / `WorkoutSyncContext` host-protocol
 /// pattern. Surface is exactly what `MeshNetworkManager` + `ProximityRecipeShareManager`
 /// consume: display name, trusted peers + vault, and the block/fingerprint checks — and, since
-/// ProximityKit plan step A0.2.3, the host's protocol identity, ``proximityNamespace``, the one
-/// requirement with no default.
+/// ProximityKit plan step A0.2.3, the host's protocol identity, ``proximityNamespace``, and since
+/// step A0.2.9 its install binding, ``proximityInstallBinding``: two requirements the extension
+/// below will never give a default.
 @MainActor
 public protocol ProximityHost: AnyObject {
     var proximityDisplayName: String { get }
@@ -93,15 +94,29 @@ public protocol ProximityHost: AnyObject {
     /// extension below also builds this host's default sidecar root and both storage scopes from it,
     /// and every scope carries it to the store that reads its names.
     var proximityNamespace: ProximityNamespace { get }
+
+    /// The host's install binding (ProximityKit plan step A0.2.9): the per-install bytes the two
+    /// sealed mesh stores' column seal places after the column label in every blob's authenticated
+    /// data, read at each seal and each open.
+    ///
+    /// **No default, like ``proximityNamespace``.** An install has one binding, shared with whatever
+    /// else the host seals under it, so ProximityKit keeps no row of its own and never falls back to
+    /// one: a host that supplies none fails to compile. Fernlet's app answers
+    /// `FernletDeviceBindingAdapter()` (the `FernletConnections` module, delegating to FernletCrypto's
+    /// `DeviceBindingID`) in `ProximityHostAdapter.swift`, as every test double does. The extension
+    /// below builds both default storage scopes with it; a host with scopes of its own hands each the
+    /// same binding.
+    var proximityInstallBinding: any ProximityInstallBinding { get }
 }
 
 public extension ProximityHost {
 
     /// Default for hosts that do not carry their own scope (test doubles), built from the host's
-    /// namespace (plan step A0.2.8). On the namespace's default directory it is the namespace's
-    /// production scope — for Fernlet `Application Support/Fernlet` + `com.fernlet.mesh-session`,
-    /// unchanged; a host on any other sidecar root gets a service named after that root, so it can
-    /// never wipe — or be wiped by — the production row or another double's.
+    /// namespace (plan step A0.2.8) and install binding (plan step A0.2.9). On the namespace's
+    /// default directory it is the namespace's production scope — for Fernlet
+    /// `Application Support/Fernlet` + `com.fernlet.mesh-session`, unchanged; a host on any other
+    /// sidecar root gets a service named after that root, so it can never wipe — or be wiped by —
+    /// the production row or another double's.
     var meshSessionStorage: MeshSessionStorageScope {
         let namespace = proximityNamespace
         let directory = proximitySupportDirectory
@@ -109,23 +124,25 @@ public extension ProximityHost {
             return MeshSessionStorageScope(
                 namespace: namespace,
                 directory: directory,
-                keychainService: namespace.installation.keychain.meshSessionSealKey.service
+                keychainService: namespace.installation.keychain.meshSessionSealKey.service,
+                installBinding: proximityInstallBinding
             )
         }
         return MeshSessionStorageScope(
             namespace: namespace,
             directory: directory,
             keychainService: namespace.installation.keychain.meshSessionSealKey.service
-                + ".host." + directory.lastPathComponent
+                + ".host." + directory.lastPathComponent,
+            installBinding: proximityInstallBinding
         )
     }
 
     /// Default for hosts that do not carry their own routed scope (test doubles), built from the
-    /// host's namespace (plan step A0.2.8). On the namespace's default directory it is the
-    /// namespace's production scope — for Fernlet `Application Support/Fernlet` +
-    /// `com.fernlet.mesh-routed`, unchanged; a host on any other sidecar root gets a service named
-    /// after that root, so it can never wipe — or be wiped by — the production row or another
-    /// double's.
+    /// host's namespace (plan step A0.2.8) and install binding (plan step A0.2.9). On the
+    /// namespace's default directory it is the namespace's production scope — for Fernlet
+    /// `Application Support/Fernlet` + `com.fernlet.mesh-routed`, unchanged; a host on any other
+    /// sidecar root gets a service named after that root, so it can never wipe — or be wiped by —
+    /// the production row or another double's.
     var meshRoutedStorage: MeshRoutedStorageScope {
         let namespace = proximityNamespace
         let directory = proximitySupportDirectory
@@ -133,14 +150,16 @@ public extension ProximityHost {
             return MeshRoutedStorageScope(
                 namespace: namespace,
                 directory: directory,
-                keychainService: namespace.installation.keychain.meshRoutedSealKey.service
+                keychainService: namespace.installation.keychain.meshRoutedSealKey.service,
+                installBinding: proximityInstallBinding
             )
         }
         return MeshRoutedStorageScope(
             namespace: namespace,
             directory: directory,
             keychainService: namespace.installation.keychain.meshRoutedSealKey.service
-                + ".host." + directory.lastPathComponent
+                + ".host." + directory.lastPathComponent,
+            installBinding: proximityInstallBinding
         )
     }
     /// Default for hosts that predate the hearts opt-out (e.g. test doubles). The app's

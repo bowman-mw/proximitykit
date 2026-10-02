@@ -5,16 +5,15 @@
 // concept the code can hold across a process death — and the five-state load that keeps a REFUSAL
 // from ever looking like an empty field.
 //
-// The fifth state is the whole design. `ColumnCrypto` is V3-only and refuses to seal without a
-// `DeviceBindingID` (owner decision D4), so before first unlock this file cannot be written — not
-// slower, not retried, refused. Collapsing that into `absent` is the shape that overwrites live
-// membership: a consumer reading "no prior context" starts a fresh mesh and saves over records the
-// user's friends still hold. So `refused` is its own type, it names what it refused, and the WRITER
-// is gated on a token only `loaded` and `absent` can vend.
+// The fifth state is the whole design. `ProximityColumnCrypto` is V3-only and refuses to seal without
+// the host's install binding (Fernlet's `DeviceBindingID`; owner decision D4), so before first unlock
+// this file cannot be written — not slower, not retried, refused. Collapsing that into `absent` is the
+// shape that overwrites live membership: a consumer reading "no prior context" starts a fresh mesh and
+// saves over records the user's friends still hold. So `refused` is its own type, it names what it
+// refused, and the WRITER is gated on a token only `loaded` and `absent` can vend.
 
 import CryptoKit
 import Foundation
-import FernletCrypto
 import FernletFoundation
 
 // MARK: - MeshSessionSealRefusal
@@ -40,8 +39,8 @@ nonisolated struct MeshSessionSealRefusal: Error, Equatable, Sendable {
 
     /// Why it refused. Every case is terminal *for this attempt* and none of them means "empty".
     nonisolated enum Cause: String, CaseIterable, Equatable, Sendable {
-        /// `DeviceBindingID` produced no durable install binding, so v3 cannot be minted or its
-        /// AAD reconstructed. The canonical D4 refusal — the pre-first-unlock window.
+        /// The host's install binding (Fernlet's `DeviceBindingID`) is not durably there, so v3 cannot
+        /// be minted or its AAD reconstructed. The canonical D4 refusal — the pre-first-unlock window.
         case installBindingUnavailable
         /// A sealed file exists but its keychain row is authoritatively gone. Nothing can open
         /// these bytes again; deleting them is a decision, not a fallback.
@@ -52,7 +51,7 @@ nonisolated struct MeshSessionSealRefusal: Error, Equatable, Sendable {
         /// A freshly minted key did not survive its read-back verify, so sealing against it would
         /// write ciphertext nothing can ever open.
         case sealKeyNotPersisted
-        /// The blob claims an at-rest generation this build no longer reads (`ColumnCrypto` v2 or
+        /// The blob claims an at-rest generation this build no longer reads (the column seal's v2 or
         /// the unprefixed legacy format). Named rather than reported as an authentication failure,
         /// because nothing is wrong with the ciphertext.
         case retiredAtRestFormat
@@ -85,8 +84,8 @@ nonisolated struct MeshSessionDeferral: Equatable, Sendable {
         /// The keychain could not answer for the seal key (locked, interaction required, transient
         /// failure). The row's existence is UNKNOWN, which is exactly why this is not a refusal.
         case sealKeyTransientlyUnreadable
-        /// The install-binding keychain read errored, which `DeviceBindingID` defines as retryable
-        /// — as opposed to an authoritatively absent binding, which refuses.
+        /// The install-binding read errored, which ``ProximityInstallBindingReadError`` defines as
+        /// retryable — as opposed to an authoritatively absent binding, which refuses.
         case installBindingReadError
         /// The file exists but could not be read. Protected-data-unavailable and ordinary I/O
         /// errors are one case on purpose: neither is licence to overwrite.
@@ -183,9 +182,10 @@ nonisolated enum MeshSessionSaveError: Error, Equatable, Sendable {
 /// 2. **A refusal is never an absence.** ``load()`` has five states, and only `loaded` and `absent`
 ///    vend a ``LoadToken``. A caller holding `refused`, `deferred` or `corrupt` structurally cannot
 ///    call the writer.
-/// 3. **No plaintext writer exists.** Every byte goes through `ColumnCrypto`'s v3 path under
-///    `FernletCryptoPurpose.KeyDerivation.meshSessionContextV1`, sealed with this install's
-///    `DeviceBindingID` in the AAD.
+/// 3. **No plaintext writer exists.** Every byte goes through `ProximityColumnCrypto`'s v3 path under
+///    the scope namespace's `family.purposes.keyDerivation.meshSessionContextV1`, sealed with the
+///    scope's install binding in the AAD (plan step A0.2.9; Fernlet's `fernlet.mesh.session-context.v1`
+///    and `DeviceBindingID`, byte for byte as before).
 /// 4. **The group control key is not here.** `MeshGroupKey` stays memory-only, forever (plan
 ///    §8.1). This store is what makes that doc guard load-bearing rather than incidental.
 /// 5. **Per-instance scope.** Directory *and* keychain service come from
@@ -233,7 +233,7 @@ public nonisolated struct MeshSessionStore: Sendable {
     /// Extension appended when a corrupt file is set aside.
     static let quarantineExtension = "corrupt"
 
-    /// This store's namespace + directory + keychain service.
+    /// This store's namespace + directory + keychain service + install binding.
     let scope: MeshSessionStorageScope
 
     /// The seal key's account under ``MeshSessionStorageScope/keychainService``: the scope
@@ -241,14 +241,19 @@ public nonisolated struct MeshSessionStore: Sendable {
     /// `meshSessionContextKey`).
     var sealKeyAccount: String { scope.namespace.installation.keychain.meshSessionSealKey.account }
 
-    /// The one sealing path, bound to this surface's reviewed purpose.
-    private let crypto = ColumnCrypto(purpose: FernletCryptoPurpose.KeyDerivation.meshSessionContextV1)
+    /// The one sealing path, bound to this surface's reviewed purpose: the scope namespace's
+    /// `family.purposes.keyDerivation.meshSessionContextV1` column seal, under the scope's install
+    /// binding (plan step A0.2.9; Fernlet's `fernlet.mesh.session-context.v1` and `DeviceBindingID`).
+    private var crypto: ProximityColumnCrypto {
+        ProximityColumnCrypto(purpose: scope.namespace.family.purposes.keyDerivation.meshSessionContextV1,
+                              installBinding: scope.installBinding)
+    }
 
     /// Builds a store on one scope.
     ///
-    /// - Parameter scope: Namespace + directory + keychain service. Pass
-    ///   ``MeshSessionStorageScope/production(for:)`` in the app; tests pass a temp directory and a
-    ///   unique service.
+    /// - Parameter scope: Namespace + directory + keychain service + install binding. Pass
+    ///   ``MeshSessionStorageScope/production(for:installBinding:)`` in the app; tests pass a temp
+    ///   directory and a unique service.
     init(scope: MeshSessionStorageScope) {
         self.scope = scope
     }
@@ -297,8 +302,8 @@ public nonisolated struct MeshSessionStore: Sendable {
 
     /// Opens sealed bytes into a context, mapping every failure onto the state it belongs in.
     ///
-    /// The three-way split of `ColumnCrypto`'s errors is the point: a retryable binding READ error
-    /// defers, an authoritatively absent binding refuses, and anything wrong with the BYTES is
+    /// The three-way split of `ProximityColumnCrypto`'s errors is the point: a retryable binding READ
+    /// error defers, an authoritatively absent binding refuses, and anything wrong with the BYTES is
     /// corruption. Collapsing any pair loses the distinction plan §20.2 exists to preserve.
     private func openContext(from raw: Data, contentKey: SymmetricKey) -> MeshSessionLoad {
         do {
@@ -309,9 +314,9 @@ public nonisolated struct MeshSessionStore: Sendable {
             return .loaded(context, LoadToken(fileURL: fileURL))
         } catch MeshSessionContextDecodingError.unsupportedSchemaVersion(let version) {
             return .corrupt(MeshSessionCorruption(detail: .unsupportedSchemaVersion(version)))
-        } catch let error as ColumnCrypto.SealedColumnOpenError {
+        } catch let error as ProximityColumnCrypto.SealedColumnOpenError {
             return Self.loadState(forOpenError: error)
-        } catch is DeviceBindingID.ReadError {
+        } catch is ProximityInstallBindingReadError {
             return .deferred(MeshSessionDeferral(reason: .installBindingReadError, detail: fileName))
         } catch let error as DecodingError {
             return .corrupt(MeshSessionCorruption(detail: .undecodableJSON(String(describing: error))))
@@ -320,12 +325,12 @@ public nonisolated struct MeshSessionStore: Sendable {
         }
     }
 
-    /// Maps `ColumnCrypto`'s named open refusals onto load states.
+    /// Maps `ProximityColumnCrypto`'s named open refusals onto load states.
     ///
     /// `installBindingMissing` is a REFUSAL (custody, not content — the ciphertext is fine); a
     /// retired format is a refusal too, and by name, so the log says "this build stopped reading
     /// that generation" rather than "authentication failed"; an empty column is corruption.
-    private static func loadState(forOpenError error: ColumnCrypto.SealedColumnOpenError) -> MeshSessionLoad {
+    private static func loadState(forOpenError error: ProximityColumnCrypto.SealedColumnOpenError) -> MeshSessionLoad {
         switch error {
         case .installBindingMissing:
             return .refused(MeshSessionSealRefusal(operation: .open, cause: .installBindingUnavailable))
@@ -374,11 +379,11 @@ public nonisolated struct MeshSessionStore: Sendable {
         try writeAtomically(sealed)
     }
 
-    /// Seals the context, translating `ColumnCrypto`'s D4 refusal into this store's named one.
+    /// Seals the context, translating `ProximityColumnCrypto`'s D4 refusal into this store's named one.
     private func sealBytes(_ context: MeshSessionContext, contentKey: SymmetricKey) throws -> Data {
         do {
             return try crypto.seal(context, contentKey: contentKey)
-        } catch ColumnCrypto.SealedColumnStrictSealError.bindingUnavailable {
+        } catch ProximityColumnCrypto.SealedColumnStrictSealError.bindingUnavailable {
             throw MeshSessionSealRefusal(operation: .seal, cause: .installBindingUnavailable)
         }
     }

@@ -17,7 +17,6 @@
 
 import CryptoKit
 import Foundation
-import FernletCrypto
 import FernletFoundation
 import Security
 
@@ -28,7 +27,9 @@ import Security
 /// payload directory) and the keychain service holding the key that seals them, plus the host's
 /// ``ProximityNamespace``, whose `installation.storage` and `installation.keychain` name the index,
 /// the chunk directory and the key's account, and whose `family.purposes` the store measures under
-/// (plan step A0.2.8; Fernlet's names are the ones above).
+/// (plan step A0.2.8; Fernlet's names are the ones above) and seals under (plan step A0.2.9), and the
+/// host's ``ProximityInstallBinding``, which every seal and open of those files reads (plan step
+/// A0.2.9).
 ///
 /// **Why the two travel together.** ``MeshRoutedStore/wipeForDeleteAll(scope:)`` destroys both, so
 /// isolating one without the other isolates nothing: files on a private root sealed by a shared key
@@ -42,14 +43,16 @@ import Security
 /// (`PhotoDirectoryIsolationTests`), and this scope is what keeps it from gaining a new member —
 /// `MeshRoutedStoreIsolationTests` is the grep-wall that enforces it.
 ///
-/// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: inert configuration, read
-/// from nonisolated stores and from `FernletStore`'s nonisolated stored properties.
-public nonisolated struct MeshRoutedStorageScope: Sendable, Equatable {
+/// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: configuration, read from
+/// nonisolated stores and from `FernletStore`'s nonisolated stored properties. Not `Equatable` since
+/// plan step A0.2.9: it carries the host's install binding, a capability with no equality.
+public nonisolated struct MeshRoutedStorageScope: Sendable {
 
     /// The host's protocol identity: the store reads its index file name, its chunk directory name
     /// and its seal key's account off `installation`, and the labels it hashes chunks and items under
-    /// off `family.purposes` (plan step A0.2.8). Not an isolation axis — ``directory`` and
-    /// ``keychainService`` are.
+    /// off `family.purposes` (plan step A0.2.8), and seals its files under
+    /// `family.purposes.keyDerivation.meshRoutedStoreV1` (plan step A0.2.9). Not an isolation axis —
+    /// ``directory`` and ``keychainService`` are.
     public let namespace: ProximityNamespace
 
     /// Directory holding `MeshRoutedIndex.sealed`, its `.corrupt` quarantine sibling, and the
@@ -59,17 +62,30 @@ public nonisolated struct MeshRoutedStorageScope: Sendable, Equatable {
     /// Keychain service holding the seal key for everything under ``directory``.
     public let keychainService: String
 
-    /// Builds a scope from the host's namespace, a directory and a keychain service.
+    /// The host's install binding, which the store's column seal reads at every seal and every open
+    /// and places after the column label in each file's authenticated data (plan step A0.2.9). Not an
+    /// isolation axis either: one install has one binding, which every scope of the host carries.
+    public let installBinding: any ProximityInstallBinding
+
+    /// Builds a scope from the host's namespace, a directory, a keychain service and its install
+    /// binding.
     ///
     /// - Parameters:
     ///   - namespace: The host's protocol identity, which names the files and the key's account and
-    ///     holds the labels the store measures under.
+    ///     holds the labels the store measures and seals under.
     ///   - directory: Where the sealed index, its quarantine sibling and the chunk directory live.
     ///   - keychainService: Keychain service holding those files' seal key.
-    public init(namespace: ProximityNamespace, directory: URL, keychainService: String) {
+    ///   - installBinding: The host's install binding, which the files are sealed and opened under.
+    public init(
+        namespace: ProximityNamespace,
+        directory: URL,
+        keychainService: String,
+        installBinding: any ProximityInstallBinding
+    ) {
         self.namespace = namespace
         self.directory = directory
         self.keychainService = keychainService
+        self.installBinding = installBinding
     }
 
     /// The shipped scope of a host: the namespace's `installation.storage.defaultDirectory` (for
@@ -77,15 +93,22 @@ public nonisolated struct MeshRoutedStorageScope: Sendable, Equatable {
     /// `installation.keychain.meshRoutedSealKey.service` (for Fernlet `com.fernlet.mesh-routed`: its
     /// own service, not a lodger under the mesh-session one, because delete-all takes this one whole
     /// and one service per fate is the only arrangement a service-wide delete can express honestly).
-    /// Replaces the static `production` and `productionKeychainService` (plan step A0.2.8).
+    /// Replaces the static `production` and `productionKeychainService` (plan step A0.2.8); takes the
+    /// host's install binding since plan step A0.2.9.
     ///
-    /// - Parameter namespace: The host's protocol identity.
+    /// - Parameters:
+    ///   - namespace: The host's protocol identity.
+    ///   - installBinding: The host's install binding.
     /// - Returns: The namespace's production scope.
-    public static func production(for namespace: ProximityNamespace) -> MeshRoutedStorageScope {
+    public static func production(
+        for namespace: ProximityNamespace,
+        installBinding: any ProximityInstallBinding
+    ) -> MeshRoutedStorageScope {
         MeshRoutedStorageScope(
             namespace: namespace,
             directory: namespace.installation.storage.defaultDirectory,
-            keychainService: namespace.installation.keychain.meshRoutedSealKey.service
+            keychainService: namespace.installation.keychain.meshRoutedSealKey.service,
+            installBinding: installBinding
         )
     }
 
@@ -151,9 +174,9 @@ nonisolated enum MeshRoutedSealKeyOutcome: Sendable {
 ///   the background while the device is locked, and a `WhenUnlocked` key would make every
 ///   background custody write unsealable — which, under durable-before-acknowledged (plan §3.6),
 ///   means unacknowledgeable.
-/// - **ThisDeviceOnly**, because the sealed bytes are device-bound anyway: `ColumnCrypto`'s v3
-///   format authenticates this install's `DeviceBindingID`, so a key restored onto another phone
-///   would open nothing.
+/// - **ThisDeviceOnly**, because the sealed bytes are device-bound anyway: `ProximityColumnCrypto`'s
+///   V3 format authenticates this install's binding (the host's ``ProximityInstallBinding``; Fernlet's
+///   `DeviceBindingID`), so a key restored onto another phone would open nothing.
 ///
 /// The key is read on every use with no in-memory cache, so a wiped key can never be resurrected by
 /// a stale copy. There is deliberately no argument-less production variant: every caller states its

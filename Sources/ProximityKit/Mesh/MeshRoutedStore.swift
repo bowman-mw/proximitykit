@@ -11,12 +11,13 @@
 // mesh surface must not paraphrase the first. What is new is the SECOND file kind: one sealed
 // `MeshRoutedChunks/<uuid>.chunk` per held chunk, so 256 MiB of custody never has to be resident.
 //
-// The fifth state is the whole design, and here it is load-bearing twice over. `ColumnCrypto` is
-// V3-only and refuses to seal without a `DeviceBindingID` (owner decision D4), so before first
-// unlock this store cannot be written — not slower, not retried silently, refused. Under plan §3.6
-// that means: **if you cannot seal, you must not acknowledge.** A custody receipt for bytes no
-// durable write returned is exactly the lie the type system in `MeshRoutedCustodyCommit.swift`
-// makes unwritable, and this file is the half that decides when a write returned.
+// The fifth state is the whole design, and here it is load-bearing twice over. `ProximityColumnCrypto`
+// is V3-only and refuses to seal without the host's install binding (Fernlet's `DeviceBindingID`;
+// owner decision D4), so before first unlock this store cannot be written — not slower, not retried
+// silently, refused. Under plan §3.6 that means: **if you cannot seal, you must not acknowledge.**
+// A custody receipt for bytes no durable write returned is exactly the lie the type system in
+// `MeshRoutedCustodyCommit.swift` makes unwritable, and this file is the half that decides when a
+// write returned.
 //
 // What is deliberately NOT here: any decryption of routed CONTENT. The store never calls
 // `MeshRoutedContentKeyWrapper.unwrap`, never touches the key-agreement key, never names a content
@@ -27,7 +28,6 @@
 
 import CryptoKit
 import Foundation
-import FernletCrypto
 import FernletFoundation
 
 // MARK: - MeshRoutedSealRefusal
@@ -54,9 +54,9 @@ nonisolated struct MeshRoutedSealRefusal: Error, Equatable, Sendable {
 
     /// Why it refused. Every case is terminal *for this attempt* and none of them means "empty".
     nonisolated enum Cause: String, CaseIterable, Equatable, Sendable {
-        /// `DeviceBindingID` produced no durable install binding, so v3 cannot be minted or its AAD
-        /// reconstructed. The canonical D4 refusal — the pre-first-unlock window §19.5 is about,
-        /// and the one cause that self-heals on unlock.
+        /// The host's install binding (Fernlet's `DeviceBindingID`) is not durably there, so v3 cannot
+        /// be minted or its AAD reconstructed. The canonical D4 refusal — the pre-first-unlock window
+        /// §19.5 is about, and the one cause that self-heals on unlock.
         case installBindingUnavailable
         /// A sealed file exists but its keychain row is authoritatively gone. Nothing can open
         /// these bytes again; deleting them is a decision, not a fallback.
@@ -98,8 +98,8 @@ nonisolated struct MeshRoutedDeferral: Equatable, Sendable {
         /// The keychain could not answer for the seal key (locked, interaction required, transient
         /// failure). The row's existence is UNKNOWN, which is exactly why this is not a refusal.
         case sealKeyTransientlyUnreadable
-        /// The install-binding keychain read errored, which `DeviceBindingID` defines as retryable —
-        /// as opposed to an authoritatively absent binding, which refuses.
+        /// The install-binding read errored, which ``ProximityInstallBindingReadError`` defines as
+        /// retryable — as opposed to an authoritatively absent binding, which refuses.
         case installBindingReadError
         /// The file exists but could not be read. Protected-data-unavailable and ordinary I/O errors
         /// are one case on purpose: neither is licence to overwrite or to delete.
@@ -280,7 +280,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
     /// Extension every payload file carries. The stem is a fresh random UUID and means nothing.
     static let chunkFileExtension = "chunk"
 
-    /// This store's namespace + directory + keychain service.
+    /// This store's namespace + directory + keychain service + install binding.
     let scope: MeshRoutedStorageScope
 
     /// The seal key's account under ``MeshRoutedStorageScope/keychainService``: the scope
@@ -288,9 +288,15 @@ public nonisolated struct MeshRoutedStore: Sendable {
     /// `meshRoutedStoreKey`).
     var sealKeyAccount: String { scope.namespace.installation.keychain.meshRoutedSealKey.account }
 
-    /// The one sealing path, bound to this surface's reviewed purpose. **The only `ColumnCrypto` in
-    /// the routed store**, and the reason a grep-wall can assert the store names no decryption seam.
-    private let crypto = ColumnCrypto(purpose: FernletCryptoPurpose.KeyDerivation.meshRoutedStoreV1)
+    /// The one sealing path, bound to this surface's reviewed purpose: the scope namespace's
+    /// `family.purposes.keyDerivation.meshRoutedStoreV1` column seal, under the scope's install binding
+    /// (plan step A0.2.9; Fernlet's `fernlet.mesh.routed-store.v1` and `DeviceBindingID`). **The only
+    /// `ColumnCrypto` in the routed store**, and the reason a grep-wall can assert the store names no
+    /// decryption seam.
+    private var crypto: ProximityColumnCrypto {
+        ProximityColumnCrypto(purpose: scope.namespace.family.purposes.keyDerivation.meshRoutedStoreV1,
+                              installBinding: scope.installBinding)
+    }
 
     /// The caps this store refuses at, as ONE value (P5 item 9).
     ///
@@ -306,9 +312,9 @@ public nonisolated struct MeshRoutedStore: Sendable {
     /// Builds a store on one scope.
     ///
     /// - Parameters:
-    ///   - scope: Namespace + directory + keychain service. Pass
-    ///     ``MeshRoutedStorageScope/production(for:)`` in the app; tests pass a temp directory and a
-    ///     unique service.
+    ///   - scope: Namespace + directory + keychain service + install binding. Pass
+    ///     ``MeshRoutedStorageScope/production(for:installBinding:)`` in the app; tests pass a temp
+    ///     directory and a unique service.
     ///   - capacity: The cap model this store's doors refuse at. Shipping code takes the default;
     ///     a test drives a door to its bound in milliseconds by injecting a small one.
     init(scope: MeshRoutedStorageScope, capacity: MeshRoutedCapacity = .production) {
@@ -378,8 +384,8 @@ public nonisolated struct MeshRoutedStore: Sendable {
 
     /// Opens sealed bytes into an index, mapping every failure onto the state it belongs in.
     ///
-    /// The three-way split of `ColumnCrypto`'s errors is the point: a retryable binding READ error
-    /// defers, an authoritatively absent binding refuses, and anything wrong with the BYTES is
+    /// The three-way split of `ProximityColumnCrypto`'s errors is the point: a retryable binding READ
+    /// error defers, an authoritatively absent binding refuses, and anything wrong with the BYTES is
     /// corruption. An at-rest cap violation is corruption too — never a clamp, which would silently
     /// drop a durable record whose payload files stay on disk.
     private func openIndex(from raw: Data, contentKey: SymmetricKey) -> MeshRoutedLoad {
@@ -393,9 +399,9 @@ public nonisolated struct MeshRoutedStore: Sendable {
             return .corrupt(MeshRoutedCorruption(detail: .unsupportedSchemaVersion(version)))
         } catch MeshRoutedIndexDecodingError.capacityExceeded(let cap) {
             return .corrupt(MeshRoutedCorruption(detail: .undecodableJSON("capacityExceeded:\(cap)")))
-        } catch let error as ColumnCrypto.SealedColumnOpenError {
+        } catch let error as ProximityColumnCrypto.SealedColumnOpenError {
             return Self.loadState(forOpenError: error)
-        } catch is DeviceBindingID.ReadError {
+        } catch is ProximityInstallBindingReadError {
             return .deferred(
                 MeshRoutedDeferral(reason: .installBindingReadError, detail: indexFileName)
             )
@@ -406,11 +412,11 @@ public nonisolated struct MeshRoutedStore: Sendable {
         }
     }
 
-    /// Maps `ColumnCrypto`'s named open refusals onto load states.
+    /// Maps `ProximityColumnCrypto`'s named open refusals onto load states.
     ///
     /// `installBindingMissing` is a REFUSAL (custody, not content — the ciphertext is fine); a
     /// retired format is a refusal too, and by name; an empty column is corruption.
-    private static func loadState(forOpenError error: ColumnCrypto.SealedColumnOpenError) -> MeshRoutedLoad {
+    private static func loadState(forOpenError error: ProximityColumnCrypto.SealedColumnOpenError) -> MeshRoutedLoad {
         switch error {
         case .installBindingMissing:
             return .refused(MeshRoutedSealRefusal(operation: .open, cause: .installBindingUnavailable))
@@ -474,17 +480,18 @@ public nonisolated struct MeshRoutedStore: Sendable {
         MeshRoutedSealKey.forOpen(service: scope.keychainService, account: sealKeyAccount)
     }
 
-    /// Seals any value under this store's one purpose, translating `ColumnCrypto`'s D4 refusal into
-    /// this store's named one.
+    /// Seals any value under this store's one purpose, translating `ProximityColumnCrypto`'s D4
+    /// refusal into this store's named one.
     ///
-    /// - Important: there is **no write-side deferral for the install binding**.
-    ///   `DeviceBindingID.current()` collapses "unavailable" and "read error" into nil, so the seal
-    ///   refuses, fail-closed. Do not add one to make background custody "work": that is precisely
-    ///   plan §19.5's "background custody must never assume it can seal".
+    /// - Important: there is **no write-side deferral for the install binding**. A seal-side read
+    ///   collapses "unavailable" and "read error" into no binding (Fernlet's
+    ///   `DeviceBindingID.current()` answers nil for both), so the seal refuses, fail-closed. Do not
+    ///   add one to make background custody "work": that is precisely plan §19.5's "background
+    ///   custody must never assume it can seal".
     func sealBytes(_ value: some Encodable, contentKey: SymmetricKey) throws -> Data {
         do {
             return try crypto.seal(value, contentKey: contentKey)
-        } catch ColumnCrypto.SealedColumnStrictSealError.bindingUnavailable {
+        } catch ProximityColumnCrypto.SealedColumnStrictSealError.bindingUnavailable {
             throw MeshRoutedSealRefusal(operation: .seal, cause: .installBindingUnavailable)
         }
     }
@@ -533,7 +540,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
     /// Reads one sealed payload file and checks it really is the chunk the index says holds that
     /// slot.
     ///
-    /// **The comparison is not redundant.** `ColumnCrypto` authenticates with
+    /// **The comparison is not redundant.** `ProximityColumnCrypto` authenticates with
     /// `aad = purpose ‖ install binding` — no file name, item id or index is in it — so under one
     /// key and one install every `MeshRoutedChunks/<uuid>.chunk` blob authenticates in *any* slot.
     /// The binding of a file to a slot is restored by comparing all eight canonical fields and the
@@ -578,9 +585,9 @@ public nonisolated struct MeshRoutedStore: Sendable {
                 return .unauthentic(.authenticationFailed)
             }
             return .chunk(chunk)
-        } catch let error as ColumnCrypto.SealedColumnOpenError {
+        } catch let error as ProximityColumnCrypto.SealedColumnOpenError {
             return Self.chunkRead(forOpenError: error)
-        } catch is DeviceBindingID.ReadError {
+        } catch is ProximityInstallBindingReadError {
             return .unavailable(
                 .deferred(MeshRoutedDeferral(reason: .installBindingReadError, detail: stored.fileName))
             )
@@ -594,7 +601,7 @@ public nonisolated struct MeshRoutedStore: Sendable {
     /// The chunk-file counterpart of ``loadState(forOpenError:)``: custody refusals stay refusals
     /// (they repair nothing), an empty column is unauthentic.
     private static func chunkRead(
-        forOpenError error: ColumnCrypto.SealedColumnOpenError
+        forOpenError error: ProximityColumnCrypto.SealedColumnOpenError
     ) -> MeshRoutedChunkFileRead {
         switch error {
         case .installBindingMissing:
