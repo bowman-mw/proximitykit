@@ -1,0 +1,188 @@
+# ProximityKit CI: on every pull request into main and every push to main, the four walls, then the
+# package build and tests.
+#
+# The walls are the Python scripts in Scripts/ (Python 3, standard library only). Each one runs
+# locally with `python3 Scripts/<name>.py` and exits 1 on a violation. They are ports of the checks
+# that guard this code in the Fernlet repository today:
+#   * power-of-10-scan.py: the Power of 10 rules a line tokenizer can decide, with the exceptions in
+#     Scripts/power-of-10-allowlist.json (every entry states the invariant that makes it safe);
+#   * doc-coverage-scan.py: every struct, class, protocol, enum and actor carries a /// comment;
+#   * no-tracking-scan.py: no tracking SDK in Sources/ or Tests/, no HTTP client in Sources/, and no
+#     package dependency in Package.swift or Package.resolved;
+#   * local-link-scan.py: Network.framework's local-link API only in the three radio files.
+#
+# The code arrives later with its git history from the Fernlet repository. Until Package.swift
+# exists, the build and test steps are skipped with a notice and the job is the walls alone.
+#
+# RUNNER: macOS with Xcode 26 or newer, for Swift tools 6.2 and the iOS 26 and macOS 26 SDKs. The
+# job picks the newest Xcode 26+ on the image and fails in seconds when a floor is unmet. It never
+# pins a minor version: in the Fernlet repository, pinning 26.5 made that workflow fall back to
+# Xcode 16.4 without a word and fail on every run. If hosted images ever fall behind the floors,
+# point `runs-on` at a self-hosted label.
+#
+# Make this a REQUIRED status check in branch protection, so a wall cannot be merged around.
+
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+# One in-flight run per ref; newer pushes cancel older ones.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Walls, build and test
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Picks the newest Xcode 26+ and exports it for every later step, the way the Fernlet
+      # repository's s3-wall.yml does. Deliberately a floor and never a pin: the exact minor version
+      # does not matter, being able to read Swift tools 6.2 and build against the 26 SDKs does.
+      # A missing toolchain is a hard failure, never a silent fallback.
+      - name: Select the newest Xcode 26+ (floors Swift 6.2, iOS and macOS 26 SDKs)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          best_version=""; best_dir=""
+          for app in /Applications/Xcode*.app; do
+            version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+              "$app/Contents/Info.plist" 2>/dev/null)" || continue
+            [ -n "$version" ] || continue
+            major="${version%%.*}"
+            case "$major" in ''|*[!0-9]*) continue ;; esac
+            [ "$major" -ge 26 ] || continue
+            if [ -z "$best_version" ] || \
+               [ "$(printf '%s\n%s\n' "$best_version" "$version" | sort -V | tail -1)" = "$version" ]; then
+              best_version="$version"; best_dir="$app/Contents/Developer"
+            fi
+          done
+          if [ -z "$best_dir" ]; then
+            echo "::error::No Xcode 26 or newer on this runner. ProximityKit needs Swift tools 6.2 and the iOS 26 and macOS 26 SDKs."
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          echo "Selected Xcode $best_version ($best_dir)"
+          echo "DEVELOPER_DIR=$best_dir" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$best_dir" xcodebuild -version
+
+          # Package.swift says swift-tools-version 6.2 and uses .defaultIsolation(MainActor.self), so
+          # an older toolchain cannot even load the manifest. Xcode 26 ships Swift 6.2, but read the
+          # toolchain's own answer instead of trusting that pairing, and fail here, naming the floor.
+          required_swift="6.2"
+          swift_out="$(DEVELOPER_DIR="$best_dir" swift --version 2>&1)"
+          printf '%s\n' "$swift_out"
+          if [[ "$swift_out" =~ Swift\ version\ ([0-9]+)\.([0-9]+) ]]; then
+            swift_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          else
+            echo "::error::Could not read a Swift version from 'swift --version'. ProximityKit needs Swift $required_swift or newer."
+            exit 1
+          fi
+          echo "Swift: $swift_version (require >= $required_swift)"
+          if [ "$(printf '%s\n%s\n' "$required_swift" "$swift_version" | sort -V | head -1)" != "$required_swift" ]; then
+            echo "::error::Swift $swift_version is older than $required_swift, the package's tools version. Use a runner image with Xcode 26 or newer, or a self-hosted runner."
+            exit 1
+          fi
+
+          # The package declares iOS 26 and macOS 26, and Xcode 26 installs the iOS platform as a
+          # separate component. Check both SDKs now, so a broken image fails in seconds naming the
+          # missing SDK instead of minutes into a build. Raise required_sdk if the code ever needs
+          # API from a later SDK.
+          required_sdk="26.0"
+          for sdk_name in iphonesimulator macosx; do
+            sdk="$(DEVELOPER_DIR="$best_dir" xcodebuild -version -sdk "$sdk_name" SDKVersion 2>/dev/null)" || sdk=""
+            echo "$sdk_name SDK: ${sdk:-missing} (require >= $required_sdk)"
+            if [ -z "$sdk" ] || \
+               [ "$(printf '%s\n%s\n' "$required_sdk" "$sdk" | sort -V | head -1)" != "$required_sdk" ]; then
+              echo "::error::The $sdk_name SDK is missing or older than $required_sdk. Use a runner image with Xcode 26 or newer and its iOS platform installed, or a self-hosted runner."
+              exit 1
+            fi
+          done
+
+      # Runs on every push and pull request, before and after the code arrives. All four scripts
+      # run even when one fails, so a single run reports every wall that broke.
+      - name: Walls
+        run: |
+          set -uo pipefail
+          python3 --version
+          status=0
+          for wall in power-of-10-scan.py doc-coverage-scan.py no-tracking-scan.py local-link-scan.py; do
+            echo "::group::$wall"
+            if python3 "Scripts/$wall"; then
+              echo "$wall: clean"
+            else
+              echo "::error::$wall found a violation. Its output above names the file and line."
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+      - name: Look for the package
+        id: package
+        run: |
+          if [ -f Package.swift ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Walls only::There is no Package.swift yet. The code arrives later with its history from the Fernlet repository; until then CI runs the walls only and skips the build and test steps."
+          fi
+
+      # `swift package describe` loads the manifest and resolves the package graph. Its JSON form
+      # says whether a test target exists, which decides the test steps below.
+      - name: Resolve the package (swift package describe)
+        id: describe
+        if: steps.package.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          swift package describe
+          swift package describe --type json > "$RUNNER_TEMP/package.json"
+          tests="$(python3 -c 'import json, sys; targets = json.load(open(sys.argv[1])).get("targets", []); print("true" if any(t.get("type") == "test" for t in targets) else "false")' "$RUNNER_TEMP/package.json")"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          if [ "$tests" != "true" ]; then
+            echo "::notice title=No test target::The package declares no test target, so the test steps are skipped."
+          fi
+
+      - name: Build for macOS (swift build)
+        if: steps.package.outputs.present == 'true'
+        run: swift build
+
+      - name: Test on macOS (swift test)
+        if: steps.describe.outputs.tests == 'true'
+        run: swift test
+
+      - name: Build for the iOS Simulator (xcodebuild)
+        if: steps.package.outputs.present == 'true'
+        run: xcodebuild build -scheme ProximityKit -destination 'generic/platform=iOS Simulator'
+
+      # iPhone 17 is the one simulator the iOS tests run on, pinned the way the Fernlet repository
+      # pins its test lines: if the image drops the device, fail in seconds and name the fix. There
+      # is no fallback to another device, because a silent device change is the failure a pinned
+      # device exists to rule out.
+      - name: Resolve the iPhone 17 simulator
+        if: steps.describe.outputs.tests == 'true'
+        run: |
+          set -euo pipefail
+          name="iPhone 17"
+          devices="$(xcrun simctl list devices available)"
+          if ! grep -qE "^ *${name} \(" <<< "$devices"; then
+            echo "::error::The '${name}' simulator is not available on this runner, and the iOS tests are pinned to it. Use a runner image that ships it, or a self-hosted runner. Do not substitute another device here."
+            printf '%s\n' "$devices"
+            exit 1
+          fi
+          echo "Using simulator: $name"
+          echo "PROXIMITYKIT_DESTINATION=platform=iOS Simulator,name=$name" >> "$GITHUB_ENV"
+
+      - name: Test on the iOS Simulator (iPhone 17)
+        if: steps.describe.outputs.tests == 'true'
+        run: xcodebuild test -scheme ProximityKit -destination "$PROXIMITYKIT_DESTINATION"

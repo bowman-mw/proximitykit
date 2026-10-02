@@ -1,0 +1,24 @@
+# CODEOWNERS: review gate on ProximityKit's walls and its label registry.
+#
+# Every path here is load-bearing for a guarantee, as in the Fernlet repository's CODEOWNERS. With
+# branch protection's "Require review from Code Owners" enabled, no change to these paths can merge
+# without the owner's explicit approval, so a wall cannot be weakened in a drive-by commit.
+#
+# Deliberately narrow: ordinary package code is not listed, so this gate cannot rot into a rubber
+# stamp. If a path is added here, say in the PR why it is load-bearing.
+
+# The label registry: the host-supplied namespace and the domain-separation labels that every
+# signature, seal and key derivation is bound to. Changing a label breaks the wire and on-disk
+# formats of every app built on the package, and two namespaces sharing a label would let one
+# app's bytes validate as another's. The same reasoning puts FernletCrypto/ under the owner in the
+# Fernlet repository, and this rule mirrors that one. The directory arrives with the code, so until
+# then the pattern matches nothing (GitHub does not report that).
+/Sources/ProximityKit/Namespace/              @bowman-mw
+
+# The dependency list the no-tracking wall pins to empty. It arrives with the code too.
+/Package.swift                                @bowman-mw
+
+# The walls, their allowlist, and the CI that runs them (this file included). An allowlist entry is
+# a sanctioned exception, so adding one deserves the same review as weakening a wall.
+/Scripts/                                     @bowman-mw
+/.github/                                     @bowman-mw
