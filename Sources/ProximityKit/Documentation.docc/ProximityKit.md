@@ -500,6 +500,24 @@ a pre-WI-6 admission token verify under `legacyV1`'s verify-only labels, and a f
 ``ProximityNamespace/LegacyV1/refused`` has none, so for it a legacy-framed signature is
 `signatureInvalid`. `.fernlet` accepts its legacy peers, so Fernlet verifies exactly what it did.
 
+**Signed transcripts II (step A0.2.5).** The QUIC channel introduction, the six routed transcripts
+(manifest, chunk, custody receipt, recipient receipt, routed inventory digest, drain answer) and the
+verify QR read the namespace too. Their serializer overloads take `in purposes:`, leaving only the
+four activity and moderation tags in the serializer until their features move (A0.4). The six routed
+doors and `MeshChannelIntroductionExchange` keep their own copy (a trailing `purposes:` with no
+default), which ``MeshNetworkManager`` fills with its stored `namespace.family.purposes`; the
+transport fills the exchange's from `MeshIntroductionAuthority.namespace`, a requirement the manager
+meets with that same stored value, so a peer's introduction is checked under the label
+`signChannelIntroduction` signs this side's under. Every routed builder signs under its identity's
+``IdentityService/purposes``. ``ProximityVerifyQR/makeURL(identity:now:)`` takes the scheme and the
+QR label off the signing identity's namespace, ``ProximityVerifyQR/parse(_:in:)`` compares a scanned
+URL's scheme with the caller's ``ProximityNamespace/Family/verifyQR``, and
+``ProximityVerifyQR/isValid(_:at:in:)`` and ``ProximityVerifySignature/message(scannerKeyAgreementPublicKey:challengeNonce:qrNonce:in:)``
+take the caller's purposes; the static `urlScheme` and both QR domain constants are gone, while the
+host `verify`, the query key `d` and the payload version 1 stay this module's format constants. All
+three ceremonies read one value each: the manager its stored namespace, ``CoachVerificationCeremony``
+and the app's duress flow their identity's.
+
 ## Topics
 
 ### Host seam and app integration
@@ -616,8 +634,8 @@ pair. A per-transfer stream keeps two writes because it has exactly one writer, 
 any app frame crosses a QUIC tunnel, both ends exchange a `MeshChannelHello` and then Ed25519
 signatures over one `MeshChannelIntroductionTranscript` — purpose ‖ version ‖ meshID ‖ epochRef ‖
 both signing public keys ‖ both nonces ‖ the SHA-256 of this connection's TLS exporter secret —
-serialized by `canonicalBytes(for:)` under
-`FernletCryptoPurpose.Signature.meshChannelIntroductionV1`. `MeshChannelIntroductionExchange` holds
+serialized by `canonicalBytes(for:in:)` under the host namespace's
+`purposes.signature.meshChannelIntroductionV1` (step A0.2.5). `MeshChannelIntroductionExchange` holds
 the whole decision as a value type: a foreign mesh, a diverged epoch, a roster-absent or barred key,
 a replayed nonce, a mismatched channel binding and an invalid signature each name themselves, and
 every one tears the tunnel down. **The epoch gate is strict as of P3 item 4** (plan §20.1): P2's
@@ -627,7 +645,8 @@ matched. Every non-empty reference must now be a canonical `MeshEpochRef` (check
 widths, so a bad one is `malformedHello`), equality is equality of the whole value, and the joiner
 that holds no key is a named branch of `MeshEpochAcceptance.introductionVerdict` rather than a
 short-circuit that skipped the comparison. `MeshIntroductionAuthority` is the seam that supplies the mesh id,
-epoch reference, roster and signing key; a session without one authenticates nobody and therefore
+epoch reference, roster, signing key and (since step A0.2.5) the namespace whose labels the exchange
+holds; a session without one authenticates nobody and therefore
 admits nobody. The verified `sid` it yields is what lets an inbound tunnel be matched to the browsed
 advertisement it came from, so duplicate-tunnel suppression ranks the pair instead of admitting both.
 

@@ -23,7 +23,6 @@
 // `hardDeadline + grace`, not a liveness read; liveness is `MeshCustodyReceipt.isLive(at:)` with an
 // injected `now`, decided by the caller.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshCustodyReceiptRejection
@@ -82,7 +81,7 @@ nonisolated enum MeshCustodyReceiptRejection: String, CaseIterable, Equatable, S
 /// like every other plan §3.2 union record — and deliberately does NOT require the custodian to be a
 /// current roster member (D14).
 ///
-/// Pure value, `nonisolated`, no clock. All four stored properties are values; re-create it when the
+/// Pure value, `nonisolated`, no clock. All five stored properties are values; re-create it when the
 /// ledger merges or the manifest arrives.
 nonisolated struct MeshCustodyReceiptVerifier: Sendable {
     /// The session this device is in.
@@ -98,6 +97,9 @@ nonisolated struct MeshCustodyReceiptVerifier: Sendable {
     ///   already accepted; this type never re-verifies it, and it is the only authority on `itemID`,
     ///   `originFingerprint` and `contentHash`.
     let manifest: MeshRoutedManifest?
+    /// The labels the custodian's signature is checked under: this verifier's own copy of its host
+    /// namespace's purposes (plan step A0.2.5), handed in at construction and never looked up.
+    let purposes: ProximityNamespace.Purposes
 
     /// Binds the verifier to one session, optionally to one already-verified manifest.
     ///
@@ -106,11 +108,17 @@ nonisolated struct MeshCustodyReceiptVerifier: Sendable {
     ///   - hardDeadline: The session's signed ceiling.
     ///   - ledger: The merged membership ledger.
     ///   - manifest: An already-verified manifest, or nil when the item is not held yet.
-    init(meshID: UUID, hardDeadline: Date, ledger: MeshMembershipLedger, manifest: MeshRoutedManifest?) {
+    ///   - purposes: The caller's namespace labels, with no default: ProximityKit holds no namespace
+    ///     of its own.
+    init(
+        meshID: UUID, hardDeadline: Date, ledger: MeshMembershipLedger, manifest: MeshRoutedManifest?,
+        purposes: ProximityNamespace.Purposes
+    ) {
         self.meshID = meshID
         self.hardDeadline = hardDeadline
         self.ledger = ledger
         self.manifest = manifest
+        self.purposes = purposes
     }
 
     /// Checks, in order: mesh → shape → custodian is not the origin → admitted key → custodian not
@@ -141,9 +149,9 @@ nonisolated struct MeshCustodyReceiptVerifier: Sendable {
         }
         guard IdentityService.verify(
             receipt.signature,
-            of: canonicalBytes(for: receipt),
+            of: canonicalBytes(for: receipt, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshCustodyReceiptV1
+            purpose: purposes.signature.meshCustodyReceiptV1
         ) else {
             return .signatureInvalid
         }

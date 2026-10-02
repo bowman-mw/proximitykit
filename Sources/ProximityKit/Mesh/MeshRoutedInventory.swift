@@ -37,7 +37,6 @@
 // Built and unwired, exactly as items 1–4 left the manifest, chunk and receipts: no send, no
 // receive, no dispatch case, no manager edit, no persistence, no wipe row.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshRoutedInventoryFormat
@@ -476,8 +475,8 @@ nonisolated struct MeshRoutedInventoryPayload: Codable, Equatable, Sendable {
     /// When it was signed, floored to whole seconds — **bound into the signature**, so a stale
     /// digest cannot be replayed as fresh.
     let sentAt: Date
-    /// The advertiser's Ed25519 signature over `canonicalBytes(for:)` under
-    /// `FernletCryptoPurpose.Signature.meshRoutedInventoryDigestV1`. Excluded from those bytes.
+    /// The advertiser's Ed25519 signature over `canonicalBytes(for:in:)` under
+    /// its namespace's `purposes.signature.meshRoutedInventoryDigestV1`. Excluded from those bytes.
     let signature: Data
 
     /// Builds a payload from already-signed parts, flooring `sentAt` so the stored value is
@@ -595,8 +594,8 @@ extension MeshRoutedInventoryPayload {
             signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshRoutedInventoryDigestV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshRoutedInventoryDigestV1
         )
         return MeshRoutedInventoryPayload(
             inventory: inventory,

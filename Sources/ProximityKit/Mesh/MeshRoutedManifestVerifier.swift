@@ -20,7 +20,6 @@
 // over ciphertext-only custody (D9); `MeshRoutedContentKeyWrapper.unwrap` is the separate,
 // private-key half.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshRoutedManifestRejection
@@ -116,13 +115,23 @@ nonisolated struct MeshRoutedManifestVerifier: Sendable {
     /// fixture set; item 11 passes the registry's. Empty means "accept nothing", which is the
     /// correct answer for a door nobody has configured.
     let acceptedTypeTokens: Set<String>
+    /// The labels the origin's signature is checked under: this verifier's own copy of its host
+    /// namespace's purposes (plan step A0.2.5), handed in at construction and never looked up.
+    let purposes: ProximityNamespace.Purposes
 
-    /// Binds the verifier to one session. All four are values; re-create it when the ledger merges.
-    init(meshID: UUID, hardDeadline: Date, ledger: MeshMembershipLedger, acceptedTypeTokens: Set<String>) {
+    /// Binds the verifier to one session. All five are values; re-create it when the ledger merges.
+    ///
+    /// `purposes` has no default: ProximityKit holds no namespace of its own, so the caller passes
+    /// the purposes it already holds.
+    init(
+        meshID: UUID, hardDeadline: Date, ledger: MeshMembershipLedger, acceptedTypeTokens: Set<String>,
+        purposes: ProximityNamespace.Purposes
+    ) {
         self.meshID = meshID
         self.hardDeadline = hardDeadline
         self.ledger = ledger
         self.acceptedTypeTokens = acceptedTypeTokens
+        self.purposes = purposes
     }
 
     /// Checks, in order: mesh → shape → type token accepted → admitted key → origin not removed →
@@ -152,9 +161,9 @@ nonisolated struct MeshRoutedManifestVerifier: Sendable {
         guard fingerprintMatches(manifest.originFingerprint, key) else { return .originKeyMismatch }
         guard IdentityService.verify(
             manifest.signature,
-            of: canonicalBytes(for: manifest),
+            of: canonicalBytes(for: manifest, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshRoutedManifestV1
+            purpose: purposes.signature.meshRoutedManifestV1
         ) else {
             return .signatureInvalid
         }

@@ -30,7 +30,6 @@
 // Signed and **unsealed**, like every other routed frame: that is what lets it cross a divergent
 // pair on a reconciling tunnel, which is exactly the partition the drain exists to heal.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshRoutedDrainAnswerFormat
@@ -128,8 +127,8 @@ nonisolated struct MeshRoutedDrainAnswerPayload: Codable, Equatable, Sendable {
     /// answer cannot be replayed as fresh.
     let sentAt: Date
 
-    /// The answerer's Ed25519 signature over `canonicalBytes(for:)` under
-    /// `FernletCryptoPurpose.Signature.meshRoutedDrainAnswerV1`. Excluded from those bytes.
+    /// The answerer's Ed25519 signature over `canonicalBytes(for:in:)` under
+    /// its namespace's `purposes.signature.meshRoutedDrainAnswerV1`. Excluded from those bytes.
     let signature: Data
 
     /// Builds a payload from already-signed parts, flooring `sentAt` so the stored value is
@@ -245,8 +244,8 @@ extension MeshRoutedDrainAnswerPayload {
             answer: answer, senderFingerprint: sender, sentAt: sentAt, signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshRoutedDrainAnswerV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshRoutedDrainAnswerV1
         )
         return MeshRoutedDrainAnswerPayload(
             answer: unsigned.answer, senderFingerprint: unsigned.senderFingerprint,

@@ -1,5 +1,4 @@
 import Foundation
-import FernletCrypto
 
 // MARK: - MeshChannelRole
 
@@ -172,9 +171,9 @@ nonisolated struct MeshChannelIntroduction: Codable, Equatable, Sendable {
 /// own channel binding, so there is no wire representation of it to tamper with; a peer that
 /// disagrees about any field simply produces a signature that does not verify.
 ///
-/// Serialized by `canonicalBytes(for:)` in `CanonicalSignatureSerializer.swift` — the same
+/// Serialized by `canonicalBytes(for:in:)` in `CanonicalSignatureSerializer.swift` — the same
 /// length-prefixed `CanonicalByteWriter` format every other production signature uses, which is why
-/// `FernletCryptoPurpose.Signature.meshChannelIntroductionV1` declares `.lengthPrefixed` framing.
+/// the namespace's `purposes.signature.meshChannelIntroductionV1` has `.lengthPrefixed` framing.
 /// That pairing is proven by `CryptographicPurposeBoundaryTests`; changing one without the other is
 /// what broke in commit `91c3956`.
 nonisolated struct MeshChannelIntroductionTranscript: Equatable, Sendable {
@@ -491,14 +490,22 @@ nonisolated struct MeshChannelIntroductionExchange {
     let role: MeshChannelRole
     /// The hello this side sent.
     let localHello: MeshChannelHello
+    /// The labels the transcript is framed and the peer's signature is checked under: this
+    /// exchange's own copy of its host namespace's purposes (plan step A0.2.5), handed in at
+    /// construction and never looked up.
+    let purposes: ProximityNamespace.Purposes
 
     private var peerHello: MeshChannelHello?
     private var transcript: MeshChannelIntroductionTranscript?
 
     /// Starts an exchange for one tunnel.
-    init(role: MeshChannelRole, localHello: MeshChannelHello) {
+    ///
+    /// `purposes` has no default: ProximityKit holds no namespace of its own, so the transport
+    /// passes its introduction authority's.
+    init(role: MeshChannelRole, localHello: MeshChannelHello, purposes: ProximityNamespace.Purposes) {
         self.role = role
         self.localHello = localHello
+        self.purposes = purposes
     }
 
     /// Step 1: review the peer's hello, recording it only if every check passes.
@@ -589,7 +596,7 @@ nonisolated struct MeshChannelIntroductionExchange {
             channelBindingHash: channelBindingHash
         )
         transcript = built
-        return canonicalBytes(for: built)
+        return canonicalBytes(for: built, in: purposes)
     }
 
     /// Step 3: review the peer's signed introduction against the derived transcript.
@@ -601,9 +608,9 @@ nonisolated struct MeshChannelIntroductionExchange {
         }
         guard IdentityService.verify(
             introduction.signature,
-            of: canonicalBytes(for: transcript),
+            of: canonicalBytes(for: transcript, in: purposes),
             by: peerHello.signingPublicKey,
-            purpose: FernletCryptoPurpose.Signature.meshChannelIntroductionV1
+            purpose: purposes.signature.meshChannelIntroductionV1
         ) else {
             return .rejected(.signatureInvalid)
         }
@@ -712,7 +719,13 @@ protocol MeshIntroductionAuthority: AnyObject {
     /// did before. Nothing about identity moves: the roster still decides who connects.
     var mayReconcileDivergentEpochs: Bool { get }
 
+    /// The host's protocol identity, as the layer above the transport holds it (plan step A0.2.5).
+    /// The transport hands its `family.purposes` to every ``MeshChannelIntroductionExchange`` it
+    /// starts, so the peer's introduction is checked under the same labels
+    /// ``signChannelIntroduction(_:)`` signs this side's under.
+    var namespace: ProximityNamespace { get }
+
     /// Signs the introduction transcript with the device's identity key under
-    /// `FernletCryptoPurpose.Signature.meshChannelIntroductionV1`.
+    /// ``namespace``'s `purposes.signature.meshChannelIntroductionV1`.
     func signChannelIntroduction(_ transcript: Data) throws -> Data
 }

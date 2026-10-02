@@ -19,7 +19,6 @@
 // Public material only, so it verifies on a locked device. Pure value, no clock: `sentAt` is
 // **bound** into the signature, not checked against a wall clock, exactly as the two digests are.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshRoutedDrainAnswerRejection
@@ -73,11 +72,18 @@ nonisolated struct MeshRoutedDrainAnswerVerifier: Sendable {
     let meshID: UUID
     /// The merged membership ledger whose admissions bind fingerprints to signing keys.
     let ledger: MeshMembershipLedger
+    /// The labels the answerer's signature is checked under: this verifier's own copy of its host
+    /// namespace's purposes (plan step A0.2.5), handed in at construction and never looked up.
+    let purposes: ProximityNamespace.Purposes
 
-    /// Binds the verifier to one session. Both are values.
-    init(meshID: UUID, ledger: MeshMembershipLedger) {
+    /// Binds the verifier to one session. All three are values.
+    ///
+    /// `purposes` has no default: ProximityKit holds no namespace of its own, so the caller passes
+    /// the purposes it already holds.
+    init(meshID: UUID, ledger: MeshMembershipLedger, purposes: ProximityNamespace.Purposes) {
         self.meshID = meshID
         self.ledger = ledger
+        self.purposes = purposes
     }
 
     /// Checks, in order: mesh → shape → admitted key → answerer not removed → key/fingerprint
@@ -95,9 +101,9 @@ nonisolated struct MeshRoutedDrainAnswerVerifier: Sendable {
         guard fingerprintMatches(payload.senderFingerprint, key) else { return .senderKeyMismatch }
         guard IdentityService.verify(
             payload.signature,
-            of: canonicalBytes(for: payload),
+            of: canonicalBytes(for: payload, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshRoutedDrainAnswerV1
+            purpose: purposes.signature.meshRoutedDrainAnswerV1
         ) else {
             return .signatureInvalid
         }

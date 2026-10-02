@@ -129,10 +129,12 @@ public final class IdentityService {
     /// an identity is always built from its host's. Since step A0.2.3 the identity reads its default
     /// ``keychainService`` off it, and since A0.2.4 the builders that sign with this identity (the
     /// envelope, the admission token, the membership, quorum and key-agreement records) and the
-    /// envelope's `verify` read their labels from its ``purposes``; A0.2's later commits route the
-    /// identity's own seal and group-key labels and its row names through it too, each
-    /// byte-identical for Fernlet. `nonisolated`: inert `Sendable` value data, which the nonisolated
-    /// verifiers and serializers read without a hop to the main actor.
+    /// envelope's `verify` read their labels from its ``purposes``; since A0.2.5 the six routed
+    /// builders do too, and a verify QR made from this identity carries this namespace's scheme and
+    /// QR label (the coach and duress ceremonies scan and answer under it as well). A0.2's later
+    /// commits route the identity's own seal and group-key labels and its row names through it too,
+    /// each byte-identical for Fernlet. `nonisolated`: inert `Sendable` value data, which the
+    /// nonisolated verifiers and serializers read without a hop to the main actor.
     public nonisolated let namespace: ProximityNamespace
 
     /// The namespace's domain-separation labels, `namespace.family.purposes`, by consumer family.

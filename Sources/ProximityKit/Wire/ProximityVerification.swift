@@ -1,6 +1,5 @@
 import Foundation
 import CryptoKit
-import FernletCrypto
 
 /// QR verification ceremony (bitchat adoptions Increment 4,
 /// Docs/Plan-Bitchat-Adoptions-2026-07-25.md — bitchat's signed verify-QR + in-session
@@ -9,17 +8,20 @@ import FernletCrypto
 /// sealed challenge/response proves the live session peer HOLDS that key — together they bind
 /// the person to the cryptographic identity, which is exactly the binding bitchat's 2025
 /// favorites-impersonation flaw lacked.
+///
+/// Since ProximityKit plan step A0.2.5 the URL scheme and the identity transcript's label are the
+/// host's (`ProximityNamespace.Family.verifyQR` and `purposes.signature.proximityQRIdentityV1`),
+/// read off the identity that signs or the namespace a caller hands in; the host `verify`, the
+/// query key `d` and the payload version 1 stay this type's format constants.
 public nonisolated enum ProximityVerifyQR {
 
     /// Thrown by `makeURL` when the payload could not be JSON-encoded into a URL.
     public enum VerifyQRError: Error { case encodingFailed }
 
-    public static let urlScheme = "fernlet"
     public static let urlHost = "verify"
     /// Bounds replay of a photographed QR to minutes; both devices are physically together, so
     /// generous skew tolerance isn't needed.
     public static let freshnessWindow: TimeInterval = 5 * 60
-    static let signingDomain = FernletCryptoPurpose.Signature.proximityQRIdentityV1.data
 
     /// The self-signed content of a `fernlet://verify` QR: both public keys, a timestamp, a
     /// single-use display nonce, and the Ed25519 signature over their canonical bytes.
@@ -54,14 +56,18 @@ public nonisolated enum ProximityVerifyQR {
         }
     }
 
+    /// The fixed-width transcript the QR's signature covers: the namespace's
+    /// `purposes.signature.proximityQRIdentityV1`, raw, then the version byte, both keys, the
+    /// big-endian timestamp and the nonce (plan step A0.2.5 moved the label onto the namespace).
     static func canonicalBytes(
         version: Int,
         signingPublicKey: Data,
         keyAgreementPublicKey: Data,
         timestamp: UInt64,
-        nonce: Data
+        nonce: Data,
+        in purposes: ProximityNamespace.Purposes
     ) -> Data {
-        var bytes = signingDomain
+        var bytes = purposes.signature.proximityQRIdentityV1.data
         bytes.append(UInt8(clamping: version))
         bytes.append(signingPublicKey)
         bytes.append(keyAgreementPublicKey)
@@ -76,6 +82,9 @@ public nonisolated enum ProximityVerifyQR {
 
     /// Builds the signed `fernlet://verify?d=…` URL. Returns the nonce too — the caller must
     /// remember it (single-use display, bound to one slot; see `MeshNetworkManager.activeVerifyQR`).
+    ///
+    /// The scheme and the signature's label are the identity's namespace's (plan step A0.2.5), so
+    /// the code a device shows is the one its own host is registered for.
     @MainActor
     public static func makeURL(identity: IdentityService, now: Date = Date()) throws -> (url: URL, nonce: Data) {
         let nonce = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })
@@ -85,8 +94,9 @@ public nonisolated enum ProximityVerifyQR {
             signingPublicKey: identity.localSigningPublicKey,
             keyAgreementPublicKey: identity.localKeyAgreementPublicKey,
             timestamp: timestamp,
-            nonce: nonce
-        ), purpose: FernletCryptoPurpose.Signature.proximityQRIdentityV1)
+            nonce: nonce,
+            in: identity.purposes
+        ), purpose: identity.purposes.signature.proximityQRIdentityV1)
         let payload = Payload(
             version: 1,
             signingPublicKey: identity.localSigningPublicKey,
@@ -97,15 +107,23 @@ public nonisolated enum ProximityVerifyQR {
         )
         guard let json = try? JSONEncoder().encode(payload) else { throw VerifyQRError.encodingFailed }
         var components = URLComponents()
-        components.scheme = urlScheme
+        components.scheme = identity.namespace.family.verifyQR.urlScheme
         components.host = urlHost
         components.queryItems = [URLQueryItem(name: "d", value: base64URLEncode(json))]
         guard let url = components.url else { throw VerifyQRError.encodingFailed }
         return (url, nonce)
     }
 
-    public static func parse(_ url: URL) -> Payload? {
-        guard url.scheme?.lowercased() == urlScheme,
+    /// The payload a scanned verify URL carries, or nil for any URL that is not one: another scheme
+    /// than `namespace`'s (plan step A0.2.5; the namespace's soundness rule holds it lowercase, as
+    /// the comparison below assumes), another host, no `d` item, or bytes that do not decode.
+    ///
+    /// - Parameters:
+    ///   - url: The scanned URL, untrusted.
+    ///   - namespace: The scanning host's namespace, with no default: ProximityKit holds none.
+    /// - Returns: The decoded payload, not yet validated — ``isValid(_:at:in:)`` does that.
+    public static func parse(_ url: URL, in namespace: ProximityNamespace) -> Payload? {
+        guard url.scheme?.lowercased() == namespace.family.verifyQR.urlScheme,
               url.host?.lowercased() == urlHost,
               let encoded = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                   .queryItems?.first(where: { $0.name == "d" })?.value,
@@ -113,8 +131,11 @@ public nonisolated enum ProximityVerifyQR {
         return try? JSONDecoder().decode(Payload.self, from: data)
     }
 
-    /// Shape + signature + freshness.
-    public static func isValid(_ payload: Payload, at now: Date = Date()) -> Bool {
+    /// Shape + signature + freshness. The signature is checked under `purposes`, the caller's
+    /// namespace labels (plan step A0.2.5), with no default: ProximityKit holds none.
+    public static func isValid(
+        _ payload: Payload, at now: Date = Date(), in purposes: ProximityNamespace.Purposes
+    ) -> Bool {
         guard payload.version == 1,
               payload.nonce.count == ProximityVerifySignature.nonceByteCount,
               // Exact Curve25519 lengths, not merely non-empty: `canonicalBytes` concatenates these
@@ -132,10 +153,11 @@ public nonisolated enum ProximityVerifyQR {
                 signingPublicKey: payload.signingPublicKey,
                 keyAgreementPublicKey: payload.keyAgreementPublicKey,
                 timestamp: payload.timestamp,
-                nonce: payload.nonce
+                nonce: payload.nonce,
+                in: purposes
             ),
             by: payload.signingPublicKey,
-            purpose: FernletCryptoPurpose.Signature.proximityQRIdentityV1
+            purpose: purposes.signature.proximityQRIdentityV1
         )
     }
 
@@ -194,9 +216,9 @@ public nonisolated struct VerifyResponsePayload: Codable, Equatable, Sendable {
 /// Shared by both ceremony implementations (`MeshNetworkManager`'s slot-bound flow and
 /// ``CoachVerificationCeremony``) so their transcripts can never diverge. The transcript has no
 /// length prefixes, which is why `isWellFormedChallenge` is mandatory before anything is signed
-/// with the long-term identity key.
+/// with the long-term identity key. Its label is the host namespace's
+/// `purposes.signature.proximityQRResponseV1` since plan step A0.2.5.
 public nonisolated enum ProximityVerifySignature {
-    static let domain = FernletCryptoPurpose.Signature.proximityQRResponseV1.data
 
     /// Byte length every nonce in the ceremony must have. The transcript below concatenates its
     /// fields WITHOUT length prefixes, so it is unambiguous only while every field is fixed-length
@@ -222,11 +244,15 @@ public nonisolated enum ProximityVerifySignature {
     /// The signed transcript: domain ‖ the SCANNER's KA key (binds the response to who asked) ‖
     /// both nonces. Signed by the displayer's identity signing key. Every field is fixed-length by
     /// `isWellFormedChallenge`, which the callers gate on — do not sign an unchecked payload.
+    ///
+    /// The domain is `purposes.signature.proximityQRResponseV1`, raw: the caller's namespace labels
+    /// (plan step A0.2.5), with no default, since ProximityKit holds none.
     public static func message(
         scannerKeyAgreementPublicKey: Data,
         challengeNonce: Data,
-        qrNonce: Data
+        qrNonce: Data,
+        in purposes: ProximityNamespace.Purposes
     ) -> Data {
-        domain + scannerKeyAgreementPublicKey + challengeNonce + qrNonce
+        purposes.signature.proximityQRResponseV1.data + scannerKeyAgreementPublicKey + challengeNonce + qrNonce
     }
 }

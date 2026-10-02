@@ -20,7 +20,6 @@
 // not a liveness read; liveness is `MeshChunk.isLive(at:)` with an injected `now`, decided by the
 // caller.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshChunkRejection
@@ -107,8 +106,11 @@ nonisolated struct MeshChunkVerifier: Sendable {
     ///   unauthenticated claim, and a nil verdict stops being an origin-authenticity statement
     ///   about the *item*.
     let manifest: MeshRoutedManifest?
+    /// The labels the origin's signature is checked under: this verifier's own copy of its host
+    /// namespace's purposes (plan step A0.2.5), handed in at construction and never looked up.
+    let purposes: ProximityNamespace.Purposes
 
-    /// Binds the verifier to one session, optionally to one already-verified manifest. All four
+    /// Binds the verifier to one session, optionally to one already-verified manifest. All five
     /// are values; re-create it when the ledger merges or the manifest arrives.
     ///
     /// - Parameters:
@@ -117,11 +119,17 @@ nonisolated struct MeshChunkVerifier: Sendable {
     ///   - ledger: The merged membership ledger.
     ///   - manifest: An already-verified manifest, or nil for the parked case. See the
     ///     ``manifest`` precondition — this type never re-verifies it.
-    init(meshID: UUID, hardDeadline: Date, ledger: MeshMembershipLedger, manifest: MeshRoutedManifest?) {
+    ///   - purposes: The caller's namespace labels, with no default: ProximityKit holds no namespace
+    ///     of its own.
+    init(
+        meshID: UUID, hardDeadline: Date, ledger: MeshMembershipLedger, manifest: MeshRoutedManifest?,
+        purposes: ProximityNamespace.Purposes
+    ) {
         self.meshID = meshID
         self.hardDeadline = hardDeadline
         self.ledger = ledger
         self.manifest = manifest
+        self.purposes = purposes
     }
 
     /// Checks, in order: mesh → shape → admitted key → origin not removed → key/fingerprint
@@ -141,9 +149,9 @@ nonisolated struct MeshChunkVerifier: Sendable {
         guard fingerprintMatches(chunk.originFingerprint, key) else { return .originKeyMismatch }
         guard IdentityService.verify(
             chunk.signature,
-            of: canonicalBytes(for: chunk),
+            of: canonicalBytes(for: chunk, in: purposes),
             by: key,
-            purpose: FernletCryptoPurpose.Signature.meshRoutedChunkV1
+            purpose: purposes.signature.meshRoutedChunkV1
         ) else {
             return .signatureInvalid
         }

@@ -2281,7 +2281,8 @@ private extension NetworkMeshSession {
         }
         var exchange = MeshChannelIntroductionExchange(
             role: role,
-            localHello: localHello(from: authority)
+            localHello: localHello(from: authority),
+            purposes: authority.namespace.family.purposes
         )
         do {
             let peerHello = try await exchangeHellos(role: role, local: exchange.localHello, over: stream)

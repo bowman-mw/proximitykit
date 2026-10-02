@@ -89,8 +89,8 @@ nonisolated struct MeshCustodyReceipt: Codable, Equatable, Sendable {
     /// The item's expiry — `MeshRoutedManifest.expiry(afterHardDeadline:)`, floored, copied from the
     /// manifest. Checked for **exact** equality against the receiver's own value (D6).
     let expiresAt: Date
-    /// The custodian's Ed25519 signature over `canonicalBytes(for:)` under
-    /// `FernletCryptoPurpose.Signature.meshCustodyReceiptV1`. Excluded from those bytes.
+    /// The custodian's Ed25519 signature over `canonicalBytes(for:in:)` under
+    /// its namespace's `purposes.signature.meshCustodyReceiptV1`. Excluded from those bytes.
     let signature: Data
 
     /// Builds a receipt from already-signed parts, flooring both instants through
@@ -303,8 +303,8 @@ extension MeshCustodyReceipt {
             signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshCustodyReceiptV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshCustodyReceiptV1
         )
         return MeshCustodyReceipt(
             meshID: unsigned.meshID, itemID: unsigned.itemID,

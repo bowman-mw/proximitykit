@@ -262,12 +262,12 @@ nonisolated struct MeshChunk: Codable, Equatable, Sendable {
     let expiresAt: Date
     /// The ciphertext slice, 1 … ``MeshChunkFormat/maxChunkPayloadBytes``. Opaque to this type:
     /// the seal's own nonce and tag live **inside** the blob these slices reassemble (the manifest
-    /// carries no nonce), so nothing here parses it. Excluded from ``canonicalBytes(for:)-(MeshChunk)``
+    /// carries no nonce), so nothing here parses it. Excluded from ``canonicalBytes(for:in:)-(MeshChunk,_)``
     /// and bound through ``chunkHash``; still part of `==`, because transcript exclusion is a
     /// serializer fact, not a value fact.
     let payload: Data
-    /// The origin's Ed25519 signature over ``canonicalBytes(for:)-(MeshChunk)`` under
-    /// `FernletCryptoPurpose.Signature.meshRoutedChunkV1`. Excluded from those bytes. A custodian
+    /// The origin's Ed25519 signature over ``canonicalBytes(for:in:)-(MeshChunk,_)`` under
+    /// its namespace's `purposes.signature.meshRoutedChunkV1`. Excluded from those bytes. A custodian
     /// carries it verbatim; there is no API in this module that re-signs somebody else's chunk.
     let signature: Data
 

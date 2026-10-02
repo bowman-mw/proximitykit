@@ -33,7 +33,6 @@
 // `MeshChunkFormat.maxChunksInFlightPerPeer`), any forwarding or custody transfer (item 8), and
 // any content-key handling at all.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshChunkMintError
@@ -172,8 +171,8 @@ nonisolated enum MeshChunker {
             expiresAt: manifest.expiresAt, payload: payload, signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshRoutedChunkV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshRoutedChunkV1
         )
         return signed(unsigned, with: signature)
     }

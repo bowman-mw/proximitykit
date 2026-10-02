@@ -24,7 +24,6 @@
 // 3/4). `MeshRoutedManifestVerifier` is the receive-side door and `MeshRoutedContentKeyWrapper`
 // the crypto; this file is the record, its bounds and its mint.
 
-import FernletCrypto
 import Foundation
 
 // MARK: - MeshRoutedManifestFormat
@@ -185,8 +184,8 @@ nonisolated struct MeshRoutedManifest: Codable, Equatable, Sendable {
     let destinations: [String]
     /// One wrap per destination, same order. Clamped exactly as ``destinations``.
     let keyWraps: [MeshRecipientKeyWrap]
-    /// The origin's Ed25519 signature over ``canonicalBytes(for:)-(MeshRoutedManifest)`` under
-    /// `FernletCryptoPurpose.Signature.meshRoutedManifestV1`. Excluded from those bytes.
+    /// The origin's Ed25519 signature over ``canonicalBytes(for:in:)-(MeshRoutedManifest,_)`` under
+    /// its namespace's `purposes.signature.meshRoutedManifestV1`. Excluded from those bytes.
     let signature: Data
 
     /// Builds a manifest from already-signed parts, clamping both lists to the destination cap and
@@ -463,8 +462,8 @@ extension MeshRoutedManifest {
             keyWraps: wraps, signature: Data()
         )
         let signature = try identity.sign(
-            canonicalBytes(for: unsigned),
-            purpose: FernletCryptoPurpose.Signature.meshRoutedManifestV1
+            canonicalBytes(for: unsigned, in: identity.purposes),
+            purpose: identity.purposes.signature.meshRoutedManifestV1
         )
         return MeshRoutedManifest(
             meshID: unsigned.meshID, itemID: unsigned.itemID, originFingerprint: unsigned.originFingerprint,

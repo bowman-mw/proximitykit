@@ -343,9 +343,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The host's protocol identity, read once from ``store`` at construction and kept as this
     /// manager's own copy (ProximityKit plan step A0.2.3), so no later read reaches back to the
     /// host. The default identity is built from it, and since step A0.2.4 its purposes are what the
-    /// membership verifiers, the ledger adoption and the admission-token check run under; A0.2's
-    /// later commits route the rest of this manager's labels and names through it. `nonisolated`:
-    /// inert `Sendable` value data.
+    /// membership verifiers, the ledger adoption and the admission-token check run under; since
+    /// A0.2.5 the six routed verifiers too, the QR ceremony's scan, response and check, and the
+    /// channel introduction this manager signs as the transport's ``MeshIntroductionAuthority``
+    /// (whose requirement it satisfies, so the transport checks the peer's under the same labels).
+    /// A0.2's later commits route the rest of this manager's labels and names through it.
+    /// `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
     /// its body. `NetworkMeshSession` since the MC→QUIC cutover (2026-09-21), and the only radio a
@@ -6557,7 +6560,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         now: Date = Date()
     ) {
         guard let mesh = currentMesh, let verifier = membershipVerifier else { return }
-        let door = MeshRoutedInventoryVerifier(meshID: mesh.meshID, ledger: verifier.ledger)
+        let door = MeshRoutedInventoryVerifier(meshID: mesh.meshID, ledger: verifier.ledger, purposes: namespace.family.purposes)
         if let rejection = door.verify(payload) {
             FernletAuditLog.log(
                 "mesh.routedDrain.rejected",
@@ -6738,7 +6741,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         from senderFingerprint: String
     ) {
         guard let mesh = currentMesh, let verifier = membershipVerifier else { return }
-        let door = MeshRoutedDrainAnswerVerifier(meshID: mesh.meshID, ledger: verifier.ledger)
+        let door = MeshRoutedDrainAnswerVerifier(meshID: mesh.meshID, ledger: verifier.ledger, purposes: namespace.family.purposes)
         if let rejection = door.verify(payload) {
             FernletAuditLog.log(
                 "mesh.routedDrain.rejected",
@@ -6806,7 +6809,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let door = MeshRoutedManifestVerifier(
             meshID: context.meshID, hardDeadline: context.hardDeadline, ledger: context.ledger,
-            acceptedTypeTokens: routedTypes.tokens
+            acceptedTypeTokens: routedTypes.tokens, purposes: namespace.family.purposes
         )
         if let rejection = door.verify(manifest) {
             refuseRoutedFrameBeforeStore(
@@ -6924,7 +6927,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let door = MeshChunkVerifier(
             meshID: context.meshID, hardDeadline: context.hardDeadline,
-            ledger: context.ledger, manifest: manifest
+            ledger: context.ledger, manifest: manifest, purposes: namespace.family.purposes
         )
         if let rejection = door.verify(chunk) {
             refuseRoutedFrameBeforeStore(
@@ -6967,7 +6970,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let door = MeshCustodyReceiptVerifier(
             meshID: context.meshID, hardDeadline: context.hardDeadline,
-            ledger: context.ledger, manifest: manifest
+            ledger: context.ledger, manifest: manifest, purposes: namespace.family.purposes
         )
         if let rejection = door.verify(receipt) {
             refuseRoutedFrameBeforeStore(
@@ -7005,7 +7008,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let door = MeshRecipientReceiptVerifier(
             meshID: context.meshID, hardDeadline: context.hardDeadline,
-            ledger: context.ledger, manifest: manifest
+            ledger: context.ledger, manifest: manifest, purposes: namespace.family.purposes
         )
         if let rejection = door.verify(receipt) {
             refuseRoutedFrameBeforeStore(
@@ -12952,7 +12955,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// the scanning row surfaces the refusal to the user rather than letting the sheet close as if
     /// the code had been accepted.
     public func beginQRVerification(with url: URL, slotID: UUID) -> Bool {
-        guard let payload = ProximityVerifyQR.parse(url), ProximityVerifyQR.isValid(payload) else {
+        guard let payload = ProximityVerifyQR.parse(url, in: namespace),
+              ProximityVerifyQR.isValid(payload, in: namespace.family.purposes) else {
             FernletAuditLog.log("mesh.verifyQR.invalidScanned")
             return false
         }
@@ -13008,11 +13012,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let message = ProximityVerifySignature.message(
             scannerKeyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
             challengeNonce: payload.challengeNonce,
-            qrNonce: payload.qrNonce
+            qrNonce: payload.qrNonce,
+            in: namespace.family.purposes
         )
         let signature: Data
         do {
-            signature = try identity.sign(message, purpose: FernletCryptoPurpose.Signature.proximityQRResponseV1)
+            signature = try identity.sign(message, purpose: namespace.family.purposes.signature.proximityQRResponseV1)
         } catch {
             // Recovery is "no response" — the scanner never commits — so name it (R7) instead of
             // leaving the ceremony to die silently.
@@ -13052,10 +13057,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let message = ProximityVerifySignature.message(
             scannerKeyAgreementPublicKey: identity.localKeyAgreementPublicKey,
             challengeNonce: pending.challengeNonce,
-            qrNonce: pending.qrNonce
+            qrNonce: pending.qrNonce,
+            in: namespace.family.purposes
         )
         guard IdentityService.verify(payload.signature, of: message, by: pending.expectedSigningKey,
-                                     purpose: FernletCryptoPurpose.Signature.proximityQRResponseV1) else {
+                                     purpose: namespace.family.purposes.signature.proximityQRResponseV1) else {
             pendingQRVerifications[slot.id] = nil
             FernletAuditLog.log("mesh.verifyQR.badResponseSignature")
             return
@@ -16448,7 +16454,7 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
     }
 
     func signChannelIntroduction(_ transcript: Data) throws -> Data {
-        try identity.sign(transcript, purpose: FernletCryptoPurpose.Signature.meshChannelIntroductionV1)
+        try identity.sign(transcript, purpose: namespace.family.purposes.signature.meshChannelIntroductionV1)
     }
 }
 
