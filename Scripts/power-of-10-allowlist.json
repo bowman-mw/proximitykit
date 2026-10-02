@@ -1,0 +1,17 @@
+[
+ {
+  "rule": "R9-UNSAFE",
+  "path": "Sources/ProximityKit/Wire/SealedPayloadFraming.swift",
+  "reason": "Apple Compression framework C seam (compression_stream_init/process/destroy take raw pointers; NSData.decompressed(using:) has no inflate limit, so it cannot enforce maxInflatedByteCount and would lose the 16 MiB decompression-bomb guard). Invariant: the compression_stream and the 64 KiB destination buffer are allocated and deallocated in the SAME scope via defer and never escape; the source pointer is valid only inside input.withUnsafeBytes and the whole process loop runs inside that closure; every produced chunk is copied into a Swift Data before the buffer is reused; total output is bounded by `limit`."
+ },
+ {
+  "rule": "R9-UNSAFE",
+  "path": "Sources/ProximityKit/Ranging/NIRangingSession.swift",
+  "reason": "NearbyInteraction delegate bridging seam. Invariant: the invalidated NISession is transferred solely to compare identity (===) against self.niSession on the MainActor; it is never called or mutated after the hop, and holding the strong reference until the comparison runs is precisely what prevents the address-reuse aliasing an ObjectIdentifier comparison would admit."
+ },
+ {
+  "rule": "R9-UNSAFE",
+  "path": "Sources/ProximityKit/ForegroundAnchor/ProximityForegroundAnchor.swift",
+  "reason": "ActivityKit seam, reaper only: Activity is a non-Sendable class and end(_:dismissalPolicy:) is nonisolated async and documented callable from any context, with no actor-isolated alternative API, so the MainActor-held reference must be transferred across the call. Since the network migration's P9 item 5 retired ActivityKitProximityForegroundAnchor there is exactly ONE such local left in the file, in ProximityLiveActivityReaper.endOrphans. Invariant: one local per stranded activity from the single launch-time enumeration, used for exactly ONE end(_:dismissalPolicy:) call and never stored; endOrphans runs once per launch from FernletStoreLoader.startIfNeeded() before any proximity manager exists, and nothing in the app requests a proximity activity any more, so no other object can ever hold a second reference to the same activity."
+ }
+]
