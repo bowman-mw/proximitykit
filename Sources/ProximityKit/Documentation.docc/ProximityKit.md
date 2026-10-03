@@ -446,12 +446,14 @@ type has no local label). Senders keep emitting frozen English forever.
 and disk formats identify the app it runs in: the 39 labels, the three radios' values, the QR
 scheme, the identity's and the two mesh seal keys' keychain rows, the storage names and the log
 subsystem. Plan step A0.2 of `Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md` moved every read of
-those in this module onto it, each byte-identical for Fernlet. Some such strings stay outside it
-until a later step (see "What A0.2 left for later" below): the 13 feature labels this module reads
-from FernletCrypto's registry, the heart-drop and moderation keychain services and
-``ProximitySupportLayout``'s `Fernlet` folder until A0.4, and the payload vocabulary and
-presentation strings until A0.3. `ProximityNamespaceBoundaryTests` allowlists each feature-label
-read and each literal that spells `fernlet`, with the step that removes it. Beside it the
+those in this module onto it, each byte-identical for Fernlet. Its family also carries the payload
+vocabulary and the radios' presentation strings, which this module's consumers still read from
+constants of their own until plan step A0.3 re-points them. Some such strings stay outside it until
+a later step (see "What A0.2 left for later" below): the 13 feature labels this module reads from
+FernletCrypto's registry, the heart-drop and moderation keychain services and
+``ProximitySupportLayout``'s `Fernlet` folder until A0.4. `ProximityNamespaceBoundaryTests`
+allowlists each feature-label read and each literal that spells `fernlet`, with the step that
+removes it. Beside it the
 host supplies two things this module used to take from Fernlet's own modules, the install binding
 the sealed mesh stores seal under and the sink audit lines go to, and two mechanisms were copied in
 rather than shared: the column seal and the keychain item. This module holds no instance of the
@@ -462,8 +464,15 @@ audit sink alone lives in one process-wide slot, ``ProximityAudit`` (see "The au
 shares: the 39 domain-separation labels as ``ProximityCryptographicPurpose`` values
 (``ProximityNamespace/Purposes``: 21 signature transcripts with the verify-only legacy pair, three
 HKDF salts, the QUIC channel binding's TLS exporter label, the two column seals, five AEAD labels and
-seven hash domains, the epoch id's among them), the three radios' service types and ALPNs and the
-mesh heartbeat (``ProximityNamespace/Radios``), and the verify QR's URL scheme. Its
+seven hash domains, the epoch id's among them), the three radios' service types and ALPNs, the
+mesh heartbeat and three presentation strings (``ProximityNamespace/Radios``: the mesh and
+recipe-share radios' Bonjour instance-name prefix, the presence radio's, and the ephemeral
+certificates' common name), the verify QR's URL scheme, and the payload vocabulary
+(``ProximityNamespace/Vocabulary``: the coordinator's three session messages with their signed
+summary titles, every payload token the host dispatches and those that must arrive sealed, the
+capability tokens with the wire2 token and what a peer that lists none is taken to support, the four
+membership record kinds and the routed-type tokens). Tokens are plain `String`s, wire data rather
+than labels, and decoding never produces one. Its
 ``ProximityNamespace/Installation`` is what belongs to one app on one device: the identity's
 keychain service and its four accounts, the two seal-key rows, the default directory name and the
 three storage names, and the radios' log subsystem. Two apps that share a family speak one wire and
@@ -481,7 +490,9 @@ or raw-prefix signature transcript, the verify-only `.absent` legacy pair, a len
 hash preimage, an HKDF salt, a column seal, an AEAD prefix, the exporter label), so a host supplies
 bytes and never decides how this module consumes them, and a label in a non-signature role verifies
 nothing. The initializer is total and records ``ProximityNamespace/soundness`` (labels well-formed,
-distinct and prefix-free; radio, QR, keychain and storage values well-formed and distinct);
+distinct and prefix-free; radio, QR, keychain and storage values well-formed and distinct; every
+vocabulary token within the bytes its receivers accept, none repeated within its group and none a
+rule names left unknown; summary titles, instance-name prefixes and the common name well-formed);
 ``ProximityNamespace/validated(family:installation:)`` throws the same violations, and
 ``ProximityNamespace/familyCollisions(with:)`` and ``ProximityNamespace/installationCollisions(with:)``
 let a host's own tests show it overlaps no other app. This module does not yet refuse an unsound
@@ -521,8 +532,11 @@ hand it:
 `.fernlet` carries to the literal Fernlet shipped before A0.2 (62 rows), each label's role and its
 FernletCrypto twin, soundness, the byte-prefix check over FernletCrypto's 81 registry labels and
 `.fernlet`'s 39 together, one role-versus-consumer cell per hash and transcript consumer, and the
-readers above under `.fernlet` and under a foreign namespace. `ProximityNamespaceSoundnessTests`
-holds the soundness and collision rules over namespaces built only from literals.
+readers above under `.fernlet` and under a foreign namespace. `ProximityVocabularyGoldenTests`, on
+the same line, holds every token and presentation string this module's consumers read to the
+literal Fernlet shipped before A0.3, and `.fernlet`'s vocabulary and presentation strings to the
+same literals. `ProximityNamespaceSoundnessTests` holds the soundness and collision rules over
+namespaces built only from literals.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
 named only on the 20 code lines in 7 files that read the feature labels leaving at A0.4; and every
@@ -584,13 +598,15 @@ without it.
 
 **What A0.2 left for later.**
 
-- **A0.3** injects the vocabulary and the presentation strings. Beside the namespace, as a second
-  host requirement: the `PayloadType` tokens, capability raw values, the sealing set, the routed-type
-  rows (`MeshRoutedTypeToken`'s spellings among them) and the membership record kinds. Per host: the Bonjour
-  instance prefixes (`fernlet-mesh-` and `fn-`), the ephemeral certificate's common name, the
-  coordinator's `"Fernlet"` display default and `serviceType(for:)`. And this module starts refusing
-  an unsound namespace, failing closed in `ensureProvisioned()`, `encryptGroupKey` and every radio's
-  `start`.
+- **A0.3** routes the vocabulary and the presentation strings. The namespace's family already
+  carries both, judged by its soundness rules, but this module's consumers still read their own
+  constants: the envelope its sealing set and `PayloadType`, the coordinator its session tokens,
+  titles and capability rules, the membership code its record kinds, the routed code
+  `MeshRoutedTypeToken`'s spellings, the radios their Bonjour instance prefixes (`fernlet-mesh-` and
+  `fn-`) and certificate name. A0.3 re-points each at the namespace it holds and deletes the
+  constant; the coordinator's `"Fernlet"` display default and `serviceType(for:)` are deleted rather
+  than injected. And this module starts refusing an unsound namespace, failing closed in
+  `ensureProvisioned()`, `encryptGroupKey` and every radio's `start`.
 - **A0.4** moves Fernlet's features out, and with them the 13 feature labels this module still reads
   from FernletCrypto's registry (hearts, presence, activities, moderation and the sealed-backup
   escrow; the heart-drop and presence derivations become a generic `pairSecret(purpose:)` and

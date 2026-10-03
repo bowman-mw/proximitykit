@@ -4,8 +4,8 @@
 // The rules a namespace is judged by: alone, once, when it is built (`soundness`), and against
 // another app's namespace (`familyCollisions(with:)`, `installationCollisions(with:)`). Every loop runs
 // over the namespace's fixed shape — at most 39 labels, three radios, three keychain services, four
-// storage names — or over one value whose length a guard has already bounded, or a string the host
-// wrote.
+// storage names, sixteen vocabulary fields — or over one value whose length a guard has already
+// bounded, or a string or token list the host wrote.
 
 import Foundation
 
@@ -25,10 +25,41 @@ nonisolated extension ProximityNamespace {
     /// The most bytes the mesh heartbeat may hold.
     static let maximumHeartbeatBytes = 64
 
+    /// The most bytes a payload token or a membership record kind may hold.
+    static let maximumPayloadTokenBytes = 255
+
+    /// The most bytes a capability token may hold: the coordinator cuts every token a peer advertises
+    /// to `ProximityCoordinator.maxCapabilityTokenLength` characters, so a longer one would never match.
+    static let maximumCapabilityTokenBytes = 32
+
+    /// The most bytes a routed-type token may hold: `MeshRoutedManifestFormat.maxTypeTokenLength`, past
+    /// which a routed manifest is refused.
+    static let maximumRoutedTypeTokenBytes = 64
+
+    /// The most characters a summary title may hold: a receiver's bounded `PayloadSummary` decode refuses
+    /// a longer one (FernletDomainModel's `PayloadSummary.maxDetailCharacters`, out of this folder's
+    /// reach, which `ProximityVocabularyGoldenTests` holds equal).
+    static let maximumSummaryTitleCharacters = 200
+
+    /// The most bytes a DNS-SD instance name may hold: it is one DNS label.
+    static let maximumInstanceNameBytes = 63
+
+    /// The lowercase hex characters a mesh or recipe-share instance name holds after its prefix
+    /// (`MeshLinkAdvertisement.instanceNameTokenLength`).
+    static let meshInstanceNameTokenLength = 12
+
+    /// The lowercase hex characters a presence instance name holds after its prefix: eight bytes of
+    /// entropy (`PresenceEpochPosture.instanceNameEntropyByteCount`), two characters each.
+    static let presenceInstanceNameTokenLength = 16
+
+    /// The most bytes the certificates' common name may hold: X.509's upper bound on a common name.
+    static let maximumCommonNameBytes = 64
+
     /// Every soundness rule's verdict for one family and installation.
     ///
     /// Runs once, from ``init(family:installation:)``, in a fixed order — labels, radios and heartbeat,
-    /// QR scheme, keychain, storage, log subsystem — so equal inputs always record equal verdicts.
+    /// QR scheme, keychain, storage, log subsystem, then the vocabulary and the radios' presentation
+    /// strings — so equal inputs always record equal verdicts.
     ///
     /// - Parameters:
     ///   - family: The family to judge.
@@ -45,6 +76,8 @@ nonisolated extension ProximityNamespace {
         if installation.logSubsystem.isEmpty {
             violations.append(.emptyLogSubsystem)
         }
+        violations += vocabularyViolations(family.vocabulary)
+        violations += presentationViolations(family.radios)
         return violations.isEmpty ? .sound : .unsound(violations)
     }
 
@@ -219,12 +252,128 @@ nonisolated extension ProximityNamespace {
         return !name.utf8.contains { separators.contains($0) }
     }
 
+    // MARK: Vocabulary
+
+    /// The vocabulary: every token well-formed, the tokens of each group distinct, every token a rule
+    /// names known, and every summary title well-formed.
+    ///
+    /// - Parameter vocabulary: The family's vocabulary.
+    /// - Returns: Malformed tokens, then duplicate tokens, then unknown tokens, then malformed summary
+    ///   titles, each in declaration order.
+    private static func vocabularyViolations(_ vocabulary: Vocabulary) -> [Violation] {
+        // R2: sixteen token fields, a set's or list's members bounded by the tokens the host listed.
+        var violations = vocabulary.tokenFields
+            .filter { field in
+                !field.tokens.allSatisfy { isWellFormedToken($0, maximumBytes: field.maximumBytes) }
+            }
+            .map { Violation.malformedToken(field: $0.field) }
+        violations += duplicateTokenViolations(vocabulary)
+        violations += unknownTokenViolations(vocabulary)
+        // R2: four titles.
+        violations += vocabulary.session.titleFields
+            .filter { !isWellFormedSummaryTitle($0.value) }
+            .map { Violation.malformedSummaryTitle(field: $0.field) }
+        return violations
+    }
+
+    /// Tokens repeated within a group: the three session payload tokens, the capability tokens, the
+    /// four record kinds, the four routed types. Two groups may share a token, as a record kind may
+    /// spell the payload token of the message that carries its record.
+    ///
+    /// - Parameter vocabulary: The family's vocabulary.
+    /// - Returns: Each group's duplicate pairs, in that order.
+    private static func duplicateTokenViolations(_ vocabulary: Vocabulary) -> [Violation] {
+        let duplicate = Violation.duplicateToken(field:otherField:)
+        var violations = duplicatePairs(vocabulary.session.payloadTypeFields, duplicate)
+        violations += duplicatePairs(vocabulary.capabilities.knownFields, duplicate)
+        violations += duplicatePairs(vocabulary.membershipRecordKinds.fields, duplicate)
+        violations += duplicatePairs(vocabulary.routedTypes.fields, duplicate)
+        return violations
+    }
+
+    /// Tokens a rule names that the vocabulary does not know: each session payload token and the
+    /// sealing set against `payloads.known`, `wire2` and the legacy assumption against
+    /// `capabilities.known`.
+    ///
+    /// - Parameter vocabulary: The family's vocabulary.
+    /// - Returns: The unknown session tokens in declaration order, then the sealing set, `wire2` and
+    ///   the legacy assumption, each named once.
+    private static func unknownTokenViolations(_ vocabulary: Vocabulary) -> [Violation] {
+        let payloads = vocabulary.payloads
+        let capabilities = vocabulary.capabilities
+        let knownCapabilities = Set(capabilities.known)
+        // R2: three session tokens; the set operations below are bounded by the tokens the host listed.
+        var violations = vocabulary.session.payloadTypeFields
+            .filter { !payloads.known.contains($0.value) }
+            .map { Violation.unknownToken(field: $0.field) }
+        if !payloads.sealingRequired.isSubset(of: payloads.known) {
+            violations.append(.unknownToken(field: PayloadRules.sealingRequiredField))
+        }
+        if !knownCapabilities.contains(capabilities.wire2) {
+            violations.append(.unknownToken(field: Capabilities.wire2Field))
+        }
+        if !knownCapabilities.isSuperset(of: capabilities.assumedForLegacyPeers) {
+            violations.append(.unknownToken(field: Capabilities.assumedForLegacyPeersField))
+        }
+        return violations
+    }
+
+    /// 1 to `maximumBytes` bytes, each from `0x21` (`!`) to `0x7E` (`~`): printable ASCII with no space,
+    /// the byte rule labels follow.
+    private static func isWellFormedToken(_ token: String, maximumBytes: Int) -> Bool {
+        guard (1...maximumBytes).contains(token.utf8.count) else { return false }
+        // R2: bounded by the guard above, at most `maximumBytes` bytes.
+        return token.utf8.allSatisfy { (0x21...0x7E).contains($0) }
+    }
+
+    /// 1 to ``maximumSummaryTitleCharacters`` characters, counted as the receiver's decode counts them:
+    /// by `Character`, so a letter and its combining mark are one.
+    private static func isWellFormedSummaryTitle(_ title: String) -> Bool {
+        (1...maximumSummaryTitleCharacters).contains(title.count)
+    }
+
+    // MARK: Presentation strings
+
+    /// The radios' presentation strings: both instance-name prefixes and the certificates' common name
+    /// well-formed.
+    ///
+    /// - Parameter radios: The family's radios.
+    /// - Returns: The malformed prefixes, mesh then presence, then the common name.
+    private static func presentationViolations(_ radios: Radios) -> [Violation] {
+        // R2: two prefixes.
+        var violations = radios.instanceNamePrefixFields
+            .filter { !isWellFormedInstanceNamePrefix($0.value, room: $0.room) }
+            .map { Violation.malformedInstanceNamePrefix(field: $0.field) }
+        if !isWellFormedCommonName(radios.tlsCommonName) {
+            violations.append(.malformedCommonName)
+        }
+        return violations
+    }
+
+    /// 1 to `room` bytes of `[a-z0-9-]`: lowercase, because a display layer lowercases a name before it
+    /// compares it with the mesh prefix, and within the room a 63-byte DNS-SD instance name leaves
+    /// before the hex that follows.
+    private static func isWellFormedInstanceNamePrefix(_ prefix: String, room: Int) -> Bool {
+        guard (1...room).contains(prefix.utf8.count) else { return false }
+        let hyphen = UInt8(ascii: "-")
+        // R2: bounded by the guard above, at most `room` bytes.
+        return prefix.utf8.allSatisfy { isLowercaseLetter($0) || isDigit($0) || $0 == hyphen }
+    }
+
+    /// 1 to ``maximumCommonNameBytes`` bytes of printable ASCII, `0x20` (space) to `0x7E` (`~`).
+    private static func isWellFormedCommonName(_ name: String) -> Bool {
+        guard (1...maximumCommonNameBytes).contains(name.utf8.count) else { return false }
+        // R2: bounded by the guard above, at most 64 bytes.
+        return name.utf8.allSatisfy { (0x20...0x7E).contains($0) }
+    }
+
     // MARK: Shared
 
     /// One violation per unordered pair of equal values, the earlier field first.
     ///
     /// - Parameters:
-    ///   - named: Fields and their values, in declaration order (at most four).
+    ///   - named: Fields and their values, in declaration order (at most four, or the capability tokens
+    ///     the host listed).
     ///   - violation: Builds the violation from the earlier and the later field.
     /// - Returns: The violations, in pair order.
     private static func duplicatePairs(
@@ -232,7 +381,8 @@ nonisolated extension ProximityNamespace {
         _ violation: (String, String) -> Violation
     ) -> [Violation] {
         var violations: [Violation] = []
-        // R2: every unordered pair once, over at most four values.
+        // R2: every unordered pair once, over at most four values or the capability tokens the host
+        // listed.
         for (index, first) in named.enumerated() {
             for second in named.dropFirst(index + 1) where first.value == second.value {
                 violations.append(violation(first.field, second.field))
@@ -377,6 +527,132 @@ nonisolated extension ProximityNamespace.Radios {
     /// The mesh heartbeat with its path from the namespace root.
     var heartbeatField: (field: String, value: Data) {
         (field: "family.radios.meshHeartbeat", value: meshHeartbeat)
+    }
+
+    /// The two instance-name prefixes with their paths from the namespace root, in declaration order,
+    /// each with the room a 63-byte DNS-SD instance name leaves it before the hex that follows.
+    var instanceNamePrefixFields: [(field: String, value: String, room: Int)] {
+        let longest = ProximityNamespace.maximumInstanceNameBytes
+        return [
+            (field: "family.radios.meshInstanceNamePrefix", value: meshInstanceNamePrefix,
+             room: longest - ProximityNamespace.meshInstanceNameTokenLength),
+            (field: "family.radios.presenceInstanceNamePrefix", value: presenceInstanceNamePrefix,
+             room: longest - ProximityNamespace.presenceInstanceNameTokenLength)
+        ]
+    }
+}
+
+nonisolated extension ProximityNamespace.Vocabulary {
+
+    /// The sixteen token fields with their paths from the namespace root, in declaration order: each
+    /// with its token or, for a set or list, every member, and the most bytes its group's receivers
+    /// accept.
+    var tokenFields: [(field: String, tokens: [String], maximumBytes: Int)] {
+        let payloadBytes = ProximityNamespace.maximumPayloadTokenBytes
+        let capabilityBytes = ProximityNamespace.maximumCapabilityTokenBytes
+        let routedBytes = ProximityNamespace.maximumRoutedTypeTokenBytes
+        var fields = Self.singleTokenFields(session.payloadTypeFields, maximumBytes: payloadBytes)
+        fields.append((field: ProximityNamespace.PayloadRules.knownField,
+                       tokens: Array(payloads.known), maximumBytes: payloadBytes))
+        fields.append((field: ProximityNamespace.PayloadRules.sealingRequiredField,
+                       tokens: Array(payloads.sealingRequired), maximumBytes: payloadBytes))
+        fields.append((field: ProximityNamespace.Capabilities.knownField,
+                       tokens: capabilities.known, maximumBytes: capabilityBytes))
+        fields.append((field: ProximityNamespace.Capabilities.wire2Field,
+                       tokens: [capabilities.wire2], maximumBytes: capabilityBytes))
+        fields.append((field: ProximityNamespace.Capabilities.assumedForLegacyPeersField,
+                       tokens: capabilities.assumedForLegacyPeers, maximumBytes: capabilityBytes))
+        fields += Self.singleTokenFields(membershipRecordKinds.fields, maximumBytes: payloadBytes)
+        fields += Self.singleTokenFields(routedTypes.fields, maximumBytes: routedBytes)
+        return fields
+    }
+
+    /// One token field per single token in `named`, each accepting at most `maximumBytes`.
+    private static func singleTokenFields(
+        _ named: [(field: String, value: String)],
+        maximumBytes: Int
+    ) -> [(field: String, tokens: [String], maximumBytes: Int)] {
+        // R2: at most four fields.
+        named.map { (field: $0.field, tokens: [$0.value], maximumBytes: maximumBytes) }
+    }
+}
+
+nonisolated extension ProximityNamespace.SessionMessages {
+
+    /// The three session payload tokens with their paths from the namespace root, in declaration order.
+    var payloadTypeFields: [(field: String, value: String)] {
+        [
+            (field: "family.vocabulary.session.identityIntroduction.payloadType",
+             value: identityIntroduction.payloadType),
+            (field: "family.vocabulary.session.identityAcknowledge.payloadType",
+             value: identityAcknowledge.payloadType),
+            (field: "family.vocabulary.session.heartbeat.payloadType", value: heartbeat.payloadType)
+        ]
+    }
+
+    /// The four summary titles with their paths from the namespace root, in declaration order.
+    var titleFields: [(field: String, value: String)] {
+        [
+            (field: "family.vocabulary.session.identityIntroduction.summaryTitle",
+             value: identityIntroduction.summaryTitle),
+            (field: "family.vocabulary.session.identityAcknowledge.summaryTitle",
+             value: identityAcknowledge.summaryTitle),
+            (field: "family.vocabulary.session.heartbeat.pingTitle", value: heartbeat.pingTitle),
+            (field: "family.vocabulary.session.heartbeat.replyTitle", value: heartbeat.replyTitle)
+        ]
+    }
+}
+
+nonisolated extension ProximityNamespace.PayloadRules {
+
+    /// The known set's path from the namespace root.
+    static let knownField = "family.vocabulary.payloads.known"
+
+    /// The sealing set's path from the namespace root.
+    static let sealingRequiredField = "family.vocabulary.payloads.sealingRequired"
+}
+
+nonisolated extension ProximityNamespace.Capabilities {
+
+    /// The known list's path from the namespace root. A member's path adds its index in brackets.
+    static let knownField = "family.vocabulary.capabilities.known"
+
+    /// The wire2 token's path from the namespace root.
+    static let wire2Field = "family.vocabulary.capabilities.wire2"
+
+    /// The legacy assumption's path from the namespace root.
+    static let assumedForLegacyPeersField = "family.vocabulary.capabilities.assumedForLegacyPeers"
+
+    /// Each known token with its path from the namespace root, `known[0]` first.
+    var knownFields: [(field: String, value: String)] {
+        // R2: bounded by the tokens the host listed.
+        known.enumerated().map { (field: Self.knownField + "[\($0.offset)]", value: $0.element) }
+    }
+}
+
+nonisolated extension ProximityNamespace.MembershipRecordKinds {
+
+    /// The four record kinds with their paths from the namespace root, in declaration order.
+    var fields: [(field: String, value: String)] {
+        [
+            (field: "family.vocabulary.membershipRecordKinds.admission", value: admission),
+            (field: "family.vocabulary.membershipRecordKinds.departure", value: departure),
+            (field: "family.vocabulary.membershipRecordKinds.removal", value: removal),
+            (field: "family.vocabulary.membershipRecordKinds.termination", value: termination)
+        ]
+    }
+}
+
+nonisolated extension ProximityNamespace.RoutedTypes {
+
+    /// The four routed-type tokens with their paths from the namespace root, in declaration order.
+    var fields: [(field: String, value: String)] {
+        [
+            (field: "family.vocabulary.routedTypes.photo", value: photo),
+            (field: "family.vocabulary.routedTypes.tempMessage", value: tempMessage),
+            (field: "family.vocabulary.routedTypes.heart", value: heart),
+            (field: "family.vocabulary.routedTypes.control", value: control)
+        ]
     }
 }
 

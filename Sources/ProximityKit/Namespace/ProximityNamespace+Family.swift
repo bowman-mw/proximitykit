@@ -4,7 +4,8 @@
 // The family half of `ProximityNamespace`: what every interoperating app shares. The labels are
 // grouped and named like FernletCrypto's registry (Signature, KeyDerivation, AEAD, Hash), so each read
 // site A0.2's later commits re-pointed only re-cased the family name. Every label initializer takes
-// `StaticString` and mints each purpose with the role its field fixes; nothing here takes a role.
+// `StaticString` and mints each purpose with the role its field fixes; nothing here takes a role. The
+// payload vocabulary the family also carries is declared in `ProximityNamespace+Vocabulary.swift`.
 
 import Foundation
 
@@ -12,28 +13,35 @@ nonisolated extension ProximityNamespace {
 
     // MARK: - Family
 
-    /// What every interoperating app shares: the domain-separation labels, the radios and the QR scheme.
+    /// What every interoperating app shares: the domain-separation labels, the radios, the QR scheme
+    /// and the payload vocabulary.
     ///
     /// Two apps that supply one family speak one wire. That is the only way two namespaces can, which
     /// is why a family is built from the host's literals and never from another app's value by default.
     public nonisolated struct Family: Hashable, Sendable {
         /// Every domain-separation label, by consumer family.
         public let purposes: Purposes
-        /// The three radios' discovery and protocol values, and the mesh heartbeat.
+        /// The three radios' discovery and protocol values, the mesh heartbeat and the radios'
+        /// presentation strings.
         public let radios: Radios
         /// The verify QR's URL scheme.
         public let verifyQR: VerifyQR
+        /// The payload vocabulary: session messages, payload and capability tokens, record kinds and
+        /// routed types.
+        public let vocabulary: Vocabulary
 
         /// Assembles a family.
         ///
         /// - Parameters:
         ///   - purposes: Every domain-separation label.
-        ///   - radios: The radios' service types, ALPNs and heartbeat.
+        ///   - radios: The radios' service types, ALPNs, heartbeat and presentation strings.
         ///   - verifyQR: The verify QR's URL scheme.
-        public init(purposes: Purposes, radios: Radios, verifyQR: VerifyQR) {
+        ///   - vocabulary: The payload vocabulary.
+        public init(purposes: Purposes, radios: Radios, verifyQR: VerifyQR, vocabulary: Vocabulary) {
             self.purposes = purposes
             self.radios = radios
             self.verifyQR = verifyQR
+            self.vocabulary = vocabulary
         }
     }
 
@@ -380,7 +388,12 @@ nonisolated extension ProximityNamespace {
         }
     }
 
-    /// The three radios' values and the mesh heartbeat.
+    /// The three radios' values, the mesh heartbeat and the radios' presentation strings.
+    ///
+    /// The presentation strings name the family to a Bonjour listing or a packet capture, never a
+    /// device: they ride in the family because a display layer on one device must recognize the
+    /// instance names another device of the family advertises. ProximityKit's radios and its peer-name
+    /// display still read constants of their own for them until plan step A0.3 re-points them here.
     public nonisolated struct Radios: Hashable, Sendable {
         /// The friend mesh's radio.
         public let mesh: Radio
@@ -390,6 +403,16 @@ nonisolated extension ProximityNamespace {
         public let recipeShare: Radio
         /// The mesh heartbeat datagram, which the receive path drops by byte equality alone.
         public let meshHeartbeat: Data
+        /// The start of the mesh and recipe-share radios' Bonjour instance names, which go on with 12
+        /// lowercase hex characters. A display layer never shows a name that begins with it as a
+        /// person's name.
+        public let meshInstanceNamePrefix: String
+        /// The start of the presence radio's rotating Bonjour instance names, any separator included,
+        /// which go on with 16 lowercase hex characters.
+        public let presenceInstanceNamePrefix: String
+        /// The common name of every radio's ephemeral TLS certificate, as subject and issuer. Nothing
+        /// verifies it: it names the protocol, never the device.
+        public let tlsCommonName: String
 
         /// Assembles the radios' values.
         ///
@@ -398,11 +421,20 @@ nonisolated extension ProximityNamespace {
         ///   - presence: The presence radio.
         ///   - recipeShare: The recipe-share radio.
         ///   - meshHeartbeat: The mesh heartbeat datagram.
-        public init(mesh: Radio, presence: Radio, recipeShare: Radio, meshHeartbeat: Data) {
+        ///   - meshInstanceNamePrefix: The mesh and recipe-share radios' instance-name prefix.
+        ///   - presenceInstanceNamePrefix: The presence radio's instance-name prefix.
+        ///   - tlsCommonName: The ephemeral certificates' common name.
+        public init(
+            mesh: Radio, presence: Radio, recipeShare: Radio, meshHeartbeat: Data,
+            meshInstanceNamePrefix: String, presenceInstanceNamePrefix: String, tlsCommonName: String
+        ) {
             self.mesh = mesh
             self.presence = presence
             self.recipeShare = recipeShare
             self.meshHeartbeat = meshHeartbeat
+            self.meshInstanceNamePrefix = meshInstanceNamePrefix
+            self.presenceInstanceNamePrefix = presenceInstanceNamePrefix
+            self.tlsCommonName = tlsCommonName
         }
     }
 

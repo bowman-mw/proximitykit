@@ -2,10 +2,10 @@
 // ProximityKit/Namespace
 //
 // ProximityKit plan step A0.2.1 (Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md §4 A0.2, §13 item
-// 1): the host's protocol identity (its labels, radio values, QR scheme, keychain rows, storage names
-// and log subsystem) as ONE `Sendable` value that the host builds once and hands down. Step A0.2.1
-// added the type alone; A0.2's later commits routed ProximityKit's reads of those through it, one
-// consumer family at a time, each byte-identical for Fernlet.
+// 1): the host's protocol identity (its labels, radio values, QR scheme, payload vocabulary, keychain
+// rows, storage names and log subsystem) as ONE `Sendable` value that the host builds once and hands
+// down. Step A0.2.1 added the type alone; A0.2's later commits routed ProximityKit's reads of those
+// through it, one consumer family at a time, each byte-identical for Fernlet.
 
 import Foundation
 
@@ -15,10 +15,10 @@ import Foundation
 /// keychain and disk formats identify the app it runs in.
 ///
 /// **Two halves.** ``family`` is what every interoperating app shares — the domain-separation labels,
-/// the radios' service types, ALPNs and heartbeat, and the QR scheme — so two apps that supply one
-/// family speak one wire. ``installation`` is what belongs to this app on this device — its keychain
-/// rows, its storage names and its log subsystem — so two apps of one family still never share a key,
-/// a file or a log stream.
+/// the radios' service types, ALPNs, heartbeat and presentation strings, the QR scheme and the payload
+/// vocabulary — so two apps that supply one family speak one wire. ``installation`` is what belongs to
+/// this app on this device — its keychain rows, its storage names and its log subsystem — so two apps
+/// of one family still never share a key, a file or a log stream.
 ///
 /// **Built once by the host, never looked up.** ProximityKit holds no instance, offers no default and
 /// keeps no global: no `static var`, no slot, no `@TaskLocal`. The host builds one value at its
@@ -28,13 +28,15 @@ import Foundation
 /// A0.2.1 added the type; since A0.2.3 the host supplies it as ``ProximityHost/proximityNamespace``
 /// and the managers keep a copy, and by the end of A0.2 ProximityKit reads from it all 39 protocol
 /// labels, the radio values, the QR scheme, the identity's and the two mesh seal keys' keychain rows,
-/// the storage names and the log subsystem. Some such strings stay outside it until a later plan
-/// step: the 13 feature labels ProximityKit reads from FernletCrypto's registry, the heart-drop and
-/// moderation keychain services and ``ProximitySupportLayout``'s folder until A0.4, and the payload
-/// vocabulary and presentation strings until A0.3. `ProximityNamespaceBoundaryTests` keeps three
-/// rules: no namespace, group or purpose is built outside `Namespace/`, `FernletCryptoPurpose` stays
-/// on its 20 allowlisted lines, and every literal that spells `fernlet` is on an exact allowlist that
-/// can only shrink.
+/// the storage names and the log subsystem. Its family also carries the payload vocabulary
+/// (``Vocabulary``) and the radios' three presentation strings, which ProximityKit's consumers still
+/// read from constants of their own until plan step A0.3 re-points them; for Fernlet the two
+/// spellings are equal, which `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
+/// until plan step A0.4: the 13 feature labels ProximityKit reads from FernletCrypto's registry, the
+/// heart-drop and moderation keychain services and ``ProximitySupportLayout``'s folder.
+/// `ProximityNamespaceBoundaryTests` keeps three rules: no namespace, group or purpose is built outside
+/// `Namespace/`, `FernletCryptoPurpose` stays on its 20 allowlisted lines, and every literal that
+/// spells `fernlet` is on an exact allowlist that can only shrink.
 ///
 /// **Total, and judged once.** ``init(family:installation:)`` never throws or traps: it runs every
 /// soundness rule once and records the verdict in ``soundness``. A host that prefers to fail at launch
@@ -45,7 +47,7 @@ import Foundation
 /// `Namespace/`: inert value data, read from nonisolated code.
 public nonisolated struct ProximityNamespace: Hashable, Sendable {
 
-    /// What every interoperating app shares: the labels, the radios and the QR scheme.
+    /// What every interoperating app shares: the labels, the radios, the QR scheme and the vocabulary.
     public let family: Family
 
     /// What belongs to this app on this device: keychain rows, storage names and the log subsystem.
@@ -60,7 +62,8 @@ public nonisolated struct ProximityNamespace: Hashable, Sendable {
     /// Builds a namespace and judges it.
     ///
     /// Total: it never throws or traps. Every broken rule is recorded in ``soundness`` instead, in the
-    /// order the rules run (labels, radios, QR scheme, keychain, storage, log subsystem).
+    /// order the rules run (labels, radios, QR scheme, keychain, storage, log subsystem, then the
+    /// vocabulary and the radios' presentation strings).
     ///
     /// - Parameters:
     ///   - family: What every interoperating app shares.
@@ -155,6 +158,33 @@ public nonisolated struct ProximityNamespace: Hashable, Sendable {
         case duplicateFileName(field: String, otherField: String)
         /// The log subsystem is empty.
         case emptyLogSubsystem
+        /// A token is empty, longer than its group allows, or holds a byte outside `0x21`–`0x7E`: a
+        /// payload token or membership record kind at most 255 bytes, a capability token at most 32
+        /// (a receiver cuts a longer one, which then matches nothing), a routed-type token at most 64
+        /// (a routed manifest naming a longer one is refused). A set or list is named once, by its
+        /// own path, however many of its members break the rule.
+        case malformedToken(field: String)
+        /// Two tokens of one group have the same bytes: two of the three session payload tokens, two
+        /// capability tokens (each named by its index in `capabilities.known`), two membership record
+        /// kinds, or two routed types.
+        case duplicateToken(field: String, otherField: String)
+        /// A token a rule names is not one the vocabulary knows: a session payload token or a
+        /// `sealingRequired` member outside `payloads.known`, or `wire2` or an
+        /// `assumedForLegacyPeers` member outside `capabilities.known`. A set or list is named once,
+        /// by its own path.
+        case unknownToken(field: String)
+        /// A summary title is empty or longer than 200 characters, the most a receiver's bounded
+        /// summary decode accepts.
+        case malformedSummaryTitle(field: String)
+        /// An instance-name prefix is empty, holds a byte other than `a`–`z`, `0`–`9` or `-`, or
+        /// leaves too little of a 63-byte DNS-SD instance name for the hex that follows it: the mesh
+        /// prefix at most 51 bytes (12 hex characters follow), the presence prefix at most 47 (16
+        /// follow). Lowercase, because a display layer lowercases a name before comparing it with the
+        /// mesh prefix.
+        case malformedInstanceNamePrefix(field: String)
+        /// The TLS common name is empty, longer than 64 bytes (X.509's upper bound on a common name),
+        /// or not printable ASCII (`0x20`–`0x7E`).
+        case malformedCommonName
     }
 
     // MARK: - Collision
