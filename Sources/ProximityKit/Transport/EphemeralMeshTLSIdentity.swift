@@ -182,13 +182,11 @@ nonisolated enum MeshTransportError: Error, Equatable {
 /// identity with an accept-any certificate validator: the certificate exists because QUIC's TLS
 /// handshake requires the listener to present one, and it is asked to prove nothing.
 ///
-/// The certificate's common name is a fixed English token for the same reason: it identifies the
-/// protocol, not the device, and a device-derived name here would re-introduce exactly the passive
-/// linkability the random Bonjour instance name exists to remove.
+/// The certificate's common name is the host namespace's `family.radios.tlsCommonName`, one token
+/// every device of the family presents, for the same reason: it identifies the protocol, not the
+/// device, and a device-derived name here would re-introduce exactly the passive linkability the
+/// random Bonjour instance name exists to remove. Never localized, never a device name.
 nonisolated enum EphemeralMeshTLSIdentity {
-
-    /// The certificate's subject and issuer. A frozen token, never localized, never a device name.
-    static let commonName = "fernlet-mesh"
 
     /// How long a minted certificate claims to be valid. A day is far longer than any session and
     /// far shorter than anything worth caching; nothing validates it, so the field exists only
@@ -221,12 +219,16 @@ nonisolated enum EphemeralMeshTLSIdentity {
 
     /// Mints a fresh identity for one session.
     ///
-    /// - Parameter now: the instant validity is anchored to; a parameter so the encoder can be
-    ///   tested against fixed dates rather than the wall clock.
-    static func mint(now: Date = Date()) throws -> Minted {
+    /// - Parameters:
+    ///   - commonName: the certificate's subject and issuer, the host namespace's
+    ///     `family.radios.tlsCommonName`, which the minting radio read from its namespace.
+    ///   - now: the instant validity is anchored to; a parameter so the encoder can be tested
+    ///     against fixed dates rather than the wall clock.
+    static func mint(commonName: String, now: Date = Date()) throws -> Minted {
         let privateKey = P256.Signing.PrivateKey()
         let der = try selfSignedCertificateDER(
             for: privateKey,
+            commonName: commonName,
             notBefore: now.addingTimeInterval(-clockSkewSeconds),
             notAfter: now.addingTimeInterval(lifetimeSeconds),
             serial: randomSerial()
@@ -250,13 +252,15 @@ nonisolated enum EphemeralMeshTLSIdentity {
         return Minted(identity: protocolIdentity, certificateDER: der)
     }
 
-    /// The DER of a minimal v3 self-signed certificate over `privateKey`'s public half.
+    /// The DER of a minimal v3 self-signed certificate over `privateKey`'s public half, its subject
+    /// and issuer both `commonName`.
     ///
-    /// Pure and separately testable: given a key and two dates it returns bytes, and a test can
-    /// hand those bytes to `SecCertificateCreateWithData` to prove the platform parser accepts
+    /// Pure and separately testable: given a key, a name and two dates it returns bytes, and a test
+    /// can hand those bytes to `SecCertificateCreateWithData` to prove the platform parser accepts
     /// them — which is the only correctness claim that matters, since nothing else ever reads one.
     static func selfSignedCertificateDER(
         for privateKey: P256.Signing.PrivateKey,
+        commonName: String,
         notBefore: Date,
         notAfter: Date,
         serial: [UInt8]

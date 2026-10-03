@@ -33,8 +33,9 @@ drop-in package of its own). The three screens this module used to ship from its
 session-end photo review with its Photos saver and save-failure alert, the keep-as-friend prompt,
 and the fingerprint view — moved to the `FernletProximityUI` module, which depends on this one and
 never the reverse. ``PeerNameDisplay`` deliberately stayed in `UI/`: it imports neither SwiftUI nor
-`FernletUI`, `PresenceManager.firstName(of:)` calls it (a module below cannot call up into
-`FernletProximityUI`), and it reads this module's internal `MeshLinkAdvertisement.instanceNamePrefix`.
+`FernletUI`, and `PresenceManager.firstName(of:in:)` calls it (a module below cannot call up into
+`FernletProximityUI`). It hides the QUIC instance name by the mesh instance-name prefix of the
+namespace each caller passes it.
 It is Fernlet display policy rather than mechanism, though, so it should follow `PresenceManager`
 out of ProximityKit to FernletKit with the feature code in the plan's step A0.4.
 
@@ -161,10 +162,11 @@ persists a peer name (rosters, the trust vault, audits) reads
 ``ProximityCoordinator/PeerIdentity/displayNameOrFingerprint``. Every site that RENDERS one goes
 through ``PeerNameDisplay`` instead (owner decision 2026-09-29, reversing the fingerprint title the
 first build showed): a pre-commit peer reads "Someone nearby", never its fingerprint, and the same
-filter turns a fingerprint filed as a name, or the QUIC transport's `fernlet-mesh-…` instance name,
-into the placeholder. Hearts copy that uses a first name goes through
-``PeerNameDisplay/firstName(_:fingerprint:placeholder:)``, which
-``PresenceManager/firstName(of:)`` delegates to, so a sentence composed in this package cannot
+filter turns a fingerprint filed as a name, or the QUIC transport's instance name (the host
+namespace's mesh prefix and 12 hex characters, `fernlet-mesh-…` for Fernlet), into the placeholder;
+every call passes the namespace whose prefix it hides. Hearts copy that uses a first name goes
+through ``PeerNameDisplay/firstName(_:fingerprint:placeholder:in:)``, which
+``PresenceManager/firstName(of:in:)`` delegates to, so a sentence composed in this package cannot
 interpolate a fingerprint either. No wire shape moved: an empty name is a value.
 **The mesh has a door of its own** and the invariant holds there too: every mesh frame is signed in
 `MeshNetworkManager.sendEnvelopeCore`, six broadcasts reach slots this device has not committed and
@@ -446,9 +448,10 @@ type has no local label). Senders keep emitting frozen English forever.
 and disk formats identify the app it runs in: the 39 labels, the three radios' values, the QR
 scheme, the identity's and the two mesh seal keys' keychain rows, the storage names and the log
 subsystem. Plan step A0.2 of `Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md` moved every read of
-those in this module onto it, each byte-identical for Fernlet. Its family also carries the payload
-vocabulary and the radios' presentation strings, which this module's consumers still read from
-constants of their own until plan step A0.3 re-points them. Some such strings stay outside it until
+those in this module onto it, each byte-identical for Fernlet. Its family also carries the radios'
+presentation strings, which the radios, their postures and ``PeerNameDisplay`` read off it, and the
+payload vocabulary, which this module's consumers still read from constants of their own until the
+rest of plan step A0.3 re-points them. Some such strings stay outside it until
 a later step (see "What A0.2 left for later" below): the 13 feature labels this module reads from
 FernletCrypto's registry, the heart-drop and moderation keychain services and
 ``ProximitySupportLayout``'s `Fernlet` folder until A0.4. `ProximityNamespaceBoundaryTests`
@@ -524,7 +527,9 @@ hand it:
 | Verifiers: `MeshMembershipRecordVerifier`, the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
 | Stateless helpers: the serializer's `canonicalBytes(for:in:)` overloads and `canonicalInventoryDigestBytes`, ``MeshRoutedContentDigest``, ``MeshChunkAssembly``, the item seal and the content-key wrap, ``ProximityVerifyQR/parse(_:in:)``, ``MeshEpochRef/minted(counter:coordinatorFingerprint:meshID:in:)`` | Take `in purposes:` (or `in:` a namespace) last. |
 | Ids that hash a label: ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)``, ``MeshRecipientReceipt/receiptID(in:)`` | Are functions, not stored properties: a value decoded off the wire carries no namespace, so `Codable` stays namespace-free. |
-| The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkRecipeShareSession` | Take `init(namespace:)` and read their service type, ALPN, heartbeat, exporter label and log subsystem there, once; the mesh radio keeps `family.purposes` for the channel introductions it frames and checks. |
+| The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkRecipeShareSession` | Take `init(namespace:)` and read their service type, ALPN, heartbeat, exporter label and log subsystem there, once; the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
+| The presence posture: `PresenceEpochPosture` | Is minted, and rotated, with the presence instance-name prefix and the TLS common name its caller passes: ``PresenceManager``'s posture mint, built in `init` from the manager's namespace, passes them. |
+| The name display: ``PeerNameDisplay``, `PresenceManager.firstName(of:in:)` | Take `in namespace:` last and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
 | Storage scopes: ``MeshSessionStorageScope``, ``MeshRoutedStorageScope`` | Carry the namespace and the install binding (`init(namespace:directory:keychainService:installBinding:)`, ``MeshSessionStorageScope/production(for:installBinding:)``); the two stores read their file names, seal-key accounts and column-seal labels off `scope.namespace`. |
 | Closures that cross an actor | Capture the `Sendable` value when they are made, as ``PresenceManager``'s radio factory does. |
 
@@ -535,12 +540,14 @@ FernletCrypto twin, soundness, the byte-prefix check over FernletCrypto's 81 reg
 readers above under `.fernlet` and under a foreign namespace. `ProximityVocabularyGoldenTests`, on
 the same line, holds every token and presentation string this module's consumers read to the
 literal Fernlet shipped before A0.3, and `.fernlet`'s vocabulary and presentation strings to the
-same literals. `ProximityNamespaceSoundnessTests` holds the soundness and collision rules over
+same literals; it drives the radios, the presence posture mint and the name display under `.fernlet`
+and under a namespace whose presentation strings are its own. `ProximityNamespaceSoundnessTests`
+holds the soundness and collision rules over
 namespaces built only from literals.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
 named only on the 20 code lines in 7 files that read the feature labels leaving at A0.4; and every
-remaining string literal that spells `fernlet` (51 in 19 files) is on an exact allowlist that names
+remaining string literal that spells `fernlet` (46 in 15 files) is on an exact allowlist that names
 why it is still here and the plan step that removes it. Both lists can only shrink.
 
 **The install binding and the column seal.** The two sealed mesh stores seal through
@@ -598,15 +605,18 @@ without it.
 
 **What A0.2 left for later.**
 
-- **A0.3** routes the vocabulary and the presentation strings. The namespace's family already
-  carries both, judged by its soundness rules, but this module's consumers still read their own
-  constants: the envelope its sealing set and `PayloadType`, the coordinator its session tokens,
-  titles and capability rules, the membership code its record kinds, the routed code
-  `MeshRoutedTypeToken`'s spellings, the radios their Bonjour instance prefixes (`fernlet-mesh-` and
-  `fn-`) and certificate name. A0.3 re-points each at the namespace it holds and deletes the
-  constant; the coordinator's `"Fernlet"` display default and `serviceType(for:)` are deleted rather
-  than injected. And this module starts refusing an unsound namespace, failing closed in
-  `ensureProvisioned()`, `encryptGroupKey` and every radio's `start`.
+- **A0.3** routes the rest of the vocabulary. The namespace's family already carries it, judged by
+  its soundness rules, but this module's consumers still read their own constants: the envelope its
+  sealing set and `PayloadType`, the coordinator its session tokens, titles and capability rules,
+  the membership code its record kinds, the routed code `MeshRoutedTypeToken`'s spellings. A0.3
+  re-points each at the namespace it holds and deletes the constant, as the presentation strings
+  already are: the radios and the presence posture mint their Bonjour instance names
+  (`fernlet-mesh-…` and `fn-…` for Fernlet) and certificates under the namespace's strings and
+  ``PeerNameDisplay`` hides its mesh prefix, while the coordinator has no display default (every
+  caller passes the host's name) and `PeerTransport`'s discovery doors take no service type. And
+  this module starts refusing an
+  unsound namespace, failing closed in `ensureProvisioned()`, `encryptGroupKey` and every radio's
+  `start`.
 - **A0.4** moves Fernlet's features out, and with them the 13 feature labels this module still reads
   from FernletCrypto's registry (hearts, presence, activities, moderation and the sealed-backup
   escrow; the heart-drop and presence derivations become a generic `pairSecret(purpose:)` and
@@ -1043,7 +1053,6 @@ but never charged. The two digest doors stay outside it by D-5.12 / D-6.10.
 - ``PeerPendingInvite``
 - ``InboundPeerFrame``
 - ``PeerTransportError``
-- ``MultipeerServiceType``
 
 Internal to the module, and listed here because they are the transport SEAM the manager holds its
 radio through (the selection that used to live beside them — `MeshTransportKind`,

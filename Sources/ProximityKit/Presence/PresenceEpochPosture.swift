@@ -40,10 +40,11 @@ nonisolated enum PresencePostureError: Error, Equatable {
 /// ## What a posture is made of
 ///
 /// - ``epoch`` — `IdentityService.presenceEpoch(at:)`, the same counter the presence tags use.
-/// - ``instanceName`` — ``instanceNamePrefix``, a separator, then ``instanceNameEntropyByteCount``
-///   freshly drawn bytes as lowercase hexadecimal. The prefix is a frozen *service* token every
-///   Fernlet device carries identically; the rest is entropy and nothing else. The name has the
-///   same length at every epoch on every device, so not even its length encodes anything.
+/// - ``instanceName`` — the host namespace's `family.radios.presenceInstanceNamePrefix` (its
+///   separator included), then ``instanceNameEntropyByteCount`` freshly drawn bytes as lowercase
+///   hexadecimal. The prefix is a frozen *service* token every device of the family carries
+///   identically; the rest is entropy and nothing else. The name has the same length at every epoch
+///   on every device, so not even its length encodes anything.
 /// - ``tlsIdentity`` — one ``EphemeralMeshTLSIdentity/Minted``, minted through the module's single
 ///   certificate path. There is no second crypto path here and no new cryptographic purpose: the
 ///   key pair is generated, used to self-sign, and thrown away by machinery that already exists
@@ -53,7 +54,7 @@ nonisolated enum PresencePostureError: Error, Equatable {
 ///
 /// ## Why the certificate is minted at the epoch's START
 ///
-/// `EphemeralMeshTLSIdentity.mint(now:)` writes its argument into the certificate as
+/// `EphemeralMeshTLSIdentity.mint(commonName:now:)` writes its instant into the certificate as
 /// `notBefore`/`notAfter` at one-second resolution, and the transport's validator accepts any
 /// certificate — so those two fields are readable by every device in range. Handing it the *mint
 /// instant* would therefore stamp each posture with the second its radio came up: a phone that
@@ -95,17 +96,6 @@ nonisolated struct PresenceEpochPosture {
 
     // MARK: Shape
 
-    /// The frozen service token every presence instance name begins with.
-    ///
-    /// Constant across every device and every epoch, so it names the protocol and never the
-    /// device — a device-derived prefix here would re-introduce exactly the linkability the rest
-    /// of the name removes. A wire token: frozen English, never localized.
-    static let instanceNamePrefix = "fn"
-
-    /// Separates the frozen token from the random half, so a reader can see where entropy starts.
-    /// A fixed string, which is what keeps ``instanceNameLength`` a constant.
-    static let instanceNameSeparator = "-"
-
     /// Bytes of entropy behind one instance name: 64 bits, drawn fresh at every epoch.
     ///
     /// Enough that two devices in one room collide with negligible probability, and far more than
@@ -119,10 +109,15 @@ nonisolated struct PresenceEpochPosture {
     /// the only draw this type makes.
     static let maxEntropyByteCount = 64
 
-    /// The length every instance name has, on every device, at every epoch. A constant by
-    /// construction — a variable-length name would leak through its length alone.
-    static var instanceNameLength: Int {
-        instanceNamePrefix.count + instanceNameSeparator.count + 2 * instanceNameEntropyByteCount
+    /// The length every instance name minted under `prefix` has, on every device, at every epoch:
+    /// the prefix's own length plus two hexadecimal characters per entropy byte. A constant for one
+    /// host by construction — a variable-length name would leak through its length alone.
+    ///
+    /// - Parameter prefix: The presence prefix the names are minted under, the host namespace's
+    ///   `family.radios.presenceInstanceNamePrefix`, separator included.
+    /// - Returns: The prefix's length plus 16.
+    static func instanceNameLength(prefix: String) -> Int {
+        prefix.count + 2 * instanceNameEntropyByteCount
     }
 
     // MARK: The posture
@@ -135,9 +130,9 @@ nonisolated struct PresenceEpochPosture {
     let instanceName: String
 
     /// The TLS identity presented for this epoch: a fresh self-signed P-256 key pair whose
-    /// certificate's subject is ``EphemeralMeshTLSIdentity/commonName``, a token shared by every
-    /// device, and whose validity window is anchored to the epoch's start so it is shared too.
-    /// Memory-only, and replaced wholesale at the next boundary.
+    /// certificate's subject is the host namespace's `family.radios.tlsCommonName`, a token shared
+    /// by every device, and whose validity window is anchored to the epoch's start so it is shared
+    /// too. Memory-only, and replaced wholesale at the next boundary.
     ///
     /// Minted EAGERLY, with the rest of the posture, rather than lazily on the first QUIC accept:
     /// a lazily-minted identity would make "stable within an epoch" depend on the order calls
@@ -159,19 +154,22 @@ nonisolated struct PresenceEpochPosture {
     ///   - now: the clock reading, and the only input the epoch comes from. The certificate is
     ///     minted at the epoch's START, never at `now` — a certificate anchored to the asking
     ///     instant would carry the second this device's radio came up (see the type's doc).
+    ///   - instanceNamePrefix: the host namespace's `family.radios.presenceInstanceNamePrefix`,
+    ///     which the instance name begins with.
     ///   - entropy: the instance name's randomness, as a count-to-bytes function.
     ///   - mintIdentity: the certificate path — production passes
-    ///     ``EphemeralMeshTLSIdentity/mint(now:)`` and nothing else ever should. It is handed
-    ///     `IdentityService.presenceEpochStart(at: now)`, which is the same instant on every
-    ///     device in the epoch.
+    ///     ``EphemeralMeshTLSIdentity/mint(commonName:now:)`` under the host namespace's common name
+    ///     and nothing else ever should. It is handed `IdentityService.presenceEpochStart(at: now)`,
+    ///     which is the same instant on every device in the epoch.
     /// - Throws: ``PresencePostureError/entropyUnavailable(byteCount:)``, or whatever the identity
     ///   mint throws.
     static func minted(
         at now: Date,
+        instanceNamePrefix: String,
         entropy: (Int) -> [UInt8],
         mintIdentity: (Date) throws -> EphemeralMeshTLSIdentity.Minted
     ) throws -> PresenceEpochPosture {
-        let name = try instanceName(entropy: entropy)
+        let name = try instanceName(prefix: instanceNamePrefix, entropy: entropy)
         let identity = try mintIdentity(IdentityService.presenceEpochStart(at: now))
         return PresenceEpochPosture(
             epoch: IdentityService.presenceEpoch(at: now),
@@ -180,12 +178,19 @@ nonisolated struct PresenceEpochPosture {
         )
     }
 
-    /// The production mint: the system CSPRNG and the module's one certificate path.
-    static func minted(at now: Date) throws -> PresenceEpochPosture {
+    /// The production mint: the system CSPRNG and the module's one certificate path, under the
+    /// host's presence prefix and common name.
+    ///
+    /// - Parameters:
+    ///   - now: the clock reading the epoch comes from.
+    ///   - instanceNamePrefix: the host namespace's `family.radios.presenceInstanceNamePrefix`.
+    ///   - commonName: the host namespace's `family.radios.tlsCommonName`.
+    static func minted(at now: Date, instanceNamePrefix: String, commonName: String) throws -> PresenceEpochPosture {
         try minted(
             at: now,
+            instanceNamePrefix: instanceNamePrefix,
             entropy: systemEntropy,
-            mintIdentity: { try EphemeralMeshTLSIdentity.mint(now: $0) }
+            mintIdentity: { try EphemeralMeshTLSIdentity.mint(commonName: commonName, now: $0) }
         )
     }
 
@@ -193,46 +198,55 @@ nonisolated struct PresenceEpochPosture {
     /// fresh posture — new name, new key pair, new certificate — the moment it is not.
     ///
     /// Non-mutating, and the whole of the rotation rule: there is no partial rotation, no carried
-    /// field and no counter, so a boundary crossing shares nothing with what preceded it.
+    /// field and no counter, so a boundary crossing shares nothing with what preceded it. The host's
+    /// prefix is handed in again rather than kept: it is the same on every device and every epoch.
     func rotated(
         at now: Date,
+        instanceNamePrefix: String,
         entropy: (Int) -> [UInt8],
         mintIdentity: (Date) throws -> EphemeralMeshTLSIdentity.Minted
     ) throws -> PresenceEpochPosture {
         guard IdentityService.presenceEpoch(at: now) != epoch else { return self }
-        return try Self.minted(at: now, entropy: entropy, mintIdentity: mintIdentity)
+        return try Self.minted(
+            at: now, instanceNamePrefix: instanceNamePrefix, entropy: entropy, mintIdentity: mintIdentity
+        )
     }
 
-    /// The production rotation, on the same terms as ``rotated(at:entropy:mintIdentity:)``.
-    func rotated(at now: Date) throws -> PresenceEpochPosture {
+    /// The production rotation, on the same terms as ``rotated(at:instanceNamePrefix:entropy:mintIdentity:)``.
+    func rotated(at now: Date, instanceNamePrefix: String, commonName: String) throws -> PresenceEpochPosture {
         guard IdentityService.presenceEpoch(at: now) != epoch else { return self }
-        return try Self.minted(at: now)
+        return try Self.minted(at: now, instanceNamePrefix: instanceNamePrefix, commonName: commonName)
     }
 
     // MARK: Name construction
 
-    /// One instance name: the frozen token, the separator, then exactly
-    /// ``instanceNameEntropyByteCount`` drawn bytes as lowercase hexadecimal.
+    /// One instance name: the host's frozen prefix, then exactly ``instanceNameEntropyByteCount``
+    /// drawn bytes as lowercase hexadecimal.
     ///
     /// Nothing else goes in — no counter, no epoch index, no timestamp, no device byte — which is
     /// why a name minted from fixed entropy is the same string at every epoch, and why two names
     /// from the same epoch differ whenever the entropy does.
     ///
+    /// - Parameters:
+    ///   - prefix: the host namespace's `family.radios.presenceInstanceNamePrefix`, its separator
+    ///     included (Fernlet's is `fn-`), so a reader can see where entropy starts. Constant across
+    ///     every device and every epoch, so it names the protocol and never the device.
+    ///   - entropy: the name's randomness, as a count-to-bytes function.
     /// - Throws: ``PresencePostureError/entropyUnavailable(byteCount:)`` when the source answers
     ///   with the wrong number of bytes (validated at entry; never padded or truncated).
-    static func instanceName(entropy: (Int) -> [UInt8]) throws -> String {
+    static func instanceName(prefix: String, entropy: (Int) -> [UInt8]) throws -> String {
         let bytes = entropy(instanceNameEntropyByteCount)
         guard bytes.count == instanceNameEntropyByteCount else {
             throw PresencePostureError.entropyUnavailable(byteCount: bytes.count)
         }
-        return instanceNamePrefix + instanceNameSeparator + hexadecimal(bytes)
+        return prefix + hexadecimal(bytes)
     }
 
     /// The production entropy source: `byteCount` bytes from the system CSPRNG — the same draw
     /// ``EphemeralMeshTLSIdentity/randomSerial()`` makes next door.
     ///
     /// A request outside 1 ... ``maxEntropyByteCount`` answers empty, which
-    /// ``instanceName(entropy:)`` then refuses by length rather than advertising a short name.
+    /// ``instanceName(prefix:entropy:)`` then refuses by length rather than advertising a short name.
     static func systemEntropy(_ byteCount: Int) -> [UInt8] {
         guard byteCount > 0, byteCount <= maxEntropyByteCount else { return [] }
         return (0..<byteCount).map { _ in UInt8.random(in: UInt8.min...UInt8.max) }

@@ -57,8 +57,8 @@ final class DetachedPeerChannel: MeshPeerChannel {
     }
 
     // Discovery belongs to a shared session this channel does not have.
-    func startAdvertising(serviceType: String, discoveryInfo: [String: String]) async throws {}
-    func startBrowsing(serviceType: String) async throws {}
+    func startAdvertising(discoveryInfo: [String: String]) async throws {}
+    func startBrowsing() async throws {}
     func invite(_ peer: PeerHandle) async throws {}
     func accept(_ invite: PeerPendingInvite) async throws {}
 

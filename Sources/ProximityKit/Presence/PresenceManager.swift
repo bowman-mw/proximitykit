@@ -171,7 +171,9 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// The host's protocol identity, read once from ``store`` at construction and kept as this
     /// manager's own copy (ProximityKit plan step A0.2.3), so no later read reaches back to the
     /// host. The default identity is built from it, and since A0.2.7 so is the radio, which reads
-    /// its service type, ALPN and log subsystem off it. `nonisolated`: inert `Sendable` value data.
+    /// its service type, ALPN and log subsystem off it; the default posture mint takes its presence
+    /// instance-name prefix and TLS common name, and the hearts copy its mesh prefix, which a name
+    /// never begins with. `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     @ObservationIgnored private let identity: IdentityService
     @ObservationIgnored private let ledger: ProximityHeartLedger
@@ -282,11 +284,11 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     /// Test seam: the posture mint, as `(posture held now, instant) -> the posture to wear`. The
     /// production default is ``PresenceEpochPosture``'s own production path — the system CSPRNG
-    /// and the module's one certificate path — and nothing in shipping code writes this. A test
-    /// substitutes a failing mint to exercise the once-per-epoch budget above.
-    @ObservationIgnored var postureMint: (PresenceEpochPosture?, Date) throws -> PresenceEpochPosture = { held, now in
-        try held?.rotated(at: now) ?? PresenceEpochPosture.minted(at: now)
-    }
+    /// and the module's one certificate path — under ``namespace``'s presence instance-name prefix
+    /// and TLS common name, and nothing in shipping code writes this. The default is set in `init`,
+    /// where it captures those two strings when it is made. A test substitutes a failing mint to
+    /// exercise the once-per-epoch budget above.
+    @ObservationIgnored var postureMint: (PresenceEpochPosture?, Date) throws -> PresenceEpochPosture
 
     public init(store: any ProximityHost, ledger: ProximityHeartLedger, identity: IdentityService? = nil) {
         self.store = store
@@ -294,6 +296,12 @@ public final class PresenceManager: ProximityPayloadHandling {
         let namespace = store.proximityNamespace
         self.namespace = namespace
         self.makeSession = { NetworkPresenceSession(namespace: namespace) }
+        let prefix = namespace.family.radios.presenceInstanceNamePrefix
+        let commonName = namespace.family.radios.tlsCommonName
+        self.postureMint = { held, now in
+            try held?.rotated(at: now, instanceNamePrefix: prefix, commonName: commonName)
+                ?? PresenceEpochPosture.minted(at: now, instanceNamePrefix: prefix, commonName: commonName)
+        }
         if let identity {
             self.identity = identity
         } else {
@@ -804,13 +812,18 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// First word of a friend's display name for warm copy ("Aisha" from "Aisha Bloom"). Pure, so
     /// `nonisolated`. Moved here from the deleted ProximityHeartManager.
     ///
-    /// Delegates to ``PeerNameDisplay/firstName(_:fingerprint:placeholder:)`` (2026-09-29): a friend
-    /// kept before their name arrived has their fingerprint filed AS the name, and every heart
+    /// Delegates to ``PeerNameDisplay/firstName(_:fingerprint:placeholder:in:)`` (2026-09-29): a
+    /// friend kept before their name arrived has their fingerprint filed AS the name, and every heart
     /// sentence built on this (this manager's own refusals, the app's session and Home copy) used to
     /// interpolate it. It now reads "Someone you met", which also replaces the English-only
-    /// "your friend" this answered for an empty name.
-    public nonisolated static func firstName(of displayName: String) -> String {
-        PeerNameDisplay.firstName(displayName, fingerprint: nil, placeholder: .met)
+    /// "your friend" this answered for an empty name. This manager's own calls pass its
+    /// ``namespace``; the app passes the namespace it hands ProximityKit.
+    ///
+    /// - Parameters:
+    ///   - displayName: The friend's name as stored.
+    ///   - namespace: The host's namespace, whose mesh instance-name prefix is never a name.
+    public nonisolated static func firstName(of displayName: String, in namespace: ProximityNamespace) -> String {
+        PeerNameDisplay.firstName(displayName, fingerprint: nil, placeholder: .met, in: namespace)
     }
 
     /// A friend is heart-reachable when their pairwise tag is in the presence nearby set right now.
@@ -879,7 +892,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// pipeline; drives `heartSendState`. The FriendListView button is enabled only while the
     /// friend is reachable and the 5-minute cooldown is clear — the guards here are the belt.
     public func sendHeart(to friend: ProximityTrustedPeerRecord) {
-        let firstName = Self.firstName(of: friend.displayName)
+        let firstName = Self.firstName(of: friend.displayName, in: namespace)
 
         // Send-side opt-out gate (one of the three homes of allowNearbyHearts).
         guard store.allowNearbyHearts else {
@@ -1195,7 +1208,7 @@ public final class PresenceManager: ProximityPayloadHandling {
                     heartSendState = .verifying(recipientName: intended.displayName)
                     spawnHostPinned { [weak self] in await self?.deliverHeart(via: connection, to: intended) }
                 } else {
-                    failHeart("Couldn't verify \(Self.firstName(of: intended.displayName)) — no heart was sent.")
+                    failHeart("Couldn't verify \(Self.firstName(of: intended.displayName, in: namespace)) — no heart was sent.")
                     teardownIDs.append(heartConnections[index].id)
                 }
             } else if !eligible {
@@ -1241,7 +1254,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         defer { teardownHeartConnection(id: connection.id) }
         // Re-check the cooldown right before the wire write (a racing send may have consumed it).
         guard ledger.canSendHeart(to: friend.fingerprint) else {
-            failHeart("You just sent \(Self.firstName(of: friend.displayName)) some warmth — hearts settle for a few minutes.")
+            failHeart("You just sent \(Self.firstName(of: friend.displayName, in: namespace)) some warmth — hearts settle for a few minutes.")
             return
         }
         do {
@@ -1379,7 +1392,7 @@ public final class PresenceManager: ProximityPayloadHandling {
         guard nextAttempt < Self.maxHeartInviteAttempts else {
             removePendingHeartSend(for: peer)
             session?.disconnectPeer(peer)
-            failHeart("\(Self.firstName(of: friend.displayName)) didn't answer — try again in a moment.")
+            failHeart("\(Self.firstName(of: friend.displayName, in: namespace)) didn't answer — try again in a moment.")
             return
         }
         // Pre-discovery race: clear the stale invite, then re-invite after a short delay (mirrors
@@ -1679,6 +1692,7 @@ public final class PresenceManager: ProximityPayloadHandling {
             transport: channel,
             ranging: ranging,
             replayCache: replayCache,
+            displayName: displayName,
             timeoutSeconds: 0)
         heartConnections.append(PresenceHeartConnection(
             id: peer.id,

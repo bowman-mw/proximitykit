@@ -24,16 +24,20 @@ import FernletDomainModel
 /// - the Option 1b withheld state, where the name is empty until the peer commits;
 /// - a roster or trust-vault row that filed the fingerprint AS the name, because the link dropped
 ///   before the name arrived (`MeshNetworkManager.rosterDisplayName`, then `keepProximityFriends`);
-/// - the QUIC transport's random Bonjour instance name (`fernlet-mesh-` plus 12 hex characters),
-///   which a slot carries as its `displayHint` and the session's participant projection moderates
-///   into a 24-character truncation.
+/// - the QUIC transport's random Bonjour instance name (the host namespace's
+///   `family.radios.meshInstanceNamePrefix` plus 12 hex characters; Fernlet's prefix is
+///   `fernlet-mesh-`), which a slot carries as its `displayHint` and the session's participant
+///   projection moderates into a 24-character truncation.
 ///
 /// Every one of them is turned into the placeholder here, in one place, so a new surface cannot
-/// forget one.
+/// forget one. The instance name is recognized by the prefix of the namespace each caller passes
+/// (`in namespace:`, last): a peer advertises the prefix of the family both devices share, so the
+/// host's own namespace names it.
 ///
 /// **The accepted false positive.** Someone who literally names themselves sixteen hex characters,
-/// or `fernlet-mesh-…`, reads as the placeholder. Shorter hex-looking names (`Ada`, `Dee Cafe`,
-/// `deadbeef`) are names and pass. `PeerNameDisplayTests` pins both halves.
+/// or the mesh prefix and more (`fernlet-mesh-…` for Fernlet), reads as the placeholder. Shorter
+/// hex-looking names (`Ada`, `Dee Cafe`, `deadbeef`) are names and pass. `PeerNameDisplayTests`
+/// pins both halves.
 public nonisolated enum PeerNameDisplay {
 
     /// Which plain phrase stands in for a person whose name is not known.
@@ -57,43 +61,54 @@ public nonisolated enum PeerNameDisplay {
     ///     (`ItemNameModeration.sanitizedName`) before it is judged.
     ///   - fingerprint: The peer's fingerprint when the caller has it. A name equal to it (ignoring
     ///     case) is the fingerprint filed as a name. Nil still catches the canonical shape.
+    ///   - namespace: The host's namespace. A name that begins with its
+    ///     `family.radios.meshInstanceNamePrefix` (compared lowercased, as the soundness rule keeps
+    ///     the prefix) is the QUIC instance name.
     /// - Returns: The sanitized name, or nil when it is empty, is the peer's fingerprint, has the
     ///   shape of a fingerprint, or is the QUIC instance name.
-    public static func personName(_ raw: String, fingerprint: String?) -> String? {
+    public static func personName(_ raw: String, fingerprint: String?, in namespace: ProximityNamespace) -> String? {
         let name = ItemNameModeration.sanitizedName(raw)
         guard !name.isEmpty else { return nil }
         if let fingerprint, name.caseInsensitiveCompare(fingerprint) == .orderedSame { return nil }
         guard !hasFingerprintShape(name) else { return nil }
-        guard !name.lowercased().hasPrefix(MeshLinkAdvertisement.instanceNamePrefix) else { return nil }
+        guard !name.lowercased().hasPrefix(namespace.family.radios.meshInstanceNamePrefix) else { return nil }
         return name
     }
 
-    /// The text to render for a peer: ``personName(_:fingerprint:)``, or the placeholder.
+    /// The text to render for a peer: ``personName(_:fingerprint:in:)``, or the placeholder.
     ///
     /// - Parameters:
     ///   - raw: The name as received or stored.
     ///   - fingerprint: The peer's fingerprint, when the caller has it.
     ///   - placeholder: Which phrase stands in when there is no name. Defaults to ``Placeholder/nearby``.
+    ///   - namespace: The host's namespace, whose mesh instance-name prefix is never a name.
     /// - Returns: A string safe to show, already localized. Render it verbatim.
-    public static func shown(_ raw: String, fingerprint: String?, placeholder: Placeholder = .nearby) -> String {
-        personName(raw, fingerprint: fingerprint) ?? text(for: placeholder)
+    public static func shown(
+        _ raw: String, fingerprint: String?, placeholder: Placeholder = .nearby, in namespace: ProximityNamespace
+    ) -> String {
+        personName(raw, fingerprint: fingerprint, in: namespace) ?? text(for: placeholder)
     }
 
     /// The first word of the peer's chosen name for warm copy ("Aisha" from "Aisha Bloom"), or the
     /// WHOLE placeholder when there is no name to take it from.
     ///
-    /// Taking the first word of ``shown(_:fingerprint:placeholder:)`` instead would turn "Someone
-    /// you met" into "Someone", which is why the rule is applied before the split, here.
-    /// `PresenceManager.firstName(of:)` delegates to this, so the hearts copy composed inside the
+    /// Taking the first word of ``shown(_:fingerprint:placeholder:in:)`` instead would turn
+    /// "Someone you met" into "Someone", which is why the rule is applied before the split, here.
+    /// `PresenceManager.firstName(of:in:)` delegates to this, so the hearts copy composed inside the
     /// package (the presence path's refusals) can never interpolate a fingerprint filed as a name.
     ///
     /// - Parameters:
     ///   - raw: The name as received or stored.
     ///   - fingerprint: The peer's fingerprint, when the caller has it.
     ///   - placeholder: Which phrase stands in when there is no name. Defaults to ``Placeholder/nearby``.
+    ///   - namespace: The host's namespace, whose mesh instance-name prefix is never a name.
     /// - Returns: A string safe to show, already localized. Render it verbatim.
-    public static func firstName(_ raw: String, fingerprint: String?, placeholder: Placeholder = .nearby) -> String {
-        guard let name = personName(raw, fingerprint: fingerprint) else { return text(for: placeholder) }
+    public static func firstName(
+        _ raw: String, fingerprint: String?, placeholder: Placeholder = .nearby, in namespace: ProximityNamespace
+    ) -> String {
+        guard let name = personName(raw, fingerprint: fingerprint, in: namespace) else {
+            return text(for: placeholder)
+        }
         // `personName` collapsed every whitespace run to one space and trimmed the ends.
         return name.split(separator: " ", maxSplits: 1).first.map(String.init) ?? name
     }

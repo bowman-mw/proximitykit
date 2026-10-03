@@ -188,8 +188,8 @@ final class NetworkPeerChannel: PeerTransport {
     }
 
     // Discovery and admission belong to the shared session, exactly as they did under MC.
-    func startAdvertising(serviceType: String, discoveryInfo: [String: String]) async throws {}
-    func startBrowsing(serviceType: String) async throws {}
+    func startAdvertising(discoveryInfo: [String: String]) async throws {}
+    func startBrowsing() async throws {}
     func invite(_ peer: PeerHandle) async throws {}
     func accept(_ invite: PeerPendingInvite) async throws {}
 
@@ -328,6 +328,16 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// builds the radio from its namespace signs this side's introduction under the same namespace's
     /// label.
     nonisolated let purposes: ProximityNamespace.Purposes
+
+    /// The start of every Bonjour instance name this radio advertises, the host namespace's
+    /// `family.radios.meshInstanceNamePrefix`; 12 random lowercase hex characters follow it
+    /// (``MeshLinkAdvertisement/randomInstanceName(prefix:)``). A presentation string, never a
+    /// device's: every device of the family wears the same prefix.
+    nonisolated let instanceNamePrefix: String
+
+    /// The subject and issuer of every TLS certificate this radio mints, the host namespace's
+    /// `family.radios.tlsCommonName`. Nothing verifies it: it names the protocol, never the device.
+    nonisolated let tlsCommonName: String
 
     /// Hard ceiling on one inbound frame, enforced before the bytes reach any channel or decoder.
     /// Pinned to the same value the retired `MeshMultipeerSession` used, so both transports refused
@@ -541,7 +551,7 @@ final class NetworkMeshSession: NetworkChannelHost {
     private var listenerTask: Task<Void, Never>?
     private var browserTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
-    private var instanceName = MeshLinkAdvertisement.randomInstanceName()
+    private var instanceName: String
 
     /// The random salt every peer label in this session's diagnostics is taken under.
     ///
@@ -579,8 +589,9 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// A radio that speaks the host's wire: it advertises and browses the namespace's mesh service
     /// type, negotiates its ALPN, beats its heartbeat, binds every tunnel's introduction under its
     /// TLS exporter label, frames and checks that introduction under its labels and logs under its
-    /// subsystem (ProximityKit plan step A0.2.7). Each value is read once, here; building a radio
-    /// starts nothing.
+    /// subsystem (ProximityKit plan step A0.2.7), and names its Bonjour instances and certificates
+    /// with the namespace's mesh instance-name prefix and common name. Each value is read once,
+    /// here; building a radio starts nothing.
     ///
     /// - Parameter namespace: The host's protocol identity, as its manager holds it.
     init(namespace: ProximityNamespace) {
@@ -589,6 +600,9 @@ final class NetworkMeshSession: NetworkChannelHost {
         heartbeatDatagram = namespace.family.radios.meshHeartbeat
         tlsExporterLabel = namespace.family.purposes.keyDerivation.meshTLSExporterV1
         purposes = namespace.family.purposes
+        instanceNamePrefix = namespace.family.radios.meshInstanceNamePrefix
+        tlsCommonName = namespace.family.radios.tlsCommonName
+        instanceName = MeshLinkAdvertisement.randomInstanceName(prefix: instanceNamePrefix)
         logger = Logger(subsystem: namespace.installation.logSubsystem, category: "proximity.transport.quic")
     }
 
@@ -617,9 +631,9 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// listener, and starts browsing once the listener is both ready and advertised.
     func start(discoveryInfo: [String: String]) throws {
         guard !isRunning else { return }
-        instanceName = MeshLinkAdvertisement.randomInstanceName()
+        instanceName = MeshLinkAdvertisement.randomInstanceName(prefix: instanceNamePrefix)
         advertisedFields = MeshLinkAdvertisement.publishedFields(from: discoveryInfo)
-        tlsIdentity = try EphemeralMeshTLSIdentity.mint()
+        tlsIdentity = try EphemeralMeshTLSIdentity.mint(commonName: tlsCommonName)
         isRunning = true
         try startListener()
         startPoll()

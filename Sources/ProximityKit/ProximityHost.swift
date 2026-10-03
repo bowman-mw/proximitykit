@@ -80,9 +80,10 @@ public protocol ProximityHost: AnyObject {
     /// The host's protocol identity (ProximityKit plan step A0.2.3): the labels, radio values, QR
     /// scheme, identity and mesh seal-key rows, storage names and log subsystem by which this module's
     /// wire, keychain and disk formats identify the app it runs in, as the one ``ProximityNamespace``
-    /// the host builds at its composition root. It also carries the payload vocabulary and the radios'
-    /// presentation strings, which this module's consumers still read from constants of their own
-    /// until plan step A0.3 re-points them. Some such strings stay outside it until plan step A0.4:
+    /// the host builds at its composition root. The radios, their postures and ``PeerNameDisplay`` read
+    /// the radios' presentation strings off it too. It also carries the payload vocabulary, which this
+    /// module's consumers still read from constants of their own until the rest of plan step A0.3
+    /// re-points them. Some such strings stay outside it until plan step A0.4:
     /// the feature labels, the heart-drop and moderation keychain services and
     /// ``ProximitySupportLayout``'s folder. `ProximityNamespaceBoundaryTests` allowlists each
     /// feature-label read and each literal that spells `fernlet`.

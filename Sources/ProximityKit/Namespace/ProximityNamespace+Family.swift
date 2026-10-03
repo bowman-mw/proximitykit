@@ -392,8 +392,9 @@ nonisolated extension ProximityNamespace {
     ///
     /// The presentation strings name the family to a Bonjour listing or a packet capture, never a
     /// device: they ride in the family because a display layer on one device must recognize the
-    /// instance names another device of the family advertises. ProximityKit's radios and its peer-name
-    /// display still read constants of their own for them until plan step A0.3 re-points them here.
+    /// instance names another device of the family advertises. ProximityKit's radios mint their
+    /// instance names and certificates under them, and its peer-name display hides the mesh prefix of
+    /// the namespace its caller passes.
     public nonisolated struct Radios: Hashable, Sendable {
         /// The friend mesh's radio.
         public let mesh: Radio

@@ -186,6 +186,8 @@ public final class ProximityCoordinator {
     @ObservationIgnored private weak var trustPolicy: (any ProximityTrustPolicy)?
     @ObservationIgnored private let replayCache: ReplayCache
     @ObservationIgnored private let foregroundAnchor: any ProximityForegroundAnchoring
+    /// The local name this side discloses once it has committed, and advertises as `name`: always
+    /// the caller's (the host's resolved name). The engine has no name of its own to fall back on.
     @ObservationIgnored private let displayName: String
     // Capability tokens advertised in this radio's identity intro/ack (Phase 1). Empty = this
     // radio offers none of the mesh feature payloads (e.g. the recipe radio).
@@ -237,7 +239,7 @@ public final class ProximityCoordinator {
         trustPolicy: (any ProximityTrustPolicy)? = nil,
         replayCache: ReplayCache,
         foregroundAnchor: (any ProximityForegroundAnchoring)? = nil,
-        displayName: String = "Fernlet",
+        displayName: String,
         capabilities: [String] = [],
         sealedIntroductionPeerKeyAgreementKey: Data? = nil,
         timeoutSeconds: TimeInterval = 30,
@@ -294,11 +296,10 @@ public final class ProximityCoordinator {
             switch role {
             case .advertiser:
                 try await transport.startAdvertising(
-                    serviceType: serviceType(for: mode),
                     discoveryInfo: discoveryInfo(for: role, mode: mode)
                 )
             case .browser:
-                try await transport.startBrowsing(serviceType: serviceType(for: mode))
+                try await transport.startBrowsing()
             }
             transition(to: .discovering)
         } catch {
@@ -311,10 +312,9 @@ public final class ProximityCoordinator {
         do {
             try prepareSession(role: .browser, mode: .friend)
             try await transport.startAdvertising(
-                serviceType: serviceType(for: .friend),
                 discoveryInfo: discoveryInfo(for: .browser, mode: .friend)
             )
-            try await transport.startBrowsing(serviceType: serviceType(for: .friend))
+            try await transport.startBrowsing()
             transition(to: .discovering)
         } catch {
             fail(error.localizedDescription)
@@ -1463,17 +1463,6 @@ public final class ProximityCoordinator {
             updateInspectorRangingMode(.rssi)
             inspector?.recordError(domain: "Ranging", message: error.localizedDescription, recoverable: true)
             inspector?.recordCoordinatorEvent("ranging fallback: \(error.localizedDescription)")
-        }
-    }
-
-    private func serviceType(for mode: Mode) -> String {
-        switch mode {
-        case .trainer: return MultipeerServiceType.trainer
-        // Inert since the deletion round (2026-09-22): the `_fernlet-friend` plist pair left with the
-        // MultipeerConnectivity radio, and both surviving `MeshPeerChannel` conformers' discovery
-        // doors (`startAdvertising`/`startBrowsing`) are documented no-ops — the shared session owns
-        // discovery on its own service type. The string is a per-mode label with no reader on the air.
-        case .friend: return "fernlet-friend"
         }
     }
 

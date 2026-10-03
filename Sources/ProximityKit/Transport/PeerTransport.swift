@@ -1,18 +1,6 @@
 import Foundation
 import Combine
 
-/// Namespace for shared Bonjour service-type constants.
-///
-/// Only the coach channel's `fernlet-coach` lives here; the friend and presence radios declare
-/// their service types on their owning session/manager types. Every service type must also
-/// appear in the app's Info.plist `NSBonjourServices` or discovery silently fails on device.
-///
-/// The values are frozen wire tokens. `ProximityVocabularyGoldenTests` pins the literal: a changed
-/// spelling compiles, but fails CI there instead of showing up only as dead discovery on a device.
-nonisolated public enum MultipeerServiceType {
-    public static let trainer = "fernlet-coach"
-}
-
 /// How reliably a frame must be delivered.
 ///
 /// The transport-neutral replacement for the retired `MCSessionSendDataMode`, mapped onto the
@@ -129,14 +117,19 @@ public struct InboundPeerFrame {
 /// QUIC conformer slotted in beside it in P2 or when the MC one left in the deletion round.
 /// `@MainActor`: the coordinator and every conformer live on the main actor, with delegate
 /// callbacks hopped in.
+///
+/// The two discovery doors take no service type: a radio's service type is the host namespace's,
+/// read by the shared session that owns discovery (`family.radios.<radio>.serviceType`), and every
+/// production conformer's doors are no-ops for that reason. The coach channel's own type arrives
+/// with its radio profile.
 @MainActor
 public protocol PeerTransport: AnyObject {
     var state: AnyPublisher<PeerTransportState, Never> { get }
     var inbound: AnyPublisher<InboundPeerFrame, Never> { get }
     var connectedPeers: [PeerHandle] { get }
 
-    func startAdvertising(serviceType: String, discoveryInfo: [String: String]) async throws
-    func startBrowsing(serviceType: String) async throws
+    func startAdvertising(discoveryInfo: [String: String]) async throws
+    func startBrowsing() async throws
     func invite(_ peer: PeerHandle) async throws
     func accept(_ invite: PeerPendingInvite) async throws
     func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws

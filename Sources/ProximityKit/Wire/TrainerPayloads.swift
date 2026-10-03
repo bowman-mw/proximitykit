@@ -8,8 +8,8 @@
 // location, and recipe ingredients — see `TrainerExportBuilder`).
 //
 // TRANSPORT SEAM (deferred): a coach is NOT a friend. When the dedicated coaching feature ships, this
-// bundle will travel over the separate `fernlet-coach` trainer channel (`ProximityMode.trainer` /
-// `MultipeerServiceType.trainer`, `ProximityCoordinator.sendPayload(...)`) to a coach running the
+// bundle will travel over the separate `fernlet-coach` trainer channel (`ProximityMode.trainer`, a
+// service type its radio profile brings, `ProximityCoordinator.sendPayload(...)`) to a coach running the
 // separate coaching app — never over the friend mesh. Until then the app shares the reviewed bundle as a
 // file. This type + `PayloadType.workoutCompletion`'s membership in `sealingRequiredTypes` (so an
 // unsealed send is fail-closed at `verify()`) are the wire seam that later feature will use.

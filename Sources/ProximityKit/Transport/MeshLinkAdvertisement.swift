@@ -45,12 +45,9 @@ nonisolated enum MeshLinkAdvertisement {
     /// reads as "unrankable", which the tie-break already handles by inviting — the safe direction.
     static let maxFieldValueLength = 64
 
-    /// Bonjour instance-name prefix. A frozen token: it is matched by nothing, but it is what a
-    /// developer sees in a `dns-sd` listing, so it stays stable and stays English.
-    static let instanceNamePrefix = "fernlet-mesh-"
-
-    /// Random hex characters after the prefix. Twelve is the same width the retired MC presence
-    /// radio's ephemeral display name used.
+    /// Random hex characters after the instance-name prefix. Twelve is the same width the retired
+    /// MC presence radio's ephemeral display name used. A format constant, not a host value: the
+    /// namespace's soundness rule leaves a mesh prefix room for exactly this many characters.
     static let instanceNameTokenLength = 12
 
     /// The TXT fields to publish for a given `discoveryInfo`.
@@ -94,19 +91,24 @@ nonisolated enum MeshLinkAdvertisement {
         return result
     }
 
-    /// A fresh Bonjour instance name for one session.
+    /// A fresh Bonjour instance name for one session: `prefix`, then ``instanceNameTokenLength``
+    /// random lowercase hex characters.
     ///
     /// Random per session and derived from nothing stable (plan §7.2): the archived `MCPeerID` it
     /// replaces was a device-name-derived identifier that persisted across launches, so a passive
     /// Bonjour scanner could link sightings of one person across days and places. Identity here is
     /// proven cryptographically after connecting, never advertised — so the name can afford to
     /// carry no meaning at all, and does.
-    static func randomInstanceName() -> String {
+    ///
+    /// - Parameter prefix: The host namespace's `family.radios.meshInstanceNamePrefix`, which every
+    ///   device of the family wears identically. It is what a developer sees in a `dns-sd` listing,
+    ///   and it is matched: ``PeerNameDisplay`` never shows a name that begins with it as a person's.
+    static func randomInstanceName(prefix: String) -> String {
         let token = UUID().uuidString
             .replacingOccurrences(of: "-", with: "")
             .prefix(instanceNameTokenLength)
             .lowercased()
-        return instanceNamePrefix + token
+        return prefix + token
     }
 
     /// Whether a value may cross the wire in either direction: non-empty and within the length cap.
