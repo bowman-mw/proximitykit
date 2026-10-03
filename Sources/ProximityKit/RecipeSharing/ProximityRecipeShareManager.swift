@@ -12,12 +12,13 @@ private struct RecipeShareConnection: Identifiable {
     let peer: PeerHandle
     let channel: NetworkPeerChannel
     let coordinator: ProximityCoordinator
-    /// Retained for the connection's lifetime so the coordinator's `weak` trustPolicy stays alive —
+    /// The host's trust policy for this pairing (`ProximityHost.makeProximityTrustPolicy()`),
+    /// retained for the connection's lifetime so the coordinator's `weak` trustPolicy stays alive —
     /// otherwise the revoked/blocked-key envelope rejection + audit calls silently no-op (they would
     /// evaluate `nil?.isRevokedProximitySigningKey(...) == true` → false, and every recordTrainerAudit
     /// becomes a no-op). Mirrors MeshNetworkManager's `slotTrustPolicies` and the heart manager's
     /// HeartShareConnection.
-    let trustPolicy: FriendSessionTrustPolicy
+    let trustPolicy: any ProximityTrustPolicy
     var fingerprint: String?
     var verifiedKeyAgreementPublicKey: Data?
 }
@@ -81,7 +82,8 @@ public enum ProximityRecipeShareDiagnostics {
 ///
 /// Owns its own ``RecipeShareRadioSession`` (the QUIC ``NetworkRecipeShareSession`` in
 /// production), ``IdentityService`` cache, and ``ReplayCache``; each pairing gets a
-/// ``ProximityCoordinator`` with a retained ``FriendSessionTrustPolicy`` (the coordinator's trust
+/// ``ProximityCoordinator`` with a retained trust policy from the host,
+/// ``ProximityHost/makeProximityTrustPolicy()`` (the coordinator's trust
 /// ref is `weak` — dropping the retention silently disables the revoked/blocked drops). The hard
 /// 2-device cap is enforced at four layers: the inbound dialer gate, the outbound send guard, the
 /// connecting-window check, and the belt-and-braces channel admission — with the radio PAUSED
@@ -777,7 +779,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             break
         }
         recordDiagnostic("Secure recipe-share channel opened with \(displayName(for: channel.peer)).")
-        let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
+        let trustPolicy = store.makeProximityTrustPolicy()
         let coordinator = ProximityCoordinator(
             identity: identity,
             transport: channel,
@@ -1350,8 +1352,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     // MARK: - Test seam
 
-    /// Builds AND retains a connection exactly as `handleChannelReady` does — creating the
-    /// FriendSessionTrustPolicy from the store's vault and holding it on the connection struct so the
+    /// Builds AND retains a connection exactly as `handleChannelReady` does — asking the host for the
+    /// pairing's trust policy (`makeProximityTrustPolicy()`) and holding it on the connection struct so the
     /// coordinator's `weak` trustPolicy survives past this method's scope — but over an injected transport
     /// so a unit test can drive a revoked/blocked-key envelope through the coordinator. Returns the
     /// connection's coordinator. `internal` for `@testable` unit tests only: the production connection path
@@ -1364,7 +1366,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         transport: any PeerTransport,
         ranging: any RangingProvider
     ) -> ProximityCoordinator {
-        let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
+        let trustPolicy = store.makeProximityTrustPolicy()
         let coordinator = ProximityCoordinator(
             identity: identity,
             transport: transport,

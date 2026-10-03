@@ -110,9 +110,12 @@ key's link is refused once, audited (`mesh.slot.returningMemberRefusedMismatched
 only an ask — the coordinator commits whatever identity it holds when the ask lands — so the seat
 checks it again and evicts a slot whose committed key is not the one judged
 (`mesh.slot.returningMemberRefusedAtSeat`). Trust questions along the way go to a
-``ProximityTrustPolicy`` — ``FriendSessionTrustPolicy`` for friend radios (proximity *is* the
-authorization; only blocked keys ban), ``CoachSessionTrustPolicy`` for the future coach channel
-(only a remembered `.trainer` pairing auto-confirms), and ``ProximityTrustVault`` as the
+``ProximityTrustPolicy`` the host hands out fresh for each connection
+(``ProximityHost/makeProximityTrustPolicy()``), which the manager retains because the coordinator
+holds it `weak`. The session policies are the host's rules, not this module's: Fernlet's, in
+`FernletConnections`, are `FriendSessionTrustPolicy` for friend radios (proximity *is* the
+authorization; only blocked keys ban) and `CoachSessionTrustPolicy` for the future coach channel
+(only a remembered `.trainer` pairing auto-confirms), and ``ProximityTrustVault`` is the
 persistent record store behind both, holding the friend/removed/blocked/reported lifecycle and
 the audit trail.
 
@@ -193,8 +196,8 @@ Group Activities (``ProximityActivityManager``, whose authorization is a host-si
 invitee-key-bound token rather than the shared handshake). Feature payloads dispatch through a
 registry whose committed-slot gate is the security boundary — behind the payload door's attribution
 rule, which every frame of every family passes first (see the seat invariant above); the session end promotes the roster
-AND the session's unreviewed photos into the keep-as-friend review (``FriendMintingReview`` here,
-`KeepFriendsPromptSheet` and `FriendPhotoReviewSheet` in `FernletProximityUI`). **Nothing is on the wall until the person
+AND the session's unreviewed photos into the keep-as-friend review (`FriendMintingReview` in
+`FernletConnections`, `KeepFriendsPromptSheet` and `FriendPhotoReviewSheet` in `FernletProximityUI`). **Nothing is on the wall until the person
 chooses** (2026-09-30, the owner: "None of the photos should be saved to the camera roll until this
 selection has been made", and the review must survive a process kill). Every session photo — taken
 here or received from a peer — is HELD from the moment it exists in the sealed pending corpus
@@ -525,10 +528,11 @@ compare with; its identity's doors cover it. The checks live in the internal `Pr
 error and its audit line, over namespaces built from literals.
 
 **How a host supplies it.** ``ProximityHost/proximityNamespace`` and
-``ProximityHost/proximityInstallBinding`` are two of the seven ``ProximityHost`` requirements with no
+``ProximityHost/proximityInstallBinding`` are two of the eight ``ProximityHost`` requirements with no
 default in the protocol extension (the others are the display name, the trusted peers, the vault,
-`isBlockedFingerprint(_:)` and `blockProximityPeer(signingPublicKey:)`), and the two it will never
-default, so a host that leaves either out fails to compile instead of running under another app's
+`isBlockedFingerprint(_:)`, `blockProximityPeer(signingPublicKey:)` and the per-connection trust
+policy, ``ProximityHost/makeProximityTrustPolicy()``), and two of the three it will never
+default (the trust policy is the third), so a host that leaves either out fails to compile instead of running under another app's
 identity or binding. The extension's five defaults are the two hearts settings, the sidecar root
 (`installation.storage.defaultDirectory`, built from the namespace) and both mesh storage scopes
 (built from the namespace and the binding). Fernlet's values are not in this module and never will
@@ -579,7 +583,7 @@ namespaces built only from literals.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
 named only on the 20 code lines in 7 files that read the feature labels leaving at A0.4; and every
-remaining string literal that spells `fernlet` (38 in 13 files) is on an exact allowlist that names
+remaining string literal that spells `fernlet` (36 in 12 files) is on an exact allowlist that names
 why it is still here and the plan step that removes it. Both lists can only shrink.
 
 **The install binding and the column seal.** The two sealed mesh stores seal through
@@ -1191,13 +1195,15 @@ Release build the environment-reading half is compiled out entirely.
 
 ### Trust and verification
 
+The session trust policies, the coach session contract, the keep-as-friend review and the trainer
+export body are Fernlet's rules, so they live in `FernletConnections`; a manager gets each
+connection's policy from ``ProximityHost/makeProximityTrustPolicy()``, and a trainer-mode
+coordinator refuses any inbound blob over ``ProximityCoordinator/maxTrainerModeInboundBytes`` before
+decoding it.
+
 - ``ProximityTrustPolicy``
 - ``ProximityTrustVault``
-- ``FriendSessionTrustPolicy``
-- ``CoachSessionTrustPolicy``
-- ``CoachSessionContract``
 - ``CoachVerificationCeremony``
-- ``FriendMintingReview``
 - ``FriendsDiscoveryEntry``
 - ``ProximityVerifyQR``
 - ``ProximityVerifySignature``
@@ -2771,10 +2777,6 @@ the retired wire payload, **frozen and parked** (decoded, never dispatched, neve
 - ``ModerationReportRelay``
 - ``ModerationReportPayload``
 - ``SignedModerationReport``
-
-### Trainer export
-
-- ``TrainerExportPayload``
 
 ### Peer names on screen
 

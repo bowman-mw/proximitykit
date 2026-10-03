@@ -61,7 +61,8 @@ private struct FriendPhotoWallPreferences: Codable, Equatable {
 /// the MC→QUIC cutover, and the only radio in the tree since the deletion round — feeds per-peer
 /// channels; each channel
 /// gets a ``PeerSlot`` with its own ``ProximityCoordinator`` and a
-/// retained ``FriendSessionTrustPolicy``. Slots are capped (3 active + 2 lightweight, ranked by
+/// retained trust policy from the host (``ProximityHost/makeProximityTrustPolicy()``). Slots are
+/// capped (3 active + 2 lightweight, ranked by
 /// stable UWB distance with hysteresis-guarded overflow eviction) and a symmetric `sid`
 /// comparison picks the single inviter of a mutually-discovered pair. Core mesh-control payloads
 /// are handled in the dispatch switch; feature payloads go through the Phase-1 registry, whose
@@ -425,7 +426,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// never during body eval), and touch-read in `favoritePhotoID(for:)` and the `photoWallPosts`
     /// getter so the viewer heart and the wall cover both re-render when a favorite toggles.
     private var favoritesRevision = 0
-    @ObservationIgnored private var slotTrustPolicies: [UUID: FriendSessionTrustPolicy] = [:]
+    @ObservationIgnored private var slotTrustPolicies: [UUID: any ProximityTrustPolicy] = [:]
     @ObservationIgnored private var observationTask: Task<Void, Never>?
     public private(set) var photosAddedThisSession = 0
 
@@ -12516,7 +12517,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
         let isOverflowCandidate = slots.count >= Self.maxTotalSlots
         let kind: SlotKind = activeSlots.count < Self.maxActiveSlots ? .active : .lightweight
-        let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
+        let trustPolicy = store.makeProximityTrustPolicy()
 
         let coordinator = ProximityCoordinator(
             identity: identity,
@@ -16135,8 +16136,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             + photoWallPreferences.favoritePhotoIDsBySession.count
     }
 
-    /// Builds AND retains a slot coordinator exactly as `handleChannelReady` does — creating the
-    /// FriendSessionTrustPolicy from the store's vault and holding it in `slotTrustPolicies` so the
+    /// Builds AND retains a slot coordinator exactly as `handleChannelReady` does — asking the host
+    /// for the slot's trust policy (`makeProximityTrustPolicy()`) and holding it in `slotTrustPolicies` so the
     /// coordinator's `weak` trustPolicy stays alive — but over an injected transport so a unit test can
     /// drive a blocked-key envelope through the coordinator (ported from the deleted
     /// `ProximityClothingShareManager.makeRetainedConnectionCoordinatorForTesting`, whose regression
@@ -16148,7 +16149,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         transport: any PeerTransport,
         ranging: any RangingProvider
     ) -> ProximityCoordinator {
-        let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
+        let trustPolicy = store.makeProximityTrustPolicy()
         let coordinator = ProximityCoordinator(
             identity: identity,
             transport: transport,

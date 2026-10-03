@@ -7,8 +7,8 @@ import Foundation
 /// halves — the arm and the five-minute timeout that rides it — were `private` in the app target
 /// and reddened **nothing** when deleted, while being the whole user-facing claim of item 2's P1
 /// (a founded pair whose link dropped can get its radios back at all). Pulled out here it is a
-/// four-row truth table a cell can pin, exactly as ``FriendMintingReview/sessionEndReview(hasPhotos:eligibleCandidateCount:)``
-/// is for the session-end sheet; the call site stays two lines and a `switch`.
+/// four-row truth table a cell can pin, exactly as `FriendMintingReview.sessionEndReview(hasPhotos:eligibleCandidateCount:)`
+/// (in `FernletConnections`) is for the session-end sheet; the call site stays two lines and a `switch`.
 ///
 /// Deliberately NOT a decision about the *mesh*: it answers only "which radio call", and every
 /// reason each answer is right lives with the manager seams it names.

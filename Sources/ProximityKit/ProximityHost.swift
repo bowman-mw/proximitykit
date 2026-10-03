@@ -11,9 +11,10 @@ import FernletDomainModel
 /// Mirrors the existing `ProximityTrustPolicy` / `WorkoutSyncContext` host-protocol
 /// pattern. Surface is exactly what `MeshNetworkManager` + `ProximityRecipeShareManager`
 /// consume: display name, trusted peers + vault, and the block/fingerprint checks — and, since
-/// ProximityKit plan step A0.2.3, the host's protocol identity, ``proximityNamespace``, and since
-/// step A0.2.9 its install binding, ``proximityInstallBinding``: two requirements the extension
-/// below will never give a default.
+/// ProximityKit plan step A0.2.3, the host's protocol identity, ``proximityNamespace``, since
+/// step A0.2.9 its install binding, ``proximityInstallBinding``, and the session trust policy every
+/// connection's coordinator consults, ``makeProximityTrustPolicy()``: three requirements the
+/// extension below will never give a default.
 @MainActor
 public protocol ProximityHost: AnyObject {
     var proximityDisplayName: String { get }
@@ -117,6 +118,24 @@ public protocol ProximityHost: AnyObject {
     /// a pinned binding in the cells that test one. The extension below builds both default storage
     /// scopes with it; a host with scopes of its own hands each the same binding.
     var proximityInstallBinding: any ProximityInstallBinding { get }
+
+    /// A fresh trust policy for one connection: the ``ProximityTrustPolicy`` that the
+    /// ``ProximityCoordinator`` a manager builds for a friend-mode link consults on every inbound
+    /// envelope (the revoked-key hard fail, the blocked-key silent drop, remembered-trust
+    /// auto-confirm) and records its audit events through.
+    ///
+    /// **A new value per call, kept alive by the caller.** The coordinator holds its policy `weak`,
+    /// so ``MeshNetworkManager`` (per slot), ``PresenceManager`` (per heart connection) and
+    /// ``ProximityRecipeShareManager`` (per pairing) each call this once per connection, test seams
+    /// included, and keep the result beside that connection for its lifetime: a policy nothing
+    /// retains lets the revoked and blocked drops silently stop firing.
+    ///
+    /// **No default, like ``proximityNamespace``.** Which peers a session trusts, treats as revoked
+    /// and bans is the host's rule, not the mechanism's, so ProximityKit ships no session policy and
+    /// never falls back to one: a host that supplies none fails to compile. Fernlet's app answers
+    /// `FriendSessionTrustPolicy(vault: proximityTrustVault)` (the `FernletConnections` module) in
+    /// `ProximityHostAdapter.swift`, and every test double answers the same over its own vault.
+    func makeProximityTrustPolicy() -> any ProximityTrustPolicy
 }
 
 public extension ProximityHost {

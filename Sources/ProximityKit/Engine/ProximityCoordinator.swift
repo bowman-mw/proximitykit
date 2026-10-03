@@ -914,19 +914,29 @@ public final class ProximityCoordinator {
         }
     }
 
+    /// The largest inbound blob a trainer-mode session accepts, in bytes (4 MiB), checked before the
+    /// envelope is decoded, decrypted or inflated (`rejectsOversizedTrainerBlob(_:)`).
+    ///
+    /// The mechanism's own bound, and the one a host's coach bodies must fit inside once sealed and
+    /// carried in an envelope: Fernlet's trainer export (`TrainerExportPayload` in
+    /// `FernletConnections`) takes it as its wire cap and half of it as its bundle cap. `nonisolated`
+    /// so a host's `nonisolated` payload types can derive their caps from it.
+    public nonisolated static let maxTrainerModeInboundBytes = 4 * 1024 * 1024
+
     /// Increment 10 (coach path): hard wire-size gate BEFORE the envelope is decoded, decrypted, or
     /// inflated — the hearts ordering (`HeartDropSealer.open` gates size before key agreement).
-    /// `TrainerExportPayload.isWellFormed` can only run after decrypt+inflate, which is the wrong
+    /// A host's own shape check on a coach body (Fernlet's `TrainerExportPayload.isWellFormed`) can
+    /// only run after decrypt+inflate, which is the wrong
     /// layer for a bound: coach payloads are ~1000× a heart, so the inflate-bomb exposure is
     /// correspondingly worse. Trainer-scoped: this is the MODE-SPECIFIC tightening on top of the
     /// uniform floor every radio already gets from `NetworkMeshSession.maxInboundWireBytes`
     /// (16 MiB, dropped before the frame ever reaches a channel — the shipping radio's copy of a
     /// value both transports pin to `SealedPayloadFraming.maxInflatedByteCount`, deliberately, so
-    /// they refuse the same frame). 4 MB ≪ 16 MiB, so the trainer bound still binds. True when the
-    /// session was failed and the caller stops.
+    /// they refuse the same frame). ``maxTrainerModeInboundBytes`` (4 MiB) ≪ 16 MiB, so the trainer
+    /// bound still binds. True when the session was failed and the caller stops.
     private func rejectsOversizedTrainerBlob(_ message: InboundPeerFrame) -> Bool {
         guard currentMode == .trainer,
-              message.data.count > TrainerExportPayload.maxTrainerWireBytes else { return false }
+              message.data.count > Self.maxTrainerModeInboundBytes else { return false }
         trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
             kind: .envelopeRejected,
             peerFingerprint: message.peer.advertisedFingerprint,

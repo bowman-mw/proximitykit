@@ -62,7 +62,8 @@ import UIKit
 import FernletDomainModel
 import FernletFoundation
 
-/// One in-flight heart connection on the presence session. Retains its `FriendSessionTrustPolicy`
+/// One in-flight heart connection on the presence session. Retains the trust policy the host made
+/// for it (`ProximityHost.makeProximityTrustPolicy()`)
 /// for the connection's lifetime so the coordinator's `weak` trustPolicy stays alive (the
 /// revoked/blocked-key envelope rejection + audit calls silently no-op otherwise) — mirrors the
 /// recipe manager's `RecipeShareConnection`.
@@ -71,7 +72,7 @@ private struct PresenceHeartConnection: Identifiable {
     let peer: PeerHandle
     let channel: NetworkPeerChannel
     let coordinator: ProximityCoordinator
-    let trustPolicy: FriendSessionTrustPolicy
+    let trustPolicy: any ProximityTrustPolicy
     /// The friend this connection is delivering a heart to (outbound). `nil` = an inbound-only
     /// connection we accepted so a friend could send US a heart.
     var intendedFriend: ProximityTrustedPeerRecord?
@@ -1140,7 +1141,7 @@ public final class PresenceManager: ProximityPayloadHandling {
             return
         }
 
-        let trustPolicy = FriendSessionTrustPolicy(vault: store.proximityTrustVault)
+        let trustPolicy = store.makeProximityTrustPolicy()
         let coordinator = ProximityCoordinator(
             identity: identity,
             transport: channel,
@@ -1711,7 +1712,7 @@ public final class PresenceManager: ProximityPayloadHandling {
             peer: peer,
             channel: channel,
             coordinator: coordinator,
-            trustPolicy: FriendSessionTrustPolicy(vault: store.proximityTrustVault),
+            trustPolicy: store.makeProximityTrustPolicy(),
             intendedFriend: nil,
             fingerprint: nil))
         teardownHeartConnection(id: peer.id)
@@ -1729,7 +1730,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     func evaluateConnectedCoordinatorForTesting(
         _ coordinator: ProximityCoordinator,
         peer: PeerHandle,
-        trustPolicy: FriendSessionTrustPolicy,
+        trustPolicy: any ProximityTrustPolicy,
         intendedFriend: ProximityTrustedPeerRecord? = nil
     ) -> Bool {
         let channelSession = session ?? NetworkPresenceSession(namespace: namespace)
