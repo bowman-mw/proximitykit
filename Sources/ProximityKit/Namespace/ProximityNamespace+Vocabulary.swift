@@ -4,9 +4,11 @@
 // The family's payload vocabulary: the tokens every interoperating app signs into its envelopes and
 // routed manifests and hashes into its membership digests, and the payload rules that hang on them.
 // Tokens are the host's `String`s, like the radios' service types and ALPNs: wire data, never crypto
-// labels, so none is a `StaticString` and none takes a role. ProximityKit's consumers still read
-// constants of their own for these values until plan step A0.3 re-points each one here; for Fernlet
-// the two are equal, which `ProximityVocabularyGoldenTests` holds.
+// labels, so none is a `StaticString` and none takes a role. ProximityKit reads the membership record
+// kinds (the inventory digest hashes them) and the routed types (the routed type registry builds its
+// rows from them) here; its other consumers still read constants of their own for the rest
+// until plan step A0.3 re-points each one here, and for Fernlet the two are equal, which
+// `ProximityVocabularyGoldenTests` holds.
 
 import Foundation
 
@@ -179,7 +181,8 @@ nonisolated extension ProximityNamespace {
     // MARK: - MembershipRecordKinds
 
     /// The four membership record kinds. Each record's kind is hashed into the signed inventory
-    /// digest, and the digest lists a ledger's records by their kind tokens' bytes.
+    /// digest, and the digest lists a ledger's records by their kind tokens' bytes. ProximityKit's
+    /// `MeshMembershipRecordKind` names the four roles and reads each one's token here.
     public nonisolated struct MembershipRecordKinds: Hashable, Sendable {
         /// A member admitted to the mesh.
         public let admission: String
@@ -210,8 +213,9 @@ nonisolated extension ProximityNamespace {
     /// The routed engine's type tokens: the three types it registers rows for, and one reserved.
     ///
     /// A type token is signed into every routed manifest and bound into the routed item seal's
-    /// authenticated data. These are the engine's three registered types plus the reserved one; they
-    /// become host-registered rows when plan step A0.5 moves their features out.
+    /// authenticated data. These are the engine's three registered types plus the reserved one:
+    /// ProximityKit's routed type registry builds its three rows from them and reads them nowhere
+    /// else. They become host-registered rows when plan step A0.5 moves their features out.
     public nonisolated struct RoutedTypes: Hashable, Sendable {
         /// A friend photo.
         public let photo: String

@@ -70,7 +70,7 @@ nonisolated struct MeshRecipientDeliveryWitness: Equatable, Sendable {
     /// the mint: the door already refused an unknown token and an unsatisfied stage before a witness
     /// existed, and a mint-side re-check against a table the same caller passes would be circular.
     /// What keeps the token → stage binding single is item 11's registry plus the source-scan wall
-    /// over ``MeshRoutedAckStageTable/increment1``, not this field.
+    /// over ``MeshRoutedAckStageTable/increment1(_:)``, not this field.
     let ackStage: MeshRoutedAckStage
 
     /// The one construction site's initialiser. `fileprivate` on purpose — see the type's
@@ -133,7 +133,7 @@ nonisolated extension MeshRoutedStore {
     ///     here, and against the signing identity at the mint. Nothing per-destination is written on
     ///     it.
     ///   - stages: The type → final-ack table. Item 11 passes the registry's; shipping code names
-    ///     only ``MeshRoutedAckStageTable/increment1``.
+    ///     only ``MeshRoutedAckStageTable/increment1(_:)``.
     ///   - evidence: What the caller offers for the stage. `.none` for every stage whose condition
     ///     the store reads for itself. **`@autoclosure`, and that is load-bearing** (P6 item 6 fix
     ///     review, P2-3): the heart stage's evidence is a ledger JUDGEMENT — an unwrap, a durable

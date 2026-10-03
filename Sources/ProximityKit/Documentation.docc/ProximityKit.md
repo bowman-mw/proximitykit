@@ -524,7 +524,9 @@ hand it:
 | ``MeshNetworkManager``, ``PresenceManager``, ``ProximityRecipeShareManager`` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their default identity and their radio from it, and hand it, or its `family.purposes`, to every reader they call. |
 | ``IdentityService`` | Takes it in ``IdentityService/init(namespace:keychainService:)`` (a `nil` service means the namespace's identity service) and keeps it with its ``IdentityService/purposes``: it signs, seals, opens and wraps under its own labels and keeps its four device rows under the namespace's accounts. Its ``ProximityCryptographicPurpose`` overloads of `sign` and `verify` treat a label by its role, and `sign` refuses a verify-only or non-signature label. |
 | Builders: envelopes, admission tokens, membership records and messages, the removal quorum, key advertisements, routed items, chunks and receipts, the verify QR | Sign under their signing identity's ``IdentityService/purposes``. |
-| Verifiers: `MeshMembershipRecordVerifier`, the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
+| Verifiers: the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
+| The membership digest and its holders: `MeshInventoryDigest`, `MeshMembershipRecordVerifier`, `MeshLedgerAdoption` | Take the whole family (`family:`, or the adoption's `in family:`, with no default), because the digest needs its record kinds beside its labels: every record is tagged with its kind's token from `family.vocabulary.membershipRecordKinds` (`MeshMembershipRecordKind.token(in:)`). The verifier keeps the family as its copy, so its labels and record kinds come from one namespace; an identity's signed digest uses its own namespace's. |
+| The routed type registry: `MeshRoutedTypeRegistry.increment1(_:)` and its projection `MeshRoutedAckStageTable.increment1(_:)` | Build their rows from the routed types they are handed. ``MeshNetworkManager`` hands them its namespace's `family.vocabulary.routedTypes`, and the manifest mint takes the manager's registry with no default, so this module spells no routed type. |
 | Stateless helpers: the serializer's `canonicalBytes(for:in:)` overloads and `canonicalInventoryDigestBytes`, ``MeshRoutedContentDigest``, ``MeshChunkAssembly``, the item seal and the content-key wrap, ``ProximityVerifyQR/parse(_:in:)``, ``MeshEpochRef/minted(counter:coordinatorFingerprint:meshID:in:)`` | Take `in purposes:` (or `in:` a namespace) last. |
 | Ids that hash a label: ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)``, ``MeshRecipientReceipt/receiptID(in:)`` | Are functions, not stored properties: a value decoded off the wire carries no namespace, so `Codable` stays namespace-free. |
 | The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkRecipeShareSession` | Take `init(namespace:)` and read their service type, ALPN, heartbeat, exporter label and log subsystem there, once; the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
@@ -541,13 +543,15 @@ readers above under `.fernlet` and under a foreign namespace. `ProximityVocabula
 the same line, holds every token and presentation string this module's consumers read to the
 literal Fernlet shipped before A0.3, and `.fernlet`'s vocabulary and presentation strings to the
 same literals; it drives the radios, the presence posture mint and the name display under `.fernlet`
-and under a namespace whose presentation strings are its own. `ProximityNamespaceSoundnessTests`
+and under a namespace whose presentation strings are its own, and the inventory digest, the routed
+type registry and a mesh manager under `.fernlet` and under a namespace whose record kinds and routed
+types are its own. `ProximityNamespaceSoundnessTests`
 holds the soundness and collision rules over
 namespaces built only from literals.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
 named only on the 20 code lines in 7 files that read the feature labels leaving at A0.4; and every
-remaining string literal that spells `fernlet` (46 in 15 files) is on an exact allowlist that names
+remaining string literal that spells `fernlet` (38 in 13 files) is on an exact allowlist that names
 why it is still here and the plan step that removes it. Both lists can only shrink.
 
 **The install binding and the column seal.** The two sealed mesh stores seal through
@@ -606,13 +610,14 @@ without it.
 **What A0.2 left for later.**
 
 - **A0.3** routes the rest of the vocabulary. The namespace's family already carries it, judged by
-  its soundness rules, but this module's consumers still read their own constants: the envelope its
-  sealing set and `PayloadType`, the coordinator its session tokens, titles and capability rules,
-  the membership code its record kinds, the routed code `MeshRoutedTypeToken`'s spellings. A0.3
-  re-points each at the namespace it holds and deletes the constant, as the presentation strings
-  already are: the radios and the presence posture mint their Bonjour instance names
-  (`fernlet-mesh-…` and `fn-…` for Fernlet) and certificates under the namespace's strings and
-  ``PeerNameDisplay`` hides its mesh prefix, while the coordinator has no display default (every
+  its soundness rules, but some of this module's consumers still read their own constants: the
+  envelope its sealing set and `PayloadType`, the coordinator its session tokens, titles and
+  capability rules. A0.3 re-points each at the namespace it holds and deletes the constant, as the
+  presentation strings, the record kinds and the routed types already are: the radios and the
+  presence posture mint their Bonjour instance names (`fernlet-mesh-…` and `fn-…` for Fernlet) and
+  certificates under the namespace's strings and ``PeerNameDisplay`` hides its mesh prefix, the
+  inventory digest tags each record with its family's record kind and the routed type registry
+  builds its rows from its routed types, while the coordinator has no display default (every
   caller passes the host's name) and `PeerTransport`'s discovery doors take no service type. And
   this module starts refusing an
   unsound namespace, failing closed in `ensureProvisioned()`, `encryptGroupKey` and every radio's
@@ -1207,7 +1212,7 @@ added the CUSTODY RECEIPT and the sealed routed store — the module's **second*
 `MeshRoutedIndexLoad`, `MeshRoutedStagedFile`, `MeshRoutedContentHasher`, `MeshChunkDescriptor`,
 `MeshChunkSetShape`, `MeshChunkAdmissionRule`, plus `MeshDeliveryRestoreRefusal` and
 `MeshDeliveryRestoreOutcome` on the P4 delivery target. P5 item 4 added the RECIPIENT RECEIPT and
-plan §11's acknowledgement stages — fifteen types: `MeshRoutedAckStage`, `MeshRoutedTypeToken`,
+plan §11's acknowledgement stages — fourteen types: `MeshRoutedAckStage`,
 `MeshRoutedAckStageRow`, `MeshRoutedAckStageTable`, `MeshRoutedHeartAck`, `MeshRoutedAckEvidence`,
 `MeshRoutedAckShortfall`, `MeshRoutedDeliveryCommitOutcome`, `MeshRecipientReceiptFormat`,
 `MeshRecipientReceipt`, `MeshRecipientReceiptPayload`, `MeshRecipientReceiptMintError`,
@@ -1552,8 +1557,8 @@ same row (the foreground-decrypt requirement, **derived** from the stage so two 
 disagree; the canonical store, **declared** as a frozen token for the delivery dispatch — read by
 nobody when item 11 shipped it, and since **P5 item 13** the dispatch key the photo projection
 switches on, in both directions: `entry(for:)` names the store a delivered item belongs in, and
-`token(forCanonicalStore:)` is how the sender door gets a type token without typing a spelling). ``MeshRoutedAckStageTable`` survives as its **projection** — `increment1` is now
-`MeshRoutedTypeRegistry.increment1.ackStages` — so the accepted-token set and the stage column come
+`token(forCanonicalStore:)` is how the sender door gets a type token without typing a spelling). ``MeshRoutedAckStageTable`` survives as its **projection** — `increment1(_:)` is
+`MeshRoutedTypeRegistry.increment1(_:)`'s `ackStages` over the same routed types — so the accepted-token set and the stage column come
 from one source and cannot drift, which is the failure item 4's forward-compat note named.
 
 - **`entry(for:) == nil` IS "unknown", and item 11 adds no fourth answer.** The manifest verifier
@@ -1616,10 +1621,13 @@ from one source and cannot drift, which is the failure item 4's forward-compat n
   verbatim, and a persisted policy would outlive the build that wrote it); and the file names none of
   ``MeshRoutedAccessGate``'s symbols — a type's declared column is a property of the type, never the
   gate. Three source-scan walls hold it: one registry construction site, one named value
-  (`increment1`), and **no per-type branch anywhere** — a token spelling has one source, a lookup
-  argument and a branch on a *resolved* value stay legal, and a `switch` on a token does not.
+  (`increment1(_:)`, built from the namespace's routed types), and **no per-type branch anywhere** —
+  a token spelling has one source, the host's namespace (a routed type is read off it only where the
+  rows are built, and no file here spells one), a lookup argument and a branch on a *resolved* value
+  stay legal, and a `switch` on a token does not.
 
-**Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's `rawValue`,
+**Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's token (the
+namespace's `vocabulary.membershipRecordKinds`, which `.fernlet` reads off `PayloadType`),
 the `PayloadType` it travels as, and the namespace signature label it is signed under
 (`purposes.signature.<field>`; `.fernlet` spells each exactly as its `FernletCryptoPurpose` twin,
 pinned equal until C1) are, in Fernlet's namespace, the SAME frozen English spelling, so one grep

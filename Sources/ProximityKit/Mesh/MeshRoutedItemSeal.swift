@@ -85,7 +85,7 @@ nonisolated enum MeshRoutedItemSealFormat {
     /// ``MeshRoutedItemBodyFormat`` add.
     ///
     /// **Seam bound and registry cap are now the same value, deliberately.**
-    /// `MeshRoutedTypeRegistry.increment1`'s photo row is defined as this constant, so the manifest
+    /// `MeshRoutedTypeRegistry.increment1(_:)`'s photo row is defined as this constant, so the manifest
     /// door's per-type check and the projection's resident-blob guard cannot disagree. Narrowing
     /// only one of them would re-create the mint-it/never-open-it asymmetry D-13.19 closes: the
     /// photo stage is final on durable **ciphertext**, so a receipt is already minted by the time an

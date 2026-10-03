@@ -425,10 +425,10 @@ extension MeshRoutedManifest {
     ///     token's row supplies the per-type size cap, the destination semantics the mint is allowed
     ///     to use, and the expiry rule. An UNREGISTERED token still mints, under the shared wire
     ///     bounds — a documented asymmetry: acceptance is a receiver-side statement (D13), so an
-    ///     unregistered item is refused at every receiver door rather than at its author's. The
-    ///     default is written as `MeshRoutedTypeRegistry.increment1` rather than `.increment1` on
-    ///     purpose: the one-registry wall's member scanner reads the spelled-out form only, so a
-    ///     leading dot here would let a second registry value reach a value position unseen.
+    ///     unregistered item is refused at every receiver door rather than at its author's. No
+    ///     default: the caller passes the registry it holds (the manager's, built from its host
+    ///     namespace's routed types), since this module has no routed types of its own to fall back
+    ///     on.
     /// - Throws: ``MeshRoutedManifestMintError``, ``MeshRoutedKeyWrapError``, or the identity's
     ///   signing error. Never a trap.
     @MainActor
@@ -443,7 +443,7 @@ extension MeshRoutedManifest {
         contentKey: Data,
         recipientKeys: [String: Data],
         identity: IdentityService,
-        types: MeshRoutedTypeRegistry = MeshRoutedTypeRegistry.increment1
+        types: MeshRoutedTypeRegistry
     ) throws -> MeshRoutedManifest {
         let origin = identity.localFingerprint
         try validated(

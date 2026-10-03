@@ -7,9 +7,10 @@
 // Item 1 built the records and the algebra; this file gives them a frame, a signing factory and a
 // bound, and adds the inventory digest a peer sends so a counterpart can notice it is MISSING
 // records and ask for a re-gossip. Item 3 framed three of the four record kinds and item 3b framed
-// the fourth (`member-removal.v1`). The frozen English tokens are the same spellings
-// in every layer — `MeshMembershipRecordKind`, `PayloadType`, `FernletCryptoPurpose.Signature` —
-// so one grep finds the record, the frame and the domain.
+// the fourth (`member-removal.v1`). The record kinds' tokens are the host's: the digest tags each
+// record with its kind's token in the namespace family it is handed. In Fernlet's family a kind's
+// token, the `PayloadType` of its frame and (for three of the four) its signature label are one
+// frozen English spelling, so one grep finds the record, the frame and the domain.
 //
 // What is deliberately NOT here: emission. Nothing in this file decides WHEN a departure is sent;
 // `MeshNetworkManager.emitMembershipEvent(_:)` is the seam items 5–6 fill. And nothing here
@@ -52,17 +53,18 @@ nonisolated enum MeshMembershipEventFormat {
 
 // MARK: - MeshRecordIdentity
 
-/// One record's identity inside an inventory digest: its kind plus the four fields that give
+/// One record's identity inside an inventory digest: its kind's token plus the four fields that give
 /// ``MeshMembershipRecordOrder`` its total order.
 ///
 /// It exists so the digest is computed over a **kind-tagged flattening** of all four record sets
 /// rather than four separate hashes: a departure and a removal for the same member at the same
 /// instant are different records, and a digest that could not tell them apart would report
-/// convergence between two ledgers that disagree about why somebody is out.
+/// convergence between two ledgers that disagree about why somebody is out. The tag is the kind's
+/// token in the host's record kinds, resolved when the identity is built.
 nonisolated struct MeshRecordIdentity: Equatable, Sendable {
 
-    /// The frozen token naming the record's kind.
-    let kind: MeshMembershipRecordKind
+    /// The host's token for the record's kind (``MeshMembershipRecordKind/token(in:)``).
+    let kindToken: String
     /// The member the record is about — the dedup key of its set.
     let memberFingerprint: String
     /// When the record's event happened, as claimed by its author.
@@ -72,9 +74,9 @@ nonisolated struct MeshRecordIdentity: Equatable, Sendable {
     /// The record's signature bytes, which are what make two otherwise-identical claims distinct.
     let signature: Data
 
-    /// The identity of one record.
-    init<Record: MeshMembershipRecord>(_ record: Record) {
-        kind = Record.kind
+    /// The identity of one record, tagged with its kind's token in `recordKinds`.
+    init<Record: MeshMembershipRecord>(_ record: Record, recordKinds: ProximityNamespace.MembershipRecordKinds) {
+        kindToken = Record.kind.token(in: recordKinds)
         memberFingerprint = record.memberFingerprint
         occurredAt = record.occurredAt
         authorFingerprint = record.authorFingerprint
@@ -85,7 +87,7 @@ nonisolated struct MeshRecordIdentity: Equatable, Sendable {
     /// derived only from record content, so two devices holding the same records emit the same
     /// sequence and therefore the same digest.
     static func precedes(_ lhs: MeshRecordIdentity, _ rhs: MeshRecordIdentity) -> Bool {
-        if lhs.kind != rhs.kind { return lhs.kind.rawValue < rhs.kind.rawValue }
+        if lhs.kindToken != rhs.kindToken { return lhs.kindToken < rhs.kindToken }
         if lhs.occurredAt != rhs.occurredAt { return lhs.occurredAt < rhs.occurredAt }
         if lhs.memberFingerprint != rhs.memberFingerprint {
             return lhs.memberFingerprint < rhs.memberFingerprint
@@ -112,9 +114,10 @@ nonisolated struct MeshRecordIdentity: Equatable, Sendable {
 /// bounded to a wasted exchange.
 ///
 /// The hash is domain-separated under the host namespace's `purposes.hash.meshInventoryDigestV1`
-/// (plan step A0.2.4) and computed over the sorted ``MeshRecordIdentity`` list, so it is a pure
+/// (plan step A0.2.4) and computed over the sorted ``MeshRecordIdentity`` list, each record tagged
+/// with its kind's token in the namespace's `vocabulary.membershipRecordKinds`, so it is a pure
 /// function of the record SET — order of arrival, and which device is asking, cannot change it. The
-/// purposes are an initializer argument and never stored: the digest's `Codable` form is unchanged.
+/// family is an initializer argument and never stored: the digest's `Codable` form is unchanged.
 nonisolated struct MeshInventoryDigest: Codable, Equatable, Sendable {
 
     /// The mesh the digest describes. A digest for another mesh is a refusal, not a difference.
@@ -130,14 +133,17 @@ nonisolated struct MeshInventoryDigest: Codable, Equatable, Sendable {
     /// SHA-256 over the domain-tagged, sorted identities of every record in the ledger.
     let recordsHash: Data
 
-    /// Computes the digest of a ledger, its records hash under `purposes`.
-    init(meshID: UUID, ledger: MeshMembershipLedger, purposes: ProximityNamespace.Purposes) {
+    /// Computes the digest of a ledger, its records hash under `family`'s labels over its record
+    /// kinds' tokens.
+    init(meshID: UUID, ledger: MeshMembershipLedger, family: ProximityNamespace.Family) {
         self.meshID = meshID
         admissionCount = ledger.admissions.count
         departureCount = ledger.departures.count
         removalCount = ledger.removals.count
         terminationCount = ledger.terminations.count
-        recordsHash = Self.hash(of: Self.identities(in: ledger), in: purposes)
+        recordsHash = Self.hash(
+            of: Self.identities(in: ledger, recordKinds: family.vocabulary.membershipRecordKinds), in: family.purposes
+        )
     }
 
     /// Rebuilds a digest from already-computed parts — the decode path's memberwise entry, and
@@ -183,15 +189,18 @@ nonisolated struct MeshInventoryDigest: Codable, Equatable, Sendable {
         admissionCount + departureCount + removalCount + terminationCount
     }
 
-    /// Every record in `ledger`, kind-tagged and in the digest's deterministic order.
+    /// Every record in `ledger`, tagged with its kind's token in `recordKinds` and in the digest's
+    /// deterministic order.
     ///
     /// Bounded by construction: four sets, each already capped by ``MeshMembershipBounds``.
-    static func identities(in ledger: MeshMembershipLedger) -> [MeshRecordIdentity] {
+    static func identities(
+        in ledger: MeshMembershipLedger, recordKinds: ProximityNamespace.MembershipRecordKinds
+    ) -> [MeshRecordIdentity] {
         var identities: [MeshRecordIdentity] = []
-        identities.append(contentsOf: ledger.admissions.all.map(MeshRecordIdentity.init))
-        identities.append(contentsOf: ledger.departures.all.map(MeshRecordIdentity.init))
-        identities.append(contentsOf: ledger.removals.all.map(MeshRecordIdentity.init))
-        identities.append(contentsOf: ledger.terminations.all.map(MeshRecordIdentity.init))
+        identities.append(contentsOf: ledger.admissions.all.map { MeshRecordIdentity($0, recordKinds: recordKinds) })
+        identities.append(contentsOf: ledger.departures.all.map { MeshRecordIdentity($0, recordKinds: recordKinds) })
+        identities.append(contentsOf: ledger.removals.all.map { MeshRecordIdentity($0, recordKinds: recordKinds) })
+        identities.append(contentsOf: ledger.terminations.all.map { MeshRecordIdentity($0, recordKinds: recordKinds) })
         return identities.sorted(by: MeshRecordIdentity.precedes)
     }
 
@@ -535,7 +544,8 @@ extension SignedRemovalRecord {
 
 extension MeshInventoryDigestPayload {
 
-    /// Computes and signs this device's inventory digest for one ledger.
+    /// Computes and signs this device's inventory digest for one ledger, under the family of the
+    /// identity's namespace: its labels and its record kinds.
     @MainActor
     static func signed(
         meshID: UUID,
@@ -543,7 +553,7 @@ extension MeshInventoryDigestPayload {
         identity: IdentityService,
         sentAt: Date = Date()
     ) throws -> MeshInventoryDigestPayload {
-        let digest = MeshInventoryDigest(meshID: meshID, ledger: ledger, purposes: identity.purposes)
+        let digest = MeshInventoryDigest(meshID: meshID, ledger: ledger, family: identity.namespace.family)
         let unsigned = MeshInventoryDigestPayload(
             digest: digest,
             senderFingerprint: identity.localFingerprint,

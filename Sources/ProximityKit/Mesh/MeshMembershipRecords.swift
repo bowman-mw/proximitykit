@@ -10,24 +10,40 @@ import Foundation
 // and the crypto purpose that produces and checks those bytes belongs to the rotation item, not
 // this one. That is deliberate: the algebra below is the part that must be provable at tier 1.
 
-/// The frozen wire vocabulary naming the four membership records.
+/// The four membership records, by role: what each record is, never how it is spelled.
 ///
-/// English tokens, forever — a `rawValue` here is a byte on the mesh wire and a key in the sealed
-/// session context, so it never localizes (localization wall; plan invariant 8). `departure` and
-/// `termination` are the tokens plan §8.3 names verbatim; `admission` and `removal` are minted in
-/// the same family for the two records §8.3 implies but does not spell out.
+/// The spelling is the host's. ``token(in:)`` reads a kind's token off the record kinds of the
+/// namespace the caller holds (``ProximityNamespace/MembershipRecordKinds``), and that token is what
+/// the signed inventory digest hashes for each record and sorts the records by
+/// (``MeshRecordIdentity``). A token is frozen wire data that never localizes (localization wall;
+/// plan invariant 8); nothing encodes or decodes a kind, and nothing shows one to a person.
+/// `departure` and `termination` are the records plan §8.3 names verbatim; `admission` and `removal`
+/// are the two §8.3 implies but does not spell out.
 ///
 /// The retired `sessionGoodbye` payload type is deliberately absent: it stays frozen/parked in
 /// `PayloadType` and is translated into a departure by the wire layer, never re-used here.
-nonisolated enum MeshMembershipRecordKind: String, Codable, CaseIterable, Sendable {
+nonisolated enum MeshMembershipRecordKind: CaseIterable, Sendable {
     /// A member was admitted to the mesh, proven by the admitter's signature.
-    case admission = "fernlet.mesh.member-admission.v1"
+    case admission
     /// A member left of their own accord (development, hand-off, explicit leave).
-    case departure = "fernlet.mesh.member-departure.v1"
+    case departure
     /// A member was voted out and the quorum completed (plan §10.4).
-    case removal = "fernlet.mesh.member-removal.v1"
+    case removal
     /// A final-pair member ended the mesh for everyone.
-    case termination = "fernlet.mesh.terminated.v1"
+    case termination
+
+    /// This kind's token in the host's vocabulary: the one place a role meets its spelling.
+    ///
+    /// - Parameter kinds: The record kinds of the namespace the caller holds.
+    /// - Returns: The token the inventory digest hashes for a record of this kind.
+    func token(in kinds: ProximityNamespace.MembershipRecordKinds) -> String {
+        switch self {
+        case .admission: return kinds.admission
+        case .departure: return kinds.departure
+        case .removal: return kinds.removal
+        case .termination: return kinds.termination
+        }
+    }
 }
 
 // MARK: - MeshMembershipBounds
@@ -77,7 +93,8 @@ nonisolated enum MeshMembershipBounds {
 ///   records into a ledger a roster is derived from.
 nonisolated protocol MeshMembershipRecord: Codable, Equatable, Sendable {
 
-    /// The frozen token naming this record on the wire.
+    /// This record's kind. Its token is the host's (``MeshMembershipRecordKind/token(in:)``), and the
+    /// inventory digest hashes it.
     static var kind: MeshMembershipRecordKind { get }
 
     /// How many records of this kind a set retains (plan §9).

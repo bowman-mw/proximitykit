@@ -770,9 +770,10 @@ private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ 
 /// The bytes a ``MeshInventoryDigest`` hashes, under the Hash-family purpose that names them: the
 /// host namespace's `purposes.hash.meshInventoryDigestV1` (plan step A0.2.4).
 ///
-/// Every record contributes its kind token and the four fields that give the record set its total
-/// order, in that set's own deterministic order — so two ledgers holding the same records produce
-/// the same bytes on any device, and one extra or one missing record changes them.
+/// Every record contributes its kind's token (the host's, resolved when its identity was built) and
+/// the four fields that give the record set its total order, in that set's own deterministic order —
+/// so two ledgers holding the same records produce the same bytes on any device, and one extra or one
+/// missing record changes them.
 nonisolated func canonicalInventoryDigestBytes(
     for identities: [MeshRecordIdentity], in purposes: ProximityNamespace.Purposes
 ) -> Data {
@@ -780,7 +781,7 @@ nonisolated func canonicalInventoryDigestBytes(
     writer.appendLengthPrefixed(purposes.hash.meshInventoryDigestV1.data)
     writer.appendUInt64(UInt64(identities.count))
     for identity in identities {
-        writer.appendString(identity.kind.rawValue)
+        writer.appendString(identity.kindToken)
         writer.appendString(identity.memberFingerprint)
         writer.appendDate(identity.occurredAt)
         writer.appendString(identity.authorFingerprint)

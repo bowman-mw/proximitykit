@@ -108,24 +108,29 @@ nonisolated struct MeshMembershipRecordVerifier {
     /// there is no other door.
     private(set) var ledger: MeshMembershipLedger
 
-    /// The labels every signature is checked under: this verifier's own copy of its host
-    /// namespace's purposes (plan step A0.2.4), handed in at construction and never looked up, so a
-    /// verifier carried off the main actor reads them with no hop.
-    let purposes: ProximityNamespace.Purposes
+    /// This verifier's own copy of its host namespace's family, handed in at construction and never
+    /// looked up, so a verifier carried off the main actor reads it with no hop: its labels check
+    /// every signature (plan step A0.2.4), and its record kinds tag the records
+    /// ``localInventoryDigest`` hashes. One family for both, so the two cannot come from two
+    /// namespaces.
+    let family: ProximityNamespace.Family
+
+    /// The labels every signature is checked under: ``family``'s.
+    var purposes: ProximityNamespace.Purposes { family.purposes }
 
     /// Builds a verifier over an existing ledger — typically one loaded from the sealed
     /// ``MeshSessionContext``, whose contents were verified when they were first accepted.
     ///
-    /// `purposes` has no default: ProximityKit holds no namespace of its own, so the caller passes
-    /// the purposes it already holds (its manager's namespace, or another verifier's copy).
+    /// `family` has no default: ProximityKit holds no namespace of its own, so the caller passes
+    /// the family it already holds (its manager's namespace's, or another verifier's copy).
     init(
         meshID: UUID, founderSigningPublicKey: Data? = nil, ledger: MeshMembershipLedger = .empty,
-        purposes: ProximityNamespace.Purposes
+        family: ProximityNamespace.Family
     ) {
         self.meshID = meshID
         self.founderSigningPublicKey = founderSigningPublicKey
         self.ledger = ledger
-        self.purposes = purposes
+        self.family = family
     }
 
     /// The roster derived from everything accepted so far.
@@ -462,9 +467,9 @@ nonisolated struct MeshMembershipRecordVerifier {
         digest == localInventoryDigest
     }
 
-    /// This device's own digest, for sending.
+    /// This device's own digest, for sending: under ``family``'s labels and record kinds.
     var localInventoryDigest: MeshInventoryDigest {
-        MeshInventoryDigest(meshID: meshID, ledger: ledger, purposes: purposes)
+        MeshInventoryDigest(meshID: meshID, ledger: ledger, family: family)
     }
 
     // MARK: - Shared checks

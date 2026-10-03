@@ -2,9 +2,10 @@
 // ProximityKit/Mesh
 //
 // Network migration P5 item 4 (plan §11's acknowledgement stages): what makes a routed item FINAL
-// at a destination, as a VALUE — three frozen stages, the frozen type-token spellings, the
-// token → stage table item 11 registers, and the evidence a caller offers for the one stage whose
-// condition the store cannot read for itself.
+// at a destination, as a VALUE — three frozen stages, the token → stage table item 11 registers,
+// and the evidence a caller offers for the one stage whose condition the store cannot read for
+// itself. The type tokens are the host's: the namespace's routed types, from which the registry
+// builds the rows this table projects.
 //
 // The rule §11 states in one line — "photos/text final on durable recipient storage; hearts final
 // only after foreground decrypt + ledger commit; control immediate" — is expressed here as data
@@ -16,8 +17,8 @@
 // meant is resolved on both sides from the manifest's ORIGIN-signed `typeToken`. A recipient has no
 // field in which to state a weaker rule. What keeps the resolution single is item 11's one registry
 // plus the source-scan wall asserting shipping code names only
-// ``MeshRoutedAckStageTable/increment1`` — said out loud here rather than claimed as a property of
-// the types.
+// ``MeshRoutedAckStageTable/increment1(_:)`` — said out loud here rather than claimed as a property
+// of the types.
 //
 // What is deliberately NOT here: any store extension (so tier 1 can build a stage with no disk
 // root), any decryption or unwrap, any dispatch, and any acceptance decision about an unknown token
@@ -35,7 +36,7 @@ import Foundation
 /// in — so the only way two members can disagree about what "delivered" meant is by resolving the
 /// same token through two different tables. Item 4 does not close that by itself: the table is a
 /// door parameter, and what makes it ONE table is item 11's registry plus the source-scan wall
-/// asserting shipping code names only ``MeshRoutedAckStageTable/increment1``. That is said here
+/// asserting shipping code names only ``MeshRoutedAckStageTable/increment1(_:)``. That is said here
 /// rather than claimed as a guarantee this type carries.
 ///
 /// Deliberately **not** ordered and deliberately without a rank: a heart is not "further along"
@@ -47,7 +48,7 @@ nonisolated enum MeshRoutedAckStage: String, CaseIterable, Equatable, Sendable {
     /// The ACK RECORD is still what must be durable (plan §3.6): nothing is acknowledged before the
     /// index write recording it returned, so "immediate" is about the CONTENT condition being empty,
     /// never about skipping the write. Reserved in increment 1 — no control type is registered
-    /// (see ``MeshRoutedTypeToken/control``).
+    /// (see ``ProximityNamespace/RoutedTypes/control``).
     case immediate
     /// Final when this device durably holds the item's complete ciphertext — photos and text.
     ///
@@ -62,30 +63,6 @@ nonisolated enum MeshRoutedAckStage: String, CaseIterable, Equatable, Sendable {
     /// delivered, and stays so across restarts until a foreground pass supplies the ledger
     /// judgement — or until the item expires.
     case foregroundDecryptAndLedgerCommit
-}
-
-// MARK: - MeshRoutedTypeToken
-
-/// The routed type-token spellings (`fernlet.mesh.routed-type.<kind>.v1`, each within
-/// ``MeshRoutedManifestFormat/maxTypeTokenLength``).
-///
-/// Frozen English wire vocabulary, never localized. Item 11's registry is what ACCEPTS a token;
-/// item 4 hard-codes no acceptance anywhere and only names the spellings its stage table keys on.
-nonisolated enum MeshRoutedTypeToken {
-    /// The friend photo (plan §12).
-    static let photo = "fernlet.mesh.routed-type.photo.v1"
-    /// A session-scoped temporary message (plan §12).
-    static let tempMessage = "fernlet.mesh.routed-type.temp-message.v1"
-    /// A heart. For this type the manifest's `itemID` **is** the gift id — one id, no second
-    /// mapping table, and the replay window, the delivery target and the heart ledger all key on
-    /// the same value.
-    static let heart = "fernlet.mesh.routed-type.heart.v1"
-    /// **Reserved, not registered.** Plan §11 names an `immediate` stage but neither §11 nor §12
-    /// routes a control item, and registering a token nothing mints would open a door with no
-    /// handler behind it. The precedent is `AEAD.meshRoutedItemV1`, which was registered by item 1
-    /// and left unwritten until item 13 built its sealer, applied to a token instead of a domain:
-    /// ``MeshRoutedAckStageTable/increment1`` deliberately answers nil for it.
-    static let control = "fernlet.mesh.routed-type.control.v1"
 }
 
 // MARK: - MeshRoutedAckStageRow
@@ -120,17 +97,18 @@ nonisolated struct MeshRoutedAckStageRow: Equatable, Sendable {
 /// manifest verifier.
 ///
 /// Injected rather than global (`MeshRoutedStore.committingDelivery(item:recipient:stages:evidence:now:)`
-/// takes it) so policy stays item 11's. Shipping code names exactly one value, ``increment1``, and a
-/// source-scan wall in `MeshRoutedStoreIsolationTests` is what keeps that true — a fixture table is
-/// a test-only affordance.
+/// takes it) so policy stays item 11's. Shipping code names exactly one value, ``increment1(_:)``,
+/// and a source-scan wall in `MeshRoutedStoreIsolationTests` is what keeps that true — a fixture
+/// table is a test-only affordance.
 ///
 /// **Since P5 item 11 this type is a PROJECTION, not a source.** ``MeshRoutedTypeRegistry`` owns the
 /// rows — one per routed type, carrying the other four columns plan §11 makes a type declare — and
-/// ``increment1`` is `MeshRoutedTypeRegistry.increment1.ackStages`. The table survives so item 4's
-/// door contract (D-4.7) and its pins keep asserting through the new source; a caller still hands a
-/// table to a door, and the registry is what decided what is in it.
+/// ``increment1(_:)`` is `MeshRoutedTypeRegistry.increment1(_:)`'s `ackStages` over the same routed
+/// types. The table survives so item 4's door contract (D-4.7) and its pins keep asserting through
+/// the new source; a caller still hands a table to a door, and the registry is what decided what is
+/// in it.
 nonisolated struct MeshRoutedAckStageTable: Equatable, Sendable {
-    /// Most rows a table holds. The routed type vocabulary is a compile-time literal; this cap is
+    /// Most rows a table holds. The routed type rows are a compile-time literal; this cap is
     /// what makes the build loop bounded (Power of 10 R2/R4) rather than a policy number.
     static let maxRows = 16
 
@@ -152,12 +130,18 @@ nonisolated struct MeshRoutedAckStageTable: Equatable, Sendable {
     }
 
     /// Plan §11's three registered types, **projected from item 11's registry** — the rows live in
-    /// ``MeshRoutedTypeRegistry/increment1``, and this value is the `finalAck` column of them.
+    /// ``MeshRoutedTypeRegistry/increment1(_:)``, and this value is the `finalAck` column of them,
+    /// keyed by the tokens of the routed types it is handed.
     ///
     /// Derived rather than re-listed: the accepted-token set and the stage column come from one
-    /// source, so they cannot drift. Control is deliberately absent (``MeshRoutedTypeToken/control``)
-    /// because no row registers it.
-    static let increment1 = MeshRoutedTypeRegistry.increment1.ackStages
+    /// source, so they cannot drift. Control is deliberately absent
+    /// (``ProximityNamespace/RoutedTypes/control``) because no row registers it.
+    ///
+    /// - Parameter routedTypes: The routed types of the namespace the caller holds.
+    /// - Returns: The three registered types' stages, keyed by their tokens in `routedTypes`.
+    static func increment1(_ routedTypes: ProximityNamespace.RoutedTypes) -> MeshRoutedAckStageTable {
+        MeshRoutedTypeRegistry.increment1(routedTypes).ackStages
+    }
 
     /// Every token this table knows. Item 11 folds these rows into its registry and derives its
     /// accepted-token set from the same source, so the two can never disagree.
@@ -186,7 +170,7 @@ nonisolated struct MeshRoutedAckStageTable: Equatable, Sendable {
 /// two apart, and a gift beyond that bound yields no evidence and stays enumerable rather than being
 /// acknowledged on a guess.
 nonisolated struct MeshRoutedHeartAck: Equatable, Sendable {
-    /// The gift id, which for ``MeshRoutedTypeToken/heart`` IS the manifest's `itemID`.
+    /// The gift id, which for ``ProximityNamespace/RoutedTypes/heart`` IS the manifest's `itemID`.
     let giftID: UUID
     /// How many times the ledger judged THIS gift in the outcome that produced this evidence —
     /// always 1 when the value exists.

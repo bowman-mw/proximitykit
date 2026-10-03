@@ -349,9 +349,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// keys on, the routed store's three hashing verbs, the encrypted-metadata door's AAD and every
     /// epoch id it mints or plans; since A0.2.7 the radio it builds by default, which reads its wire
     /// values off it and checks the peer's introduction under its labels, the labels this manager
-    /// signs this side's under; since A0.2.8 the storage scopes its host builds carry it too. What
-    /// this manager still spells itself, its features' values and the photo stores' names, leaves
-    /// with those features (plan steps A0.4 and A0.5).
+    /// signs this side's under; since A0.2.8 the storage scopes its host builds carry it too. Its
+    /// family is what the membership verifiers and the ledger adoption keep, so the inventory digest
+    /// tags every record with its family's record kinds, and its routed types are the tokens of the
+    /// routed type registry's rows (``routedTypes``). What this manager still spells itself, its
+    /// features' values and the photo stores' names, leaves with those features (plan steps A0.4 and
+    /// A0.5).
     /// `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
@@ -977,7 +980,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `.sending` was never an observable state on this path; the presence fallback keeps its own.
     ///
     /// One `UUID` is minted and used three times — the routed item id, the body header's id and the
-    /// gift id — because for ``MeshRoutedTypeToken/heart`` those are one value by frozen contract.
+    /// gift id — because for ``ProximityNamespace/RoutedTypes/heart`` those are one value by frozen contract.
     public func sendSessionHeart(to friend: ProximityTrustedPeerRecord) {
         guard store.allowNearbyHearts else { return failSessionHeart(.heartsOff, friend) }
         // Active record only — never send to a blocked or revoked (unfriended) peer. Silent: the
@@ -4208,7 +4211,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         membershipVerifier = MeshMembershipRecordVerifier(
             meshID: meshID,
             founderSigningPublicKey: founderSigningPublicKey,
-            purposes: namespace.family.purposes
+            family: namespace.family
         )
         peerInventoryDigests.removeAll()
         reGossipedToFingerprints.removeAll()
@@ -5889,7 +5892,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return true
         }
         switch MeshLedgerAdoption.bootstrapVerifier(
-            meshID: grant.meshID, ownAdmission: ownAdmission, in: namespace.family.purposes
+            meshID: grant.meshID, ownAdmission: ownAdmission, in: namespace.family
         ) {
         case .adopted(let verifier):
             membershipVerifier = verifier
@@ -6042,10 +6045,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The **one** shipping read of the registry value: the verifier's accepted-token set, the
     /// ack-stage projection, the re-entry stage branch and the four forwarding gates all resolve
     /// through this property, so a build cannot register a token at one door and refuse it at
-    /// another. `routedTypeRegistryForTesting` is the `@testable` seam that makes the
-    /// build-narrowed doors — unreachable in one shipping build — reachable in a cell.
+    /// another. Its rows' tokens are the host's: the registry is built from the routed types of
+    /// ``namespace``, so this manager mints, accepts and acknowledges its host's spellings and no
+    /// other. `routedTypeRegistryForTesting` is the `@testable` seam that makes the build-narrowed
+    /// doors — unreachable in one shipping build — reachable in a cell.
     private var routedTypes: MeshRoutedTypeRegistry {
-        routedTypeRegistryForTesting ?? MeshRoutedTypeRegistry.increment1
+        routedTypeRegistryForTesting ?? MeshRoutedTypeRegistry.increment1(namespace.family.vocabulary.routedTypes)
     }
 
     /// How many routed content ids one AUTHOR may occupy in this session's replay window (P5 item
@@ -11246,7 +11251,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let own = context.ledger.admissions.all.first(where: { $0.memberFingerprint == local })
         else { return }
         switch MeshLedgerAdoption.adopt(
-            offered: context.ledger, ownAdmission: own, meshID: context.meshID, in: namespace.family.purposes
+            offered: context.ledger, ownAdmission: own, meshID: context.meshID, in: namespace.family
         ) {
         case .adopted(let verifier):
             membershipVerifier = verifier
@@ -11641,7 +11646,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// advertisement would re-spend the drain's per-peer session budget).
     private func attemptLedgerAdoption(ownAdmission: SignedAdmissionRecord, meshID: UUID) {
         let outcome = MeshLedgerAdoption.adopt(
-            offered: pendingAdoptionLedger, ownAdmission: ownAdmission, meshID: meshID, in: namespace.family.purposes
+            offered: pendingAdoptionLedger, ownAdmission: ownAdmission, meshID: meshID, in: namespace.family
         )
         guard case .adopted(let adopted) = outcome else { return }
         let snapshot = membershipVerifier
@@ -15625,7 +15630,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// A narrowed or widened routed type registry for one manager, or nil for the shipping value
-    /// ``MeshRoutedTypeRegistry/increment1``. `internal` for `@testable` unit tests only.
+    /// ``MeshRoutedTypeRegistry/increment1(_:)`` over the host namespace's routed types. `internal`
+    /// for `@testable` unit tests only.
     ///
     /// P5 item 11's four forwarding gates are *unreachable in one shipping build* — nothing carrying
     /// an unregistered token can be admitted, so no such record exists at rest. This seam is what
@@ -15848,7 +15854,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             meshID: meshID,
             founderSigningPublicKey: founderSigningPublicKey,
             ledger: ledger,
-            purposes: namespace.family.purposes
+            family: namespace.family
         )
     }
 

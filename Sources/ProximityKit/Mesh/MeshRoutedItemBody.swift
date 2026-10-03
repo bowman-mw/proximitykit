@@ -462,7 +462,7 @@ nonisolated struct MeshRoutedTextBody: Equatable, Sendable {
 /// for a new meaning.
 ///
 /// **``id`` IS the gift id, and it MUST equal the manifest's item id.** For
-/// ``MeshRoutedTypeToken/heart`` that equality is the type's frozen contract rather than a
+/// ``ProximityNamespace/RoutedTypes/heart`` that equality is the type's frozen contract rather than a
 /// convenience: `ProximityHeartLedger` dedups on the gift id, `MeshRoutedHeartAck` refuses any
 /// proof whose `giftID` is not the item's, and the replay window, the delivery target and the
 /// ledger therefore all key on one value with no second mapping table. The receiver enforces it in
