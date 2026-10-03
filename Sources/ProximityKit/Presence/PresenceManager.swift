@@ -176,6 +176,11 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// never begins with. `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     @ObservationIgnored private let identity: IdentityService
+    /// Whether ``identity`` is of ``namespace``, decided once at `init`. False only when the
+    /// `identity:` parameter handed this manager an identity of another namespace: the manager still
+    /// constructs, and ``start()`` refuses every start of the radio
+    /// (`presence.identity.namespaceMismatch`), so nothing is advertised under two namespaces.
+    @ObservationIgnored private let identityIsOfNamespace: Bool
     @ObservationIgnored private let ledger: ProximityHeartLedger
     @ObservationIgnored private let replayCache = ReplayCache()
     /// Fired (with the friend's fingerprint) when a heart is successfully sent / received, so the app can
@@ -303,8 +308,11 @@ public final class PresenceManager: ProximityPayloadHandling {
                 ?? PresenceEpochPosture.minted(at: now, instanceNamePrefix: prefix, commonName: commonName)
         }
         if let identity {
+            self.identityIsOfNamespace = ProximityNamespaceGate.checkIdentity(
+                identity, isOf: namespace, event: "presence.identity.namespaceMismatch")
             self.identity = identity
         } else {
+            self.identityIsOfNamespace = true
             let id = IdentityService(namespace: namespace)
             // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
             // otherwise every later presence tag and heart send fails with no visible cause.
@@ -339,6 +347,10 @@ public final class PresenceManager: ProximityPayloadHandling {
     public var isListening: Bool { isRunning }
 
     public func start() {
+        // One namespace per manager: an identity of another namespace starts no radio and mints no posture.
+        guard ProximityNamespaceGate.mayStart(
+            identityIsOfNamespace: identityIsOfNamespace, event: "presence.identity.namespaceMismatch"
+        ) else { return }
         guard !isRunning else { return }
         currentEpoch = rotatePosture(at: nowProvider())
         // The posture IS the radio's identity now: no posture, no name and no certificate to

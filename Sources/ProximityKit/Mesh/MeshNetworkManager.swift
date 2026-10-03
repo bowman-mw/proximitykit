@@ -371,6 +371,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// has no other entry point.
     @ObservationIgnored private var transportHandlers = MeshTransportHandlers()
     @ObservationIgnored private let identity: IdentityService
+    /// Whether ``identity`` is of ``namespace``, decided once at `init`. False only when the
+    /// `identity:` seam handed this manager an identity of another namespace: the manager still
+    /// constructs, as it does when provisioning fails, and `startSearching()` refuses every start of
+    /// the radio (`mesh.identity.namespaceMismatch`), so nothing is advertised under two namespaces.
+    @ObservationIgnored private let identityIsOfNamespace: Bool
     @ObservationIgnored private let replayCache = ReplayCache()
     @ObservationIgnored private let photoCacheStore: PrivateMediaStore
     @ObservationIgnored private let photoWallPreferencesStore: JSONSidecarFile<FriendPhotoWallPreferences>
@@ -648,7 +653,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// (P4 item 2's wire exchange, `MeshMergeExchangeTests`) impossible to state honestly. Passing a
     /// distinctly-keyed identity is the only thing that separates them. Nothing in shipping code
     /// passes it: the public initializer above cannot, so a Release build always takes this device's
-    /// real identity.
+    /// real identity. An identity of another namespace than the host's is refused: the manager
+    /// constructs, audits `mesh.identity.namespaceMismatch` and never starts its radio.
     ///
     /// `heldPhotoKeys` is the third seam, for the pending corpus's at-rest key: nil (every shipping
     /// path) takes the device-bound keychain row; a test passes an in-memory or wrong key to reach
@@ -671,6 +677,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         self.hostRoutedTypeRegistry = MeshRoutedTypeRegistry.increment1(namespace.family.vocabulary.routedTypes)
         self.transport = transport ?? NetworkMeshSession(namespace: namespace)
         let id = identity ?? IdentityService(namespace: namespace)
+        self.identityIsOfNamespace = ProximityNamespaceGate.checkIdentity(
+            id, isOf: namespace, event: "mesh.identity.namespaceMismatch")
         // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
         // otherwise every later sign/seal on this identity fails with no visible cause.
         do {
@@ -12242,6 +12250,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     private func startSearching() {
+        // One namespace per manager: an identity of another namespace starts no radio, on any path.
+        guard ProximityNamespaceGate.mayStart(
+            identityIsOfNamespace: identityIsOfNamespace, event: "mesh.identity.namespaceMismatch"
+        ) else { return }
         // The hold's inverse, said once for every re-arm path: `startJoin()`, the founding resume
         // and ``resumeSearchingForPartitionedMesh()`` all end here, so the door cannot be left shut
         // by one of them. The audit line fires only when a hold is actually being undone.

@@ -154,6 +154,11 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// conformer through the init seam and exercise them with no Bonjour anywhere.
     @ObservationIgnored private let session: any RecipeShareRadioSession
     @ObservationIgnored private let identity: IdentityService
+    /// Whether ``identity`` is of ``namespace``, decided once at `init`. False only when the
+    /// `identity:` seam handed this manager an identity of another namespace: the manager still
+    /// constructs, as it does when provisioning fails, and ``start()`` refuses every start of the radio
+    /// (`recipeShare.identity.namespaceMismatch`), so nothing is advertised under two namespaces.
+    @ObservationIgnored private let identityIsOfNamespace: Bool
     @ObservationIgnored private let replayCache = ReplayCache()
     @ObservationIgnored private var connections: [RecipeShareConnection] = []
     @ObservationIgnored private var discoveredPeers: [UUID: PeerHandle] = [:]
@@ -211,7 +216,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// one on a service of its own. Without it a test that exercised
     /// ``wipeIdentityForDeleteAll()`` would have wiped the TEST HOST's real identity — the test
     /// bundle runs inside the app on that Simulator and shares its keychain — so the wipe's EFFECT
-    /// was untestable here and only its existence was pinned.
+    /// was untestable here and only its existence was pinned. An identity of another namespace than
+    /// the host's is refused: the manager constructs, audits `recipeShare.identity.namespaceMismatch`
+    /// and never starts its radio.
     init(
         store: any ProximityHost,
         makeSession: (() -> any RecipeShareRadioSession)?,
@@ -222,6 +229,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         self.namespace = namespace
         self.session = makeSession?() ?? NetworkRecipeShareSession(namespace: namespace)
         let id = injected ?? IdentityService(namespace: namespace)
+        self.identityIsOfNamespace = ProximityNamespaceGate.checkIdentity(
+            id, isOf: namespace, event: "recipeShare.identity.namespaceMismatch")
         do {
             try id.ensureProvisioned()
         } catch {
@@ -263,6 +272,10 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     public var isListening: Bool { isRunning }
 
     public func start() {
+        // One namespace per manager: an identity of another namespace starts no radio.
+        guard ProximityNamespaceGate.mayStart(
+            identityIsOfNamespace: identityIsOfNamespace, event: "recipeShare.identity.namespaceMismatch"
+        ) else { return }
         guard !isRunning else { return }
         isRunning = true
         recordDiagnostic("Recipe share discovery started.")

@@ -103,7 +103,9 @@ public enum IdentityError: Error, Equatable {
 ///
 /// Every instance is built from its host's ``ProximityNamespace`` (plan step A0.2.3), which names
 /// the keychain service those shared rows live under; ProximityKit holds no namespace of its own
-/// and so offers no default identity.
+/// and so offers no default identity. An identity of an unsound namespace refuses to provision and
+/// to wrap a group key (``ensureProvisioned()``, ``encryptGroupKey(_:for:)``), so it never holds a
+/// key and nothing is signed, sealed or wrapped under that namespace.
 @MainActor
 public final class IdentityService {
 
@@ -572,7 +574,14 @@ public final class IdentityService {
     /// Wire form: ephemeralPubKey (32 B) || nonce (12 B) || ciphertext (32 B) || tag (16 B) = 92 B total.
     /// The HKDF salt is this identity's `purposes.keyDerivation.meshGroupKeyWrapV1` and the
     /// authenticated data `purposes.aead.meshGroupKeyWrapV2`, alone (plan step A0.2.6).
+    ///
+    /// **Refuses an unsound namespace first.** The wrap needs no provisioned key, so the refusal in
+    /// ``ensureProvisioned()`` does not cover it: under an unsound ``namespace`` it throws
+    /// ``ProximityNamespaceError`` with every violation and audits `identity.namespace.unsound` (at
+    /// `groupKeyWrap`) before anything is derived or sealed.
     public func encryptGroupKey(_ key: Data, for recipientPublicKey: Data) throws -> Data {
+        try ProximityNamespaceGate.refuseUnsound(
+            namespace.soundness, event: "identity.namespace.unsound", at: .groupKeyWrap)
         guard key.count == 32 else { throw IdentityError.sealFailed }
         guard let recipientKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: recipientPublicKey) else {
             throw IdentityError.sealFailed
@@ -670,7 +679,14 @@ public final class IdentityService {
     /// `errSecItemNotFound` is absence, and any other status throws
     /// ``IdentityError/keychainReadFailed(_:)`` with nothing written. The decision is
     /// ``classifyDeviceIdentityRows(signing:keyAgreement:accounts:)``, pure and tested on its own.
+    ///
+    /// **Refuses an unsound namespace first.** Before any row is read or written, an identity whose
+    /// ``namespace`` judged itself unsound throws ``ProximityNamespaceError`` with every violation and
+    /// audits `identity.namespace.unsound` (at `provision`), on every call: it never holds a key, so
+    /// nothing signs, seals or opens under that namespace.
     public func ensureProvisioned() throws {
+        try ProximityNamespaceGate.refuseUnsound(
+            namespace.soundness, event: "identity.namespace.unsound", at: .provision)
         if signingKey != nil && keyAgreementKey != nil { return }
 
         let deviceOnly = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as CFString

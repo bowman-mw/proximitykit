@@ -502,8 +502,27 @@ vocabulary token within the bytes its receivers accept, none repeated within its
 rule names left unknown; summary titles, instance-name prefixes and the common name well-formed);
 ``ProximityNamespace/validated(family:installation:)`` throws the same violations, and
 ``ProximityNamespace/familyCollisions(with:)`` and ``ProximityNamespace/installationCollisions(with:)``
-let a host's own tests show it overlaps no other app. This module does not yet refuse an unsound
-namespace at run time; that arrives with plan step A0.3.
+let a host's own tests show it overlaps no other app.
+
+**An unsound namespace is refused at run time.** This module refuses one on its own, failing closed,
+by reading the verdict ``ProximityNamespace/soundness`` stored when the namespace was built (no rule
+runs twice). ``IdentityService/ensureProvisioned()`` throws ``ProximityNamespaceError`` first thing,
+before any keychain row is read or written, and ``IdentityService/encryptGroupKey(_:for:)``, the one
+identity operation that needs no provisioned key, before it wraps anything, each auditing
+`identity.namespace.unsound`; each radio's `start` throws it before it mints, listens or advertises,
+auditing `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound` or
+`recipe.quic.namespaceUnsound`. Each line's context names the door (`at`: `provision`,
+`groupKeyWrap` or `start`), the violation count and the first violation's case name, never a field
+or a value. Nothing else needs a door of its own: nothing signs, seals or opens without a provisioned
+identity, and nothing reaches a peer without a started radio. Each manager also compares the
+namespace of an identity handed to it through its `identity:` seam (no shipping caller passes one)
+with its own: on a mismatch it still constructs, audits `mesh.identity.namespaceMismatch`,
+`presence.identity.namespaceMismatch` or `recipeShare.identity.namespaceMismatch` (at
+`construction`), and refuses every start of its radio with the same event (at `start`), so nothing is
+signed for or advertised under two namespaces. ``HeartDropService`` holds no namespace of its own to
+compare with; its identity's doors cover it. The checks live in the internal `ProximityNamespaceGate`
+(`Support/`), and `ProximityNamespaceGateTests`, on the crypto-goldens CI line, holds every door to its
+error and its audit line, over namespaces built from literals.
 
 **How a host supplies it.** ``ProximityHost/proximityNamespace`` and
 ``ProximityHost/proximityInstallBinding`` are two of the seven ``ProximityHost`` requirements with no
@@ -525,8 +544,8 @@ hand it:
 
 | Reader | How it reads the namespace |
 | --- | --- |
-| ``MeshNetworkManager``, ``PresenceManager``, ``ProximityRecipeShareManager`` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their default identity and their radio from it, and hand it, or its `family.purposes`, to every reader they call. |
-| ``IdentityService`` | Takes it in ``IdentityService/init(namespace:keychainService:)`` (a `nil` service means the namespace's identity service) and keeps it with its ``IdentityService/purposes``: it signs, seals, opens and wraps under its own labels and keeps its four device rows under the namespace's accounts. Its ``ProximityCryptographicPurpose`` overloads of `sign` and `verify` treat a label by its role, and `sign` refuses a verify-only or non-signature label. |
+| ``MeshNetworkManager``, ``PresenceManager``, ``ProximityRecipeShareManager`` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their default identity and their radio from it, and hand it, or its `family.purposes`, to every reader they call. An identity handed to them is compared with it once, in `init`, and one of another namespace never starts their radio. |
+| ``IdentityService`` | Takes it in ``IdentityService/init(namespace:keychainService:)`` (a `nil` service means the namespace's identity service) and keeps it with its ``IdentityService/purposes``: it signs, seals, opens and wraps under its own labels and keeps its four device rows under the namespace's accounts. Its ``ProximityCryptographicPurpose`` overloads of `sign` and `verify` treat a label by its role, and `sign` refuses a verify-only or non-signature label. Under an unsound namespace it refuses to provision and to wrap a group key. |
 | Builders: envelopes, admission tokens, membership records and messages, the removal quorum, key advertisements, routed items, chunks and receipts, the verify QR | Sign under their signing identity's ``IdentityService/purposes``. |
 | Verifiers: the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
 | The membership digest and its holders: `MeshInventoryDigest`, `MeshMembershipRecordVerifier`, `MeshLedgerAdoption` | Take the whole family (`family:`, or the adoption's `in family:`, with no default), because the digest needs its record kinds beside its labels: every record is tagged with its kind's token from `family.vocabulary.membershipRecordKinds` (`MeshMembershipRecordKind.token(in:)`). The verifier keeps the family as its copy, so its labels and record kinds come from one namespace; an identity's signed digest uses its own namespace's. |
@@ -536,7 +555,7 @@ hand it:
 | Capability gates: `ProximityCoordinator.PeerIdentity.supports(_:in:)`, `PeerSlot.supports(_:in:)` | Take the host's `capabilities` last: a peer that listed none supports exactly `assumedForLegacyPeers`. The `ProximityCapability` overloads are the features' gates and delegate; the mesh's sealed sends and the coordinator ask for the host's wire2 token, which the mesh and presence managers advertise. |
 | Stateless helpers: the serializer's `canonicalBytes(for:in:)` overloads and `canonicalInventoryDigestBytes`, ``MeshRoutedContentDigest``, ``MeshChunkAssembly``, the item seal and the content-key wrap, ``ProximityVerifyQR/parse(_:in:)``, ``MeshEpochRef/minted(counter:coordinatorFingerprint:meshID:in:)`` | Take `in purposes:` (or `in:` a namespace) last. |
 | Ids that hash a label: ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)``, ``MeshRecipientReceipt/receiptID(in:)`` | Are functions, not stored properties: a value decoded off the wire carries no namespace, so `Codable` stays namespace-free. |
-| The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkRecipeShareSession` | Take `init(namespace:)` and read their service type, ALPN, heartbeat, exporter label and log subsystem there, once; the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
+| The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkRecipeShareSession` | Take `init(namespace:)` and read their service type, ALPN, heartbeat, exporter label, log subsystem and soundness verdict there, once (their `start` refuses an unsound namespace by that verdict); the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
 | The presence posture: `PresenceEpochPosture` | Is minted, and rotated, with the presence instance-name prefix and the TLS common name its caller passes: ``PresenceManager``'s posture mint, built in `init` from the manager's namespace, passes them. |
 | The name display: ``PeerNameDisplay``, `PresenceManager.firstName(of:in:)` | Take `in namespace:` last and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
 | Storage scopes: ``MeshSessionStorageScope``, ``MeshRoutedStorageScope`` | Carry the namespace and the install binding (`init(namespace:directory:keychainService:installBinding:)`, ``MeshSessionStorageScope/production(for:installBinding:)``); the two stores read their file names, seal-key accounts and column-seal labels off `scope.namespace`. |
@@ -629,9 +648,6 @@ without it.
   prefix, the inventory digest tags each record with its family's record kind and the routed type
   registry builds its rows from its routed types, while the coordinator has no display default
   (every caller passes the host's name) and `PeerTransport`'s discovery doors take no service type.
-  And this module starts refusing an
-  unsound namespace, failing closed in `ensureProvisioned()`, `encryptGroupKey` and every radio's
-  `start`.
 - **A0.4** moves Fernlet's features out, and with them the 13 feature labels this module still reads
   from FernletCrypto's registry (hearts, presence, activities, moderation and the sealed-backup
   escrow; the heart-drop and presence derivations become a generic `pairSecret(purpose:)` and

@@ -339,6 +339,10 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// `family.radios.tlsCommonName`. Nothing verifies it: it names the protocol, never the device.
     nonisolated let tlsCommonName: String
 
+    /// The host namespace's ``ProximityNamespace/soundness``, the verdict it recorded when it was
+    /// built: ``start(discoveryInfo:)`` refuses to bring the radio up under an unsound namespace.
+    nonisolated let namespaceSoundness: ProximityNamespace.Soundness
+
     /// Hard ceiling on one inbound frame, enforced before the bytes reach any channel or decoder.
     /// Pinned to the same value the retired `MeshMultipeerSession` used, so both transports refused
     /// identically.
@@ -591,7 +595,7 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// TLS exporter label, frames and checks that introduction under its labels and logs under its
     /// subsystem (ProximityKit plan step A0.2.7), and names its Bonjour instances and certificates
     /// with the namespace's mesh instance-name prefix and common name. Each value is read once,
-    /// here; building a radio starts nothing.
+    /// here, with the namespace's soundness verdict; building a radio starts nothing.
     ///
     /// - Parameter namespace: The host's protocol identity, as its manager holds it.
     init(namespace: ProximityNamespace) {
@@ -602,6 +606,7 @@ final class NetworkMeshSession: NetworkChannelHost {
         purposes = namespace.family.purposes
         instanceNamePrefix = namespace.family.radios.meshInstanceNamePrefix
         tlsCommonName = namespace.family.radios.tlsCommonName
+        namespaceSoundness = namespace.soundness
         instanceName = MeshLinkAdvertisement.randomInstanceName(prefix: instanceNamePrefix)
         logger = Logger(subsystem: namespace.installation.logSubsystem, category: "proximity.transport.quic")
     }
@@ -629,7 +634,13 @@ final class NetworkMeshSession: NetworkChannelHost {
 
     /// Brings the radio up: mints this session's TLS identity and Bonjour name, starts the QUIC
     /// listener, and starts browsing once the listener is both ready and advertised.
+    ///
+    /// Refuses first, under an unsound namespace (``namespaceSoundness``): it throws
+    /// ``ProximityNamespaceError`` and audits `mesh.quic.namespaceUnsound` (at `start`) before it
+    /// mints, listens or advertises anything.
     func start(discoveryInfo: [String: String]) throws {
+        try ProximityNamespaceGate.refuseUnsound(
+            namespaceSoundness, event: "mesh.quic.namespaceUnsound", at: .start)
         guard !isRunning else { return }
         instanceName = MeshLinkAdvertisement.randomInstanceName(prefix: instanceNamePrefix)
         advertisedFields = MeshLinkAdvertisement.publishedFields(from: discoveryInfo)

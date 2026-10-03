@@ -44,10 +44,17 @@ import Foundation
 /// `Namespace/`, `FernletCryptoPurpose` stays on its 20 allowlisted lines, and every literal that
 /// spells `fernlet` is on an exact allowlist that can only shrink.
 ///
-/// **Total, and judged once.** ``init(family:installation:)`` never throws or traps: it runs every
-/// soundness rule once and records the verdict in ``soundness``. A host that prefers to fail at launch
-/// calls ``validated(family:installation:)``, which throws the same violations. ProximityKit's own
-/// run-time refusal of an unsound namespace arrives with plan step A0.3.
+/// **Total, judged once, and refused at run time.** ``init(family:installation:)`` never throws or
+/// traps: it runs every soundness rule once and records the verdict in ``soundness``. A host that
+/// prefers to fail at launch calls ``validated(family:installation:)``, which throws the same
+/// violations. ProximityKit refuses an unsound namespace at run time on its own, reading that stored
+/// verdict and failing closed: ``IdentityService/ensureProvisioned()`` and
+/// ``IdentityService/encryptGroupKey(_:for:)`` throw ``ProximityNamespaceError`` before they touch a
+/// key, and each radio's `start` throws it before it advertises, each with a named audit event
+/// (`identity.namespace.unsound`, `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound`,
+/// `recipe.quic.namespaceUnsound`) whose context names the door, the violation count and the first
+/// violation's case, never a value. A manager handed an identity of another namespace refuses every
+/// start of its radio, so nothing is signed for or advertised under two namespaces.
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`, like every type in
 /// `Namespace/`: inert value data, read from nonisolated code.
@@ -218,8 +225,9 @@ public nonisolated struct ProximityNamespace: Hashable, Sendable {
 
 // MARK: - ProximityNamespaceError
 
-/// Why ``ProximityNamespace/validated(family:installation:)`` refused a namespace: every violation its
-/// soundness recorded.
+/// Why a namespace was refused, by ``ProximityNamespace/validated(family:installation:)`` at a host's
+/// launch or by ProximityKit at run time (an identity's provisioning or group-key wrap, or a radio's
+/// start): every violation its soundness recorded.
 ///
 /// Deliberately not a `LocalizedError`: it names fields for the host's developer, never copy for a
 /// person.

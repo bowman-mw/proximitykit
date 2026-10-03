@@ -159,6 +159,11 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     /// connection with each other.
     nonisolated let alpn: String
 
+    /// The host namespace's ``ProximityNamespace/soundness``, the verdict it recorded when it was
+    /// built: ``start(posture:discoveryInfo:)`` refuses to bring the radio up under an unsound
+    /// namespace.
+    nonisolated let namespaceSoundness: ProximityNamespace.Soundness
+
     /// Hard ceiling on one inbound frame, enforced before the bytes reach any channel or decoder.
     /// The same value both other transports enforce, so all three refuse identically.
     nonisolated static let maxInboundWireBytes = NetworkMeshSession.maxInboundWireBytes
@@ -286,12 +291,14 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
 
     /// A radio that speaks the host's wire: it advertises and browses the namespace's presence
     /// service type, negotiates its ALPN and logs under its subsystem (ProximityKit plan step
-    /// A0.2.7). Each value is read once, here; building a radio starts nothing.
+    /// A0.2.7). Each value is read once, here, with the namespace's soundness verdict; building a
+    /// radio starts nothing.
     ///
     /// - Parameter namespace: The host's protocol identity, as its manager holds it.
     init(namespace: ProximityNamespace) {
         serviceType = namespace.family.radios.presence.serviceType
         alpn = namespace.family.radios.presence.alpn
+        namespaceSoundness = namespace.soundness
         logger = Logger(subsystem: namespace.installation.logSubsystem, category: "proximity.presence.quic")
     }
 
@@ -313,7 +320,13 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     ///
     /// Throws rather than reporting, because the owner's `start()` is the one caller and it stands
     /// the radio down on a failure — the `didNotStart*` shape P8 item 0's device finding (b) fixed.
+    ///
+    /// Refuses first, under an unsound namespace (``namespaceSoundness``): it throws
+    /// ``ProximityNamespaceError`` and audits `presence.quic.namespaceUnsound` (at `start`) before it
+    /// wears the posture, listens or advertises anything.
     func start(posture: PresenceEpochPosture, discoveryInfo: [String: String]) throws {
+        try ProximityNamespaceGate.refuseUnsound(
+            namespaceSoundness, event: "presence.quic.namespaceUnsound", at: .start)
         guard !isRunning else { return }
         self.posture = posture
         advertisedFields = discoveryInfo

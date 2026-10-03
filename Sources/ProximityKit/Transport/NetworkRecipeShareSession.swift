@@ -209,6 +209,10 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// namespace's `family.radios.tlsCommonName`.
     nonisolated let tlsCommonName: String
 
+    /// The host namespace's ``ProximityNamespace/soundness``, the verdict it recorded when it was
+    /// built: ``start(advertisement:)`` refuses to bring the radio up under an unsound namespace.
+    nonisolated let namespaceSoundness: ProximityNamespace.Soundness
+
     /// Hard ceiling on one inbound frame, enforced before the bytes reach any channel or decoder.
     /// The same value the other two transports enforce, so all three refuse identically.
     nonisolated static let maxInboundWireBytes = NetworkMeshSession.maxInboundWireBytes
@@ -413,7 +417,8 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// A radio that speaks the host's wire: it advertises and browses the namespace's recipe-share
     /// service type, negotiates its ALPN and logs under its subsystem (ProximityKit plan step
     /// A0.2.7), and mints every posture with the namespace's mesh instance-name prefix and common
-    /// name. Each value is read once, here; building a radio starts nothing.
+    /// name. Each value is read once, here, with the namespace's soundness verdict; building a radio
+    /// starts nothing.
     ///
     /// - Parameter namespace: The host's protocol identity, as its manager holds it.
     init(namespace: ProximityNamespace) {
@@ -421,6 +426,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
         alpn = namespace.family.radios.recipeShare.alpn
         instanceNamePrefix = namespace.family.radios.meshInstanceNamePrefix
         tlsCommonName = namespace.family.radios.tlsCommonName
+        namespaceSoundness = namespace.soundness
         logger = Logger(subsystem: namespace.installation.logSubsystem, category: "proximity.recipe.quic")
     }
 
@@ -441,7 +447,13 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// Throws rather than reporting, because the owner's `start()` is the one caller and it stands
     /// the radio down on a failure — the `didNotStart*` shape P8 item 0's device finding (b)
     /// fixed.
+    ///
+    /// Refuses first, under an unsound namespace (``namespaceSoundness``): it throws
+    /// ``ProximityNamespaceError`` and audits `recipe.quic.namespaceUnsound` (at `start`) before it
+    /// mints a posture, listens or advertises anything.
     func start(advertisement: [String: String]) throws {
+        try ProximityNamespaceGate.refuseUnsound(
+            namespaceSoundness, event: "recipe.quic.namespaceUnsound", at: .start)
         guard !isRunning else { return }
         ownerFields = advertisement
         posture = try RecipeSharePosture.minted(
