@@ -685,11 +685,24 @@ without it.
 
 ### Session engine
 
+A coordinator reports its session to the ``ProximityInspectorRecording`` its owner attaches in this
+module's own value types (an envelope record, a distance sample, the peer line, transport events
+stamped with the coordinator's own clock, the role and the ranging mode) and names no host's log: a
+host that keeps one converts each value into its own record, as Fernlet's app-side
+`ConnectionInspector` does into its persisted `ConnectionSessionLog`, which keeps its own copies of
+the role and ranging mode with the same raw values.
+
 - ``ProximityCoordinator``
 - ``ProximityCommitDetector``
 - ``ProximityPayloadHandling``
+- ``ProximityRole``
+- ``ProximityRangingMode``
 - ``ProximityInspectorRecording``
 - ``ProximityInspectorEventRecorder``
+- ``ProximityInspectorEnvelope``
+- ``ProximityInspectorDistanceSample``
+- ``ProximityInspectorPeer``
+- ``ProximityInspectorTransportEvent``
 
 ### Transport
 

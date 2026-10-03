@@ -5,19 +5,23 @@ import UIKit
 import FernletDomainModel
 
 /// Diagnostic sink for a ``ProximityCoordinator``'s session lifecycle: state transitions,
-/// envelope records, ranging samples, transport info, and errors.
+/// envelope records, ranging samples, transport events, and errors.
 ///
-/// The app's Connection Inspector conforms; every requirement has a default no-op (see the
-/// extension) so lightweight conformers like ``ProximityInspectorEventRecorder`` implement only
-/// what they need. Held `weak` by the coordinator.
+/// The coordinator reports in this module's own value types (``ProximityInspectorEnvelope``,
+/// ``ProximityInspectorDistanceSample``, ``ProximityInspectorPeer``,
+/// ``ProximityInspectorTransportEvent``, ``ProximityRole``, ``ProximityRangingMode``), never in a
+/// host's log type: a conformer that keeps a log converts each into its own record. The app's
+/// Connection Inspector conforms and builds its persisted session log from them. Every requirement
+/// has a default no-op (see the extension) so lightweight conformers like
+/// ``ProximityInspectorEventRecorder`` implement only what they need. Held `weak` by the coordinator.
 @MainActor
 public protocol ProximityInspectorRecording: AnyObject {
     func beginSession(role: ProximityCoordinator.Role, mode: ProximityCoordinator.Mode, localFingerprint: String)
     func recordCoordinatorEvent(_ message: String)
-    func recordEnvelope(_ record: ConnectionSessionLog.EnvelopeRecord)
-    func recordRangingSample(_ sample: ConnectionSessionLog.DistanceSample)
-    func updatePeer(_ peer: ConnectionSessionLog.PeerInfo)
-    func updateTransport(_ block: (inout ConnectionSessionLog.TransportInfo) -> Void)
+    func recordEnvelope(_ record: ProximityInspectorEnvelope)
+    func recordRangingSample(_ sample: ProximityInspectorDistanceSample)
+    func updatePeer(_ peer: ProximityInspectorPeer)
+    func updateTransport(_ event: ProximityInspectorTransportEvent)
     func updateRangingMode(_ mode: ProximityCoordinator.RangingMode)
     func recordError(domain: String, message: String, recoverable: Bool)
     func endSession(endState: String)
@@ -43,10 +47,10 @@ public protocol ProximityPayloadHandling: AnyObject {
 
 extension ProximityInspectorRecording {
     public func beginSession(role: ProximityCoordinator.Role, mode: ProximityCoordinator.Mode, localFingerprint: String) {}
-    public func recordEnvelope(_ record: ConnectionSessionLog.EnvelopeRecord) {}
-    public func recordRangingSample(_ sample: ConnectionSessionLog.DistanceSample) {}
-    public func updatePeer(_ peer: ConnectionSessionLog.PeerInfo) {}
-    public func updateTransport(_ block: (inout ConnectionSessionLog.TransportInfo) -> Void) {}
+    public func recordEnvelope(_ record: ProximityInspectorEnvelope) {}
+    public func recordRangingSample(_ sample: ProximityInspectorDistanceSample) {}
+    public func updatePeer(_ peer: ProximityInspectorPeer) {}
+    public func updateTransport(_ event: ProximityInspectorTransportEvent) {}
     public func updateRangingMode(_ mode: ProximityCoordinator.RangingMode) {}
     public func recordError(domain: String, message: String, recoverable: Bool) {}
     public func endSession(endState: String) {}
@@ -160,9 +164,9 @@ private nonisolated struct SessionHeartbeatPayload: Codable, Sendable {
 @MainActor
 @Observable
 public final class ProximityCoordinator {
-    // Role/Mode/RangingMode hoisted to FernletDomainModel (ProximityRole/ProximityMode/
-    // ProximityRangingMode); typealiases keep every `ProximityCoordinator.Role` / bare `Role`
-    // reference across the proximity subtree compiling unchanged.
+    // Role and RangingMode are this module's ProximityRole and ProximityRangingMode; Mode is
+    // FernletDomainModel's ProximityMode. The typealiases keep every `ProximityCoordinator.Role` /
+    // bare `Role` reference across the proximity subtree reading as it does.
     public typealias Role = ProximityRole
     public typealias Mode = ProximityMode
 
@@ -702,7 +706,7 @@ public final class ProximityCoordinator {
     private func handleDistance(_ distance: RangingDistance) async {
         lastKnownDistance = distance
         if case .meters(let meters, let direction) = distance {
-            inspector?.recordRangingSample(ConnectionSessionLog.DistanceSample(
+            inspector?.recordRangingSample(ProximityInspectorDistanceSample(
                 timestamp: now(),
                 meters: meters,
                 direction: direction
@@ -1174,10 +1178,7 @@ public final class ProximityCoordinator {
             guard let responseTo = heartbeat.responseTo,
                   let sentAt = pendingHeartbeatSentAtByID.removeValue(forKey: responseTo) else { return }
             let rttMs = max(0, now().timeIntervalSince(sentAt) * 1000)
-            inspector?.updateTransport { transport in
-                transport.rttSamplesMs.append(rttMs)
-                transport.rttSamplesMs = Array(transport.rttSamplesMs.suffix(50))
-            }
+            inspector?.updateTransport(.roundTrip(milliseconds: rttMs))
             inspector?.recordCoordinatorEvent(String(format: "heartbeat rtt %.0fms", rttMs))
         }
     }
@@ -1242,7 +1243,7 @@ public final class ProximityCoordinator {
 
     private func recordEnvelope(
         _ envelope: FernletIdentityEnvelope,
-        direction: ConnectionSessionLog.EnvelopeRecord.Direction,
+        direction: ProximityInspectorEnvelope.Direction,
         byteCount: Int,
         signatureVerified: Bool?
     ) {
@@ -1253,7 +1254,7 @@ public final class ProximityCoordinator {
         case .sealedTo:
             encrypted = true
         }
-        inspector?.recordEnvelope(ConnectionSessionLog.EnvelopeRecord(
+        inspector?.recordEnvelope(ProximityInspectorEnvelope(
             envelopeID: envelope.envelopeID,
             direction: direction,
             payloadType: envelope.payloadTypeToken,
@@ -1284,7 +1285,7 @@ public final class ProximityCoordinator {
         let displayName = identityName ?? transportPeer?.displayHint ?? "Unknown"
         let advertisedFingerprint = transportPeer?.advertisedFingerprint
         let confirmedFingerprint = identity?.fingerprint
-        inspector?.updatePeer(ConnectionSessionLog.PeerInfo(
+        inspector?.updatePeer(ProximityInspectorPeer(
             displayName: displayName,
             advertisedFingerprint: advertisedFingerprint,
             confirmedFingerprint: confirmedFingerprint,
@@ -1294,16 +1295,15 @@ public final class ProximityCoordinator {
         ))
     }
 
+    /// Reports a transport state change, stamped with this coordinator's clock: `connectedAt` when the
+    /// new state is `connected`, `disconnectedAt` when the channel closed or failed. The inspector
+    /// keeps a session's first connected stamp. With no inspector attached the clock is never read.
     private func updateInspectorTransport(state: String, disconnected: Bool = false) {
-        inspector?.updateTransport { transport in
-            transport.mcSessionState = state
-            if state == "connected", transport.connectedAt == nil {
-                transport.connectedAt = now()
-            }
-            if disconnected {
-                transport.disconnectedAt = now()
-            }
-        }
+        inspector?.updateTransport(.stateChanged(
+            state: state,
+            connectedAt: state == "connected" ? now() : nil,
+            disconnectedAt: disconnected ? now() : nil
+        ))
     }
 
     private func updateInspectorRangingMode(_ mode: RangingMode) {
