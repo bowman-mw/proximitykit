@@ -8,9 +8,10 @@
 // bound, and adds the inventory digest a peer sends so a counterpart can notice it is MISSING
 // records and ask for a re-gossip. Item 3 framed three of the four record kinds and item 3b framed
 // the fourth (`member-removal.v1`). The record kinds' tokens are the host's: the digest tags each
-// record with its kind's token in the namespace family it is handed. In Fernlet's family a kind's
-// token, the `PayloadType` of its frame and (for three of the four) its signature label are one
-// frozen English spelling, so one grep finds the record, the frame and the domain.
+// record with its kind's token in the namespace family it is handed, and each frame travels under
+// the family's mesh message for its role (`MeshPayloadRole`). In Fernlet's family a kind's token, its
+// frame's mesh message and (for three of the four) its signature label are one frozen English
+// spelling, so one grep finds the record, the frame and the domain.
 //
 // What is deliberately NOT here: emission. Nothing in this file decides WHEN a departure is sent;
 // `MeshNetworkManager.emitMembershipEvent(_:)` is the seam items 5–6 fill. And nothing here
@@ -18,7 +19,6 @@
 // a record that reached a ledger unverified is a member on a roster nobody vouched for.
 
 import CryptoKit
-import FernletDomainModel
 import Foundation
 
 // MARK: - MeshMembershipEventFormat
@@ -590,10 +590,11 @@ nonisolated enum MeshLegacyGoodbyeOutcome: Equatable, Sendable {
 
 /// The legacy goodbye's frozen interop rule, stated once (plan §8.2, §8.3).
 ///
-/// **Parsed, never emitted.** New builds send ``PayloadType/meshMemberDeparture`` — signed by the
-/// leaver — when a member actually leaves. `.sessionGoodbye` keeps decoding so peers built before
-/// the transition still close their links promptly, and it stays frozen in `PayloadType` forever
-/// because a retired wire token must never be re-used for a different meaning.
+/// **Parsed, never emitted.** New builds send ``MeshPayloadRole/meshMemberDeparture`` — signed by the
+/// leaver — when a member actually leaves. `.sessionGoodbye` keeps its role so peers built before
+/// the transition still close their links promptly, and its token (the host's
+/// `MeshMessages.sessionGoodbye`; Fernlet's stays frozen in `PayloadType`) is never re-used for a
+/// different meaning, as no retired wire token may be.
 ///
 /// **A goodbye can never become a departure record**, which is what ``departureRecord(forGoodbyeFrom:)``
 /// exists to say in code rather than in a comment. Departures are grow-only and permanent
@@ -605,8 +606,8 @@ nonisolated enum MeshLegacyGoodbyeOutcome: Equatable, Sendable {
 /// an unreachable leaver.
 nonisolated enum MeshMembershipGoodbyeInterop {
 
-    /// The wire token this rule is about. Frozen English, never localized.
-    static let payloadType = PayloadType.sessionGoodbye
+    /// The frame this rule is about, by role; its token is the host's, frozen English, never localized.
+    static let payloadType = MeshPayloadRole.sessionGoodbye
 
     /// What a received goodbye means: the link is gone, membership is not.
     static func outcome(forGoodbyeFrom _: String?) -> MeshLegacyGoodbyeOutcome {

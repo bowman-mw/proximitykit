@@ -4,7 +4,7 @@
 // The rules a namespace is judged by: alone, once, when it is built (`soundness`), and against
 // another app's namespace (`familyCollisions(with:)`, `installationCollisions(with:)`). Every loop runs
 // over the namespace's fixed shape — at most 39 labels, three radios, three keychain services, four
-// storage names, sixteen vocabulary fields — or over one value whose length a guard has already
+// storage names, forty-six vocabulary fields — or over one value whose length a guard has already
 // bounded, or a string or token list the host wrote.
 
 import Foundation
@@ -261,7 +261,7 @@ nonisolated extension ProximityNamespace {
     /// - Returns: Malformed tokens, then duplicate tokens, then unknown tokens, then malformed summary
     ///   titles, each in declaration order.
     private static func vocabularyViolations(_ vocabulary: Vocabulary) -> [Violation] {
-        // R2: sixteen token fields, a set's or list's members bounded by the tokens the host listed.
+        // R2: forty-six token fields, a set's or list's members bounded by the tokens the host listed.
         var violations = vocabulary.tokenFields
             .filter { field in
                 !field.tokens.allSatisfy { isWellFormedToken($0, maximumBytes: field.maximumBytes) }
@@ -277,27 +277,37 @@ nonisolated extension ProximityNamespace {
     }
 
     /// Tokens repeated within a group: the three session payload tokens, the capability tokens, the
-    /// four record kinds, the four routed types. Two groups may share a token, as a record kind may
-    /// spell the payload token of the message that carries its record.
+    /// four record kinds, the four routed types, the thirty mesh messages, and the session and mesh
+    /// messages together, which the coordinator and the mesh manager dispatch on one after the other.
+    /// Other groups may share a token, as a record kind may spell the payload token of the message
+    /// that carries its record.
     ///
     /// - Parameter vocabulary: The family's vocabulary.
-    /// - Returns: Each group's duplicate pairs, in that order.
+    /// - Returns: Each group's duplicate pairs, in that order; a session token a mesh message repeats
+    ///   is named first.
     private static func duplicateTokenViolations(_ vocabulary: Vocabulary) -> [Violation] {
         let duplicate = Violation.duplicateToken(field:otherField:)
         var violations = duplicatePairs(vocabulary.session.payloadTypeFields, duplicate)
         violations += duplicatePairs(vocabulary.capabilities.knownFields, duplicate)
         violations += duplicatePairs(vocabulary.membershipRecordKinds.fields, duplicate)
         violations += duplicatePairs(vocabulary.routedTypes.fields, duplicate)
+        violations += duplicatePairs(vocabulary.mesh.fields, duplicate)
+        // R2: three session tokens by thirty mesh messages.
+        for session in vocabulary.session.payloadTypeFields {
+            for mesh in vocabulary.mesh.fields where mesh.value == session.value {
+                violations.append(duplicate(session.field, mesh.field))
+            }
+        }
         return violations
     }
 
-    /// Tokens a rule names that the vocabulary does not know: each session payload token and the
-    /// sealing set against `payloads.known`, `wire2` and the legacy assumption against
+    /// Tokens a rule names that the vocabulary does not know: each session payload token, the sealing
+    /// set and each mesh message against `payloads.known`, `wire2` and the legacy assumption against
     /// `capabilities.known`.
     ///
     /// - Parameter vocabulary: The family's vocabulary.
     /// - Returns: The unknown session tokens in declaration order, then the sealing set, `wire2` and
-    ///   the legacy assumption, each named once.
+    ///   the legacy assumption, each named once, then the unknown mesh messages in declaration order.
     private static func unknownTokenViolations(_ vocabulary: Vocabulary) -> [Violation] {
         let payloads = vocabulary.payloads
         let capabilities = vocabulary.capabilities
@@ -315,6 +325,10 @@ nonisolated extension ProximityNamespace {
         if !knownCapabilities.isSuperset(of: capabilities.assumedForLegacyPeers) {
             violations.append(.unknownToken(field: Capabilities.assumedForLegacyPeersField))
         }
+        // R2: thirty mesh messages.
+        violations += vocabulary.mesh.fields
+            .filter { !payloads.known.contains($0.value) }
+            .map { Violation.unknownToken(field: $0.field) }
         return violations
     }
 
@@ -372,8 +386,8 @@ nonisolated extension ProximityNamespace {
     /// One violation per unordered pair of equal values, the earlier field first.
     ///
     /// - Parameters:
-    ///   - named: Fields and their values, in declaration order (at most four, or the capability tokens
-    ///     the host listed).
+    ///   - named: Fields and their values, in declaration order (at most thirty, or the capability
+    ///     tokens the host listed).
     ///   - violation: Builds the violation from the earlier and the later field.
     /// - Returns: The violations, in pair order.
     private static func duplicatePairs(
@@ -381,8 +395,8 @@ nonisolated extension ProximityNamespace {
         _ violation: (String, String) -> Violation
     ) -> [Violation] {
         var violations: [Violation] = []
-        // R2: every unordered pair once, over at most four values or the capability tokens the host
-        // listed.
+        // R2: every unordered pair once, over at most thirty values (435 comparisons) or the
+        // capability tokens the host listed.
         for (index, first) in named.enumerated() {
             for second in named.dropFirst(index + 1) where first.value == second.value {
                 violations.append(violation(first.field, second.field))
@@ -544,9 +558,9 @@ nonisolated extension ProximityNamespace.Radios {
 
 nonisolated extension ProximityNamespace.Vocabulary {
 
-    /// The sixteen token fields with their paths from the namespace root, in declaration order: each
-    /// with its token or, for a set or list, every member, and the most bytes its group's receivers
-    /// accept.
+    /// The forty-six token fields with their paths from the namespace root, in declaration order:
+    /// each with its token or, for a set or list, every member, and the most bytes its group's
+    /// receivers accept.
     var tokenFields: [(field: String, tokens: [String], maximumBytes: Int)] {
         let payloadBytes = ProximityNamespace.maximumPayloadTokenBytes
         let capabilityBytes = ProximityNamespace.maximumCapabilityTokenBytes
@@ -564,6 +578,7 @@ nonisolated extension ProximityNamespace.Vocabulary {
                        tokens: capabilities.assumedForLegacyPeers, maximumBytes: capabilityBytes))
         fields += Self.singleTokenFields(membershipRecordKinds.fields, maximumBytes: payloadBytes)
         fields += Self.singleTokenFields(routedTypes.fields, maximumBytes: routedBytes)
+        fields += Self.singleTokenFields(mesh.fields, maximumBytes: payloadBytes)
         return fields
     }
 
@@ -572,7 +587,7 @@ nonisolated extension ProximityNamespace.Vocabulary {
         _ named: [(field: String, value: String)],
         maximumBytes: Int
     ) -> [(field: String, tokens: [String], maximumBytes: Int)] {
-        // R2: at most four fields.
+        // R2: at most thirty fields.
         named.map { (field: $0.field, tokens: [$0.value], maximumBytes: maximumBytes) }
     }
 }
@@ -652,6 +667,46 @@ nonisolated extension ProximityNamespace.RoutedTypes {
             (field: "family.vocabulary.routedTypes.tempMessage", value: tempMessage),
             (field: "family.vocabulary.routedTypes.heart", value: heart),
             (field: "family.vocabulary.routedTypes.control", value: control)
+        ]
+    }
+}
+
+nonisolated extension ProximityNamespace.MeshMessages {
+
+    /// The thirty mesh messages with their paths from the namespace root, in declaration order.
+    var fields: [(field: String, value: String)] {
+        let path = "family.vocabulary.mesh."
+        return [
+            (field: path + "descriptor", value: descriptor),
+            (field: path + "admissionGrant", value: admissionGrant),
+            (field: path + "admissionRequest", value: admissionRequest),
+            (field: path + "stateChange", value: stateChange),
+            (field: path + "friendVouchList", value: friendVouchList),
+            (field: path + "removalProposal", value: removalProposal),
+            (field: path + "removalSecond", value: removalSecond),
+            (field: path + "memberDeparture", value: memberDeparture),
+            (field: path + "memberAdmission", value: memberAdmission),
+            (field: path + "memberRemoval", value: memberRemoval),
+            (field: path + "terminated", value: terminated),
+            (field: path + "inventoryDigest", value: inventoryDigest),
+            (field: path + "epochHeads", value: epochHeads),
+            (field: path + "keyAgreement", value: keyAgreement),
+            (field: path + "removalProposalSigned", value: removalProposalSigned),
+            (field: path + "removalVote", value: removalVote),
+            (field: path + "routedManifest", value: routedManifest),
+            (field: path + "routedChunk", value: routedChunk),
+            (field: path + "custodyReceipt", value: custodyReceipt),
+            (field: path + "recipientReceipt", value: recipientReceipt),
+            (field: path + "routedInventoryDigest", value: routedInventoryDigest),
+            (field: path + "routedDrainAnswer", value: routedDrainAnswer),
+            (field: path + "keyRotation", value: keyRotation),
+            (field: path + "keyAck", value: keyAck),
+            (field: path + "rotationSync", value: rotationSync),
+            (field: path + "encryptedMetadata", value: encryptedMetadata),
+            (field: path + "coordinatorBeacon", value: coordinatorBeacon),
+            (field: path + "verifyChallenge", value: verifyChallenge),
+            (field: path + "verifyResponse", value: verifyResponse),
+            (field: path + "sessionGoodbye", value: sessionGoodbye)
         ]
     }
 }

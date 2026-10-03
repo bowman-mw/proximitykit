@@ -407,7 +407,7 @@ nonisolated struct MeshChunk: Codable, Equatable, Sendable {
 
 // MARK: - MeshChunkPayload
 
-/// The wire frame for a ``MeshChunk`` — `PayloadType.meshRoutedChunk`, signed and UNSEALED like
+/// The wire frame for a ``MeshChunk`` — `MeshPayloadRole.meshRoutedChunk`, signed and UNSEALED like
 /// the routed manifest beside it so a custodian can re-broadcast it verbatim; the payload is
 /// already ciphertext under the item's own content key, and pairwise sealing would make a chunk
 /// readable only by its first hop. Carries no second claim about the origin: the record already

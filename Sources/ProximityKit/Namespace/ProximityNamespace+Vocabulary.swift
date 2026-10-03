@@ -7,11 +7,11 @@
 // labels, so none is a `StaticString` and none takes a role. ProximityKit reads every group here: the
 // identity envelope the payload rules (it seals and parks by them), the session coordinator the
 // session messages and the capabilities, the mesh and presence managers the wire2 token they
-// advertise (and the mesh frames by), the inventory digest the membership record kinds and the routed
-// type registry the routed types. The mesh engine's own payload tokens and its features' payload and
-// capability tokens are still Fernlet's `PayloadType` and `ProximityCapability` cases until the rest
-// of plan step A0.3 and plan steps A0.4 and A0.5 move them, and for Fernlet the two spellings are
-// equal, which `ProximityVocabularyGoldenTests` holds.
+// advertise (and the mesh frames by), the inventory digest the membership record kinds, the routed
+// type registry the routed types, and the mesh manager the mesh messages its engine signs and
+// dispatches its own frames under. The mesh features' payload and capability tokens are still
+// Fernlet's `PayloadType` and `ProximityCapability` cases until plan steps A0.4 and A0.5 move them,
+// and for Fernlet the two spellings are equal, which `ProximityVocabularyGoldenTests` holds.
 
 import Foundation
 
@@ -21,7 +21,7 @@ nonisolated extension ProximityNamespace {
 
     /// The tokens every interoperating app shares besides its labels: the session's own messages,
     /// the payload tokens and which of them must arrive sealed, the capability tokens, the membership
-    /// record kinds and the routed-type tokens.
+    /// record kinds, the routed-type tokens and the mesh engine's own messages.
     ///
     /// Shared wire, which is why it rides in the ``Family``: two apps that supply one family send and
     /// accept the same tokens. Every token is frozen wire data, never localized, and
@@ -39,6 +39,9 @@ nonisolated extension ProximityNamespace {
         public let membershipRecordKinds: MembershipRecordKinds
         /// The routed engine's type tokens.
         public let routedTypes: RoutedTypes
+        /// The mesh engine's own messages: the tokens its membership, admission, routed, group-key and
+        /// verify frames travel under.
+        public let mesh: MeshMessages
 
         /// Assembles a vocabulary.
         ///
@@ -48,15 +51,17 @@ nonisolated extension ProximityNamespace {
         ///   - capabilities: The capability tokens.
         ///   - membershipRecordKinds: The membership record kinds.
         ///   - routedTypes: The routed-type tokens.
+        ///   - mesh: The mesh engine's own messages.
         public init(
             session: SessionMessages, payloads: PayloadRules, capabilities: Capabilities,
-            membershipRecordKinds: MembershipRecordKinds, routedTypes: RoutedTypes
+            membershipRecordKinds: MembershipRecordKinds, routedTypes: RoutedTypes, mesh: MeshMessages
         ) {
             self.session = session
             self.payloads = payloads
             self.capabilities = capabilities
             self.membershipRecordKinds = membershipRecordKinds
             self.routedTypes = routedTypes
+            self.mesh = mesh
         }
     }
 
@@ -241,6 +246,157 @@ nonisolated extension ProximityNamespace {
             self.tempMessage = tempMessage
             self.heart = heart
             self.control = control
+        }
+    }
+
+    // MARK: - MeshMessages
+
+    /// The mesh engine's own messages: one payload token per frame its membership, admission,
+    /// routed-delivery, group-key and verify-ceremony doors sign and dispatch, and the legacy goodbye
+    /// it parses and never sends.
+    ///
+    /// ProximityKit's mesh manager names each by role (`MeshPayloadRole`) and reads its token here at
+    /// every send and at its dispatch door, so a frame travels under the host's token and is signed
+    /// with that token as its summary title too. Each is one of ``PayloadRules/known``, and all are
+    /// distinct from each other and from the session messages' tokens, because the coordinator and
+    /// the manager dispatch on them one after the other. A membership record kind may spell the
+    /// token of the message that carries its record, as Fernlet's do.
+    public nonisolated struct MeshMessages: Hashable, Sendable {
+        /// The mesh's descriptor, which a committed member adopts.
+        public let descriptor: String
+        /// The admitter's grant: the joiner's admission token and the current group key.
+        public let admissionGrant: String
+        /// A joiner's request to be admitted.
+        public let admissionRequest: String
+        /// A mesh state change, which the mesh opens only inside closed-mode group metadata.
+        public let stateChange: String
+        /// A member's vouch list, the source of friend-of-friend labels.
+        public let friendVouchList: String
+        /// The legacy unsigned two-party removal's proposal.
+        public let removalProposal: String
+        /// The legacy unsigned two-party removal's second.
+        public let removalSecond: String
+        /// A leaver's signed departure record.
+        public let memberDeparture: String
+        /// An admitter's signed admission record.
+        public let memberAdmission: String
+        /// A completed quorum's signed removal record.
+        public let memberRemoval: String
+        /// A final-pair member's signed termination record.
+        public let terminated: String
+        /// A member's signed membership inventory digest.
+        public let inventoryDigest: String
+        /// A member's signed epoch heads.
+        public let epochHeads: String
+        /// A batch of members' signed key-agreement advertisements.
+        public let keyAgreement: String
+        /// A signed removal proposal.
+        public let removalProposalSigned: String
+        /// A signed removal vote.
+        public let removalVote: String
+        /// A routed item's signed manifest.
+        public let routedManifest: String
+        /// A signed routed chunk.
+        public let routedChunk: String
+        /// A signed custody receipt.
+        public let custodyReceipt: String
+        /// A signed recipient receipt.
+        public let recipientReceipt: String
+        /// A member's signed routed inventory digest.
+        public let routedInventoryDigest: String
+        /// A signed routed drain answer.
+        public let routedDrainAnswer: String
+        /// The elected coordinator's group-key rotation.
+        public let keyRotation: String
+        /// A member's acknowledgement of a rotation.
+        public let keyAck: String
+        /// The coordinator's rotation sync, which drains a member's sends before a rotation.
+        public let rotationSync: String
+        /// Closed-mode group metadata: a control message sealed under the group key, received only.
+        public let encryptedMetadata: String
+        /// The elected coordinator's liveness beacon.
+        public let coordinatorBeacon: String
+        /// The verify ceremony's challenge.
+        public let verifyChallenge: String
+        /// The verify ceremony's response.
+        public let verifyResponse: String
+        /// The legacy goodbye: parsed, never sent, and never more than "this link is going away".
+        public let sessionGoodbye: String
+
+        /// Names the mesh messages.
+        ///
+        /// - Parameters:
+        ///   - descriptor: The mesh descriptor's token.
+        ///   - admissionGrant: The admission grant's token.
+        ///   - admissionRequest: The admission request's token.
+        ///   - stateChange: The state change's token.
+        ///   - friendVouchList: The vouch list's token.
+        ///   - removalProposal: The legacy removal proposal's token.
+        ///   - removalSecond: The legacy removal second's token.
+        ///   - memberDeparture: The departure record's token.
+        ///   - memberAdmission: The admission record's token.
+        ///   - memberRemoval: The removal record's token.
+        ///   - terminated: The termination record's token.
+        ///   - inventoryDigest: The membership inventory digest's token.
+        ///   - epochHeads: The epoch heads' token.
+        ///   - keyAgreement: The key-agreement advertisements' token.
+        ///   - removalProposalSigned: The signed removal proposal's token.
+        ///   - removalVote: The signed removal vote's token.
+        ///   - routedManifest: The routed manifest's token.
+        ///   - routedChunk: The routed chunk's token.
+        ///   - custodyReceipt: The custody receipt's token.
+        ///   - recipientReceipt: The recipient receipt's token.
+        ///   - routedInventoryDigest: The routed inventory digest's token.
+        ///   - routedDrainAnswer: The routed drain answer's token.
+        ///   - keyRotation: The key rotation's token.
+        ///   - keyAck: The key acknowledgement's token.
+        ///   - rotationSync: The rotation sync's token.
+        ///   - encryptedMetadata: The encrypted metadata's token.
+        ///   - coordinatorBeacon: The coordinator beacon's token.
+        ///   - verifyChallenge: The verify challenge's token.
+        ///   - verifyResponse: The verify response's token.
+        ///   - sessionGoodbye: The legacy goodbye's token.
+        public init(
+            descriptor: String, admissionGrant: String, admissionRequest: String, stateChange: String,
+            friendVouchList: String, removalProposal: String, removalSecond: String,
+            memberDeparture: String, memberAdmission: String, memberRemoval: String, terminated: String,
+            inventoryDigest: String, epochHeads: String, keyAgreement: String,
+            removalProposalSigned: String, removalVote: String,
+            routedManifest: String, routedChunk: String, custodyReceipt: String, recipientReceipt: String,
+            routedInventoryDigest: String, routedDrainAnswer: String,
+            keyRotation: String, keyAck: String, rotationSync: String, encryptedMetadata: String,
+            coordinatorBeacon: String, verifyChallenge: String, verifyResponse: String, sessionGoodbye: String
+        ) {
+            self.descriptor = descriptor
+            self.admissionGrant = admissionGrant
+            self.admissionRequest = admissionRequest
+            self.stateChange = stateChange
+            self.friendVouchList = friendVouchList
+            self.removalProposal = removalProposal
+            self.removalSecond = removalSecond
+            self.memberDeparture = memberDeparture
+            self.memberAdmission = memberAdmission
+            self.memberRemoval = memberRemoval
+            self.terminated = terminated
+            self.inventoryDigest = inventoryDigest
+            self.epochHeads = epochHeads
+            self.keyAgreement = keyAgreement
+            self.removalProposalSigned = removalProposalSigned
+            self.removalVote = removalVote
+            self.routedManifest = routedManifest
+            self.routedChunk = routedChunk
+            self.custodyReceipt = custodyReceipt
+            self.recipientReceipt = recipientReceipt
+            self.routedInventoryDigest = routedInventoryDigest
+            self.routedDrainAnswer = routedDrainAnswer
+            self.keyRotation = keyRotation
+            self.keyAck = keyAck
+            self.rotationSync = rotationSync
+            self.encryptedMetadata = encryptedMetadata
+            self.coordinatorBeacon = coordinatorBeacon
+            self.verifyChallenge = verifyChallenge
+            self.verifyResponse = verifyResponse
+            self.sessionGoodbye = sessionGoodbye
         }
     }
 }

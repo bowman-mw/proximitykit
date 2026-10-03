@@ -78,7 +78,7 @@ nonisolated enum MeshRoutedManifestFormat {
 /// lifted out of one manifest cannot be opened under another, and one relabelled to a different
 /// recipient cannot be opened by anyone. Carries no epoch, no group-key reference, no format
 /// marker — the `.v1` in the wrap purposes is the version. Never on the wire alone: it has no
-/// `PayloadType`. Pure value; nothing reads a clock.
+/// mesh message of its own. Pure value; nothing reads a clock.
 nonisolated struct MeshRecipientKeyWrap: Codable, Equatable, Sendable {
     /// The destination this wrap is for. Equals the same-index entry of ``MeshRoutedManifest/destinations``.
     let recipientFingerprint: String
@@ -295,7 +295,7 @@ nonisolated struct MeshRoutedManifest: Codable, Equatable, Sendable {
 
 // MARK: - MeshRoutedManifestPayload
 
-/// The wire frame for a ``MeshRoutedManifest`` — `PayloadType.meshRoutedManifest`, signed and
+/// The wire frame for a ``MeshRoutedManifest`` — `MeshPayloadRole.meshRoutedManifest`, signed and
 /// UNSEALED like every membership record so a custodian can re-broadcast it verbatim; the
 /// per-recipient wraps are the confidentiality, not the envelope. Carries no second claim about
 /// the origin: the record already says, under the origin's own signature. Registered in item 1,

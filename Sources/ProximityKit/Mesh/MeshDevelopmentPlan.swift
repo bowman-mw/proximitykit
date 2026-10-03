@@ -33,7 +33,6 @@
 // number, because the number is a fact about a durable index this type deliberately cannot reach.
 
 import Foundation
-import FernletDomainModel
 
 // MARK: - MeshDevelopmentEnding
 
@@ -50,8 +49,8 @@ nonisolated enum MeshDevelopmentEnding: String, Equatable, Sendable, CaseIterabl
     /// The mesh ends with this device: a signed `terminated.v1`, merged roster == 2.
     case termination
 
-    /// The frozen wire token this ending emits.
-    var membershipEvent: PayloadType {
+    /// The membership frame this ending emits, by role: its token is the host's mesh message.
+    var membershipEvent: MeshPayloadRole {
         switch self {
         case .departure: return .meshMemberDeparture
         case .termination: return .meshTerminated

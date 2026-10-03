@@ -26,8 +26,8 @@ nonisolated extension ProximityNamespace {
         public let radios: Radios
         /// The verify QR's URL scheme.
         public let verifyQR: VerifyQR
-        /// The payload vocabulary: session messages, payload and capability tokens, record kinds and
-        /// routed types.
+        /// The payload vocabulary: session messages, payload and capability tokens, record kinds,
+        /// routed types and the mesh engine's own messages.
         public let vocabulary: Vocabulary
 
         /// Assembles a family.

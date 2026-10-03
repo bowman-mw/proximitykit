@@ -83,8 +83,10 @@ public protocol ProximityHost: AnyObject {
     /// wire, keychain and disk formats identify the app it runs in, as the one ``ProximityNamespace``
     /// the host builds at its composition root. The radios, their postures and ``PeerNameDisplay`` read
     /// the radios' presentation strings off it too. It also carries the payload vocabulary, which this
-    /// module's consumers still read from constants of their own until the rest of plan step A0.3
-    /// re-points them. Some such strings stay outside it until plan step A0.4:
+    /// module reads off it as well: the envelope, the coordinator, the managers, the inventory digest,
+    /// the routed type registry and the mesh engine's own frames; the mesh features' payload and
+    /// capability tokens are still Fernlet's cases until plan steps A0.4 and A0.5. Some such strings
+    /// stay outside it until plan step A0.4:
     /// the feature labels, the heart-drop and moderation keychain services and
     /// ``ProximitySupportLayout``'s folder. `ProximityNamespaceBoundaryTests` allowlists each
     /// feature-label read and each literal that spells `fernlet`.

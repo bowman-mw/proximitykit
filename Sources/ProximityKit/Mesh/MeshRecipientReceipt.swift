@@ -212,7 +212,7 @@ nonisolated struct MeshRecipientReceipt: Codable, Equatable, Sendable {
 
 // MARK: - MeshRecipientReceiptPayload
 
-/// The wire frame for a ``MeshRecipientReceipt`` — `PayloadType.meshRecipientReceipt`, signed and
+/// The wire frame for a ``MeshRecipientReceipt`` — `MeshPayloadRole.meshRecipientReceipt`, signed and
 /// UNSEALED like the routed manifest, chunk and custody receipt beside it.
 ///
 /// **Not in the sealing set (`payloads.sealingRequired`), on purpose:** a receipt is a plan §3.2

@@ -355,10 +355,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// tags every record with its family's record kinds, and its routed types are the tokens of the
     /// routed type registry's rows (``routedTypes``, built from them once at `init`). Every capability
     /// gate here asks under its capabilities: the wire2 token this manager advertises and frames
-    /// sealed sends for, and what a peer that lists no capabilities is taken to support.
-    /// What this manager still spells itself, its own payload tokens (Fernlet's `PayloadType`, until
-    /// the rest of plan step A0.3), its features' values and capability tokens and the photo stores'
-    /// names, leaves with those features (plan steps A0.4 and A0.5).
+    /// sealed sends for, and what a peer that lists no capabilities is taken to support. Its mesh
+    /// messages are the tokens of this manager's own frames (``meshToken(_:)``): every engine send is
+    /// signed under one, and the payload door resolves each received token to its
+    /// ``MeshPayloadRole`` by them. What this manager still spells itself, its features' payload
+    /// tokens (Fernlet's `PayloadType`, sent through ``sendFeatureEnvelope(_:encodable:via:sealed:)``
+    /// and registered by token), values and capability tokens and the photo stores' names, leaves
+    /// with those features (plan steps A0.4 and A0.5).
     /// `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
@@ -834,7 +837,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let rows = ownModerationReportsProvider?(), !rows.isEmpty else { return }
         let payload = ModerationReportRelay.buildPayload(ownReports: rows, identity: identity)
         guard !payload.reports.isEmpty else { return }
-        await sendEnvelope(.itemReport, encodable: payload, via: slot, sealed: true)
+        await sendFeatureEnvelope(PayloadType.itemReport.rawValue, encodable: payload, via: slot, sealed: true)
     }
 
     /// Phase 4: fuzzy state + appearance exchange rides the friend session. The committed-slot gate has
@@ -857,7 +860,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func sendFriendState(to slot: PeerSlot, recipientSigningKey: Data) async {
         guard store.proximityTrustVault.isTrustedProximityPeer(signingPublicKey: recipientSigningKey) else { return }
         guard let payload = friendStatePayloadProvider?() else { return }
-        await sendEnvelope(.friendState, encodable: payload, via: slot, sealed: true)
+        await sendFeatureEnvelope(PayloadType.friendState.rawValue, encodable: payload, via: slot, sealed: true)
     }
 
     /// Phase 6: Group Activities ride the friend mesh as registered feature payloads. The dispatch
@@ -922,7 +925,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// sent if that peer no longer has a committed slot (they left the session).
     private func sendActivityEnvelope(_ type: PayloadType, _ payload: any Encodable, toFingerprint fingerprint: String, sealed: Bool) async {
         guard let slot = slots.first(where: { $0.fingerprint == fingerprint }) else { return }
-        await sendEnvelope(type, encodable: payload, via: slot, sealed: sealed)
+        await sendFeatureEnvelope(type.rawValue, encodable: payload, via: slot, sealed: sealed)
     }
 
     // MARK: - In-session hearts (TF b19 item 5; on the routed store since P6 item 6)
@@ -3617,14 +3620,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         _ peer: ProximityCoordinator.PeerIdentity?
     ) -> Void
 
-    @ObservationIgnored private var registeredPayloadHandlers: [PayloadType: MeshPayloadHandler] = [:]
+    /// The feature handlers, keyed by the payload token each was registered for.
+    @ObservationIgnored private var registeredPayloadHandlers: [String: MeshPayloadHandler] = [:]
 
     /// Registration seam for feature payloads carried on the friend mesh (shop registers in
-    /// Phase 3, temp messages in Phase 5). Dispatch order: the core mesh switch runs first, so a
-    /// registration can never shadow mesh-control handling; the registry is consulted only for
-    /// types the switch leaves unhandled; unregistered known types keep today's silent drop.
+    /// Phase 3, temp messages in Phase 5): a feature convenience that registers the case's token,
+    /// `type.rawValue`, in the token-keyed registry. Dispatch order: the core mesh switch runs first
+    /// (by role, from the host's mesh messages), so a registration can never shadow mesh-control
+    /// handling; the registry is consulted only for tokens the switch leaves unhandled; unregistered
+    /// known tokens keep today's silent drop.
     public func registerPayloadHandler(for type: PayloadType, handler: @escaping MeshPayloadHandler) {
-        registeredPayloadHandlers[type] = handler
+        registeredPayloadHandlers[type.rawValue] = handler
     }
 
     // MARK: - ProximityPayloadHandling
@@ -3648,11 +3654,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         plaintext: Data,
         from peer: ProximityCoordinator.PeerIdentity?
     ) {
-        // Unknown (newer-build) payload types are parked by the coordinator and never dispatched
-        // here; the guard is belt-and-braces for any future direct caller.
-        guard let payloadType = envelope.payloadType,
-              let slot = attributableSlot(for: coordinator, envelope: envelope, credited: peer, type: payloadType)
+        // A token outside the host's `payloads.known` (a newer build's) is parked by the coordinator
+        // and never dispatched here; the guard is belt-and-braces for any future direct caller.
+        let token = envelope.payloadTypeToken
+        guard namespace.family.vocabulary.payloads.known.contains(token),
+              let slot = attributableSlot(for: coordinator, envelope: envelope, credited: peer, type: token)
         else { return }
+        // A known token that names none of the mesh's own messages is a feature's: the registry's.
+        guard let payloadType = MeshPayloadRole.role(for: token, in: namespace.family.vocabulary.mesh) else {
+            dispatchRegistryPayload(token, envelope: envelope, plaintext: plaintext, peer: peer, slot: slot)
+            return
+        }
         let decoder = JSONDecoder()
 
         switch payloadType {
@@ -3679,7 +3691,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             guard slot.fingerprint != nil else {
                 ProximityAudit.log(
                     "mesh.vouchList.droppedUncommittedSlot",
-                    context: heldMeshAuditContext(["type": payloadType.rawValue])
+                    context: heldMeshAuditContext(["type": token])
                 )
                 return
             }
@@ -3707,7 +3719,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 removeSlot(slot)
             }
         default:
-            dispatchRegistryPayload(payloadType, envelope: envelope, plaintext: plaintext, peer: peer, slot: slot)
+            // The state change, which the mesh opens only inside closed-mode metadata, meets the
+            // registry here, as a feature's token does.
+            dispatchRegistryPayload(token, envelope: envelope, plaintext: plaintext, peer: peer, slot: slot)
         }
     }
 
@@ -3729,7 +3743,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         for coordinator: ProximityCoordinator,
         envelope: FernletIdentityEnvelope,
         credited peer: ProximityCoordinator.PeerIdentity?,
-        type: PayloadType
+        type token: String
     ) -> PeerSlot? {
         let slot = slots.first { $0.coordinator === coordinator }
         let reason: String?
@@ -3746,7 +3760,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let reason else { return slot }
         ProximityAudit.log(
             "mesh.dispatch.droppedUnattributable",
-            context: heldMeshAuditContext(["type": type.rawValue, "reason": reason])
+            context: heldMeshAuditContext(["type": token, "reason": reason])
         )
         return nil
     }
@@ -3790,7 +3804,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `.meshDescriptor` / `.meshAdmissionRequest` / `.meshAdmissionGrant` — the membership family
     /// of the dispatch switch (R4: one function per case family).
     private func dispatchMembershipPayload(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         plaintext: Data,
         decoder: JSONDecoder,
         peer: ProximityCoordinator.PeerIdentity?,
@@ -4252,7 +4266,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// down immediately afterwards — awaits ``sendMembershipEvent(_:)`` directly instead.
     ///
     /// - Parameter event: the signed frame to broadcast to every committed slot.
-    func emitMembershipEvent(_ event: PayloadType) {
+    func emitMembershipEvent(_ event: MeshPayloadRole) {
         spawnHostPinned { [weak self] in
             await self?.sendMembershipEvent(event)
         }
@@ -4284,10 +4298,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   fire-and-forget and were before.
     @discardableResult
     func sendMembershipEvent(
-        _ event: PayloadType, custodyHandoff: MeshCustodyHandoffSummary = .none
+        _ event: MeshPayloadRole, custodyHandoff: MeshCustodyHandoffSummary = .none
     ) async -> Bool {
         guard let mesh = currentMesh else {
-            ProximityAudit.log("mesh.membershipEvent.emitNoMesh", context: ["type": event.rawValue])
+            ProximityAudit.log("mesh.membershipEvent.emitNoMesh", context: ["type": meshToken(event)])
             return false
         }
         do {
@@ -4312,7 +4326,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 return true
             default:
                 ProximityAudit.log(
-                    "mesh.membershipEvent.emitUnsupported", context: ["type": event.rawValue]
+                    "mesh.membershipEvent.emitUnsupported", context: ["type": meshToken(event)]
                 )
                 return false
             }
@@ -4320,7 +4334,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // A membership event this device could not SIGN is never sent, and never silent (R7).
             ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
-                context: ["type": event.rawValue, "error": String(describing: error)]
+                context: ["type": meshToken(event), "error": String(describing: error)]
             )
             return false
         }
@@ -4329,13 +4343,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Sends one membership frame, awaiting each write.
     ///
     /// - Parameters:
-    ///   - type: The frozen wire token.
+    ///   - type: The frame's role; it is sent under the host's token for it.
     ///   - payload: The frame.
     ///   - recipients: The fingerprints allowed to receive it, or nil for every slot. A named set
     ///     also excludes every UNCOMMITTED slot, which has no fingerprint to be in it — membership
     ///     frames are member business.
     private func broadcastMembershipFrame(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         _ payload: some Encodable,
         to recipients: Set<String>? = nil
     ) async {
@@ -4355,13 +4369,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// audited inside `sendEnvelopeCore`; what was missing was a caller able to see them.
     ///
     /// - Parameters:
-    ///   - type: The frozen wire token.
+    ///   - type: The frame's role; it is sent under the host's token for it.
     ///   - payload: The frame.
     ///   - recipients: The fingerprints allowed to receive it, or nil for every slot.
     /// - Returns: The fingerprints whose write succeeded. An uncommitted slot contributes none,
     ///   because it has no fingerprint to report.
     private func writeMembershipFrame(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         _ payload: some Encodable,
         to recipients: Set<String>? = nil
     ) async -> Set<String> {
@@ -4372,7 +4386,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 guard let fingerprint = slot.fingerprint,
                       recipients.contains(fingerprint) else { continue }
             }
-            let delivered = await sendEnvelopeReportingResult(type, encodable: payload, via: slot)
+            let delivered = await sendEnvelopeReportingResult(meshToken(type), encodable: payload, via: slot)
             guard delivered, let fingerprint = slot.fingerprint else { continue }
             written.insert(fingerprint)
         }
@@ -4380,7 +4394,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // a transcript that shows a frame written on one node and nothing on the other names the
         // transport, not the membership rules. Compiled to nothing in Release.
         MeshTransportConsoleLog.echo(
-            "membershipFrame sent \(type.rawValue) slots=\(slots.count) "
+            "membershipFrame sent \(meshToken(type)) slots=\(slots.count) "
                 + "recipients=\(recipients.map { String($0.count) } ?? "all")"
         )
         onMembershipEventSentForTesting?(type)
@@ -4544,7 +4558,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             ProximityAudit.log(
                 "mesh.removalQuorum.signFailed",
-                context: ["type": PayloadType.meshRemovalProposalSigned.rawValue,
+                context: ["type": meshToken(.meshRemovalProposalSigned),
                           "error": String(describing: error)]
             )
             return nil
@@ -4577,7 +4591,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             ProximityAudit.log(
                 "mesh.removalQuorum.signFailed",
-                context: ["type": PayloadType.meshRemovalVote.rawValue,
+                context: ["type": meshToken(.meshRemovalVote),
                           "error": String(describing: error)]
             )
             return nil
@@ -4669,7 +4683,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The exclusion reuses ``membershipEventRecipients(excluding:)`` — the same rule that keeps a
     /// completed removal from reaching its subject — because a target handed the proposal about
     /// itself gains nothing it may act on and a voter list to retaliate against.
-    private func broadcastQuorumFrame(_ type: PayloadType, _ payload: some Encodable, about target: String) {
+    private func broadcastQuorumFrame(_ type: MeshPayloadRole, _ payload: some Encodable, about target: String) {
         let recipients = membershipEventRecipients(excluding: target)
         spawnHostPinned { [weak self] in
             await self?.broadcastMembershipFrame(type, payload, to: recipients)
@@ -4678,10 +4692,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Records one quorum refusal. Never silent (R7): a vote that did not count is a thing a
     /// developer has to be able to see in a log.
-    private func logQuorumRejection(_ rejection: MeshRemovalQuorumRejection, type: PayloadType) {
+    private func logQuorumRejection(_ rejection: MeshRemovalQuorumRejection, type: MeshPayloadRole) {
         ProximityAudit.log(
             "mesh.removalQuorum.rejected",
-            context: ["type": type.rawValue, "reason": rejection.diagnosticDescription]
+            context: ["type": meshToken(type), "reason": rejection.diagnosticDescription]
         )
     }
 
@@ -5017,7 +5031,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
-                context: ["type": PayloadType.meshEpochHeads.rawValue,
+                context: ["type": meshToken(.meshEpochHeads),
                           "error": String(describing: error)]
             )
         }
@@ -5034,7 +5048,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if let rejection = verifier.verify(payload) {
             ProximityAudit.log(
                 "mesh.membershipEvent.rejected",
-                context: ["type": PayloadType.meshEpochHeads.rawValue,
+                context: ["type": meshToken(.meshEpochHeads),
                           "reason": rejection.diagnosticDescription]
             )
             return
@@ -5245,7 +5259,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // An advertisement this device could not SIGN is never folded, and never silent (R7).
             ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
-                context: ["type": PayloadType.meshKeyAgreement.rawValue,
+                context: ["type": meshToken(.meshKeyAgreement),
                           "error": String(describing: error)]
             )
             return false
@@ -5954,7 +5968,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             ProximityAudit.log(
                 "mesh.membershipEvent.signFailed",
-                context: ["type": PayloadType.meshInventoryDigest.rawValue,
+                context: ["type": meshToken(.meshInventoryDigest),
                           "error": String(describing: error)]
             )
         }
@@ -6192,7 +6206,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             ProximityAudit.log(
                 "mesh.routedDrain.signFailed",
-                context: ["type": PayloadType.meshRoutedInventoryDigest.rawValue,
+                context: ["type": meshToken(.meshRoutedInventoryDigest),
                           "error": String(describing: error)]
             )
         }
@@ -6245,7 +6259,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// - Parameter now: The injected instant for this frame's whole ingest (D-6.12).
     func dispatchRoutedPayload(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         plaintext: Data,
         decoder: JSONDecoder,
         slot: PeerSlot?,
@@ -6258,12 +6272,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // key and no cell counts it — which is honest, not a gap.
             ProximityAudit.log(
                 "mesh.routedDrain.droppedUncommittedSlot",
-                context: heldMeshAuditContext(["type": type.rawValue])
+                context: heldMeshAuditContext(["type": meshToken(type)])
             )
             return
         }
         guard let mesh = currentMesh, let verifier = membershipVerifier else {
-            ProximityAudit.log("mesh.routedDrain.droppedNoLedger", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.routedDrain.droppedNoLedger", context: ["type": meshToken(type)])
             return
         }
         if type == .meshRoutedInventoryDigest || type == .meshRoutedDrainAnswer {
@@ -6273,7 +6287,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return
         }
         guard let hardDeadline = routedHardDeadline else {
-            ProximityAudit.log("mesh.routedDrain.droppedNoCeiling", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.routedDrain.droppedNoCeiling", context: ["type": meshToken(type)])
             return
         }
         let context = RoutedIngestContext(
@@ -6286,7 +6300,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The two digest-family frames, which need no deadline: an advertisement and an answer both
     /// describe state rather than carry content.
     private func dispatchRoutedDigest(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         plaintext: Data,
         decoder: JSONDecoder,
         from senderFingerprint: String,
@@ -6295,13 +6309,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         switch type {
         case .meshRoutedInventoryDigest:
             guard let payload = try? decoder.decode(MeshRoutedInventoryPayload.self, from: plaintext) else {
-                ProximityAudit.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                ProximityAudit.log("mesh.routedDrain.undecodable", context: ["type": meshToken(type)])
                 return
             }
             receiveRoutedInventory(payload, from: senderFingerprint, now: now)
         default:
             guard let payload = try? decoder.decode(MeshRoutedDrainAnswerPayload.self, from: plaintext) else {
-                ProximityAudit.log("mesh.routedDrain.undecodable", context: ["type": type.rawValue])
+                ProximityAudit.log("mesh.routedDrain.undecodable", context: ["type": meshToken(type)])
                 return
             }
             receiveRoutedDrainAnswer(payload, from: senderFingerprint)
@@ -6328,7 +6342,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// is already the most frames the drain lets it make this device serve — and a spent sender's
     /// content is dropped here unread. Bounded aggregate work, not just bounded frame size.
     private func dispatchRoutedContent(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         plaintext: Data,
         decoder: JSONDecoder,
         in context: RoutedIngestContext
@@ -6340,7 +6354,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshRoutedManifest:
             guard let payload = try? decoder.decode(MeshRoutedManifestPayload.self, from: plaintext) else {
                 refuseRoutedFrameBeforeStore(
-                    event: "mesh.routedDrain.undecodable", ["type": type.rawValue], in: context
+                    event: "mesh.routedDrain.undecodable", ["type": meshToken(type)], in: context
                 )
                 return
             }
@@ -6348,7 +6362,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshRoutedChunk:
             guard let payload = try? decoder.decode(MeshChunkPayload.self, from: plaintext) else {
                 refuseRoutedFrameBeforeStore(
-                    event: "mesh.routedDrain.undecodable", ["type": type.rawValue], in: context
+                    event: "mesh.routedDrain.undecodable", ["type": meshToken(type)], in: context
                 )
                 return
             }
@@ -6356,7 +6370,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshCustodyReceipt:
             guard let payload = try? decoder.decode(MeshCustodyReceiptPayload.self, from: plaintext) else {
                 refuseRoutedFrameBeforeStore(
-                    event: "mesh.routedDrain.undecodable", ["type": type.rawValue], in: context
+                    event: "mesh.routedDrain.undecodable", ["type": meshToken(type)], in: context
                 )
                 return
             }
@@ -6364,7 +6378,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         default:
             guard let payload = try? decoder.decode(MeshRecipientReceiptPayload.self, from: plaintext) else {
                 refuseRoutedFrameBeforeStore(
-                    event: "mesh.routedDrain.undecodable", ["type": type.rawValue], in: context
+                    event: "mesh.routedDrain.undecodable", ["type": meshToken(type)], in: context
                 )
                 return
             }
@@ -6400,8 +6414,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let author: String
         /// The frame's own expiry, from the frame.
         let expiresAt: Date
-        /// The payload type, for the audit line's frozen token.
-        let type: PayloadType
+        /// The frame's role, for the audit line's frozen token (the host's token for it).
+        let type: MeshPayloadRole
     }
 
     /// Whether this content frame has already been admitted from this author — the **probe**, run as
@@ -6425,7 +6439,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard verdict == .replayed else { return false }
         ProximityAudit.log(
             "mesh.routedDrain.rejected",
-            context: ["type": frame.type.rawValue, "reason": "replayed"]
+            context: ["type": meshToken(frame.type), "reason": "replayed"]
         )
         return true
     }
@@ -6528,7 +6542,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let full = window.recordedCount(for: frame.author) >= routedReplayCapacity
         ProximityAudit.log(
             "mesh.routedDrain.replayWindowFull",
-            context: ["type": frame.type.rawValue, "axis": full ? "frames" : "senders"]
+            context: ["type": meshToken(frame.type), "axis": full ? "frames" : "senders"]
         )
     }
 
@@ -6591,7 +6605,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if let rejection = door.verify(payload) {
             ProximityAudit.log(
                 "mesh.routedDrain.rejected",
-                context: ["type": PayloadType.meshRoutedInventoryDigest.rawValue,
+                context: ["type": meshToken(.meshRoutedInventoryDigest),
                           "reason": rejection.rawValue]
             )
             return
@@ -6772,7 +6786,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if let rejection = door.verify(payload) {
             ProximityAudit.log(
                 "mesh.routedDrain.rejected",
-                context: ["type": PayloadType.meshRoutedDrainAnswer.rawValue,
+                context: ["type": meshToken(.meshRoutedDrainAnswer),
                           "reason": rejection.rawValue]
             )
             return
@@ -6840,7 +6854,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         if let rejection = door.verify(manifest) {
             refuseRoutedFrameBeforeStore(
-                ["type": PayloadType.meshRoutedManifest.rawValue, "reason": rejection.rawValue],
+                ["type": meshToken(.meshRoutedManifest), "reason": rejection.rawValue],
                 in: context
             )
             dropParkedSetIfTerminal(rejection, manifest: manifest, in: context)
@@ -6848,7 +6862,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         if let capRejection = routedTypeCapRejection(for: manifest) {
             refuseRoutedFrameBeforeStore(
-                ["type": PayloadType.meshRoutedManifest.rawValue, "reason": capRejection.rawValue],
+                ["type": meshToken(.meshRoutedManifest), "reason": capRejection.rawValue],
                 in: context
             )
             return
@@ -6958,7 +6972,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         if let rejection = door.verify(chunk) {
             refuseRoutedFrameBeforeStore(
-                ["type": PayloadType.meshRoutedChunk.rawValue, "reason": rejection.rawValue],
+                ["type": meshToken(.meshRoutedChunk), "reason": rejection.rawValue],
                 in: context, charge: charge
             )
             return
@@ -7001,7 +7015,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         if let rejection = door.verify(receipt) {
             refuseRoutedFrameBeforeStore(
-                ["type": PayloadType.meshCustodyReceipt.rawValue, "reason": rejection.rawValue],
+                ["type": meshToken(.meshCustodyReceipt), "reason": rejection.rawValue],
                 in: context, charge: !routedRefusalIsHeldForCapacity(key, from: context.sender)
             )
             return
@@ -7039,7 +7053,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         if let rejection = door.verify(receipt) {
             refuseRoutedFrameBeforeStore(
-                ["type": PayloadType.meshRecipientReceipt.rawValue, "reason": rejection.rawValue],
+                ["type": meshToken(.meshRecipientReceipt), "reason": rejection.rawValue],
                 in: context, charge: !routedRefusalIsHeldForCapacity(key, from: context.sender)
             )
             return
@@ -7094,7 +7108,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// deferred is never treated as empty, and quarantine is the store's own explicit call.
     private func recordRoutedOutcome<Value>(
         _ outcome: MeshRoutedOutcome<Value>,
-        type: PayloadType,
+        type: MeshPayloadRole,
         key: MeshRoutedItemKey,
         in context: RoutedIngestContext,
         verdict: (Value) -> String = { _ in RoutedDrainVerdict.admitted }
@@ -7103,19 +7117,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .completed(let value):
             ProximityAudit.log(
                 "mesh.routedDrain.admitted",
-                context: ["type": type.rawValue, "verdict": verdict(value)]
+                context: ["type": meshToken(type), "verdict": verdict(value)]
             )
         case .refused(let refusal):
             ProximityAudit.log(
                 "mesh.routedDrain.refused",
-                context: ["type": type.rawValue, "reason": refusal.rawValue]
+                context: ["type": meshToken(type), "reason": refusal.rawValue]
             )
             guard Self.routedCapacityRefusals.contains(refusal) else { return }
             noteRoutedCapacityRefusal(refusal, key: key, from: context.sender, at: context.now)
         case .unavailable(let cause):
             ProximityAudit.log(
                 "mesh.routedDrain.unavailable",
-                context: ["type": type.rawValue, "state": cause.logToken]
+                context: ["type": meshToken(type), "state": cause.logToken]
             )
         }
     }
@@ -8540,7 +8554,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             ProximityAudit.log(
                 "mesh.routedDrain.signFailed",
-                context: ["type": PayloadType.meshCustodyReceipt.rawValue,
+                context: ["type": meshToken(.meshCustodyReceipt),
                           "error": String(describing: error)]
             )
             return nil
@@ -8857,7 +8871,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             ProximityAudit.log(
                 "mesh.routedDrain.signFailed",
-                context: ["type": PayloadType.meshRecipientReceipt.rawValue,
+                context: ["type": meshToken(.meshRecipientReceipt),
                           "error": String(describing: error)]
             )
             return nil
@@ -9858,7 +9872,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         } catch {
             ProximityAudit.log(
                 "mesh.routedDrain.signFailed",
-                context: ["type": PayloadType.meshRoutedDrainAnswer.rawValue,
+                context: ["type": meshToken(.meshRoutedDrainAnswer),
                           "error": String(describing: error)]
             )
         }
@@ -10904,11 +10918,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Returns: `true` when the record is durable and may be acted on.
     private func commitVerifiedRecord(
         rollingBackTo snapshot: MeshMembershipRecordVerifier?,
-        type: PayloadType
+        type: MeshPayloadRole
     ) -> Bool {
         guard persistSessionContext(addingEpochHead: nil) else {
             membershipVerifier = snapshot
-            ProximityAudit.log("mesh.membershipEvent.notDurable", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.membershipEvent.notDurable", context: ["type": meshToken(type)])
             return false
         }
         return true
@@ -11385,18 +11399,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// which is what stops a peer inserting junk with a low timestamp and crowding a real record
     /// out of a sixteen-slot set.
     private func dispatchMembershipEventPayload(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         plaintext: Data,
         decoder: JSONDecoder,
         slot: PeerSlot?,
         now: Date = Date()
     ) {
         guard let senderFingerprint = slot?.fingerprint else {
-            ProximityAudit.log("mesh.membershipEvent.droppedUncommittedSlot", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.membershipEvent.droppedUncommittedSlot", context: ["type": meshToken(type)])
             return
         }
         guard let verifier = membershipVerifier else {
-            ProximityAudit.log("mesh.membershipEvent.droppedNoLedger", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.membershipEvent.droppedNoLedger", context: ["type": meshToken(type)])
             return
         }
         // The ONE frame in this family whose sender must be a member this device recognises, not
@@ -11417,7 +11431,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // door, and the family's own hazard shape: a forgotten `decodeMembershipFrame` arm
             // returns nil here and reads, in a transcript, exactly like a frame that never arrived.
             ProximityAudit.log(
-                "mesh.membershipEvent.droppedUndecodable", context: ["type": type.rawValue]
+                "mesh.membershipEvent.droppedUndecodable", context: ["type": meshToken(type)]
             )
             return
         }
@@ -11462,7 +11476,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Returns: The decoded record, or nil for a frame that did not decode — never a partially
     ///   trusted value.
     private static func decodeMembershipFrame(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         plaintext: Data,
         decoder: JSONDecoder
     ) -> DecodedMembershipRecord? {
@@ -11521,7 +11535,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   rejection.
     private func insertMembershipRecord(
         _ decoded: DecodedMembershipRecord,
-        type: PayloadType
+        type: MeshPayloadRole
     ) -> DecodedMembershipRecord? {
         let rejection: MeshMembershipRecordRejection?
         switch decoded {
@@ -11537,7 +11551,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // refused" read identically in a `--console-pty` transcript, and a lane cannot tell a
         // transport fault from a membership one. Compiled to nothing in Release.
         MeshTransportConsoleLog.echo(
-            "membershipRecord \(type.rawValue) "
+            "membershipRecord \(meshToken(type)) "
                 + (rejection.map(\.diagnosticDescription) ?? "accepted")
         )
         return rejection == nil ? decoded : nil
@@ -11719,7 +11733,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// **The answer carries both halves of §10.3's exchange, exactly as the ask does** (P4 item 2c).
     /// A device inside an open merge window opens no second exchange
     /// (``openBlipMergeIfReconnected(_:from:peer:)``), and an exchange is the only other thing that
-    /// sends a ``PayloadType/meshEpochHeads`` frame — so an answer of records alone leaves a peer
+    /// sends a ``MeshPayloadRole/meshEpochHeads`` frame — so an answer of records alone leaves a peer
     /// that converged on this device's *ledger* still counting up from its own older head, with
     /// nothing left in flight to correct it. Found by the seeded convergence property
     /// (`MeshConvergencePropertyTests`), where a chain heal left one member on a lower
@@ -11729,7 +11743,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         if let rejection = verifier.verify(payload) {
             ProximityAudit.log(
                 "mesh.membershipEvent.rejected",
-                context: ["type": PayloadType.meshInventoryDigest.rawValue,
+                context: ["type": meshToken(.meshInventoryDigest),
                           "reason": rejection.diagnosticDescription]
             )
             return
@@ -11762,11 +11776,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Logs a refused record. Frozen English diagnostics, never user copy.
-    private func recordRejection(_ rejection: MeshMembershipRecordRejection?, type: PayloadType) {
+    private func recordRejection(_ rejection: MeshMembershipRecordRejection?, type: MeshPayloadRole) {
         guard let rejection else { return }
         ProximityAudit.log(
             "mesh.membershipEvent.rejected",
-            context: ["type": type.rawValue, "reason": rejection.diagnosticDescription]
+            context: ["type": meshToken(type), "reason": rejection.diagnosticDescription]
         )
     }
 
@@ -11777,14 +11791,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// hold — otherwise one peer could fabricate both halves of the vote and have any member
     /// (including this device) disconnected.
     private func dispatchRemovalPayload(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         plaintext: Data,
         decoder: JSONDecoder,
         peer: ProximityCoordinator.PeerIdentity?,
         slot: PeerSlot?
     ) {
         guard slot?.fingerprint != nil, let senderFingerprint = peer?.fingerprint else {
-            ProximityAudit.log("mesh.removalVote.droppedUncommittedSlot", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.removalVote.droppedUncommittedSlot", context: ["type": meshToken(type)])
             return
         }
         switch type {
@@ -11819,13 +11833,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// sender-must-be-author rule would additionally forbid relaying, which is the one thing a
     /// partitioned quorum genuinely wants.
     private func dispatchRemovalQuorumPayload(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         plaintext: Data,
         decoder: JSONDecoder,
         slot: PeerSlot?
     ) {
         guard slot?.fingerprint != nil else {
-            ProximityAudit.log("mesh.removalQuorum.droppedUncommittedSlot", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.removalQuorum.droppedUncommittedSlot", context: ["type": meshToken(type)])
             return
         }
         switch type {
@@ -11865,7 +11879,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// sender at all (its send side retired with P5 item 13's pull protocol); it is kept for an
     /// older peer's frame, and gating it changes only which of two refusals such a frame meets.
     private func dispatchGroupKeyPayload(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         plaintext: Data,
         decoder: JSONDecoder,
         peer: ProximityCoordinator.PeerIdentity?,
@@ -11874,7 +11888,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard slot?.fingerprint != nil else {
             ProximityAudit.log(
                 "mesh.groupKey.droppedUncommittedSlot",
-                context: heldMeshAuditContext(["type": type.rawValue])
+                context: heldMeshAuditContext(["type": meshToken(type)])
             )
             return
         }
@@ -11906,8 +11920,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// Known type outside the core mesh set: give a registered feature module a chance
-    /// (Phase 1 registry); otherwise keep the pre-registry silent drop.
+    /// A known token the core switch leaves unhandled — a feature's, which names no
+    /// ``MeshPayloadRole``, or the state change the mesh opens only inside closed-mode metadata: give
+    /// the feature module registered for that token a chance (Phase 1 registry); otherwise keep the
+    /// pre-registry silent drop.
     ///
     /// COMMITTED SLOTS ONLY (Phase 3a hardening; a Phase-1 review fact makes this the security
     /// boundary): the coordinator dispatches known non-core payloads with
@@ -11915,7 +11931,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// peer — or a coordinator that never became a slot — could otherwise reach feature handlers
     /// with a merely-pending identity. Feature payloads are for session members, not candidates.
     private func dispatchRegistryPayload(
-        _ type: PayloadType,
+        _ token: String,
         envelope: FernletIdentityEnvelope,
         plaintext: Data,
         peer: ProximityCoordinator.PeerIdentity?,
@@ -11924,11 +11940,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard slot?.fingerprint != nil else {
             ProximityAudit.log(
                 "mesh.registryPayload.droppedUncommittedSlot",
-                context: ["type": type.rawValue]
+                context: ["type": token]
             )
             return
         }
-        registeredPayloadHandlers[type]?(envelope, plaintext, peer)
+        registeredPayloadHandlers[token]?(envelope, plaintext, peer)
     }
 
     // MARK: - Friend-of-friend labels
@@ -13108,7 +13124,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     private func sendVerifyEnvelope(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         encodable: some Encodable,
         to peer: ProximityCoordinator.PeerIdentity,
         via slot: PeerSlot
@@ -13128,7 +13144,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// fields aren't populated yet — seal to the identity carried by the gate state / envelope
     /// instead of `slot.verifiedKeyAgreementPublicKey` (which `sendEnvelope` uses).
     private func sendVerifyEnvelope(
-        _ type: PayloadType,
+        _ type: MeshPayloadRole,
         encodable: some Encodable,
         toKeyAgreementKey kaKey: Data,
         fingerprint: String?,
@@ -13138,7 +13154,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Nothing retries a failed ceremony send — the user just never sees a commit — so the
         // failure is audit-logged rather than swallowed (R7).
         let sent = await sendEnvelopeCore(
-            type,
+            meshToken(type),
             encodable: encodable,
             sealTo: (kaKey: kaKey, supportsWire2: supportsWire2),
             fingerprint: fingerprint,
@@ -13146,7 +13162,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             auditSendFailure: true
         )
         if !sent {
-            ProximityAudit.log("mesh.verifyQR.sendFailed", context: ["type": type.rawValue])
+            ProximityAudit.log("mesh.verifyQR.sendFailed", context: ["type": meshToken(type)])
         }
     }
 
@@ -13692,7 +13708,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    private func broadcastEnvelope(_ type: PayloadType, encodable: some Encodable) {
+    private func broadcastEnvelope(_ type: MeshPayloadRole, encodable: some Encodable) {
         for slot in slots {
             spawnHostPinned { [weak self] in
                 await self?.sendEnvelope(type, encodable: encodable, via: slot)
@@ -14224,7 +14240,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private func sendShopCatalog(to slot: PeerSlot) async {
         guard let payload = clothingShop.localCatalogProvider?() else { return }
         onShopCatalogSendForTesting?(slot.id)
-        await sendEnvelope(.clothingCatalog, encodable: payload, via: slot, sealed: true)
+        await sendFeatureEnvelope(PayloadType.clothingCatalog.rawValue, encodable: payload, via: slot, sealed: true)
     }
 
     /// Asks a just-committed peer for its catalog (commit symmetry — see `noteSlotCommittedForShop`).
@@ -14234,7 +14250,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // DO NOT LOCALIZE "Clothing catalog request" — as the doc comment above says, the summary is
         // the whole body here, so this literal is signed wire bytes AND the receiving peer's
         // Inspector row. See `FernletIdentityEnvelope.payloadSummary`.
-        await sendEnvelope(.clothingCatalogRequest, encodable: PayloadSummary(title: "Clothing catalog request"), via: slot)
+        await sendFeatureEnvelope(
+            PayloadType.clothingCatalogRequest.rawValue,
+            encodable: PayloadSummary(title: "Clothing catalog request"), via: slot
+        )
         onShopCatalogRequestSendForTesting?(slot.id)
     }
 
@@ -14451,20 +14470,40 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: - Envelope sending
 
-    /// Seal (optional) + sign + transmit a payload to a slot, best-effort.
+    /// The host's token for one of this manager's own frames: what a frame of `role` is signed under
+    /// and titled with, and what every audit line about it names. Read off ``namespace``'s mesh
+    /// messages at each call, through ``MeshPayloadRole/token(in:)``.
+    ///
+    /// - Parameter role: The frame's role.
+    /// - Returns: The token.
+    private nonisolated func meshToken(_ role: MeshPayloadRole) -> String {
+        role.token(in: namespace.family.vocabulary.mesh)
+    }
+
+    /// Seal (optional) + sign + transmit one of this manager's own frames to a slot, best-effort,
+    /// under the host's token for `type`.
     ///
     /// The failure is never silent — `sendEnvelopeCore` audit-logs EVERY failing stage — so this
     /// wrapper deliberately returns nothing (R7: no `@discardableResult` on a success/failure
     /// value). The one caller that must branch on the outcome uses
     /// ``sendEnvelopeReportingResult(_:encodable:via:sealed:)``.
-    private func sendEnvelope(_ type: PayloadType, encodable: some Encodable, via slot: PeerSlot, sealed: Bool = false) async {
-        _ = await sendEnvelopeReportingResult(type, encodable: encodable, via: slot, sealed: sealed)
+    private func sendEnvelope(_ type: MeshPayloadRole, encodable: some Encodable, via slot: PeerSlot, sealed: Bool = false) async {
+        _ = await sendEnvelopeReportingResult(meshToken(type), encodable: encodable, via: slot, sealed: sealed)
     }
 
-    /// Same send, returning whether the wire write succeeded — used by the in-session heart path
-    /// (TF b19 item 5) for consume-on-send + sent/failed feedback. Never `@discardableResult`.
+    /// The same send for a feature's payload, under the token its caller passes: Fernlet's
+    /// `PayloadType` raw value, spelled at each feature call site, so the lines that name it are the
+    /// feature lines that leave with their features (plan steps A0.4 and A0.5). The mesh's own frames
+    /// never come through here: they are sent by role, through ``sendEnvelope(_:encodable:via:sealed:)``.
+    private func sendFeatureEnvelope(_ token: String, encodable: some Encodable, via slot: PeerSlot, sealed: Bool = false) async {
+        _ = await sendEnvelopeReportingResult(token, encodable: encodable, via: slot, sealed: sealed)
+    }
+
+    /// Same send, returning whether the wire write succeeded, for a frame whose token is already
+    /// resolved: the body of both wrappers above, and what ``writeMembershipFrame(_:_:to:)`` calls to
+    /// learn which recipients a write reached. Never `@discardableResult`.
     private func sendEnvelopeReportingResult(
-        _ type: PayloadType,
+        _ token: String,
         encodable: some Encodable,
         via slot: PeerSlot,
         sealed: Bool = false
@@ -14473,7 +14512,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             guard let kaKey = slot.verifiedKeyAgreementPublicKey else { return false }
             let capabilities = namespace.family.vocabulary.capabilities
             return await sendEnvelopeCore(
-                type,
+                token,
                 encodable: encodable,
                 sealTo: (kaKey: kaKey, supportsWire2: slot.supports(capabilities.wire2, in: capabilities)),
                 fingerprint: slot.fingerprint,
@@ -14482,7 +14521,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
         }
         return await sendEnvelopeCore(
-            type,
+            token,
             encodable: encodable,
             sealTo: nil,
             fingerprint: slot.fingerprint,
@@ -14491,14 +14530,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
     }
 
-    /// Shared seal+sign+send core behind `sendEnvelope` and `sendVerifyEnvelope`: encodes the
-    /// payload, optionally seals it to `sealTo.kaKey` (wire2 or legacy per `sealTo.supportsWire2`;
-    /// an empty key fails closed — a sealed request is never downgraded to an unsealed send),
-    /// signs the envelope, and transmits it reliably on the slot channel. Returns whether the
-    /// wire write succeeded; a send failure is audit-logged only when `auditSendFailure` is true
-    /// (the pre-commit ceremony path swallows it silently, matching its historical behavior).
+    /// Shared seal+sign+send core behind `sendEnvelope`, `sendFeatureEnvelope` and
+    /// `sendVerifyEnvelope`, and the one place a mesh envelope is signed: encodes the payload,
+    /// optionally seals it to `sealTo.kaKey` (wire2 or legacy per `sealTo.supportsWire2`; an empty key
+    /// fails closed — a sealed request is never downgraded to an unsealed send), signs the envelope
+    /// under `token`, and transmits it reliably on the slot channel. Returns whether the wire write
+    /// succeeded; a send failure is audit-logged only when `auditSendFailure` is true (the pre-commit
+    /// ceremony path swallows it silently, matching its historical behavior).
     private func sendEnvelopeCore(
-        _ type: PayloadType,
+        _ token: String,
         encodable: some Encodable,
         sealTo seal: (kaKey: Data, supportsWire2: Bool)?,
         fingerprint: String?,
@@ -14522,7 +14562,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Every failing stage is NAMED (R7) — an encode/seal/sign failure used to return `false`
         // with no trace at ~30 call sites that ignore the result.
         guard let payloadData = try? JSONEncoder().encode(outgoing) else {
-            logSendFailure(type, stage: "encode")
+            logSendFailure(token, stage: "encode")
             return false
         }
         let finalPayload: Data
@@ -14534,7 +14574,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                       to: seal.kaKey,
                       format: seal.supportsWire2 ? .wire2 : .legacy
                   ) else {
-                logSendFailure(type, stage: "seal")
+                logSendFailure(token, stage: "seal")
                 return false
             }
             finalPayload = ciphertext
@@ -14547,20 +14587,20 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             identityService: identity,
             senderDisplayName: committed ? displayName : "",
             recipientFingerprint: fingerprint,
-            payloadType: type,
+            payloadTypeToken: token,
             payloadEncryption: encryption,
-            // The mesh path deliberately uses the payload-type rawValue as the summary title rather
-            // than prose — it is the ideal shape for localization later, because the receiver can map
+            // The mesh path deliberately uses the payload token as the summary title rather than
+            // prose — it is the ideal shape for localization later, because the receiver can map
             // this token to a `String(localized:)` label without the sender's locale entering the
             // signed bytes. DO NOT "improve" this into a friendly sentence, and never localize it.
-            payloadSummary: PayloadSummary(title: type.rawValue),
+            payloadSummary: PayloadSummary(title: token),
             payload: finalPayload
         ) else {
-            logSendFailure(type, stage: "sign")
+            logSendFailure(token, stage: "sign")
             return false
         }
         guard let envelopeData = try? JSONEncoder().encode(envelope) else {
-            logSendFailure(type, stage: "encodeEnvelope")
+            logSendFailure(token, stage: "encodeEnvelope")
             return false
         }
         do {
@@ -14568,18 +14608,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return true
         } catch {
             if auditSendFailure {
-                ProximityAudit.log("mesh.sendEnvelope.failed", context: ["type": type.rawValue, "error": error.localizedDescription])
+                ProximityAudit.log("mesh.sendEnvelope.failed", context: ["type": token, "error": error.localizedDescription])
             }
             return false
         }
     }
 
     /// One audit line per non-transport send failure, naming the stage that failed. Carries only
-    /// the payload type — never payload content or peer identity.
-    private func logSendFailure(_ type: PayloadType, stage: String) {
+    /// the payload token — never payload content or peer identity.
+    private func logSendFailure(_ token: String, stage: String) {
         ProximityAudit.log(
             "mesh.sendEnvelope.failed",
-            context: ["type": type.rawValue, "stage": stage]
+            context: ["type": token, "stage": stage]
         )
     }
 
@@ -14671,9 +14711,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// but stamped with a foreign epoch would open and dispatch — including into
     /// ``handleAdmissionGrant(_:slot:senderSigningPublicKey:)``. The compare is what drops it.
     ///
-    /// If this door is ever judged dead, the admissible move is to delete it WHOLE, with
-    /// `PayloadType.meshEncryptedMetadata` parked per the `sessionGoodbye` precedent — never to keep
-    /// it minus its gate.
+    /// The inner token resolves to its role by the host's mesh messages, as the plaintext door's do;
+    /// a token that names none of the three control arms opens nothing.
+    ///
+    /// If this door is ever judged dead, the admissible move is to delete it WHOLE, with its role
+    /// retired and its token parked per the `sessionGoodbye` precedent — never to keep it minus its
+    /// gate.
     private func handleEncryptedMetadata(
         _ wrapper: MeshEncryptedMetadataPayload,
         from peer: ProximityCoordinator.PeerIdentity?,
@@ -14693,7 +14736,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return
         }
         guard let inner = try? JSONDecoder().decode(EncryptedMetadataInner.self, from: plaintext),
-              let innerType = PayloadType(rawValue: inner.payloadType) else { return }
+              let innerType = MeshPayloadRole.role(for: inner.payloadType, in: namespace.family.vocabulary.mesh)
+        else { return }
 
         let data = inner.payload
         let decoder = JSONDecoder()
@@ -15857,10 +15901,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         epochRef(counter: counter, coordinatorFingerprint: coordinatorFingerprint)
     }
 
-    /// Fires with the membership event that reached ``sendMembershipEvent(_:)``'s broadcast — the
-    /// only observation point for a frame whose wire write a unit test cannot see (the slot channel
-    /// is detached). Mirrors `onSessionHeartSendForTesting`.
-    @ObservationIgnored var onMembershipEventSentForTesting: ((PayloadType) -> Void)?
+    /// Fires with the role of the membership event that reached ``sendMembershipEvent(_:)``'s
+    /// broadcast — the only observation point for a frame whose wire write a unit test cannot see (the
+    /// slot channel is detached). Mirrors `onSessionHeartSendForTesting`.
+    @ObservationIgnored var onMembershipEventSentForTesting: ((MeshPayloadRole) -> Void)?
 
     /// Puts a ledger on this manager without a merge, so a test can start FROM a roster instead of
     /// building one through the merge path — which would spend the rotation trigger the test is

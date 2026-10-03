@@ -33,11 +33,11 @@ import Foundation
 /// (``Vocabulary``): the identity envelope seals and parks by its payload rules, the session
 /// coordinator signs and dispatches by its session messages and reads its capability rules, the mesh
 /// and presence managers advertise its wire2 token and the mesh frames by it, the inventory digest
-/// hashes its membership record kinds and the routed type registry builds its rows from its routed
-/// types. The mesh engine's own payload tokens and its features' payload and capability tokens are
-/// still Fernlet's `PayloadType` and `ProximityCapability` cases until the rest of plan step A0.3 and
-/// plan steps A0.4 and A0.5 move them; for Fernlet the two spellings are equal, which
-/// `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
+/// hashes its membership record kinds, the routed type registry builds its rows from its routed
+/// types, and the mesh manager signs and dispatches its engine's own frames by its mesh messages. The
+/// mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
+/// `ProximityCapability` cases until plan steps A0.4 and A0.5 move them; for Fernlet the two
+/// spellings are equal, which `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
 /// until plan step A0.4: the 13 feature labels ProximityKit reads from FernletCrypto's registry, the
 /// heart-drop and moderation keychain services and ``ProximitySupportLayout``'s folder.
 /// `ProximityNamespaceBoundaryTests` keeps three rules: no namespace, group or purpose is built outside
@@ -172,17 +172,18 @@ public nonisolated struct ProximityNamespace: Hashable, Sendable {
         /// The log subsystem is empty.
         case emptyLogSubsystem
         /// A token is empty, longer than its group allows, or holds a byte outside `0x21`–`0x7E`: a
-        /// payload token or membership record kind at most 255 bytes, a capability token at most 32
-        /// (a receiver cuts a longer one, which then matches nothing), a routed-type token at most 64
-        /// (a routed manifest naming a longer one is refused). A set or list is named once, by its
-        /// own path, however many of its members break the rule.
+        /// payload token (a mesh message among them) or membership record kind at most 255 bytes, a
+        /// capability token at most 32 (a receiver cuts a longer one, which then matches nothing), a
+        /// routed-type token at most 64 (a routed manifest naming a longer one is refused). A set or
+        /// list is named once, by its own path, however many of its members break the rule.
         case malformedToken(field: String)
         /// Two tokens of one group have the same bytes: two of the three session payload tokens, two
         /// capability tokens (each named by its index in `capabilities.known`), two membership record
-        /// kinds, or two routed types.
+        /// kinds, two routed types, two mesh messages, or a session payload token and a mesh message,
+        /// which one dispatch path tells apart by token alone.
         case duplicateToken(field: String, otherField: String)
-        /// A token a rule names is not one the vocabulary knows: a session payload token or a
-        /// `sealingRequired` member outside `payloads.known`, or `wire2` or an
+        /// A token a rule names is not one the vocabulary knows: a session payload token, a
+        /// `sealingRequired` member or a mesh message outside `payloads.known`, or `wire2` or an
         /// `assumedForLegacyPeers` member outside `capabilities.known`. A set or list is named once,
         /// by its own path.
         case unknownToken(field: String)
