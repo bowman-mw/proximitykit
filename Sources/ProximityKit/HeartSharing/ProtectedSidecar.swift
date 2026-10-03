@@ -5,7 +5,7 @@ import UIKit
 
 /// Sealing hooks for a sidecar file at rest (Increment 4 of
 /// Docs/Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26.md). The keychain-backed production
-/// implementation lives in `HeartDropSidecarSeal`; tests inject their own closures.
+/// implementation is FernletSocial's `HeartDropSidecarSeal`; tests inject their own closures.
 public struct SidecarSeal {
     /// Seal/open failures, classified by recoverability — the transient case defers like a
     /// locked-file read; the others invoke per-store data-loss policy.
@@ -111,7 +111,7 @@ public final class ProtectedSidecar<Value: Codable> {
 
     /// The caller-visible availability. `.unavailable` covers BOTH failure flavors (never
     /// loaded, and loaded-but-the-last-write-failed) so the nothing-silent surfacing in
-    /// `HeartDropService.refreshDeliveryProblem` sees them without caring which it is.
+    /// FernletSocial's `HeartDropService.refreshDeliveryProblem` sees them without caring which.
     public enum State: Equatable {
         case ready
         case unavailable

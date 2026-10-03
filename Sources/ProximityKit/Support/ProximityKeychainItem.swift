@@ -137,8 +137,8 @@ nonisolated enum ProximityKeychainItem {
     /// distinguishing the three outcomes ``load(account:service:synchronizable:)`` collapses:
     /// ``ReadResult/found(_:)`` with the item's data, ``ReadResult/absent`` when no item exists, and
     /// ``ReadResult/unreadable(_:)`` carrying the failing `OSStatus`. Used by every store whose
-    /// mint-on-absent path must fail closed on a transient read error: the identity rows, both mesh
-    /// seal keys, the heart-drop prekey blob and the sidecar seal key.
+    /// mint-on-absent path must fail closed on a transient read error: the identity rows and both
+    /// mesh seal keys.
     static func loadDistinguishingAbsence(
         account: String,
         service: String,

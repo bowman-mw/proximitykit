@@ -42,10 +42,10 @@ import Foundation
 /// mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
 /// `ProximityCapability` cases until plan steps A0.4, A0.5 and A0.7 move them; for Fernlet the two
 /// spellings are equal, which `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
-/// until their features leave: the 12 feature labels ProximityKit reads from FernletCrypto's registry
-/// (eight at plan step A0.4, the activities' and the moderation report's four at A0.5), and until A0.4
-/// the heart-drop keychain service and ``ProximitySupportLayout``'s folder; the moderation ban
-/// store's keychain service is FernletSocial's.
+/// until their features leave: the 8 feature labels ProximityKit reads from FernletCrypto's registry
+/// (presence's two and the sealed-backup escrow's two at plan step A0.4, the activities' and the
+/// moderation report's four at A0.5); the heart dead-drop's and the moderation ban store's keychain
+/// services are FernletSocial's.
 /// `ProximityNamespaceBoundaryTests` keeps ProximityKit building no namespace, group or purpose
 /// outside `Namespace/`, and holds what is left of Fernlet in it (the registry's feature labels, the
 /// `fernlet` literals, Fernlet's domain types) and its `package` doors to exact per-file lists, each

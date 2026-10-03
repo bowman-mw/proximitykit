@@ -5,7 +5,7 @@
 // lives — the sidecar directory holding the index and the chunk files, the keychain service holding
 // the key that seals all of them — plus the key row itself.
 //
-// Both halves travel in one value for the reason `MeshSessionStorageScope` and
+// Both halves travel in one value for the reason `MeshSessionStorageScope` and FernletSocial's
 // `HeartDropStorageScope` document at length: a scope that isolated only the directory would be
 // cosmetic, because a wipe elsewhere in the process still deletes the shared key and the isolated
 // files then open for nobody.
@@ -40,7 +40,11 @@ import Security
 /// one key, and any test running "delete everything" destroys all of them for every
 /// concurrently-running suite. That is the shared-disk-root flake family
 /// (`PhotoDirectoryIsolationTests`), and this scope is what keeps it from gaining a new member —
-/// `MeshRoutedStoreIsolationTests` is the grep-wall that enforces it.
+/// `MeshRoutedStoreIsolationTests` is the grep-wall that enforces it. A host's shipped scope is
+/// ``production(for:installBinding:)``. Fernlet's app derives each store's service instead, through
+/// FernletSocial's `keychainService(besideHeartDrop:in:)` extension of this type, which maps the
+/// production heart-drop service to that same production service and an isolated one to a sibling of
+/// its own.
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: configuration, read from
 /// nonisolated stores and from `FernletStore`'s nonisolated stored properties. Not `Equatable` since
@@ -109,31 +113,6 @@ public nonisolated struct MeshRoutedStorageScope: Sendable {
             keychainService: namespace.installation.keychain.meshRoutedSealKey.service,
             installBinding: installBinding
         )
-    }
-
-    /// The routed-store keychain service that belongs beside a given heart-drop service.
-    ///
-    /// The app derives its scope this way rather than carrying a fourth injectable seam, and that
-    /// is a deliberate reuse of an isolation axis the test walls ALREADY enforce: every test file
-    /// that reaches `deleteAllData` and builds a `FernletStore` directly is already required to
-    /// pass `heartDropKeychainService:` (`PhotoDirectoryIsolationTests`), so a store isolated for
-    /// hearts is isolated for routed custody for free — and one that is not fails an existing wall
-    /// rather than silently sharing this key.
-    ///
-    /// - Parameters:
-    ///   - heartDropService: The store's heart-drop keychain service.
-    ///   - namespace: The host's protocol identity, whose production seal-key service the
-    ///     production heart-drop service maps to.
-    /// - Returns: The namespace's `installation.keychain.meshRoutedSealKey.service` when the input is
-    ///   the production heart-drop service; a distinct sibling of the caller's isolated service
-    ///   otherwise.
-    public static func keychainService(
-        besideHeartDrop heartDropService: String,
-        in namespace: ProximityNamespace
-    ) -> String {
-        heartDropService == HeartPrekeyStore.keychainService
-            ? namespace.installation.keychain.meshRoutedSealKey.service
-            : heartDropService + ".mesh-routed"
     }
 }
 

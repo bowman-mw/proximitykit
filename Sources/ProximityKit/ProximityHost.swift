@@ -49,7 +49,7 @@ public protocol ProximityHost: AnyObject {
     /// `MeshPhotoCache.json` is read once, resealed, and deleted by `PrivateMediaStore.loadIndex()`)
     /// and its preferences (`MeshPhotoWallPreferences.json`), and the
     /// heart-drop set the app hangs off the same root (`HeartLedger.json` plus the three sealed
-    /// sidecars named by ``HeartDropStorageScope``).
+    /// sidecars named by FernletSocial's `HeartDropStorageScope`).
     ///
     /// Comes through the HOST rather than being a constant inside `MeshNetworkManager` because it is
     /// shared *mutable on-disk state*: `deletePhoto` and an answer's keep re-save the whole wall
@@ -62,8 +62,8 @@ public protocol ProximityHost: AnyObject {
     /// `FernletStore.photoDocumentsDirectory`, for the corpus on the other side of the media-key split.
     ///
     /// The heart-drop sidecars share this root but need a second half the wall does not: they are
-    /// sealed, and their key is wiped by service, so isolating them means isolating a
-    /// ``HeartDropStorageScope`` (directory + keychain service), not just a directory.
+    /// sealed, and their key is wiped by service, so isolating them means isolating FernletSocial's
+    /// `HeartDropStorageScope` (directory + keychain service), not just a directory.
     var proximitySupportDirectory: URL { get }
 
     /// This host's sealed mesh-session scope (network migration P3): the directory holding
@@ -98,12 +98,11 @@ public protocol ProximityHost: AnyObject {
     /// the routed type registry and the mesh engine's own frames; the mesh features' payload and
     /// capability tokens are still Fernlet's cases until plan steps A0.4, A0.5 and A0.7 move them.
     /// Some such strings stay outside it until a later step: the feature labels this module reads from
-    /// FernletCrypto's registry (the heart dead-drop's, presence's and the sealed-backup escrow's until
-    /// A0.4, the activities' and the moderation report's until A0.5), the heart-drop keychain service
-    /// and ``ProximitySupportLayout``'s folder until A0.4; the moderation ban store's service is
-    /// FernletSocial's. `ProximityNamespaceBoundaryTests` allowlists each feature-label read, each
-    /// literal that spells `fernlet` and each line that still names one of Fernlet's domain types,
-    /// with the step that removes it.
+    /// FernletCrypto's registry (presence's and the sealed-backup escrow's until A0.4, the activities'
+    /// and the moderation report's until A0.5); the heart dead-drop's keychain service and the
+    /// moderation ban store's are FernletSocial's. `ProximityNamespaceBoundaryTests` allowlists each
+    /// feature-label read, each literal that spells `fernlet` and each line that still names one of
+    /// Fernlet's domain types, with the step that removes it.
     ///
     /// **Deliberately no default.** The extension below hands a host that carries no value of its
     /// own the in-person hearts setting, the sidecar root and the two storage scopes; it hands out no
@@ -217,27 +216,4 @@ public extension ProximityHost {
     /// step A0.2.8; for Fernlet `Application Support/Fernlet`, unchanged). The app's `FernletStore`
     /// overrides it with a per-instance root.
     var proximitySupportDirectory: URL { proximityNamespace.installation.storage.defaultDirectory }
-}
-
-/// Where the proximity subsystem's on-disk sidecars live. Split out of `MeshNetworkManager`'s
-/// initializer so the production path had ONE definition that both the app and the default
-/// ``ProximityHost/proximitySupportDirectory`` resolved to. Since plan step A0.2.8 those two, and the
-/// mesh stores' production scopes, resolve the host namespace's
-/// `installation.storage.defaultDirectory` instead, built the same way (Fernlet's spells the same
-/// folder); this one stays only for the heart-drop scope's production directory, until the heart
-/// dead-drop leaves for FernletSocial in plan step A0.4. ``ProximityHeartLedger`` and
-/// ``ProximityActivityManager`` take their file URL with no default, and so do FernletSocial's
-/// closeness ledger, friend-state cache and moderation ledger.
-public enum ProximitySupportLayout {
-    /// `Application Support/Fernlet` — unchanged from the path the mesh photo cache, the heart
-    /// ledger and the heart-drop sidecars have always used, so no shipped install is migrated by the
-    /// seams that made these injectable.
-    /// `nonisolated` against the target's `defaultIsolation(MainActor.self)`: a pure path
-    /// computation, read by the nonisolated static default `HeartDropStorageScope.production`, its one
-    /// production reader.
-    public nonisolated static var defaultDirectory: URL {
-        // `URL.applicationSupportDirectory` is the non-optional accessor for exactly the path the
-        // optional `FileManager.urls(for:in:).first` resolved to (R5: no force unwrap).
-        URL.applicationSupportDirectory.appendingPathComponent("Fernlet", isDirectory: true)
-    }
 }

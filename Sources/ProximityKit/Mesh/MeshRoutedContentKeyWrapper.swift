@@ -14,8 +14,9 @@
 //
 // Unlike the group-key wrap this type is `nonisolated` and static. Wrapping needs public keys
 // only. Unwrapping takes the recipient's static agreement as a closure into `IdentityService`
-// (the `HeartDropSealer.open` shape), so the private key never enters this file and the identity
-// key's keychain protection is never weakened for a background decrypt (walls: locked device).
+// (the shape of FernletSocial's `HeartDropSealer.open`), so the private key never enters this
+// file and the identity key's keychain protection is never weakened for a background decrypt
+// (walls: locked device).
 
 import CryptoKit
 import Foundation
@@ -79,9 +80,10 @@ nonisolated enum MeshRoutedKeyWrapError: Error, Equatable, Sendable {
 /// binding-carrying AAD substituted; unlike the group-key wrap it is `nonisolated` and static: the
 /// recipient's private key never enters this type — ``unwrap(_:binding:localFingerprint:localKeyAgreementPublicKey:staticAgreement:in:)``
 /// takes the static-agreement closure (`IdentityService.staticKeyAgreement(withEphemeralPublicKey:)`),
-/// the `HeartDropSealer.open` shape. Wrapping needs public keys only. Both directions name their
-/// purposes at the primitive, and since ProximityKit plan step A0.2.6 both read them from the
-/// caller's `in purposes:` — the host namespace's `keyDerivation` and `aead` labels, with no default.
+/// the shape of FernletSocial's `HeartDropSealer.open`. Wrapping needs public keys only. Both
+/// directions name their purposes at the primitive, and since ProximityKit plan step A0.2.6 both
+/// read them from the caller's `in purposes:` — the host namespace's `keyDerivation` and `aead`
+/// labels, with no default.
 nonisolated enum MeshRoutedContentKeyWrapper {
 
     /// A fresh 32-byte content key from the platform CSPRNG (the `MeshSessionKeyStore` mint idiom —

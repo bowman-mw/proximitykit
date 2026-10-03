@@ -60,9 +60,9 @@ package struct JSONSidecarFile<State: Codable> {
     }
 
     // There is deliberately NO argument-less `defaultFileURL(name:)` any more. Every owner states its
-    // root, exactly as every heart-drop caller states its `HeartDropStorageScope` — a default that
-    // silently resolves to the process-wide `Application Support/Fernlet` is precisely how a store
-    // rejoins the shared-root race, and the omission compiles.
+    // root, exactly as every heart-drop caller states FernletSocial's `HeartDropStorageScope` — a
+    // default that silently resolves to the process-wide `Application Support/Fernlet` is precisely
+    // how a store rejoins the shared-root race, and the omission compiles.
 
     /// Reads + decodes the sidecar. `nil` on ANY failure — absent, unreadable (including a
     /// locked-device read of a protected file), or undecodable. Package access for FernletSocial

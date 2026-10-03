@@ -4,9 +4,9 @@
 // Where ONE device's sealed mesh-session state lives — the sidecar directory and the keychain
 // service holding the key that seals it — plus the key row itself.
 //
-// Both halves travel in one value for the reason `HeartDropStorageScope` documents at length: a
-// scope that isolated only the directory would be cosmetic, because a wipe elsewhere in the process
-// still deletes the shared key and the isolated file then opens for nobody.
+// Both halves travel in one value for the reason FernletSocial's `HeartDropStorageScope` documents at
+// length: a scope that isolated only the directory would be cosmetic, because a wipe elsewhere in the
+// process still deletes the shared key and the isolated file then opens for nobody.
 
 import CryptoKit
 import Foundation
@@ -25,13 +25,17 @@ import Security
 /// **Why the two travel together.** `MeshSessionStore.wipeForDeleteAll(scope:)` destroys both, so
 /// isolating one without the other isolates nothing: files on a private root sealed by a shared key
 /// survive somebody else's wipe as ciphertext nothing can open, which is strictly worse than losing
-/// them. Same lesson, same shape, as ``HeartDropStorageScope``.
+/// them. Same lesson, same shape, as FernletSocial's `HeartDropStorageScope`.
 ///
 /// **Why that matters outside production.** XCTest and Swift Testing suites run in parallel in ONE
 /// process, so on the production scope every live store shares one file and one key, and any test
 /// running "delete everything" destroys both for every concurrently-running suite. That is the
 /// shared-disk-root flake family (`PhotoDirectoryIsolationTests`), and this scope is what keeps it
 /// from gaining a new member — `MeshSessionStoreIsolationTests` is the grep-wall that enforces it.
+/// A host's shipped scope is ``production(for:installBinding:)``. Fernlet's app derives each store's
+/// service instead, through FernletSocial's `keychainService(besideHeartDrop:in:)` extension of this
+/// type, which maps the production heart-drop service to that same production service and an
+/// isolated one to a sibling of its own.
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: configuration, read from
 /// nonisolated stores and from `FernletStore`'s nonisolated stored properties. Not `Equatable` since
@@ -102,31 +106,6 @@ public nonisolated struct MeshSessionStorageScope: Sendable {
             installBinding: installBinding
         )
     }
-
-    /// The mesh-session keychain service that belongs beside a given heart-drop service.
-    ///
-    /// The app derives its scope this way rather than carrying a fourth injectable seam, and that
-    /// is a deliberate reuse of an isolation axis the test walls ALREADY enforce: every test file
-    /// that reaches `deleteAllData` and builds a `FernletStore` directly is already required to
-    /// pass `heartDropKeychainService:` (`PhotoDirectoryIsolationTests`), so a store isolated for
-    /// hearts is isolated for mesh-session state for free — and one that is not fails an existing
-    /// wall rather than silently sharing this key.
-    ///
-    /// - Parameters:
-    ///   - heartDropService: The store's heart-drop keychain service.
-    ///   - namespace: The host's protocol identity, whose production seal-key service the
-    ///     production heart-drop service maps to.
-    /// - Returns: The namespace's `installation.keychain.meshSessionSealKey.service` when the input
-    ///   is the production heart-drop service; a distinct sibling of the caller's isolated service
-    ///   otherwise.
-    public static func keychainService(
-        besideHeartDrop heartDropService: String,
-        in namespace: ProximityNamespace
-    ) -> String {
-        heartDropService == HeartPrekeyStore.keychainService
-            ? namespace.installation.keychain.meshSessionSealKey.service
-            : heartDropService + ".mesh-session"
-    }
 }
 
 // MARK: - MeshSessionSealKeyOutcome
@@ -172,7 +151,7 @@ nonisolated enum MeshSessionSealKeyOutcome: Sendable {
 ///   backup-restorable row would be a promise the ciphertext cannot keep.
 ///
 /// The key is read on every use with no in-memory cache, so a wiped key can never be resurrected by
-/// a stale copy — the same rule ``HeartDropSidecarSeal`` follows.
+/// a stale copy — the same rule FernletSocial's `HeartDropSidecarSeal` follows.
 ///
 /// There is deliberately no argument-less production variant: every caller states its scope's service
 /// and account.

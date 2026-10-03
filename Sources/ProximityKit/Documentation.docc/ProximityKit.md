@@ -1,12 +1,13 @@
 # ``ProximityKit``
 
-Fernlet's self-contained peer-to-peer subsystem: signed identity, QUIC + UWB session formation, trust lifecycle, and the in-person social features still built into it (photos, recipes, the clothing shop, chat, hearts, activities, the moderation report relay); moderation's ban store and ledger, closeness and friend state are `FernletSocial`'s.
+Fernlet's self-contained peer-to-peer subsystem: signed identity, QUIC + UWB session formation, trust lifecycle, and the in-person social features still built into it (photos, recipes, the clothing shop, chat, in-person hearts and the heart ledger, activities, the moderation report relay); the heart dead-drop, moderation's ban store and ledger, closeness and friend state are `FernletSocial`'s.
 
 ## Overview
 
 ProximityKit is the "meet in person" half of Fernlet's social layer. Nothing here talks to a
-server except the heart dead-drop's injected transport seam; everything else moves over local
-radios (Network.framework/QUIC over Bonjour for data, NearbyInteraction/UWB for distance) between two phones
+server (`FernletSocial`'s heart dead-drop does, through a transport its app injects); everything
+moves over local radios (Network.framework/QUIC over Bonjour for data, NearbyInteraction/UWB for
+distance) between two phones
 that are physically together. The design center is a privacy stance the rest of the app depends
 on: identities are per-device Ed25519/X25519 key pairs (``IdentityService``), every wire transfer
 travels in a signed ``FernletIdentityEnvelope`` that is verified — signature, expiry, recipient,
@@ -23,9 +24,10 @@ Fernlet's vocabulary and record types named only on the lines `ProximityNamespac
 allowlists, which leave with their features or the session profile) and `FernletFoundation` (two
 `FernletDate` reads). It therefore sits on
 the *protected* side of the S3 privacy wall: it may reach a sealed `Private*` store, and the
-walled `AIProviders` / `CloudKitSync` targets can never import it (nor it them — the dead-drop's
-CloudKit transport is injected app-side through the `HeartDropTransporting` seam, so this module
-only ever hands ciphertext + rotating day tags outward). Its one seam back to app state is the
+walled `AIProviders` / `CloudKitSync` targets can never import it (nor it them, nor
+`FernletSocial`, whose heart dead-drop gets its CloudKit transport injected app-side through
+FernletDomainModel's `HeartDropTransporting` seam and so only ever hands ciphertext + rotating day
+tags outward). Its one seam back to app state is the
 ``ProximityHost`` protocol, which `FernletStore` conforms to via an app-side adapter; the
 "outward edges only" rule keeps the module a black box the app drives, never the reverse.
 
@@ -309,15 +311,17 @@ came up. The value is pure (injected clock, injected entropy, no radio and no
 timer); the manager rotates it on the epoch tick it already runs, and drops it on `stop()`. Hearts are delivered over short-lived
 connections formed on that recognition, with the sealed-introduction rule
 (``SealedIntroductionEnvelope``) ensuring a tag-replay forger never sees an identity. When the
-friend is away, ``HeartDropService`` seals the heart (``HeartDropSealer``, forward-secret via
-``HeartPrekeyStore`` one-time/signed prekeys cached per friend in ``HeartDropPeerBundleCache``)
-and queues it in the ``HeartDropOutbox`` for the injected dead-drop transport; the receive side
-dedups durably (``HeartDropDedupStore``) and records into the shared ``ProximityHeartLedger``,
-which enforces the bidirectional 5-minute rate limit for every heart transport.
-`FernletSocial`'s `ClosenessLedger` turns these interactions into the private closeness score.
+friend is away, `FernletSocial`'s heart dead-drop takes the heart instead: its `HeartDropService`
+seals it, forward-secret to a one-time or signed prekey the friend gossiped (or to the friend's
+static key, opened through ``IdentityService/staticKeyAgreement(withEphemeralPublicKey:)``), queues
+it for the transport its app injects, and on receipt dedups it durably and records it into the shared
+``ProximityHeartLedger``, which enforces the bidirectional 5-minute rate limit for every heart
+transport. Its pair secret derives through ``IdentityService/pairSecret(with:purpose:)`` under the
+salt `.fernlet` declares for it. `FernletSocial`'s `ClosenessLedger` turns these interactions into the
+private closeness score.
 
-The prekeys travel as the core wire type ``ProximityPrekeyBundle`` (the prekey store's `Bundle`,
-`PrekeyEntry` and `SignedPrekey` are its names there), inside the signed identity introduction under
+The prekeys travel as the core wire type ``ProximityPrekeyBundle`` (`FernletSocial`'s prekey store
+names it `Bundle`, with `PrekeyEntry` and `SignedPrekey`), inside the signed identity introduction under
 its frozen `heartDropPrekeyBundle` key: the coordinator encodes what its owner's
 ``ProximityCoordinator/introductionPrekeyBundleProvider`` returns and hands a verified
 introduction's bundle to ``ProximityCoordinator/onIntroductionPrekeyBundle``, reading no field, and
@@ -357,17 +361,18 @@ cross-platform stable; the legacy JSON encoder is retained verify-only). Persist
 stance throughout: small JSON sidecars in Application Support with `.completeFileProtection`,
 never synced — the best-effort stores share the `JSONSidecarFile` helper
 (`Support/JSONSidecarFile.swift`, a `package` door that `FernletSocial`'s three ledgers persist
-through too; see "Package doors"), while the heart-sharing sidecars additionally load through
-``ProtectedSidecar`` (sealed at rest via ``HeartDropSidecarSeal``), which classifies read
-failures so a locked-device read can never be mistaken for "empty" and overwrite real data. Key
+through too; see "Package doors"), while data of record loads through ``ProtectedSidecar``, which
+classifies read failures so a locked-device read can never be mistaken for "empty" and overwrite
+real data: the heart ledger here, and `FernletSocial`'s three heart-drop sidecars, sealed at rest
+through its ``SidecarSeal`` hooks by that module's `HeartDropSidecarSeal`. Key
 material lives in the keychain, ThisDeviceOnly, except the deliberately-synced backup-escrow key
 whose content-addressed slot lifecycle ``IdentityService`` reconciles non-silently.
 
 Where those sidecars live is the host's call, not a constant. EVERY device-local sidecar in this
 module hangs off ``ProximityHost/proximitySupportDirectory`` — the friend photo wall's index and
-preferences, ``ProximityHeartLedger``, the three sealed heart-drop stores and
-``ProximityActivityManager``'s ledger — and Fernlet's app builds `FernletSocial`'s moderation,
-friend-state and closeness ledgers on the same root. The heart ledger and the activity manager take
+preferences, ``ProximityHeartLedger`` and ``ProximityActivityManager``'s ledger — and Fernlet's app
+builds `FernletSocial`'s three sealed heart-drop stores and its moderation, friend-state and
+closeness ledgers on the same root. The heart ledger and the activity manager take
 their file URL with no default, so their owner states the file. There is
 deliberately no argument-less default on ``JSONSidecarFile``: every owner states its root, because a
 default that silently resolves to the process-wide `Application Support/Fernlet` is exactly how a
@@ -385,31 +390,15 @@ calls `clearAll()` on the moderation, friend-state, closeness and activity ledge
 fuzzy-state sharing off clears the friend-state cache on its own — so a plain settings toggle in one
 test, not just a wipe, used to empty another's cache.
 
-The heart sidecars sit on the same root and need one thing more, which ``HeartDropStorageScope``
-carries: they are SEALED, and their key lives under the heart-drop keychain service so that
-`HeartDropService.wipeForDeleteAll()` takes files and key together. A scope that moved only the
-directory would be cosmetic — another store's wipe still deletes the shared key, and the isolated
-file then survives as ciphertext nothing can open, which the outbox quarantines and latches as data
-loss. So the scope is (directory, keychain service), always both, and scoping is never unsealing: a
-store on its own scope still seals through the real ``HeartDropSidecarSeal`` key path.
-
-Those sealed sidecars are the module's one at-rest format surface, and Phase 3 of the
-crypto-standardization plan **deleted its legacy reader**: ``HeartDropSidecarSeal`` requires the
-`FSC2` marker, and the Phase 2.2 migrator that converted `FSC1` rows went in the same stroke,
-because it converted *through* the branch that is now gone and a healer that can no longer heal is
-worse than either alone. An `FSC1` file is refused by name —
-``SidecarSeal/SealError/legacyFormatRetired``, audit-logged before it is thrown — and
-`ProtectedSidecar`'s unopenable-sealed policy then quarantines it and latches the data loss.
-
-The `FSC1` marker itself is **kept, and load-bearing**. `SidecarSeal.isSealed` still answers true
-for it, and must: that predicate is what splits a file into "sealed" and "legacy PLAINTEXT v0 —
-read it as JSON and re-seal it", so a marker that stopped classifying would send ciphertext down
-the plaintext branch, fail to decode, and be handled as *corrupt* — salvaged-or-discarded, i.e.
-destroyed. A refusal that cannot recognize what it is refusing is worse than the reader it
-replaced. ``HeartDropSidecarFormatCensus`` stays for the same reason: it classifies by marker
-bytes, holds no key, and counting rows nothing can open is still the only way to know they are
-there. Only the three MAIN rows (outbox, peer bundles, dedup) ever mattered to that count — the
-quarantine tombstone is reported and never blocking, because no reader ever opens that path.
+The heart-drop sidecars sit on the same root and need one thing more, which `FernletSocial`'s
+`HeartDropStorageScope` carries: they are SEALED, and their key lives under the heart-drop keychain
+service, so isolating them means a (directory, keychain service) pair, always both (that module's
+landing page says why, and how the format's retired `FSC1` generation is refused by name yet still
+classified). The mechanism stays here: ``SidecarSeal``'s `isSealed` predicate is what splits a file
+into "sealed" and "legacy plaintext v0 — read it as JSON and re-seal it", and bytes whose open
+throws ``SidecarSeal/SealError/legacyFormatRetired`` meet ``ProtectedSidecar``'s unopenable-sealed
+policy (quarantined or deleted, as the store chose, the loss latched), never the corrupt-plaintext
+path.
 
 Before changing anything here, read the wire-compatibility notes on the type you are touching:
 canonical signing bytes, sealed-payload framing (``SealedPayloadFraming``), the freeze/park
@@ -484,10 +473,10 @@ digest's record kinds, the routed type registry's routed types and the mesh engi
 The mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
 `ProximityCapability` cases until plan steps A0.4, A0.5 and A0.7 move them.
 Some such strings stay outside it until
-a later step (see "What is left for A0.4 onward" below): the 12 feature labels this module reads from
-FernletCrypto's registry (eight until A0.4, the activities' and the moderation report's four until
-A0.5), the heart-drop keychain service and
-``ProximitySupportLayout``'s `Fernlet` folder until A0.4. `ProximityNamespaceBoundaryTests`
+a later step (see "What is left for A0.4 onward" below): the 8 feature labels this module reads from
+FernletCrypto's registry (presence's and the sealed-backup escrow's four until A0.4, the activities'
+and the moderation report's four until A0.5). The heart dead-drop's keychain service and the
+moderation ban store's are `FernletSocial`'s. `ProximityNamespaceBoundaryTests`
 allowlists each feature-label read, each literal that spells `fernlet` and each line that still
 names one of Fernlet's domain types, with the step that removes it. Beside it the
 host supplies two things this module used to take from Fernlet's own modules, the install binding
@@ -570,7 +559,8 @@ with its own: on a mismatch it still constructs, audits `mesh.identity.namespace
 and, for the mesh manager, every founding a caller can begin without one
 (``MeshNetworkManager/startNewMesh(name:)`` and its DEBUG harness's founder ledger; the promotion at a
 first commit needs a peer the radio linked), so that identity founds no mesh and links no peer.
-``HeartDropService`` holds no namespace of its own to compare with; its identity's doors cover it. The checks live in
+`FernletSocial`'s `HeartDropService` holds no namespace of its own to compare with; its identity's
+doors cover it. The checks live in
 ``ProximityNamespaceGate`` (`Support/`), whose two manager doors,
 ``ProximityNamespaceGate/checkIdentity(_:isOf:event:)`` and
 ``ProximityNamespaceGate/mayStart(identityIsOfNamespace:event:)``, are public so a host's manager
@@ -643,9 +633,9 @@ holds the soundness and collision rules, a declared feature salt's place in them
 namespaces built only from literals.
 `FernletFeatureGoldenTests`, on the crypto-goldens line too, holds the bytes of Fernlet's features
 over this module, the ones it still holds and the ones already in `FernletSocial`, which every move
-must keep, to frozen literals: the feature labels the heart dead-drop, presence and the ban store hand
-CryptoKit themselves, the heart-drop and presence pair secrets and tags, the ban evidence's reporter
-tag and a reported artwork's content hash, a frozen sealed drop and sealed sidecar opened
+must keep, to frozen literals: the feature labels of the heart dead-drop, presence and the ban store,
+each read where its feature reads it, the heart-drop and presence pair secrets and tags, the ban
+evidence's reporter tag and a reported artwork's content hash, a frozen sealed drop and sealed sidecar opened
 through their readers, the prekey bundle's JSON and the identity introduction that gossips it, the
 features' keychain and file names and persisted shapes, presence's advertisement and the
 sealed-backup escrow's provisioning cases, the two feature salts `.fernlet` declares, under which
@@ -688,7 +678,7 @@ operation still reaches the stores. The golden runs the column vectors pinned be
 copy and checks that it and `ColumnCrypto` open each other's blobs and refuse alike.
 
 **The keychain mechanism.** This module's key stores (the identity's four device rows and its
-backup-escrow rows, the two mesh seal keys, the heart-drop prekey blob and sidecar seal key) reach
+backup-escrow rows, and the two mesh seal keys) reach
 the keychain through ``ProximityKeychainItem`` (`Support/`), FernletFoundation's
 `KeychainItem` mechanism copied member for member: delete-then-add `store` with its `synchronizable:`
 and `replacing:` scopes, `load`, `loadDistinguishingAbsence`, `loadAll`,
@@ -711,7 +701,7 @@ and keeps none of its own: with no sink installed, a line is dropped. Delivery i
 emitting executor, with no hop: the sink is read under a `Mutex` the slot owns and called after the
 lock is released, so it may re-enter or block, and the requirement is `nonisolated` because the
 routed and session stores that log are `nonisolated` value types. Unlike the namespace it is a
-process-wide slot: audit lines come from over four hundred call sites, including static helpers that
+process-wide slot: audit lines come from nearly four hundred call sites, including static helpers that
 hold no host, and a host's tests build this module's objects directly and still need to see every
 line, so one install at launch reaches all of them. Fernlet's sink is `FernletAuditBridge` in
 `FernletConnections`, installed first thing in `FernletApp.init` and not behind the UI-test harness
@@ -728,17 +718,16 @@ passes the host's name) and `PeerTransport`'s discovery doors take no service ty
 policies, the trust records and the peer-name policy come from the host. What still ties this module
 to Fernlet leaves in these steps:
 
-- **A0.4** moves Fernlet's remaining features out: the heart dead-drop and presence to
-  `FernletSocial`, which holds moderation's ban store, ledger and content hash, closeness, friend
-  state and the parked chat payload, and the sealed-backup escrow to the App's backup side. With them
-  go eight of the 12 feature labels this module still reads from FernletCrypto's registry (the
-  dead-drop's and presence's and the escrow's two; the heart-drop and presence pair secrets leave as
-  FernletSocial wrappers over ``IdentityService/pairSecret(with:purpose:)``, under the salts
-  `.fernlet` already declares, and their tags leave with their features), the heart-drop keychain
-  service, the heart payload's format, the feature files' lines that name Fernlet's domain types (the
-  dead-drop's friend records and heart title, presence's friend records and hearts capability),
-  `ProximitySupportLayout.defaultDirectory` together with `keychainService(besideHeartDrop:in:)`'s
-  comparison against the heart-drop service, and presence's `FernletDate` read.
+- **A0.4** moves Fernlet's remaining features out: presence to `FernletSocial`, which holds the
+  heart dead-drop (with its heart-drop derivations, its keychain service and the mesh stores' services
+  derived beside it), moderation's ban store, ledger and content hash, closeness, friend state and the
+  parked chat payload, and the sealed-backup escrow to the App's backup side. With them go four of the
+  8 feature labels this module still reads from FernletCrypto's registry (presence's two and the
+  escrow's two; the presence pair secret leaves as a FernletSocial wrapper over
+  ``IdentityService/pairSecret(with:purpose:)``, under the salt `.fernlet` already declares, as the
+  heart-drop pair secret's already is, and its tag leaves with presence), the heart payload's format,
+  presence's lines that name Fernlet's domain types (its friend records and hearts capability), and
+  presence's `FernletDate` read.
 - **A0.5** splits the routed mesh manager: its feature parts leave with their `PayloadType` sends,
   their capability list and the session hearts, and with them what the mesh manager builds, decodes
   or calls (the clothing shop, the activity manager with its send hook and item-name rules, the
@@ -801,7 +790,6 @@ the counts live.
 - ``ProximityInstallBinding``
 - ``ProximityInstallBindingAccess``
 - ``ProximityInstallBindingReadError``
-- ``ProximitySupportLayout``
 - ``MeshContinuationRaising``
 - ``MeshSessionContinuationReading``
 - ``ProximityAudit``
@@ -2824,23 +2812,17 @@ records rather than app-visible state.
 
 ### Hearts
 
+The heart dead-drop, its sealer, prekey store and sealed sidecars are `FernletSocial`'s.
+
 - ``ProximityHeartLedger``
 - ``ReceivedHeartRecord``
+- ``MeshHeartLedgerProof``
 - ``ProximityPrekeyBundle``
-- ``HeartDropService``
-- ``HeartDropOutbox``
-- ``HeartDropDedupStore``
-- ``HeartDropSealer``
-- ``HeartPrekeyStore``
-- ``HeartDropPeerBundleCache``
-- ``HeartDropStorageScope``
 
 ### Protected sidecar persistence
 
 - ``ProtectedSidecar``
 - ``SidecarSeal``
-- ``HeartDropSidecarSeal``
-- ``HeartDropSidecarFormatCensus``
 
 ### Recipe sharing
 

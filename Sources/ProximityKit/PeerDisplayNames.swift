@@ -7,8 +7,8 @@
 // host's peer-name policy (`ProximityNamespace.PeerNames`). Previously duplicated across the mesh /
 // recipe-share / presence managers and their consumers.
 //
-// Deliberately NOT adopted by the app-side FernletStore.shopDisplayName or the HeartDropService
-// name paths — those variants differ on purpose.
+// Deliberately NOT adopted by the app-side FernletStore.shopDisplayName or FernletSocial's
+// HeartDropService name paths — those variants differ on purpose.
 
 import UIKit
 

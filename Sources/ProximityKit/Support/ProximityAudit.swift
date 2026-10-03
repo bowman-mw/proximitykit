@@ -52,7 +52,7 @@ public nonisolated protocol ProximityAuditSink: Sendable {
 /// passes vacuously.
 ///
 /// **Why a slot, when the namespace is handed down instead.** ``ProximityNamespace`` reaches its
-/// readers through seams they already have. Audit lines are written from over four hundred call
+/// readers through seams they already have. Audit lines are written from nearly four hundred call
 /// sites, including `nonisolated` value-type stores and static helpers that hold no host, and the
 /// host's tests build ProximityKit objects directly and still have to see every line. A sink each
 /// constructor took would have to reach all of those sites, and the objects the tests build would

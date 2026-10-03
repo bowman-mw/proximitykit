@@ -186,8 +186,8 @@ nonisolated enum MeshRoutedContentDigest {
     }
 
     /// The first 16 bytes of `data` as a `UUID`, via the tuple form — never `withUnsafeBytes`
-    /// (Power of 10 R9). A parallel 16-byte reader to `HeartDropSealer.uuid(from:)`, which is
-    /// heart-drop vocabulary with no other caller, rather than a duplicated policy.
+    /// (Power of 10 R9). A parallel 16-byte reader to FernletSocial's `HeartDropSealer.uuid(from:)`,
+    /// which is heart-drop vocabulary with no other caller, rather than a duplicated policy.
     private static func uuid(fromFirst16 data: Data) -> UUID {
         guard data.count >= 16 else { return zeroID }
         let bytes = [UInt8](data.prefix(16))

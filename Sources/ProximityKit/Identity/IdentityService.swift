@@ -89,25 +89,27 @@ public enum IdentityError: Error, Equatable {
 // MARK: - IdentityService
 
 /// The per-device cryptographic identity for the proximity subsystem: Ed25519 signing, X25519
-/// key agreement, heart-drop/presence tag derivation, group-key wrapping, and the iCloud-synced
+/// key agreement, presence tag derivation, group-key wrapping, and the iCloud-synced
 /// backup-escrow key lifecycle.
 ///
 /// Responsibilities: provisioning + caching the keychain-backed key pairs
 /// (`ensureProvisioned()`, idempotent, with three migration cases documented inline); signing
 /// (`sign`) and static verification (`verify`); the pairwise ECDH→HKDF→ChaChaPoly seal/open used
 /// for all sealed payloads (with optional wire2 framing); domain-separated pair secrets (the generic
-/// ``pairSecret(with:purpose:)`` under a declared feature salt, and the heart-drop and presence
-/// derivations) and rotating tags for presence recognition and heart-drop day tags; and the WS-1..WS-4
-/// backup-escrow reconciliation, where CONTENT-ADDRESSED keychain slots make divergent escrow
-/// keys coexist as a detectable `.conflict` instead of silently overwriting each other.
+/// ``pairSecret(with:purpose:)`` under a declared feature salt, which FernletSocial's heart-drop
+/// derivations reach through, and the presence derivation) and rotating tags for presence
+/// recognition; and the WS-1..WS-4 backup-escrow reconciliation, where CONTENT-ADDRESSED keychain
+/// slots make divergent escrow keys coexist as a detectable `.conflict` instead of silently
+/// overwriting each other.
 ///
 /// Key separation is the core invariant: the signing + proximity KA keys are
 /// ThisDeviceOnly and never sync; only the backup-escrow key is synchronizable. The private keys
-/// never leave this type — collaborators pass closures (e.g. `HeartDropSealer.open` takes
-/// `staticKeyAgreement`). Several instances coexist in the app (mesh, presence, recipe
+/// never leave this type — collaborators pass closures (e.g. FernletSocial's `HeartDropSealer.open`
+/// takes `staticKeyAgreement`). Several instances coexist in the app (mesh, presence, recipe
 /// share, heart-drop service) over the same keychain rows; `wipe()` clears the rows plus THIS
 /// instance's cache, so delete-all must call it on every live instance. `@MainActor`; the pure
-/// crypto statics (`verify`, `fingerprint`, tag derivations) are `nonisolated` for off-main use.
+/// crypto statics (`verify`, `fingerprint`, the presence epoch clock) are `nonisolated` for off-main
+/// use.
 ///
 /// Every instance is built from its host's ``ProximityNamespace`` (plan step A0.2.3), which names
 /// the keychain service those shared rows live under; ProximityKit holds no namespace of its own
@@ -487,53 +489,6 @@ public final class IdentityService {
         )
     }
 
-    // MARK: - Heart drops (bitchat adoptions Increment 3)
-
-    /// Big-endian (MSB-first) serialization of a 64-bit counter for the domain-separated HMAC
-    /// messages below — the R9-safe replacement for `withUnsafeBytes(of: value.bigEndian)`,
-    /// byte-identical to it, so every pinned tag vector still matches.
-    private nonisolated static func bigEndianBytes(_ value: UInt64) -> [UInt8] {
-        (0..<8).map { UInt8(truncatingIfNeeded: value >> (56 - 8 * $0)) }
-    }
-
-    /// UTC day index for heart-drop tag rotation (bitchat's day-rotating courier recipient tags).
-    public nonisolated static func heartDropDayEpoch(at date: Date) -> UInt64 {
-        UInt64(max(0, date.timeIntervalSince1970) / 86_400)
-    }
-
-    /// Static-static pair secret for heart-drop day tags — mirrors `presencePairSecret` with its
-    /// own salt so presence tags and drop tags can never collide across protocols. sharedInfo
-    /// stays EMPTY: both sides must derive the same key (symmetry requirement).
-    public func heartDropPairSecret(with friendKeyAgreementPublicKey: Data) throws -> SymmetricKey {
-        guard let myKey = keyAgreementKey else { throw IdentityError.notProvisioned }
-        guard let friendKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: friendKeyAgreementPublicKey) else {
-            throw IdentityError.sealFailed
-        }
-        let shared = try myKey.sharedSecretFromKeyAgreement(with: friendKey)
-        return shared.hkdfDerivedSymmetricKey(
-            using: SHA256.self,
-            salt: FernletCryptoPurpose.KeyDerivation.heartDropPairV1.data,
-            sharedInfo: Data(),
-            outputByteCount: 32
-        )
-    }
-
-    /// A drop's public-DB record tag: HMAC-SHA256 over a domain string + the day epoch + the
-    /// SENDER's KA key (the sender term gives direction asymmetry, so my outgoing tag for a
-    /// friend never equals my expected incoming tag from them), truncated to 16 bytes, hex.
-    /// Uncorrelatable across days without the pair secret.
-    public nonisolated static func heartDropTag(
-        pairSecret: SymmetricKey,
-        dayEpoch: UInt64,
-        senderKeyAgreementPublicKey: Data
-    ) -> String {
-        var message = FernletCryptoPurpose.HMAC.heartDropDayTagV1.data
-        message.append(contentsOf: Self.bigEndianBytes(dayEpoch))
-        message.append(senderKeyAgreementPublicKey)
-        let mac = HMAC<SHA256>.authenticationCode(for: message, using: pairSecret)
-        return Data(mac).prefix(16).map { String(format: "%02x", $0) }.joined()
-    }
-
     // MARK: - Static key agreement
 
     /// X25519 against this identity's static key-agreement private key and a sender's ephemeral
@@ -542,7 +497,7 @@ public final class IdentityService {
     /// this service.
     ///
     /// Two callers: the routed content-key unwrap (`MeshRoutedContentKeyWrapper.unwrap`, from
-    /// `MeshRoutedItemDelivery`) and the heart dead-drop's static-key fallback
+    /// `MeshRoutedItemDelivery`) and FernletSocial's heart dead-drop's static-key fallback
     /// (`HeartDropSealer.open`, from `HeartDropService`). Each derives its own key from the secret
     /// under its own label; this answers the raw shared secret and derives nothing.
     ///
@@ -617,6 +572,14 @@ public final class IdentityService {
             sharedInfo: Data(),
             outputByteCount: 32
         )
+    }
+
+    /// Big-endian (MSB-first) serialization of a 64-bit counter for the presence tag's
+    /// domain-separated HMAC message below — the R9-safe replacement for
+    /// `withUnsafeBytes(of: value.bigEndian)`, byte-identical to it (and to FernletSocial's helper for
+    /// the heart day tag), so every pinned tag vector still matches.
+    private nonisolated static func bigEndianBytes(_ value: UInt64) -> [UInt8] {
+        (0..<8).map { UInt8(truncatingIfNeeded: value >> (56 - 8 * $0)) }
     }
 
     /// The rotating presence tag for one friend pair at one epoch:

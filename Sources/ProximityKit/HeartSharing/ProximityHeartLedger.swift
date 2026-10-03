@@ -356,10 +356,10 @@ public final class ProximityHeartLedger {
     /// the production root and a scoped (per-store) root can never name different files.
     ///
     /// Given a root rather than fixed for the same reason the sealed heart-drop sidecars are (see
-    /// ``HeartDropStorageScope``): `clearAll()` removes this file, `FernletStore.resetAll` calls it,
-    /// and `deleteAllData` calls `resetAll` — so on one process-wide path any wiping test destroys
-    /// the received hearts of every concurrently-running one. Unsealed, so unlike the heart-drop
-    /// sidecars this half needs no keychain scoping.
+    /// FernletSocial's `HeartDropStorageScope`): `clearAll()` removes this file,
+    /// `FernletStore.resetAll` calls it, and `deleteAllData` calls `resetAll` — so on one
+    /// process-wide path any wiping test destroys the received hearts of every concurrently-running
+    /// one. Unsealed, so unlike the heart-drop sidecars this half needs no keychain scoping.
     public nonisolated static func fileURL(in directory: URL) -> URL {
         directory.appendingPathComponent("HeartLedger.json")
     }

@@ -46,8 +46,7 @@ nonisolated extension ProximityNamespace {
     // MARK: - Keychain
 
     /// The names of the keychain rows ProximityKit writes for the device identity and the two mesh seal
-    /// keys. The heart-drop keychain service is still a ProximityKit literal until plan step A0.4 takes
-    /// its feature out; the moderation ban store's is FernletSocial's.
+    /// keys. The heart dead-drop's keychain service and the moderation ban store's are FernletSocial's.
     ///
     /// Row names only. Each row's accessibility and synchronizable class stay ProximityKit code, where
     /// the key-custody walls read them: a host names its rows and never weakens how they are kept.
@@ -126,9 +125,9 @@ nonisolated extension ProximityNamespace {
 
     // MARK: - Storage
 
-    /// The on-disk names ProximityKit writes for its default directory and the two mesh stores. Until
-    /// plan step A0.4 the heart-drop scope defaults instead to
-    /// ``ProximitySupportLayout/defaultDirectory``, which spells Fernlet's folder.
+    /// The on-disk names ProximityKit writes for its default directory and the two mesh stores.
+    /// FernletSocial's production heart-drop scope reads its directory here too: `.fernlet`'s
+    /// ``defaultDirectory``.
     public nonisolated struct Storage: Hashable, Sendable {
         /// The folder under Application Support that a host passing no root of its own gets.
         public let directoryName: String
@@ -158,7 +157,7 @@ nonisolated extension ProximityNamespace {
 
         /// `URL.applicationSupportDirectory/<directoryName>`: the root a host gets when it passes none.
         ///
-        /// Built the way `ProximitySupportLayout.defaultDirectory` builds today's root, so a host whose
+        /// Built the way Fernlet's proximity sidecar root has always been built, so a host whose
         /// ``directoryName`` matches that folder resolves the same path.
         public var defaultDirectory: URL {
             URL.applicationSupportDirectory.appendingPathComponent(directoryName, isDirectory: true)
