@@ -7,8 +7,8 @@ import Combine
 /// their service types on their owning session/manager types. Every service type must also
 /// appear in the app's Info.plist `NSBonjourServices` or discovery silently fails on device.
 ///
-/// The values are frozen wire tokens. Nothing in the test suite pins the literal — a changed
-/// spelling compiles, passes CI, and shows up only as dead discovery on a physical device.
+/// The values are frozen wire tokens. `ProximityVocabularyGoldenTests` pins the literal: a changed
+/// spelling compiles, but fails CI there instead of showing up only as dead discovery on a device.
 nonisolated public enum MultipeerServiceType {
     public static let trainer = "fernlet-coach"
 }
