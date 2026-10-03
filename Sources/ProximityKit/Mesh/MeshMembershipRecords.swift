@@ -20,8 +20,10 @@ import Foundation
 /// `departure` and `termination` are the records plan §8.3 names verbatim; `admission` and `removal`
 /// are the two §8.3 implies but does not spell out.
 ///
-/// The retired `sessionGoodbye` payload type is deliberately absent: it stays frozen/parked in
-/// `PayloadType` and is translated into a departure by the wire layer, never re-used here.
+/// The legacy goodbye is deliberately absent: an unsigned frame that can only close a link, it never
+/// becomes a membership record of any kind, a departure least of all
+/// (``MeshMembershipGoodbyeInterop``), and its token (the host's `MeshMessages.sessionGoodbye`) is
+/// never re-used here.
 nonisolated enum MeshMembershipRecordKind: CaseIterable, Sendable {
     /// A member was admitted to the mesh, proven by the admitter's signature.
     case admission

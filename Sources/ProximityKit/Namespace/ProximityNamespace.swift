@@ -1,11 +1,10 @@
 // ProximityNamespace.swift
 // ProximityKit/Namespace
 //
-// ProximityKit plan step A0.2.1 (Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md §4 A0.2, §13 item
-// 1): the host's protocol identity (its labels, radio values, QR scheme, payload vocabulary, keychain
-// rows, storage names and log subsystem) as ONE `Sendable` value that the host builds once and hands
-// down. Step A0.2.1 added the type alone; A0.2's later commits routed ProximityKit's reads of those
-// through it, one consumer family at a time, each byte-identical for Fernlet.
+// The host's protocol identity (Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md §4 A0.2 and A0.3,
+// §13 item 1): its labels, radio values, QR scheme, payload vocabulary, keychain rows, storage names,
+// log subsystem and peer-name policy as ONE `Sendable` value that the host builds once and hands
+// down, and that ProximityKit reads every one of those from, byte-identical for Fernlet.
 
 import Foundation
 
@@ -24,14 +23,13 @@ import Foundation
 /// keeps no global: no `static var`, no slot, no `@TaskLocal`. The host builds one value at its
 /// composition root and hands it down through the seams ProximityKit already has, and every reader
 /// keeps its own copy, so no read hops an actor and no reader can see a namespace its root did not
-/// hand it. A host that supplies none gets a compile error, never another app's identity. Plan step
-/// A0.2.1 added the type; since A0.2.3 the host supplies it as ``ProximityHost/proximityNamespace``
-/// and the managers keep a copy, and by the end of A0.2 ProximityKit reads from it all 39 protocol
-/// labels, the radio values, the QR scheme, the identity's and the two mesh seal keys' keychain rows,
-/// the storage names and the log subsystem. The radios, their postures and `PeerNameDisplay` read
-/// the radios' three presentation strings off it too, and wherever a peer's name enters, ProximityKit
-/// shows it under the installation's peer-name policy (``PeerNames``: the cap and the floor). Its
-/// family also carries the payload vocabulary
+/// hand it. A host that supplies none gets a compile error, never another app's identity. The host
+/// supplies it as ``ProximityHost/proximityNamespace``, the managers keep a copy, and ProximityKit
+/// reads from it all 39 protocol labels, the radio values, the QR scheme, the identity's and the two
+/// mesh seal keys' keychain rows, the storage names and the log subsystem. The radios, their
+/// postures and `PeerNameDisplay` read the radios' three presentation strings off it too, and
+/// wherever a peer's name enters, ProximityKit shows it under the installation's peer-name policy
+/// (``PeerNames``: the cap and the floor). Its family also carries the payload vocabulary
 /// (``Vocabulary``): the identity envelope seals and parks by its payload rules, the session
 /// coordinator signs and dispatches by its session messages and reads its capability rules, the mesh
 /// and presence managers advertise its wire2 token and the mesh frames by it, the inventory digest
@@ -42,9 +40,12 @@ import Foundation
 /// spellings are equal, which `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
 /// until plan step A0.4: the 13 feature labels ProximityKit reads from FernletCrypto's registry, the
 /// heart-drop and moderation keychain services and ``ProximitySupportLayout``'s folder.
-/// `ProximityNamespaceBoundaryTests` keeps three rules: no namespace, group or purpose is built outside
-/// `Namespace/`, `FernletCryptoPurpose` stays on its 20 allowlisted lines, and every literal that
-/// spells `fernlet` is on an exact allowlist that can only shrink.
+/// `ProximityNamespaceBoundaryTests` keeps four rules: no namespace, group or purpose is built outside
+/// `Namespace/`; `FernletCryptoPurpose` stays on its 20 allowlisted lines; every literal that spells
+/// `fernlet` is on an exact allowlist; and Fernlet's domain vocabulary and records (`PayloadType`,
+/// `ProximityCapability`, `ProximityMode`, `ItemNameModeration` and the persisted proximity records)
+/// are named only on the exact lines that leave with their features or the session profile. Each
+/// list can only shrink.
 ///
 /// **Total, judged once, and refused at run time.** ``init(family:installation:)`` never throws or
 /// traps: it runs every soundness rule once and records the verdict in ``soundness``. A host that

@@ -10,11 +10,11 @@ import FernletDomainModel
 ///
 /// Mirrors the existing `ProximityTrustPolicy` / `WorkoutSyncContext` host-protocol
 /// pattern. Surface is exactly what `MeshNetworkManager` + `ProximityRecipeShareManager`
-/// consume: display name, trusted peers + trust store, and the block/fingerprint checks — and, since
-/// ProximityKit plan step A0.2.3, the host's protocol identity, ``proximityNamespace``, since
-/// step A0.2.9 its install binding, ``proximityInstallBinding``, and the session trust policy every
-/// connection's coordinator consults, ``makeProximityTrustPolicy()``: three requirements the
-/// extension below will never give a default.
+/// consume: display name, trusted peers, and the block/fingerprint checks — and four requirements
+/// the extension below will never give a default, because each is the host's identity or rule, not
+/// the mechanism's: the host's protocol identity, ``proximityNamespace``, its install binding,
+/// ``proximityInstallBinding``, its trust records, ``proximityTrustStore``, and the session trust
+/// policy every connection's coordinator consults, ``makeProximityTrustPolicy()``.
 @MainActor
 public protocol ProximityHost: AnyObject {
     var proximityDisplayName: String { get }
@@ -92,7 +92,7 @@ public protocol ProximityHost: AnyObject {
     /// sidecar root.
     var meshRoutedStorage: MeshRoutedStorageScope { get }
 
-    /// The host's protocol identity (ProximityKit plan step A0.2.3): the labels, radio values, QR
+    /// The host's protocol identity: the labels, radio values, QR
     /// scheme, identity and mesh seal-key rows, storage names and log subsystem by which this module's
     /// wire, keychain and disk formats identify the app it runs in, as the one ``ProximityNamespace``
     /// the host builds at its composition root. The radios, their postures and ``PeerNameDisplay`` read
@@ -103,25 +103,27 @@ public protocol ProximityHost: AnyObject {
     /// stay outside it until plan step A0.4:
     /// the feature labels, the heart-drop and moderation keychain services and
     /// ``ProximitySupportLayout``'s folder. `ProximityNamespaceBoundaryTests` allowlists each
-    /// feature-label read and each literal that spells `fernlet`.
+    /// feature-label read, each literal that spells `fernlet` and each line that still names one of
+    /// Fernlet's domain types.
     ///
     /// **Deliberately no default.** The extension below hands a host that carries no value of its
     /// own the hearts settings, the sidecar root and the two storage scopes; it hands out no
     /// namespace, and never will. ProximityKit holds no namespace instance and keeps no global, so a
     /// host that supplies none gets a compile error, never another app's identity. Fernlet's app
     /// supplies `ProximityNamespace.fernlet` (the `FernletConnections` module) in
-    /// `ProximityHostAdapter.swift`, as the test target's eleven Fernlet doubles do;
-    /// `ProximityNamespaceGoldenTests`' three hosts take theirs from the cell that builds them, another
-    /// app's in the cells that test one.
+    /// `ProximityHostAdapter.swift`, as eleven of the test target's sixteen doubles do; the other
+    /// five, `ProximityNamespaceGoldenTests`' three hosts and `ProximityVocabularyGoldenTests`' two,
+    /// take theirs from the cell that builds them: another app's, or Fernlet's with some of its groups
+    /// replaced, in the cells that test one.
     ///
     /// Read once, at construction: ``MeshNetworkManager``, ``PresenceManager`` and
     /// ``ProximityRecipeShareManager`` each keep their own copy and build the identity and the radio
-    /// they own by default from it, so no later read reaches back to the host. Since step A0.2.8 the
+    /// they own by default from it, so no later read reaches back to the host. The
     /// extension below also builds this host's default sidecar root and both storage scopes from it,
     /// and every scope carries it to the store that reads its names.
     var proximityNamespace: ProximityNamespace { get }
 
-    /// The host's install binding (ProximityKit plan step A0.2.9): the per-install bytes the two
+    /// The host's install binding: the per-install bytes the two
     /// sealed mesh stores' column seal places after the column label in every blob's authenticated
     /// data, read at each seal and each open.
     ///
