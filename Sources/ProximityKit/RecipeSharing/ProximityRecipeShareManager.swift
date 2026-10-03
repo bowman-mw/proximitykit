@@ -15,7 +15,7 @@ private struct RecipeShareConnection: Identifiable {
     /// The host's trust policy for this pairing (`ProximityHost.makeProximityTrustPolicy()`),
     /// retained for the connection's lifetime so the coordinator's `weak` trustPolicy stays alive —
     /// otherwise the revoked/blocked-key envelope rejection + audit calls silently no-op (they would
-    /// evaluate `nil?.isRevokedProximitySigningKey(...) == true` → false, and every recordTrainerAudit
+    /// evaluate `nil?.isRevokedProximitySigningKey(...) == true` → false, and every recordSessionAudit
     /// becomes a no-op). Mirrors MeshNetworkManager's `slotTrustPolicies` and the heart manager's
     /// HeartShareConnection.
     let trustPolicy: any ProximityTrustPolicy

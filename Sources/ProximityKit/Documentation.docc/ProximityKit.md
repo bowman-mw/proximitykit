@@ -117,7 +117,9 @@ holds it `weak`. The session policies are the host's rules, not this module's: F
 authorization; only blocked keys ban) and `CoachSessionTrustPolicy` for the future coach channel
 (only a remembered `.trainer` pairing auto-confirms), and ``ProximityTrustVault`` is the
 persistent record store behind both, holding the friend/removed/blocked/reported lifecycle and
-the audit trail.
+the audit trail. The coordinator records its audit events through the same policy, in this
+module's own ``ProximitySessionAudit``, and names no host's record: Fernlet's policies convert each
+into the persisted `TrainerAuditEvent` the vault keeps.
 
 **Invariant: a link is seated — and its frames credited — only as the key its own tunnel proved**
 (2026-09-23, closing a hole the blind reviews of 31fafd6 found and which predates it). Two
@@ -1202,9 +1204,13 @@ The session trust policies, the coach session contract, the keep-as-friend revie
 export body are Fernlet's rules, so they live in `FernletConnections`; a manager gets each
 connection's policy from ``ProximityHost/makeProximityTrustPolicy()``, and a trainer-mode
 coordinator refuses any inbound blob over ``ProximityCoordinator/maxTrainerModeInboundBytes`` before
-decoding it.
+decoding it. A coordinator records its audit events through its policy as ``ProximitySessionAudit``
+values, which carry an envelope's payload token as a plain string and name no host's record; a
+policy that keeps an audit trail converts each into its own row (Fernlet's, in `FernletConnections`,
+into the `TrainerAuditEvent` the vault keeps). The vault is not itself a policy.
 
 - ``ProximityTrustPolicy``
+- ``ProximitySessionAudit``
 - ``ProximityTrustVault``
 - ``CoachVerificationCeremony``
 - ``FriendsDiscoveryEntry``

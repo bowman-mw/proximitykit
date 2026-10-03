@@ -338,7 +338,7 @@ public final class ProximityCoordinator {
         currentRole = role
         currentMode = mode
         inspector?.beginSession(role: role, mode: mode, localFingerprint: identity.localFingerprint)
-        trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
             kind: .pairingStarted,
             peerFingerprint: nil,
             peerDisplayName: nil,
@@ -439,11 +439,11 @@ public final class ProximityCoordinator {
         bytesSent += data.count
         await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
         inspector?.recordCoordinatorEvent("envelope sent \(envelope.payloadTypeToken)")
-        trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
             kind: .envelopeSent,
             peerFingerprint: identity.fingerprint,
             peerDisplayName: identity.displayNameOrFingerprint,
-            payloadType: envelope.payloadType,
+            payloadType: envelope.payloadTypeToken,
             message: "Sent \(envelope.payloadTypeToken)"
         ))
         lastTransferCompletedAt = now()
@@ -903,7 +903,7 @@ public final class ProximityCoordinator {
                                        from: message.peer,
                                        cameFromSealedWrapper: unwrapped.cameFromSealedWrapper)
         } catch {
-            trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+            trustPolicy?.recordSessionAudit(ProximitySessionAudit(
                 kind: .envelopeRejected,
                 peerFingerprint: message.peer.advertisedFingerprint,
                 peerDisplayName: message.peer.displayHint,
@@ -937,7 +937,7 @@ public final class ProximityCoordinator {
     private func rejectsOversizedTrainerBlob(_ message: InboundPeerFrame) -> Bool {
         guard currentMode == .trainer,
               message.data.count > Self.maxTrainerModeInboundBytes else { return false }
-        trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
             kind: .envelopeRejected,
             peerFingerprint: message.peer.advertisedFingerprint,
             peerDisplayName: message.peer.displayHint,
@@ -979,11 +979,11 @@ public final class ProximityCoordinator {
     private func isRejectedByTrustPolicy(_ envelope: FernletIdentityEnvelope) -> Bool {
         if trustPolicy?.isRevokedProximitySigningKey(envelope.senderSigningPublicKey) == true {
             let fingerprint = IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
-            trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+            trustPolicy?.recordSessionAudit(ProximitySessionAudit(
                 kind: .revokedPeerBlocked,
                 peerFingerprint: fingerprint,
                 peerDisplayName: Self.auditName(of: envelope),
-                payloadType: envelope.payloadType,
+                payloadType: envelope.payloadTypeToken,
                 message: "Blocked envelope from revoked key"
             ))
             fail("revokedKey")
@@ -1001,11 +1001,11 @@ public final class ProximityCoordinator {
         bytesReceived += byteCount
         await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
         inspector?.recordCoordinatorEvent("envelope received \(envelope.payloadTypeToken)")
-        trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
             kind: .envelopeReceived,
             peerFingerprint: IdentityService.fingerprint(of: envelope.senderSigningPublicKey),
             peerDisplayName: Self.auditName(of: envelope),
-            payloadType: envelope.payloadType,
+            payloadType: envelope.payloadTypeToken,
             message: "Received \(envelope.payloadTypeToken)"
         ))
     }
@@ -1527,7 +1527,7 @@ public final class ProximityCoordinator {
     private func transition(to newState: State) {
         state = newState
         inspector?.recordCoordinatorEvent("state: \(newState.debugLabel)")
-        trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
             kind: .stateTransition,
             peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
             peerDisplayName: connectedIdentity?.displayNameOrFingerprint ?? pendingPeerIdentity?.displayNameOrFingerprint ?? currentTransportPeer?.displayHint,
@@ -1542,7 +1542,7 @@ public final class ProximityCoordinator {
         lastCloseRangingSampleAt = nil
         transition(to: .failed(reason: reason))
         inspector?.recordCoordinatorEvent("failed: \(reason)")
-        trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
             kind: .error,
             peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
             peerDisplayName: connectedIdentity?.displayNameOrFingerprint ?? pendingPeerIdentity?.displayNameOrFingerprint ?? currentTransportPeer?.displayHint,
@@ -1577,7 +1577,7 @@ public final class ProximityCoordinator {
         await transport.disconnect()
         await foregroundAnchor.stop()
 
-        trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
             kind: .sessionEnded,
             peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
             peerDisplayName: connectedIdentity?.displayNameOrFingerprint ?? pendingPeerIdentity?.displayNameOrFingerprint ?? currentTransportPeer?.displayHint,
@@ -1699,7 +1699,7 @@ public final class ProximityCoordinator {
                 break
             default:
                 self.transition(to: .ended(reason: .timeout))
-                self.trustPolicy?.recordTrainerAudit(TrainerAuditEvent(
+                self.trustPolicy?.recordSessionAudit(ProximitySessionAudit(
                     kind: .sessionEnded,
                     peerFingerprint: self.connectedIdentity?.fingerprint ?? self.pendingPeerIdentity?.fingerprint ?? self.currentTransportPeer?.advertisedFingerprint,
                     peerDisplayName: self.connectedIdentity?.displayNameOrFingerprint ?? self.pendingPeerIdentity?.displayNameOrFingerprint ?? self.currentTransportPeer?.displayHint,

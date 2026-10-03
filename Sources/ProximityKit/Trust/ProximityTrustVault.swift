@@ -13,15 +13,17 @@ import FernletDomainModel
 /// states); `trust` clears both, re-activating a removed friend. `report` stamps report metadata
 /// and, by default, blocks + revokes too.
 ///
-/// Conforms to ``ProximityTrustPolicy`` answering from stored records (trusted = active
-/// unrevoked; the channel-specific policies wrap this vault instead of using it directly).
+/// Not itself a ``ProximityTrustPolicy``: the host's session policies (Fernlet's, in
+/// `FernletConnections`) wrap it, answer a coordinator's questions from its records (its own
+/// trusted check means an active, unrevoked record) and keep each ``ProximitySessionAudit`` a
+/// coordinator reports here, converted into a `TrainerAuditEvent` (``recordTrainerAudit(_:)``).
 /// Persistence is delegated: the app's `FernletStore` supplies `initialPeers`/`initialAudit`
 /// from the snapshot and observes `onChange` to save — the vault itself never touches disk.
 /// Audit events are capped at 500, newest first. `@MainActor @Observable`: the Friends UI reads
 /// `trustedPeers` directly.
 @MainActor
 @Observable
-public final class ProximityTrustVault: ProximityTrustPolicy {
+public final class ProximityTrustVault {
     /// Newest-first cap on the retained audit trail — the ONE definition, applied wherever
     /// events enter (init, snapshot apply, and each record).
     public static let maxAuditEvents = 500
