@@ -17,16 +17,16 @@ import Foundation
 /// friends only: ``MeshNetworkManager`` before it takes in or sends a friend-state payload or a
 /// moderation report, and the heart-eligibility check,
 /// ``ProximityHost/isTrustedUnblockedPeer(signingPublicKey:fingerprint:)``, before a heart from or to
-/// a peer is recorded, in person (``PresenceManager``) or routed (the mesh's routed heart path). A
-/// ``ProximityTrustPolicy`` is a different thing: the rule one session's coordinator consults while
-/// its connection runs, which for a friend session trusts every peer; the store answers what the
-/// device remembers, whichever session is running.
+/// a peer is recorded, in person (FernletSocial's `PresenceManager`) or routed (the mesh's routed
+/// heart path). A ``ProximityTrustPolicy`` is a different thing: the rule one session's coordinator
+/// consults while its connection runs, which for a friend session trusts every peer; the store
+/// answers what the device remembers, whichever session is running.
 ///
 /// This module ships no conformer and keeps no records. Fernlet's is `ProximityTrustVault`
 /// (`FernletConnections`), which also mints, normalizes and keeps Fernlet's trusted-peer records and
 /// audit rows for its snapshot to persist. Its answers must come from the same records as
-/// ``ProximityHost/trustedProximityPeers``, which ``PresenceManager`` reads for the friends it derives
-/// presence tags and a heart connection's sealing key from.
+/// ``ProximityHost/trustedProximityPeers``, which FernletSocial's `PresenceManager` reads for the
+/// friends it derives presence tags and a heart connection's sealing key from.
 ///
 /// Main-actor, like ``ProximityHost`` and the managers that ask it.
 @MainActor

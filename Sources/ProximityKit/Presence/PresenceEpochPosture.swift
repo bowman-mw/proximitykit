@@ -95,9 +95,9 @@ nonisolated enum PresencePostureError: Error, Equatable {
 ///
 /// Package access for FernletSocial until A1, with ``epoch``, ``instanceName`` and the production
 /// ``minted(at:instanceNamePrefix:commonName:)`` and ``rotated(at:instanceNamePrefix:commonName:)``:
-/// Fernlet's presence manager mints and rotates the posture it hands the presence radio's seam
-/// (``PresenceRadioSession``), which exits with it. The injected-source mints, the TLS identity and
-/// the name construction stay internal.
+/// FernletSocial's presence manager mints and rotates the posture it hands the presence radio's
+/// seam (``PresenceRadioSession``), which exits with it. The injected-source mints, the TLS identity
+/// and the name construction stay internal.
 package nonisolated struct PresenceEpochPosture {
 
     // MARK: Shape
@@ -105,8 +105,8 @@ package nonisolated struct PresenceEpochPosture {
     /// Bytes of entropy behind one instance name: 64 bits, drawn fresh at every epoch.
     ///
     /// Enough that two devices in one room collide with negligible probability, and far more than
-    /// enough that a name is unguessable; the same 8-byte unit the presence tag
-    /// (`IdentityService.presenceTagByteCount`) and the certificate serial
+    /// enough that a name is unguessable; the same 8-byte unit the presence tag (FernletSocial's
+    /// `IdentityService.presenceTagByteCount`) and the certificate serial
     /// (``EphemeralMeshTLSIdentity/serialByteCount``) already use.
     static let instanceNameEntropyByteCount = 8
 

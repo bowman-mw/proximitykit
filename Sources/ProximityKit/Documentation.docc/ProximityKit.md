@@ -1,6 +1,6 @@
 # ``ProximityKit``
 
-Fernlet's self-contained peer-to-peer subsystem: signed identity, QUIC + UWB session formation, trust lifecycle, and the in-person social features still built into it (photos, recipes, the clothing shop, chat, in-person hearts and the heart ledger, activities, the moderation report relay); the heart dead-drop, moderation's ban store and ledger, closeness and friend state are `FernletSocial`'s.
+Fernlet's self-contained peer-to-peer subsystem: signed identity, QUIC + UWB session formation, trust lifecycle, the presence radio, and the in-person social features still built into it (photos, recipes, the clothing shop, chat, the mesh's session hearts and the heart ledger, activities, the moderation report relay); presence, the heart dead-drop, moderation's ban store and ledger, closeness and friend state are `FernletSocial`'s.
 
 ## Overview
 
@@ -21,8 +21,8 @@ step A0.2 only for the feature labels that leave with their features and for the
 `CryptographicPurpose` signing overloads; see "Protocol namespace" below), `FernletDomainModel` (the
 features' payload vocabulary and models, the host's trusted-peer record type and the session mode,
 Fernlet's vocabulary and record types named only on the lines `ProximityNamespaceBoundaryTests`
-allowlists, which leave with their features or the session profile) and `FernletFoundation` (two
-`FernletDate` reads). It therefore sits on
+allowlists, which leave with their features or the session profile) and `FernletFoundation` (one
+`FernletDate` read, the mesh manager's). It therefore sits on
 the *protected* side of the S3 privacy wall: it may reach a sealed `Private*` store, and the
 walled `AIProviders` / `CloudKitSync` targets can never import it (nor it them, nor
 `FernletSocial`, whose heart dead-drop gets its CloudKit transport injected app-side through
@@ -37,14 +37,15 @@ drop-in package of its own). The three screens this module used to ship from its
 session-end photo review with its Photos saver and save-failure alert, the keep-as-friend prompt,
 and the fingerprint view — moved to the `FernletProximityUI` module, which depends on this one and
 never the reverse. ``PeerNameDisplay`` deliberately stayed in `UI/`: it imports neither SwiftUI nor
-`FernletUI`, and `PresenceManager.firstName(of:in:)` calls it (a module below cannot call up into
-`FernletProximityUI`). It hides the QUIC instance name by the mesh instance-name prefix of the
-namespace each caller passes it.
-It is Fernlet display policy rather than mechanism, though, so it should follow `PresenceManager`
-out of ProximityKit to FernletKit with the feature code in the plan's step A0.4.
+`FernletUI`, and `FernletSocial`'s `PresenceManager.firstName(of:in:)` calls it (neither module can
+call up into `FernletProximityUI`). It hides the QUIC instance name by the mesh instance-name prefix
+of the namespace each caller passes it.
+Its placeholders are Fernlet display policy rather than mechanism, though, so they leave ProximityKit
+for `FernletConnections` in the plan's step A0.4, while its identifier filter stays here.
 
 **How a session forms.** A radio owner (``MeshNetworkManager`` for the friend mesh,
-``ProximityRecipeShareManager`` for recipe pairing, ``PresenceManager`` for presence hearts)
+``ProximityRecipeShareManager`` for recipe pairing, `FernletSocial`'s `PresenceManager` for presence
+hearts, through the presence radio's `package` seam)
 runs one shared radio multiplexed into per-peer channels — one of the three `Network*Session`
 types, one per radio, since the MC→QUIC cutover (2026-09-21) took the friend mesh off
 MultipeerConnectivity and the deletion round (2026-09-22) took that radio out of the tree (see
@@ -182,8 +183,8 @@ first build showed): a pre-commit peer reads "Someone nearby", never its fingerp
 filter turns a fingerprint filed as a name, or the QUIC transport's instance name (the host
 namespace's mesh prefix and 12 hex characters, `fernlet-mesh-…` for Fernlet), into the placeholder;
 every call passes the namespace whose prefix it hides. Hearts copy that uses a first name goes
-through ``PeerNameDisplay/firstName(_:fingerprint:placeholder:in:)``, which
-``PresenceManager/firstName(of:in:)`` delegates to, so a sentence composed in this package cannot
+through ``PeerNameDisplay/firstName(_:fingerprint:placeholder:in:)``, which `FernletSocial`'s
+`PresenceManager.firstName(of:in:)` delegates to, so a sentence composed over this package cannot
 interpolate a fingerprint either. No wire shape moved: an empty name is a value.
 **The mesh has a door of its own** and the invariant holds there too: every mesh frame is signed in
 `MeshNetworkManager.sendEnvelopeCore`, six broadcasts reach slots this device has not committed and
@@ -291,9 +292,14 @@ warranted ban, lifting one whose reporters positively withdrew enough of its evi
 content hash a report binds an artwork by live in that module, whose landing page states the
 invariants.
 
-**Presence and hearts.** ``PresenceManager`` runs a standing radio that broadcasts only rotating
-pairwise-DH tags — no names, no stable identifiers — so kept friends recognize each other nearby
-without connecting. The posture behind that rotation is an
+**Presence and hearts.** The presence radio is this module's mechanism; Fernlet's presence feature,
+`FernletSocial`'s `PresenceManager`, drives it through the radio's `package` seam
+(`PresenceRadioSession`, see "Package doors"), broadcasting only rotating pairwise-DH tags — no
+names, no stable identifiers — so kept friends recognize each other nearby without connecting. The
+tags, and the pair secret under them, are `FernletSocial`'s too (its `presenceTag(for:epoch:)`,
+over ``IdentityService/pairSecret(with:purpose:)`` under the presence salt `.fernlet` declares);
+what stays here is the radio, its TXT vocabulary (`PresenceAdvertisement`), the epoch clock the tags
+rotate on (``IdentityService/presenceEpoch(at:)``) and the posture. The posture behind that rotation is an
 explicit value since P9 item 2: ``PresenceEpochPosture`` answers, for any instant, the presence
 epoch, the service instance name to advertise and the TLS identity to present, all three replaced
 whole at every 900 s boundary — so two sightings 901 seconds apart share no byte. Since pass 2 that
@@ -309,7 +315,8 @@ every device in range; the certificate is minted at the epoch's START for the sa
 validity window anchored to the mint instant would stamp each posture with the second that radio
 came up. The value is pure (injected clock, injected entropy, no radio and no
 timer); the manager rotates it on the epoch tick it already runs, and drops it on `stop()`. Hearts are delivered over short-lived
-connections formed on that recognition, with the sealed-introduction rule
+connections formed on that recognition, each a ``ProximityCoordinator`` over the radio's peer
+channel, with the sealed-introduction rule
 (``SealedIntroductionEnvelope``) ensuring a tag-replay forger never sees an identity. When the
 friend is away, `FernletSocial`'s heart dead-drop takes the heart instead: its `HeartDropService`
 seals it, forward-secret to a one-time or signed prekey the friend gossiped (or to the friend's
@@ -317,16 +324,17 @@ static key, opened through ``IdentityService/staticKeyAgreement(withEphemeralPub
 it for the transport its app injects, and on receipt dedups it durably and records it into the shared
 ``ProximityHeartLedger``, which enforces the bidirectional 5-minute rate limit for every heart
 transport. Its pair secret derives through ``IdentityService/pairSecret(with:purpose:)`` under the
-salt `.fernlet` declares for it. `FernletSocial`'s `ClosenessLedger` turns these interactions into the
-private closeness score.
+heart salt `.fernlet` declares, as presence's does under the presence salt. `FernletSocial`'s
+`ClosenessLedger` turns these interactions into the private closeness score.
 
 The prekeys travel as the core wire type ``ProximityPrekeyBundle`` (`FernletSocial`'s prekey store
 names it `Bundle`, with `PrekeyEntry` and `SignedPrekey`), inside the signed identity introduction under
 its frozen `heartDropPrekeyBundle` key: the coordinator encodes what its owner's
 ``ProximityCoordinator/introductionPrekeyBundleProvider`` returns and hands a verified
 introduction's bundle to ``ProximityCoordinator/onIntroductionPrekeyBundle``, reading no field, and
-the mesh and presence managers wire those two from their own `heartDropBundleProvider` and
-`onPeerPrekeyBundle`. Whether a heart from or to a peer may be recorded is one predicate,
+the mesh manager and `FernletSocial`'s presence manager wire those two from their own
+`heartDropBundleProvider` and `onPeerPrekeyBundle`. Whether a heart from or to a peer may be
+recorded is one predicate,
 ``ProximityHost/isTrustedUnblockedPeer(signingPublicKey:fingerprint:)``: the host's trust store
 remembers the key and has not removed it, does not hold it blocked, and the host's fingerprint
 block list does not hold the fingerprint. Presence's gate delegates to it and the mesh's routed heart
@@ -341,12 +349,13 @@ in Swift 6 language mode: managers, coordinators, and stores are `@MainActor` (m
 `@Observable`), while every wire value type, the canonical signing serializer, and the pure
 crypto statics are explicitly `nonisolated` + `Sendable` so untrusted bytes can be decoded and
 signatures verified off the main actor (the WI-9 convention). The managers that mirror
-coordinator state into their own observable properties (``MeshNetworkManager``,
-``ProximityRecipeShareManager``, ``PresenceManager``) drive that mirroring through the
+coordinator state into their own observable properties (``MeshNetworkManager`` and
+``ProximityRecipeShareManager`` here, `FernletSocial`'s `PresenceManager` over this module) drive
+that mirroring through the
 ``ObservationLoop`` helper (`Engine/ObservationLoop.swift`), which owns the shared
 `withObservationTracking` re-arm machinery and holds its owner weakly — including across the
 suspension — so the loop can never pin the manager; it is public, as settled mechanism, so a host's
-manager that watches the coordinators it owns uses it too. Every long-running task those three managers
+manager that watches the coordinators it owns uses it too, as presence does. Every long-running task those three managers
 own is also cancelled in an `isolated deinit`, and every record-drop path (stop, refresh, MC
 disconnect, stale/parked sweeps, slot eviction) runs the dropped ``ProximityCoordinator``'s own
 `cancel()` so ranging and the Live Activity anchor stop with it; the mesh manager additionally
@@ -407,8 +416,8 @@ compatibility contracts with in-field peers.
 
 ### The host pin: the managers read a host they do not own (HP0/HP1/HP2)
 
-All four proximity managers — ``MeshNetworkManager``, ``PresenceManager``,
-``ProximityRecipeShareManager``, ``ProximityActivityManager`` — hold their host as
+All four proximity managers — ``MeshNetworkManager``, ``ProximityRecipeShareManager`` and
+``ProximityActivityManager`` here, and `FernletSocial`'s `PresenceManager` — hold their host as
 `unowned let store: any ProximityHost`. That is right: the host owns the manager (each is a `lazy
 var` on `FernletStore`), so the back-reference is the cycle-breaker. It also means a manager can be
 alive while its host is gone, and reading `store` then is not a nil — it is
@@ -471,12 +480,13 @@ payload vocabulary, every group of which this module reads off it too: the envel
 the coordinator's session messages and capability rules, the managers' wire2 token, the inventory
 digest's record kinds, the routed type registry's routed types and the mesh engine's own messages.
 The mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
-`ProximityCapability` cases until plan steps A0.4, A0.5 and A0.7 move them.
+`ProximityCapability` cases until plan steps A0.5 and A0.7 move them.
 Some such strings stay outside it until
-a later step (see "What is left for A0.4 onward" below): the 8 feature labels this module reads from
-FernletCrypto's registry (presence's and the sealed-backup escrow's four until A0.4, the activities'
-and the moderation report's four until A0.5). The heart dead-drop's keychain service and the
-moderation ban store's are `FernletSocial`'s. `ProximityNamespaceBoundaryTests`
+a later step (see "What is left for A0.4 onward" below): the 6 feature labels this module reads from
+FernletCrypto's registry (the sealed-backup escrow's two until A0.4, the activities' and the
+moderation report's four until A0.5). The heart dead-drop's keychain service and the
+moderation ban store's are `FernletSocial`'s, and so is presence, with its labels and the heart
+payload format it checks. `ProximityNamespaceBoundaryTests`
 allowlists each feature-label read, each literal that spells `fernlet` and each line that still
 names one of Fernlet's domain types, with the step that removes it. Beside it the
 host supplies two things this module used to take from Fernlet's own modules, the install binding
@@ -593,7 +603,7 @@ hand it:
 
 | Reader | How it reads the namespace |
 | --- | --- |
-| ``MeshNetworkManager``, ``PresenceManager``, ``ProximityRecipeShareManager`` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their default identity and their radio from it, and hand it, or its `family.purposes`, to every reader they call. An identity handed to them is compared with it once, in `init`, and one of another namespace never starts their radio. |
+| ``MeshNetworkManager``, ``ProximityRecipeShareManager``, and `FernletSocial`'s `PresenceManager` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their default identity and their radio from it, and hand it, or its `family.purposes`, to every reader they call. An identity handed to them is compared with it once, in `init`, and one of another namespace never starts their radio. |
 | ``IdentityService`` | Takes it in ``IdentityService/init(namespace:keychainService:)`` (a `nil` service means the namespace's identity service) and keeps it with its ``IdentityService/purposes``: it signs, seals, opens and wraps under its own labels and keeps its four device rows under the namespace's accounts. Its ``ProximityCryptographicPurpose`` overloads of `sign` and `verify` treat a label by its role, and `sign` refuses a verify-only or non-signature label. ``IdentityService/pairSecret(with:purpose:)`` derives only under a feature salt its namespace's family declares (`family.purposes.feature`). Under an unsound namespace it refuses to provision and to wrap a group key, and so derives no pair secret. |
 | Builders: envelopes, admission tokens, membership records and messages, the removal quorum, key advertisements, routed items, chunks and receipts, the verify QR | Sign under their signing identity's ``IdentityService/purposes``. |
 | Verifiers: the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
@@ -606,11 +616,11 @@ hand it:
 | Stateless helpers: the serializer's `canonicalBytes(for:in:)` overloads and `canonicalInventoryDigestBytes`, ``MeshRoutedContentDigest``, ``MeshChunkAssembly``, the item seal and the content-key wrap, ``ProximityVerifyQR/parse(_:in:)``, ``MeshEpochRef/minted(counter:coordinatorFingerprint:meshID:in:)`` | Take `in purposes:` (or `in:` a namespace) last. |
 | Ids that hash a label: ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)``, ``MeshRecipientReceipt/receiptID(in:)`` | Are functions, not stored properties: a value decoded off the wire carries no namespace, so `Codable` stays namespace-free. |
 | The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkRecipeShareSession` | Take `init(namespace:)` and read their service type, ALPN, heartbeat, exporter label, log subsystem and soundness verdict there, once (their `start` refuses an unsound namespace by that verdict); the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
-| The presence posture: `PresenceEpochPosture` | Is minted, and rotated, with the presence instance-name prefix and the TLS common name its caller passes: ``PresenceManager``'s posture mint, built in `init` from the manager's namespace, passes them. |
-| The name display: ``PeerNameDisplay``, `PresenceManager.firstName(of:in:)` | Take `in namespace:` last, sanitize under its peer-name cap and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
+| The presence posture: `PresenceEpochPosture` | Is minted, and rotated, with the presence instance-name prefix and the TLS common name its caller passes: `FernletSocial`'s `PresenceManager`'s posture mint, built in `init` from the manager's namespace, passes them. |
+| The name display: ``PeerNameDisplay``, and `FernletSocial`'s `PresenceManager.firstName(of:in:)` over it | Take `in namespace:` last, sanitize under its peer-name cap and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
 | The peer-name coercion: `ProximityDisplayName.peerDisplayName(_:in:)`, ``FernletIdentityEnvelope/sanitizedSenderDisplayName(in:)`` and ``FernletIdentityEnvelope/disclosedSenderDisplayName(in:)``, `RecipeShareAdvertisedName.publishable(_:in:)`, `SessionMessageStore.receiveIncoming(…in:)` | Take `in namespace:` last and read `installation.peerNames`: a peer's sanitized name keeps at most the cap and reads as the floor when nothing displayable is left, and the advertised recipe name is capped the same way. The managers pass their own namespace (the mesh manager also to its descriptor and incoming-photo coercions, a mesh name under the cap), the coordinator its identity's. `ProximityDisplayName.sanitized(_:maxLength:)` is FernletDomainModel's `ItemNameModeration.sanitizedName` copied scalar for scalar; only the activities still use the original. |
 | Storage scopes: ``MeshSessionStorageScope``, ``MeshRoutedStorageScope`` | Carry the namespace and the install binding (`init(namespace:directory:keychainService:installBinding:)`, ``MeshSessionStorageScope/production(for:installBinding:)``); the two stores read their file names, seal-key accounts and column-seal labels off `scope.namespace`. |
-| Closures that cross an actor | Capture the `Sendable` value when they are made, as ``PresenceManager``'s radio factory does. |
+| Closures that cross an actor | Capture the `Sendable` value when they are made, as `FernletSocial`'s `PresenceManager`'s radio factory does. |
 
 **What pins it.** `ProximityNamespaceGoldenTests`, on the crypto-goldens CI line, holds every value
 `.fernlet` carries to the literal Fernlet shipped (64 rows, its two declared feature salts among
@@ -648,7 +658,7 @@ the mesh manager's feature parts (A0.5); every remaining string literal that spe
 an exact allowlist that names why it is still here and the plan step that removes it;
 FernletDomainModel's `PayloadType`, `ProximityCapability`, `ProximityMode`, `ItemNameModeration`,
 `ProximityTrustedPeerRecord`, `TrainerAuditEvent` and `ConnectionSessionLog` are named only on an
-exact per-file, per-type allowlist: the feature files that leave at A0.4, the activity manager and the
+exact per-file, per-type allowlist: the activity manager and the
 mesh manager's feature sends, capability list and session hearts with the two typed capability gates
 and the host's trusted-peer list (A0.5), the typed doors only Fernlet's features and the recipe-share
 manager go through, the envelope's typed view of its token and the coordinator's typed send (A0.7),
@@ -718,16 +728,14 @@ passes the host's name) and `PeerTransport`'s discovery doors take no service ty
 policies, the trust records and the peer-name policy come from the host. What still ties this module
 to Fernlet leaves in these steps:
 
-- **A0.4** moves Fernlet's remaining features out: presence to `FernletSocial`, which holds the
+- **A0.4** moves Fernlet's remaining features out: the sealed-backup escrow to the App's backup
+  side, and with it the escrow's two of the 6 feature labels this module still reads from
+  FernletCrypto's registry. `FernletSocial` holds A0.4's other features: presence (its
+  manager, over the presence radio's `package` doors, and its pair secret and tag, the pair secret a
+  wrapper over ``IdentityService/pairSecret(with:purpose:)`` under the salt `.fernlet` declares), the
   heart dead-drop (with its heart-drop derivations, its keychain service and the mesh stores' services
   derived beside it), moderation's ban store, ledger and content hash, closeness, friend state and the
-  parked chat payload, and the sealed-backup escrow to the App's backup side. With them go four of the
-  8 feature labels this module still reads from FernletCrypto's registry (presence's two and the
-  escrow's two; the presence pair secret leaves as a FernletSocial wrapper over
-  ``IdentityService/pairSecret(with:purpose:)``, under the salt `.fernlet` already declares, as the
-  heart-drop pair secret's already is, and its tag leaves with presence), the heart payload's format,
-  presence's lines that name Fernlet's domain types (its friend records and hearts capability), and
-  presence's `FernletDate` read.
+  parked chat payload.
 - **A0.5** splits the routed mesh manager: its feature parts leave with their `PayloadType` sends,
   their capability list and the session hearts, and with them what the mesh manager builds, decodes
   or calls (the clothing shop, the activity manager with its send hook and item-name rules, the
@@ -759,8 +767,8 @@ reshapes or replaces what is behind it; a settled seam is `public`, with its con
 door's doc comment says so and names its exit (for a protocol witness whose access its type forces,
 the type's doc comment does). The doors, by what they open:
 
-- **The presence radio, until A1.** `PresenceRadioSession`, the seam Fernlet's presence manager drives
-  the radio through, with every requirement; its QUIC conformer, `NetworkPresenceSession`, with
+- **The presence radio, until A1.** `PresenceRadioSession`, the seam `FernletSocial`'s presence
+  manager drives the radio through, with every requirement; its QUIC conformer, `NetworkPresenceSession`, with
   `init(namespace:)` and its witnesses; `NetworkPeerChannel`, which the seam's requirements name and a
   heart connection's coordinator runs over, with `peer`, `notifyConnected()` and its ``PeerTransport``
   witnesses; `PresenceEpochPosture`, with `epoch`, `instanceName` and the production `minted` and
@@ -769,8 +777,8 @@ the type's doc comment does). The doors, by what they open:
   by a presence engine.
 - **The coordinator's typed send and manual commit, until A0.7.**
   `ProximityCoordinator.sendPayload(type:summary:payload:sealed:)` and `commitManualProximity()`, which
-  presence's heart delivery and the recipe-share manager call; the profile-driven pair session's API
-  replaces them.
+  `FernletSocial`'s presence heart delivery and the recipe-share manager call; the profile-driven pair
+  session's API replaces them.
 - **The JSON sidecar, until A0.5.** `JSONSidecarFile` (`Support/JSONSidecarFile.swift`): the type, its
   `init(fileURL:)`, the `fileURL(in:name:)` layout and `load()`, `save(_:)` and `removeFile()`, the
   naive best-effort idiom `FernletSocial`'s moderation, closeness and friend-state ledgers persist
@@ -2806,7 +2814,9 @@ records rather than app-visible state.
 
 ### Presence
 
-- ``PresenceManager``
+The presence manager, which drives the presence radio and delivers in-person hearts, and the
+presence tags are `FernletSocial`'s.
+
 - ``PresenceEpochPosture``
 - ``PresencePostureError``
 

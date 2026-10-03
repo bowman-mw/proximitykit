@@ -89,16 +89,16 @@ public enum IdentityError: Error, Equatable {
 // MARK: - IdentityService
 
 /// The per-device cryptographic identity for the proximity subsystem: Ed25519 signing, X25519
-/// key agreement, presence tag derivation, group-key wrapping, and the iCloud-synced
+/// key agreement, the presence epoch clock, group-key wrapping, and the iCloud-synced
 /// backup-escrow key lifecycle.
 ///
 /// Responsibilities: provisioning + caching the keychain-backed key pairs
 /// (`ensureProvisioned()`, idempotent, with three migration cases documented inline); signing
 /// (`sign`) and static verification (`verify`); the pairwise ECDH→HKDF→ChaChaPoly seal/open used
-/// for all sealed payloads (with optional wire2 framing); domain-separated pair secrets (the generic
-/// ``pairSecret(with:purpose:)`` under a declared feature salt, which FernletSocial's heart-drop
-/// derivations reach through, and the presence derivation) and rotating tags for presence
-/// recognition; and the WS-1..WS-4 backup-escrow reconciliation, where CONTENT-ADDRESSED keychain
+/// for all sealed payloads (with optional wire2 framing); domain-separated pair secrets for a host's
+/// features (the generic ``pairSecret(with:purpose:)`` under a declared feature salt, which
+/// FernletSocial's heart-drop and presence derivations reach through, beside the rotating tags they
+/// compute over it); and the WS-1..WS-4 backup-escrow reconciliation, where CONTENT-ADDRESSED keychain
 /// slots make divergent escrow keys coexist as a detectable `.conflict` instead of silently
 /// overwriting each other.
 ///
@@ -514,7 +514,13 @@ public final class IdentityService {
         return try myKey.sharedSecretFromKeyAgreement(with: ephemeralKey)
     }
 
-    // MARK: - Presence tags (mesh redesign Phase 4a)
+    // MARK: - Presence epoch clock
+    //
+    // The wall-clock epoch the presence radio's posture (`PresenceEpochPosture`) is minted and
+    // rotated on, and FernletSocial's presence tags rotate on (its `presenceTag(for:epoch:)`, beside
+    // the pair secret it derives through `pairSecret(with:purpose:)`): one counter for the advertised
+    // name, the certificate and the tags, so they can never drift onto two clocks. Pure statics that
+    // read no key.
 
     /// Presence epoch length in seconds — **the one place 900 is written down**. Presence tags
     /// rotate every epoch; matchers accept ±1 epoch to span clock skew and the advertiser-restart
@@ -527,10 +533,6 @@ public final class IdentityService {
     /// same epoch index without exchanging a byte for the pairwise tag to be mutual. See
     /// ``PresenceEpochPosture`` for why that anchoring is also the stronger privacy choice.
     public nonisolated static let presenceEpochSeconds: TimeInterval = 900
-
-    /// Bytes kept from the truncated presence-tag HMAC (base64 → 12 chars on the wire, which is
-    /// what keeps a 24-tag roster inside the ~400 B Bonjour TXT budget).
-    public nonisolated static let presenceTagByteCount = 8
 
     /// The presence epoch counter for a moment in time: `floor(unixTime / 900)`.
     public nonisolated static func presenceEpoch(at date: Date) -> UInt64 {
@@ -547,53 +549,6 @@ public final class IdentityService {
     /// what makes the anonymity set everyone present (``PresenceEpochPosture``, reason 3).
     public nonisolated static func presenceEpochStart(at date: Date) -> Date {
         Date(timeIntervalSince1970: Double(presenceEpoch(at: date)) * presenceEpochSeconds)
-    }
-
-    /// STATIC-STATIC X25519 DH pair secret for presence tags:
-    /// `HKDF-SHA256(DH(myKA_priv, friendKA_pub))`, domain-separated from the sealing derivation
-    /// (`fernlet.proximity.v1`) and the group-key wrap (`fernlet.mesh.groupkey.v1`) by its own salt,
-    /// so presence material can never collide with message keys.
-    ///
-    /// SYMMETRIC BY CONSTRUCTION — the mutual-recognition property: `DH(aPriv, bPub) ==
-    /// DH(bPriv, aPub)`, the salt is a constant, and `sharedInfo` is deliberately EMPTY (any
-    /// ordering-dependent info such as sender‖recipient key bytes would give the two sides of the
-    /// pair different secrets and break mutual tag derivation). Pairwise-DH is also why blocking a
-    /// friend removes their tag: only someone holding one of the two private keys can derive it —
-    /// a past handshake partner holding just our public keys cannot (unlike public-key-hash tags).
-    public func presencePairSecret(with friendKeyAgreementPublicKey: Data) throws -> SymmetricKey {
-        guard let myKey = keyAgreementKey else { throw IdentityError.notProvisioned }
-        guard let friendKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: friendKeyAgreementPublicKey) else {
-            throw IdentityError.invalidKeyData
-        }
-        let sharedSecret = try myKey.sharedSecretFromKeyAgreement(with: friendKey)
-        return sharedSecret.hkdfDerivedSymmetricKey(
-            using: SHA256.self,
-            salt: FernletCryptoPurpose.KeyDerivation.presencePairV1.data,
-            sharedInfo: Data(),
-            outputByteCount: 32
-        )
-    }
-
-    /// Big-endian (MSB-first) serialization of a 64-bit counter for the presence tag's
-    /// domain-separated HMAC message below — the R9-safe replacement for
-    /// `withUnsafeBytes(of: value.bigEndian)`, byte-identical to it (and to FernletSocial's helper for
-    /// the heart day tag), so every pinned tag vector still matches.
-    private nonisolated static func bigEndianBytes(_ value: UInt64) -> [UInt8] {
-        (0..<8).map { UInt8(truncatingIfNeeded: value >> (56 - 8 * $0)) }
-    }
-
-    /// The rotating presence tag for one friend pair at one epoch:
-    /// `HMAC-SHA256("fernlet.presence.epoch.v1" ‖ epoch_be64, pairSecret)` truncated to
-    /// `presenceTagByteCount`. Both members of the pair derive the SAME tag for the same epoch
-    /// (see `presencePairSecret`); different pairs derive independent tags. Observer-opaque:
-    /// without a pair private key the tag is an unlinkable pseudorandom value that rotates every
-    /// 15 minutes.
-    public func presenceTag(for friendKeyAgreementPublicKey: Data, epoch: UInt64) throws -> Data {
-        let secret = try presencePairSecret(with: friendKeyAgreementPublicKey)
-        var message = FernletCryptoPurpose.HMAC.presenceEpochTagV1.data
-        message.append(contentsOf: Self.bigEndianBytes(epoch))
-        let mac = HMAC<SHA256>.authenticationCode(for: message, using: secret)
-        return Data(Data(mac).prefix(Self.presenceTagByteCount))
     }
 
     // MARK: - Group key distribution (Phase 3)

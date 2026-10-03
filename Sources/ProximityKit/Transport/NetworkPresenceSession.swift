@@ -5,7 +5,7 @@ import os
 
 // MARK: - PresenceRadioSession
 
-/// The presence radio, as the surface ``PresenceManager`` actually drives.
+/// The presence radio, as the surface FernletSocial's `PresenceManager` actually drives.
 ///
 /// The seam `PresenceManager` did not have. `MeshNetworkManager` has held its radio behind
 /// `MeshTransportSession` since P2 item 8, so the whole manager can be exercised at tier 1 over an
@@ -17,9 +17,9 @@ import os
 /// The hooks are settable rather than delegate methods because that is the shape both existing
 /// radios already publish, and because the manager wires them once in `start()` and never again.
 ///
-/// Package access for FernletSocial until A1, with every requirement: Fernlet's presence manager
-/// drives the radio through it, and before ProximityKit leaves FernletKit the seam is published as
-/// mechanism or wrapped by a presence engine. Main-actor, like the radio and its owner.
+/// Package access for FernletSocial until A1, with every requirement: FernletSocial's presence
+/// manager drives the radio through it, and before ProximityKit leaves FernletKit the seam is
+/// published as mechanism or wrapped by a presence engine. Main-actor, like the radio and its owner.
 @MainActor
 package protocol PresenceRadioSession: AnyObject {
 

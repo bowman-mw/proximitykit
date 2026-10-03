@@ -33,8 +33,8 @@ public protocol ProximityInspectorRecording: AnyObject {
 /// dispatches (`payloads.known`) but not one of the coordinator's own session messages (identity
 /// intro/ack, heartbeat); `peer` is the handshake-verified
 /// identity when one exists, else the pending identity — receivers must apply their own
-/// committed/blocked gates. Conformers: ``MeshNetworkManager``, ``ProximityRecipeShareManager``,
-/// ``PresenceManager``. Held `weak` by the coordinator.
+/// committed/blocked gates. Conformers: ``MeshNetworkManager`` and ``ProximityRecipeShareManager``
+/// here, and FernletSocial's `PresenceManager`. Held `weak` by the coordinator.
 @MainActor
 public protocol ProximityPayloadHandling: AnyObject {
     func proximityCoordinator(

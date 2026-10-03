@@ -20,9 +20,9 @@ public protocol ProximityHost: AnyObject {
     var proximityDisplayName: String { get }
     /// Every trusted-peer record the host keeps (kept, removed, blocked and reported alike), in the
     /// host's persisted type: the managers read a friend's record from them where a feature needs one
-    /// (presence tags, a heart connection's sealing key, a heart sender's filed name, the mesh's vouch
-    /// list). The same records ``proximityTrustStore`` answers from: Fernlet's app and every test
-    /// double answer their vault's.
+    /// (FernletSocial's presence for its tags, a heart connection's sealing key and a heart sender's
+    /// filed name; the mesh for its vouch list). The same records ``proximityTrustStore`` answers
+    /// from: Fernlet's app and every test double answer their vault's.
     var trustedProximityPeers: [ProximityTrustedPeerRecord] { get }
     /// The host's durable trust records, asked the two questions this module puts to them outside a
     /// session: whether a signing key is a remembered, unrevoked peer, and whether it is blocked
@@ -37,12 +37,13 @@ public protocol ProximityHost: AnyObject {
     func isBlockedFingerprint(_ fingerprint: String) -> Bool
     func blockProximityPeer(signingPublicKey: Data)
     /// The in-person hearts opt-in (mesh redesign Phase 4b), the one hearts setting a host answers.
-    /// `PresenceManager` consults it on the send side (block an outbound heart) and the receive side
-    /// (drop an inbound heart), and ``MeshNetworkManager``'s session hearts do too (the send, the
-    /// routed heart's ledger judgement and the hearts capability it advertises). Presence VISIBILITY
-    /// is a separate setting, so hearts-off + presence-on means a friend still sees you nearby but a
-    /// heart to you is silently dropped. The away-delivery opt-in is no host requirement: the
-    /// managers that read it take a provider of their own (`heartsAwayEnabledProvider`).
+    /// FernletSocial's `PresenceManager` consults it on the send side (block an outbound heart) and the
+    /// receive side (drop an inbound heart), and ``MeshNetworkManager``'s session hearts do too until
+    /// the mesh's feature parts leave at plan step A0.5 (the send, the routed heart's ledger judgement
+    /// and the hearts capability it advertises). Presence VISIBILITY is a separate setting, so
+    /// hearts-off + presence-on means a friend still sees you nearby but a heart to you is silently
+    /// dropped. The away-delivery opt-in is no host requirement: the managers that read it take a
+    /// provider of their own (`heartsAwayEnabledProvider`).
     var allowNearbyHearts: Bool { get }
     /// Root directory for the proximity subsystem's on-disk sidecars — the friend photo-wall index
     /// (`MeshPhotoCache.sealed`, GCM-sealed under the friend-wall media key; a legacy plaintext
@@ -96,13 +97,14 @@ public protocol ProximityHost: AnyObject {
     /// the radios' presentation strings off it too. It also carries the payload vocabulary, which this
     /// module reads off it as well: the envelope, the coordinator, the managers, the inventory digest,
     /// the routed type registry and the mesh engine's own frames; the mesh features' payload and
-    /// capability tokens are still Fernlet's cases until plan steps A0.4, A0.5 and A0.7 move them.
+    /// capability tokens are still Fernlet's cases until plan steps A0.5 and A0.7 move them.
     /// Some such strings stay outside it until a later step: the feature labels this module reads from
-    /// FernletCrypto's registry (presence's and the sealed-backup escrow's until A0.4, the activities'
-    /// and the moderation report's until A0.5); the heart dead-drop's keychain service and the
-    /// moderation ban store's are FernletSocial's. `ProximityNamespaceBoundaryTests` allowlists each
-    /// feature-label read, each literal that spells `fernlet` and each line that still names one of
-    /// Fernlet's domain types, with the step that removes it.
+    /// FernletCrypto's registry (the sealed-backup escrow's until A0.4, the activities' and the
+    /// moderation report's until A0.5); the heart dead-drop's keychain service and the moderation ban
+    /// store's are FernletSocial's, which also names presence's epoch-tag prefix.
+    /// `ProximityNamespaceBoundaryTests` allowlists each feature-label read, each literal that spells
+    /// `fernlet` and each line that still names one of Fernlet's domain types, with the step that
+    /// removes it.
     ///
     /// **Deliberately no default.** The extension below hands a host that carries no value of its
     /// own the in-person hearts setting, the sidecar root and the two storage scopes; it hands out no
@@ -114,9 +116,9 @@ public protocol ProximityHost: AnyObject {
     /// take theirs from the cell that builds them: another app's, or Fernlet's with some of its groups
     /// replaced, in the cells that test one.
     ///
-    /// Read once, at construction: ``MeshNetworkManager``, ``PresenceManager`` and
-    /// ``ProximityRecipeShareManager`` each keep their own copy and build the identity and the radio
-    /// they own by default from it, so no later read reaches back to the host. The
+    /// Read once, at construction: ``MeshNetworkManager`` and ``ProximityRecipeShareManager`` here,
+    /// and FernletSocial's `PresenceManager`, each keep their own copy and build the identity and the
+    /// radio they own by default from it, so no later read reaches back to the host. The
     /// extension below also builds this host's default sidecar root and both storage scopes from it,
     /// and every scope carries it to the store that reads its names.
     var proximityNamespace: ProximityNamespace { get }
@@ -141,8 +143,8 @@ public protocol ProximityHost: AnyObject {
     /// auto-confirm) and records its audit events through.
     ///
     /// **A new value per call, kept alive by the caller.** The coordinator holds its policy `weak`,
-    /// so ``MeshNetworkManager`` (per slot), ``PresenceManager`` (per heart connection) and
-    /// ``ProximityRecipeShareManager`` (per pairing) each call this once per connection, test seams
+    /// so ``MeshNetworkManager`` (per slot), FernletSocial's `PresenceManager` (per heart connection)
+    /// and ``ProximityRecipeShareManager`` (per pairing) each call this once per connection, test seams
     /// included, and keep the result beside that connection for its lifetime: a policy nothing
     /// retains lets the revoked and blocked drops silently stop firing.
     ///

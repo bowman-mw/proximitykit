@@ -14,16 +14,16 @@ import Foundation
 ///
 /// ## The payload
 ///
-/// `v` is the frozen version token `"1"`. The tags are the truncated pairwise HMACs
-/// `IdentityService.presenceTag` derives for the current epoch, base64, comma-separated — the only
-/// thing this radio ever broadcasts. There is no display name, no session id and no fingerprint,
-/// and there is deliberately no room in the vocabulary for one.
+/// `v` is the frozen version token `"1"`. The tags are the truncated pairwise HMACs that
+/// FernletSocial's `IdentityService.presenceTag` derives for the current epoch, base64,
+/// comma-separated — the only thing this radio ever broadcasts. There is no display name, no session
+/// id and no fingerprint, and there is deliberately no room in the vocabulary for one.
 ///
 /// ## Why the tags are chunked
 ///
 /// DNS-SD (RFC 6763 §6.1) gives each TXT entry a single length byte, so one `key=value` string may
-/// not exceed 255 bytes. `PresenceManager.maxAdvertisedTags` is 24, and 24 base64 tags with their
-/// separators are 311 bytes — over the limit before the key is even counted. Under
+/// not exceed 255 bytes. FernletSocial's `PresenceManager.maxAdvertisedTags` is 24, and 24 base64
+/// tags with their separators are 311 bytes — over the limit before the key is even counted. Under
 /// MultipeerConnectivity that ceiling was the framework's problem and its behaviour there was never
 /// established; under `NWTXTRecord` it is this type's problem, and an over-long entry would either
 /// be refused or silently truncated, which reads on the air as "presence stopped working once you

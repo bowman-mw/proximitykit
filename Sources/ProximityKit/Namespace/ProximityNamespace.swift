@@ -40,12 +40,13 @@ import Foundation
 /// hashes its membership record kinds, the routed type registry builds its rows from its routed
 /// types, and the mesh manager signs and dispatches its engine's own frames by its mesh messages. The
 /// mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
-/// `ProximityCapability` cases until plan steps A0.4, A0.5 and A0.7 move them; for Fernlet the two
+/// `ProximityCapability` cases until plan steps A0.5 and A0.7 move them; for Fernlet the two
 /// spellings are equal, which `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
-/// until their features leave: the 8 feature labels ProximityKit reads from FernletCrypto's registry
-/// (presence's two and the sealed-backup escrow's two at plan step A0.4, the activities' and the
-/// moderation report's four at A0.5); the heart dead-drop's and the moderation ban store's keychain
-/// services are FernletSocial's.
+/// until their features leave: the 6 feature labels ProximityKit reads from FernletCrypto's registry
+/// (the sealed-backup escrow's two at plan step A0.4, the activities' and the moderation report's
+/// four at A0.5); the heart dead-drop's and the moderation ban store's keychain services are
+/// FernletSocial's, and so is presence, whose pair secret derives under a feature salt its host's
+/// family declares.
 /// `ProximityNamespaceBoundaryTests` keeps ProximityKit building no namespace, group or purpose
 /// outside `Namespace/`, and holds what is left of Fernlet in it (the registry's feature labels, the
 /// `fernlet` literals, Fernlet's domain types) and its `package` doors to exact per-file lists, each
