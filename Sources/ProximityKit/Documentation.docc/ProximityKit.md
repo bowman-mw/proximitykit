@@ -513,31 +513,39 @@ hash preimage, an HKDF salt, a column seal, an AEAD prefix, the exporter label),
 bytes and never decides how this module consumes them, and a label in a non-signature role verifies
 nothing. The initializer is total and records ``ProximityNamespace/soundness`` (labels well-formed,
 distinct and prefix-free; radio, QR, keychain and storage values well-formed and distinct; every
-vocabulary token within the bytes its receivers accept, none repeated within its group (the session
-and mesh messages count as one) and none a rule names left unknown; summary titles, instance-name
-prefixes and the common name well-formed; the peer-name cap 1 to 63 characters and the floor a name
-this module's sanitizer leaves unchanged);
+vocabulary token within the bytes its receivers accept (a mesh message within a summary title's 200,
+since the mesh signs it as its frame's title), none repeated within its group (the session and mesh
+messages count as one) and none a rule names left unknown; summary titles, instance-name prefixes
+and the common name well-formed; the peer-name cap at most 63 characters and at least a key
+fingerprint's 16 and the mesh instance-name prefix's length, so a name cut to it still shows
+``PeerNameDisplay`` the identifiers it hides, and the floor a name this module's sanitizer leaves
+unchanged);
 ``ProximityNamespace/validated(family:installation:)`` throws the same violations, and
 ``ProximityNamespace/familyCollisions(with:)`` and ``ProximityNamespace/installationCollisions(with:)``
 let a host's own tests show it overlaps no other app.
 
 **An unsound namespace is refused at run time.** This module refuses one on its own, failing closed,
 by reading the verdict ``ProximityNamespace/soundness`` stored when the namespace was built (no rule
-runs twice). ``IdentityService/ensureProvisioned()`` throws ``ProximityNamespaceError`` first thing,
-before any keychain row is read or written, and ``IdentityService/encryptGroupKey(_:for:)``, the one
-identity operation that needs no provisioned key, before it wraps anything, each auditing
+runs twice), at three doors. ``IdentityService/ensureProvisioned()`` throws ``ProximityNamespaceError``
+first thing, before any keychain row is read or written, so the identity holds no signing or
+key-agreement key to sign, seal to a peer or open with, and ``IdentityService/encryptGroupKey(_:for:)``,
+which needs no provisioned key, throws it before it wraps anything, each auditing
 `identity.namespace.unsound`; each radio's `start` throws it before it mints, listens or advertises,
 auditing `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound` or
 `recipe.quic.namespaceUnsound`. Each line's context names the door (`at`: `provision`,
 `groupKeyWrap` or `start`), the violation count and the first violation's case name, never a field
-or a value. Nothing else needs a door of its own: nothing signs, seals or opens without a provisioned
-identity, and nothing reaches a peer without a started radio. Each manager also compares the
+or a value. Nothing else reads the verdict: the identity's backup-escrow API
+(``IdentityService/provisionBackupEscrowKeyForSealing()`` and its loads, derivations, reconcile and
+adoption) needs no provisioned key and checks none, because it is Fernlet's sealed-backup feature, a
+feature path that leaves at A0.4, whose callers provision first. Each manager also compares the
 namespace of an identity handed to it through its `identity:` seam (no shipping caller passes one)
 with its own: on a mismatch it still constructs, audits `mesh.identity.namespaceMismatch`,
 `presence.identity.namespaceMismatch` or `recipeShare.identity.namespaceMismatch` (at
-`construction`), and refuses every start of its radio with the same event (at `start`), so nothing is
-signed for or advertised under two namespaces. ``HeartDropService`` holds no namespace of its own to
-compare with; its identity's doors cover it. The checks live in the internal `ProximityNamespaceGate`
+`construction`), and refuses with the same event (at `start`), first thing, every start of its radio
+and, for the mesh manager, every founding a caller can begin without one
+(``MeshNetworkManager/startNewMesh(name:)`` and its DEBUG harness's founder ledger; the promotion at a
+first commit needs a peer the radio linked), so that identity founds no mesh and links no peer.
+``HeartDropService`` holds no namespace of its own to compare with; its identity's doors cover it. The checks live in the internal `ProximityNamespaceGate`
 (`Support/`), and `ProximityNamespaceGateTests`, on the crypto-goldens CI line, holds every door to its
 error and its audit line, over namespaces built from literals.
 

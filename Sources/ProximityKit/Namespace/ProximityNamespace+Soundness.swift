@@ -25,7 +25,8 @@ nonisolated extension ProximityNamespace {
     /// The most bytes the mesh heartbeat may hold.
     static let maximumHeartbeatBytes = 64
 
-    /// The most bytes a payload token or a membership record kind may hold.
+    /// The most bytes a payload token or a membership record kind may hold. A mesh message is held to
+    /// ``maximumSummaryTitleCharacters`` too: the mesh signs it as its frame's summary title.
     static let maximumPayloadTokenBytes = 255
 
     /// The most bytes a capability token may hold: the coordinator cuts every token a peer advertises
@@ -38,7 +39,8 @@ nonisolated extension ProximityNamespace {
 
     /// The most characters a summary title may hold: a receiver's bounded `PayloadSummary` decode refuses
     /// a longer one (`PayloadSummary.maxDetailCharacters`, in `Wire/`, out of this folder's reach,
-    /// which `ProximityVocabularyGoldenTests` holds equal).
+    /// which `ProximityVocabularyGoldenTests` holds equal). It bounds the session messages' titles, and
+    /// every mesh message, which the mesh signs as its frame's title.
     static let maximumSummaryTitleCharacters = 200
 
     /// The most bytes a DNS-SD instance name may hold: it is one DNS label.
@@ -58,6 +60,12 @@ nonisolated extension ProximityNamespace {
     /// The most characters a peer-name cap may allow: a name is a short label, and the loops that walk
     /// one a character at a time (the recipe radio's advertised-name trim) are bounded by the cap.
     static let maximumPeerNameLength = 63
+
+    /// The characters of a key fingerprint, the shape `PeerNameDisplay` hides when a fingerprint was
+    /// filed as a name (`PeerNameDisplay.fingerprintLength`, in `UI/`, out of this folder's reach, which
+    /// `ProximityVocabularyGoldenTests` holds equal). The display cuts a name to the peer-name cap
+    /// before it looks, so a shorter cap would cut a fingerprint to a name it shows as a person's.
+    static let peerNameFingerprintLength = 16
 
     /// Every soundness rule's verdict for one family and installation.
     ///
@@ -82,7 +90,8 @@ nonisolated extension ProximityNamespace {
         }
         violations += vocabularyViolations(family.vocabulary)
         violations += presentationViolations(family.radios)
-        violations += peerNameViolations(installation.peerNames)
+        violations += peerNameViolations(
+            installation.peerNames, meshInstanceNamePrefix: family.radios.meshInstanceNamePrefix)
         return violations.isEmpty ? .sound : .unsound(violations)
     }
 
@@ -388,19 +397,30 @@ nonisolated extension ProximityNamespace {
 
     // MARK: Peer names
 
-    /// The peer-name policy: the cap 1 to ``maximumPeerNameLength`` characters, and the floor not empty
-    /// and byte for byte what ProximityKit's sanitizer makes of it under the cap, which also keeps it no
-    /// longer than the cap.
+    /// The peer-name policy: the cap at most ``maximumPeerNameLength`` characters and at least the
+    /// longer of a key fingerprint's ``peerNameFingerprintLength`` and the family's mesh instance-name
+    /// prefix, and the floor not empty and byte for byte what ProximityKit's sanitizer makes of it
+    /// under the cap, which also keeps it no longer than the cap.
     ///
-    /// The one rule here that runs code outside this folder: the floor is judged by the sanitizer every
-    /// peer's name passes through (`ProximityDisplayName.sanitized(_:maxLength:)`), because judging it by
-    /// any copy of that sanitizer would judge it by a rule that can drift from the one applied.
+    /// The cap's lower bound is the one rule judged across the family and the installation:
+    /// `PeerNameDisplay` cuts a name to the cap before it looks for a fingerprint filed as a name or a
+    /// mesh instance name, so a cap shorter than either would cut one to a name it shows as a person's.
+    /// The floor's rule is the one here that runs code outside this folder: the floor is judged by the
+    /// sanitizer every peer's name passes through (`ProximityDisplayName.sanitized(_:maxLength:)`),
+    /// because judging it by any copy of that sanitizer would judge it by a rule that can drift from
+    /// the one applied.
     ///
-    /// - Parameter peerNames: The installation's peer-name policy.
+    /// - Parameters:
+    ///   - peerNames: The installation's peer-name policy.
+    ///   - meshInstanceNamePrefix: The family's mesh instance-name prefix, which a name cut to the cap
+    ///     must still hold whole.
     /// - Returns: The malformed cap, then the malformed floor.
-    private static func peerNameViolations(_ peerNames: PeerNames) -> [Violation] {
+    private static func peerNameViolations(_ peerNames: PeerNames, meshInstanceNamePrefix: String) -> [Violation] {
         var violations: [Violation] = []
-        if !(1...maximumPeerNameLength).contains(peerNames.maxLength) {
+        // R2: the prefix's count is bounded by the prefix the host wrote. Two comparisons, not a
+        // range: a prefix longer than the upper bound would make a range's bounds cross and trap.
+        let shortest = max(peerNameFingerprintLength, meshInstanceNamePrefix.count)
+        if peerNames.maxLength < shortest || peerNames.maxLength > maximumPeerNameLength {
             violations.append(.malformedPeerNames(field: PeerNames.maxLengthField))
         }
         // R2: the sanitizer and the comparison are bounded by the floor the host wrote; under a cap
@@ -591,11 +611,14 @@ nonisolated extension ProximityNamespace.Vocabulary {
 
     /// The forty-six token fields with their paths from the namespace root, in declaration order:
     /// each with its token or, for a set or list, every member, and the most bytes its group's
-    /// receivers accept.
+    /// receivers accept. A mesh message is a payload token that the mesh also signs as its frame's
+    /// summary title, so it takes the shorter of the two bounds; a well-formed token is printable
+    /// ASCII, one byte a character, so the title's character bound applies to it in bytes.
     var tokenFields: [(field: String, tokens: [String], maximumBytes: Int)] {
         let payloadBytes = ProximityNamespace.maximumPayloadTokenBytes
         let capabilityBytes = ProximityNamespace.maximumCapabilityTokenBytes
         let routedBytes = ProximityNamespace.maximumRoutedTypeTokenBytes
+        let meshBytes = min(payloadBytes, ProximityNamespace.maximumSummaryTitleCharacters)
         var fields = Self.singleTokenFields(session.payloadTypeFields, maximumBytes: payloadBytes)
         fields.append((field: ProximityNamespace.PayloadRules.knownField,
                        tokens: Array(payloads.known), maximumBytes: payloadBytes))
@@ -609,7 +632,7 @@ nonisolated extension ProximityNamespace.Vocabulary {
                        tokens: capabilities.assumedForLegacyPeers, maximumBytes: capabilityBytes))
         fields += Self.singleTokenFields(membershipRecordKinds.fields, maximumBytes: payloadBytes)
         fields += Self.singleTokenFields(routedTypes.fields, maximumBytes: routedBytes)
-        fields += Self.singleTokenFields(mesh.fields, maximumBytes: payloadBytes)
+        fields += Self.singleTokenFields(mesh.fields, maximumBytes: meshBytes)
         return fields
     }
 

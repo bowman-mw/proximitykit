@@ -257,7 +257,8 @@ nonisolated extension ProximityNamespace {
     ///
     /// ProximityKit's mesh manager names each by role (`MeshPayloadRole`) and reads its token here at
     /// every send and at its dispatch door, so a frame travels under the host's token and is signed
-    /// with that token as its summary title too. Each is one of ``PayloadRules/known``, and all are
+    /// with that token as its summary title too, which is why each is at most 200 bytes, the longest
+    /// title a receiver's bounded summary decode accepts. Each is one of ``PayloadRules/known``, and all are
     /// distinct from each other and from the session messages' tokens, because the coordinator and
     /// the manager dispatch on them one after the other. A membership record kind may spell the
     /// token of the message that carries its record, as Fernlet's do.

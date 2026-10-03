@@ -15,14 +15,23 @@
 ///
 /// **Where an unsound namespace is refused.** At three doors, each before it does anything under the
 /// namespace: ``IdentityService/ensureProvisioned()`` first thing (`identity.namespace.unsound`, at
-/// `provision`), so no keychain row is read or written; ``IdentityService/encryptGroupKey(_:for:)``
-/// first thing (the same event, at `groupKeyWrap`), the one identity operation that needs no
-/// provisioned key; and each radio's `start` (`mesh.quic.namespaceUnsound`,
-/// `presence.quic.namespaceUnsound`, `recipe.quic.namespaceUnsound`, at `start`), before it mints a name
-/// or a certificate or brings a listener up. Everything else ProximityKit does under a namespace sits
-/// behind one of them: nothing signs, seals or opens without a provisioned identity, and nothing reaches
-/// a peer without a started radio. Each door throws ``ProximityNamespaceError`` carrying every violation,
-/// exactly as ``ProximityNamespace/soundness`` records them, and writes nothing else.
+/// `provision`), so no device-identity row is read or written and the identity holds no signing or
+/// key-agreement key, without which it signs nothing, seals nothing to a peer and opens nothing a
+/// peer sealed; ``IdentityService/encryptGroupKey(_:for:)`` first thing (the same event, at
+/// `groupKeyWrap`), because the wrap needs no provisioned key; and each radio's `start`
+/// (`mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound`, `recipe.quic.namespaceUnsound`, at
+/// `start`), before it mints a name or a certificate or brings a listener up, so nothing reaches a peer.
+/// Each door throws ``ProximityNamespaceError`` carrying every violation, exactly as
+/// ``ProximityNamespace/soundness`` records them, and writes nothing else.
+///
+/// **Nothing else reads the verdict.** The identity's backup-escrow API
+/// (``IdentityService/provisionBackupEscrowKeyForSealing()``,
+/// ``IdentityService/loadBackupEscrowKeyForOpen()``, the sealed-backup key derivations and the escrow
+/// reconcile and adoption) needs no provisioned key and checks none: it is Fernlet's sealed-backup
+/// feature, a feature path that leaves this module in plan step A0.4, and Fernlet's backup paths call
+/// ``IdentityService/ensureProvisioned()`` before it. Nor do the paths that use no identity key: the
+/// mesh manager's launch restore opens, and may re-seal, the host's sealed session context under its
+/// storage scope, and the presence manager mints its posture before its radio's door refuses.
 ///
 /// **It reads the stored verdict, nothing else.** No rule runs again here: the namespace judged itself
 /// once, when it was built, and the identity and the radios keep that verdict beside the values they
@@ -36,8 +45,12 @@
 /// **One namespace per manager.** The mesh, presence and recipe-share managers compare the namespace of
 /// an identity they are handed (their `identity:` seam, which no shipping caller uses) with their own.
 /// On a mismatch a manager still constructs, as it does when provisioning fails, but audits
-/// `<area>.identity.namespaceMismatch` (at `construction`) and refuses every start of its radio with
-/// the same event (at `start`), so nothing is signed for or advertised under two namespaces.
+/// `<area>.identity.namespaceMismatch` (at `construction`) and refuses with the same event (at
+/// `start`), first thing, every start of its radio and, for the mesh manager, both foundings of a mesh
+/// a caller can begin without a radio (``MeshNetworkManager/startNewMesh(name:)`` and its DEBUG
+/// harness's founder ledger), which would otherwise sign the founder's admission and key advertisement
+/// and seal the session context into the host's storage; its third founding, the promotion at a first
+/// commit, needs a peer the radio linked. So that identity founds no mesh and links no peer.
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: pure reads of `Sendable`
 /// values and one synchronous audit line, called from the main-actor identity, radios and managers.
@@ -49,7 +62,8 @@ nonisolated enum ProximityNamespaceGate {
         case provision
         /// `IdentityService.encryptGroupKey(_:for:)`, before a group key is wrapped.
         case groupKeyWrap
-        /// A radio's `start`, or a manager's start of its radio, before anything is advertised.
+        /// A radio's `start`, a manager's start of its radio, or the mesh manager's founding of a mesh,
+        /// before anything is signed or advertised.
         case start
         /// A manager's initializer, where it compares its identity's namespace with its own.
         case construction
@@ -84,7 +98,7 @@ nonisolated enum ProximityNamespaceGate {
     ///   - namespace: The manager's namespace, read from its host.
     ///   - event: The manager's mismatch event, written at `construction` when the two differ.
     /// - Returns: `true` when the identity was built from `namespace`; otherwise `false`, which the
-    ///   manager keeps and ``mayStart(identityIsOfNamespace:event:)`` reads at every start.
+    ///   manager keeps and ``mayStart(identityIsOfNamespace:event:)`` reads at every start or founding.
     static func checkIdentity(_ identity: IdentityService, isOf namespace: ProximityNamespace, event: String) -> Bool {
         guard identity.namespace == namespace else {
             ProximityAudit.log(event, context: ["at": Site.construction.rawValue])
@@ -93,12 +107,13 @@ nonisolated enum ProximityNamespaceGate {
         return true
     }
 
-    /// Whether a manager may start its radio: only when its identity is of its namespace.
+    /// Whether a manager may start its radio, or the mesh manager found a mesh: only when its identity
+    /// is of its namespace.
     ///
     /// - Parameters:
     ///   - identityIsOfNamespace: What ``checkIdentity(_:isOf:event:)`` answered at construction.
-    ///   - event: The manager's mismatch event, written at `start` on every refused start.
-    /// - Returns: `true` to go ahead; `false`, after the audit line, to advertise nothing.
+    ///   - event: The manager's mismatch event, written at `start` on every refused start or founding.
+    /// - Returns: `true` to go ahead; `false`, after the audit line, to sign and advertise nothing.
     static func mayStart(identityIsOfNamespace: Bool, event: String) -> Bool {
         guard identityIsOfNamespace else {
             ProximityAudit.log(event, context: ["at": Site.start.rawValue])

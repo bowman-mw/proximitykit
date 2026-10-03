@@ -28,8 +28,10 @@ import Foundation
 /// reads from it all 39 protocol labels, the radio values, the QR scheme, the identity's and the two
 /// mesh seal keys' keychain rows, the storage names and the log subsystem. The radios, their
 /// postures and `PeerNameDisplay` read the radios' three presentation strings off it too, and
-/// wherever a peer's name enters, ProximityKit shows it under the installation's peer-name policy
-/// (``PeerNames``: the cap and the floor). Its family also carries the payload vocabulary
+/// ProximityKit shows a peer's name under the installation's peer-name policy (``PeerNames``: the
+/// cap and the floor) wherever it enters except the activity manager, whose joiners' names keep
+/// `ItemNameModeration`'s fixed cap, with no floor, until plan step A0.4 moves activities out. Its
+/// family also carries the payload vocabulary
 /// (``Vocabulary``): the identity envelope seals and parks by its payload rules, the session
 /// coordinator signs and dispatches by its session messages and reads its capability rules, the mesh
 /// and presence managers advertise its wire2 token and the mesh frames by it, the inventory digest
@@ -56,8 +58,11 @@ import Foundation
 /// key, and each radio's `start` throws it before it advertises, each with a named audit event
 /// (`identity.namespace.unsound`, `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound`,
 /// `recipe.quic.namespaceUnsound`) whose context names the door, the violation count and the first
-/// violation's case, never a value. A manager handed an identity of another namespace refuses every
-/// start of its radio, so nothing is signed for or advertised under two namespaces.
+/// violation's case, never a value. Nothing else reads the verdict: the identity's backup-escrow
+/// API, Fernlet's sealed-backup feature until plan step A0.4, needs no provisioned key and checks
+/// none. A manager handed an identity of another namespace refuses every start of its radio, and the
+/// mesh manager every founding of a mesh, before it signs, seals or advertises anything, so that
+/// identity founds no mesh and links no peer.
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`, like every type in
 /// `Namespace/`: inert value data, read from nonisolated code.
@@ -176,10 +181,12 @@ public nonisolated struct ProximityNamespace: Hashable, Sendable {
         /// The log subsystem is empty.
         case emptyLogSubsystem
         /// A token is empty, longer than its group allows, or holds a byte outside `0x21`–`0x7E`: a
-        /// payload token (a mesh message among them) or membership record kind at most 255 bytes, a
-        /// capability token at most 32 (a receiver cuts a longer one, which then matches nothing), a
-        /// routed-type token at most 64 (a routed manifest naming a longer one is refused). A set or
-        /// list is named once, by its own path, however many of its members break the rule.
+        /// payload token or membership record kind at most 255 bytes, a mesh message at most 200 (the
+        /// mesh signs it as its frame's summary title too, and a receiver's bounded summary decode
+        /// refuses a longer title), a capability token at most 32 (a receiver cuts a longer one, which
+        /// then matches nothing), a routed-type token at most 64 (a routed manifest naming a longer one
+        /// is refused). A set or list is named once, by its own path, however many of its members
+        /// break the rule.
         case malformedToken(field: String)
         /// Two tokens of one group have the same bytes: two of the three session payload tokens, two
         /// capability tokens (each named by its index in `capabilities.known`), two membership record
@@ -203,7 +210,9 @@ public nonisolated struct ProximityNamespace: Hashable, Sendable {
         /// The TLS common name is empty, longer than 64 bytes (X.509's upper bound on a common name),
         /// or not printable ASCII (`0x20`–`0x7E`).
         case malformedCommonName
-        /// The peer-name policy is out of bounds: its cap is not 1 to 63 characters, or its floor is
+        /// The peer-name policy is out of bounds: its cap is more than 63 characters, or shorter than an
+        /// identifier the name display must still recognize in a name cut to the cap (a key
+        /// fingerprint's 16 characters, or the family's mesh instance-name prefix), or its floor is
         /// empty, longer than the cap, or not exactly what ProximityKit's sanitizer makes of it under
         /// the cap, which would show a floored name differently each time it is moderated again.
         case malformedPeerNames(field: String)

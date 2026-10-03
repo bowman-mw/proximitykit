@@ -31,7 +31,9 @@ import Foundation
 /// Every one of them is turned into the placeholder here, in one place, so a new surface cannot
 /// forget one. The instance name is recognized by the prefix of the namespace each caller passes
 /// (`in namespace:`, last): a peer advertises the prefix of the family both devices share, so the
-/// host's own namespace names it.
+/// host's own namespace names it. The checks run on the name already cut to that namespace's
+/// peer-name cap, which its soundness rules keep at least a fingerprint's 16 characters and the
+/// mesh prefix's length, so a cut name still shows what they look for.
 ///
 /// **The accepted false positive.** Someone who literally names themselves sixteen hex characters,
 /// or the mesh prefix and more (`fernlet-mesh-…` for Fernlet), reads as the placeholder. Shorter
@@ -50,7 +52,9 @@ public nonisolated enum PeerNameDisplay {
     }
 
     /// The width of a canonical fingerprint (`IdentityService.fingerprint(of:)`: 16 hex characters).
-    private static let fingerprintLength = 16
+    /// Internal so `ProximityVocabularyGoldenTests` holds the namespace's soundness bound
+    /// (`ProximityNamespace.peerNameFingerprintLength`) equal to it.
+    static let fingerprintLength = 16
 
     /// The peer's own chosen name, sanitized for display, or nil when what is on hand is not a
     /// name a person should read.

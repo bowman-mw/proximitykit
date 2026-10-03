@@ -377,8 +377,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private let identity: IdentityService
     /// Whether ``identity`` is of ``namespace``, decided once at `init`. False only when the
     /// `identity:` seam handed this manager an identity of another namespace: the manager still
-    /// constructs, as it does when provisioning fails, and `startSearching()` refuses every start of
-    /// the radio (`mesh.identity.namespaceMismatch`), so nothing is advertised under two namespaces.
+    /// constructs, as it does when provisioning fails, and refuses with `mesh.identity.namespaceMismatch`,
+    /// first thing, every start of the radio (`startSearching()`) and both foundings a caller can begin
+    /// without one (`startNewMesh(name:)` and the DEBUG harness's `armFounderLedgerForHarness()`); the
+    /// third founding, the promotion at a first commit, needs a peer the radio linked. So that identity
+    /// founds no mesh and links no peer.
     @ObservationIgnored private let identityIsOfNamespace: Bool
     @ObservationIgnored private let replayCache = ReplayCache()
     @ObservationIgnored private let photoCacheStore: PrivateMediaStore
@@ -658,7 +661,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// distinctly-keyed identity is the only thing that separates them. Nothing in shipping code
     /// passes it: the public initializer above cannot, so a Release build always takes this device's
     /// real identity. An identity of another namespace than the host's is refused: the manager
-    /// constructs, audits `mesh.identity.namespaceMismatch` and never starts its radio.
+    /// constructs, audits `mesh.identity.namespaceMismatch` and never starts its radio or founds a mesh.
     ///
     /// `heldPhotoKeys` is the third seam, for the pending corpus's at-rest key: nil (every shipping
     /// path) takes the device-bound keychain row; a test passes an in-memory or wrong key to reach
@@ -2765,6 +2768,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     // MARK: - Public API
 
     public func startNewMesh(name: String? = nil) {
+        // One namespace per manager: an identity of another namespace founds nothing, so it signs no
+        // admission or key advertisement and seals no context before `startSearching()` could refuse.
+        guard ProximityNamespaceGate.mayStart(
+            identityIsOfNamespace: identityIsOfNamespace, event: "mesh.identity.namespaceMismatch"
+        ) else { return }
         resetSessionRosterForNewSession()   // live roster only — pendingFriendReview survives
         let meshName = name ?? MeshNameGenerator.generate()
         let now = Date()
@@ -16586,11 +16594,17 @@ extension MeshNetworkManager {
     /// `startSearching()`, which would re-mint the Bonjour name mid-run and drop the very tunnel
     /// the founding depends on.
     ///
-    /// - Returns: `false` when there is no mesh, a ledger already exists, the founder admission
-    ///   could not be signed, or the context could not be sealed — each of which leaves the device
-    ///   exactly where it was.
+    /// Refused first, as ``startNewMesh(name:)`` is, when the manager holds an identity of another
+    /// namespace (`mesh.identity.namespaceMismatch`, at `start`): it is a founding too, and it signs
+    /// and seals without starting a radio whose door would refuse.
+    ///
+    /// - Returns: `false` when the manager holds an identity of another namespace, there is no mesh,
+    ///   a ledger already exists, the founder admission could not be signed, or the context could not
+    ///   be sealed — each of which leaves the device exactly where it was.
     public func armFounderLedgerForHarness() -> Bool {
-        guard let mesh = currentMesh, membershipVerifier == nil else { return false }
+        guard ProximityNamespaceGate.mayStart(
+            identityIsOfNamespace: identityIsOfNamespace, event: "mesh.identity.namespaceMismatch"
+        ), let mesh = currentMesh, membershipVerifier == nil else { return false }
         let founder = MeshMember(
             fingerprint: identity.localFingerprint,
             displayName: displayName,
