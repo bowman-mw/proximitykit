@@ -12,7 +12,9 @@ import Foundation
 /// connection by ``ProximityHost/makeProximityTrustPolicy()``. Fernlet's live in `FernletConnections`:
 /// `FriendSessionTrustPolicy` (friend radios — proximity IS the authorization, so trust is
 /// unconditional) and `CoachSessionTrustPolicy` (coach channel — only a remembered `.trainer`
-/// pairing auto-confirms), each answering from a ``ProximityTrustVault`` and keeping its audits there.
+/// pairing auto-confirms), each answering from Fernlet's `ProximityTrustVault` (also
+/// `FernletConnections`') and keeping its audits there. A policy is not the host's
+/// ``ProximityTrustStore``: that answers what the device remembers, whichever session is running.
 /// Coordinators hold this `weak`, so every owner must retain its policy for the connection's
 /// lifetime or the revoked/blocked drops silently stop firing.
 @MainActor

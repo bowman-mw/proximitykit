@@ -482,7 +482,7 @@ public final class PresenceManager: ProximityPayloadHandling {
 
     private func rebuildTags(epoch: UInt64) {
         currentEpoch = epoch
-        let eligible = Self.eligibleFriends(in: store.proximityTrustVault.trustedPeers)
+        let eligible = Self.eligibleFriends(in: store.trustedProximityPeers)
 
         // A tag that fails to derive silently drops that friend from presence entirely, so the
         // failures are counted and surfaced once per rebuild (R7) — count only, never an identity.
@@ -995,7 +995,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     private func expectedFriendKeyAgreementKey(forPeer peerID: UUID, intended: ProximityTrustedPeerRecord?) -> Data? {
         if let intended, !intended.keyAgreementPublicKey.isEmpty { return intended.keyAgreementPublicKey }
         guard let matched = matchedFingerprintsByPeer[peerID] else { return nil }
-        let record = store.proximityTrustVault.trustedPeers.first { peer in
+        let record = store.trustedProximityPeers.first { peer in
             peer.blockedAt == nil && peer.revokedAt == nil && !peer.keyAgreementPublicKey.isEmpty
                 && matched.contains { IdentityService.fingerprintsMatch(peer.fingerprint, $0) }
         }
@@ -1525,14 +1525,14 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// - Parameters:
     ///   - signingPublicKey: The peer's Ed25519 signing key.
     ///   - fingerprint: The peer's fingerprint.
-    ///   - host: The host holding the trust vault and the block list.
+    ///   - host: The host answering the trust questions (its trust store) and holding the block list.
     /// - Returns: whether a heart from or to this peer may be recorded.
     static func isHeartEligible(
         signingPublicKey: Data, fingerprint: String, in host: any ProximityHost
     ) -> Bool {
-        let vault = host.proximityTrustVault
-        return vault.isTrustedProximityPeer(signingPublicKey: signingPublicKey)
-            && !vault.isBlockedProximitySigningKey(signingPublicKey)
+        let trustStore = host.proximityTrustStore
+        return trustStore.isTrustedProximityPeer(signingPublicKey: signingPublicKey)
+            && !trustStore.isBlockedProximitySigningKey(signingPublicKey)
             && !host.isBlockedFingerprint(fingerprint)
     }
 

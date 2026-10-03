@@ -10,7 +10,7 @@ import FernletDomainModel
 ///
 /// Mirrors the existing `ProximityTrustPolicy` / `WorkoutSyncContext` host-protocol
 /// pattern. Surface is exactly what `MeshNetworkManager` + `ProximityRecipeShareManager`
-/// consume: display name, trusted peers + vault, and the block/fingerprint checks — and, since
+/// consume: display name, trusted peers + trust store, and the block/fingerprint checks — and, since
 /// ProximityKit plan step A0.2.3, the host's protocol identity, ``proximityNamespace``, since
 /// step A0.2.9 its install binding, ``proximityInstallBinding``, and the session trust policy every
 /// connection's coordinator consults, ``makeProximityTrustPolicy()``: three requirements the
@@ -18,8 +18,22 @@ import FernletDomainModel
 @MainActor
 public protocol ProximityHost: AnyObject {
     var proximityDisplayName: String { get }
+    /// Every trusted-peer record the host keeps (kept, removed, blocked and reported alike), in the
+    /// host's persisted type: the managers read a friend's record from them where a feature needs one
+    /// (presence tags, a heart connection's sealing key, a heart sender's filed name, the mesh's vouch
+    /// list). The same records ``proximityTrustStore`` answers from: Fernlet's app and every test
+    /// double answer their vault's.
     var trustedProximityPeers: [ProximityTrustedPeerRecord] { get }
-    var proximityTrustVault: ProximityTrustVault { get }
+    /// The host's durable trust records, asked the two questions this module puts to them outside a
+    /// session: whether a signing key is a remembered, unrevoked peer, and whether it is blocked
+    /// (``ProximityTrustStore`` says where each manager asks).
+    ///
+    /// **No default, like ``trustedProximityPeers``.** Which peers a device remembers is the host's
+    /// record, not the mechanism's, so ProximityKit keeps none of its own: a host that supplies none
+    /// fails to compile. Fernlet's app answers its `ProximityTrustVault` (the `FernletConnections`
+    /// module) in `ProximityHostAdapter.swift`, and every test double answers its own vault. The
+    /// managers read it at each question, so an answer always reflects the records as they are then.
+    var proximityTrustStore: any ProximityTrustStore { get }
     func isBlockedFingerprint(_ fingerprint: String) -> Bool
     func blockProximityPeer(signingPublicKey: Data)
     /// The in-person hearts opt-in (mesh redesign Phase 4b). `PresenceManager` consults it on the
@@ -135,8 +149,9 @@ public protocol ProximityHost: AnyObject {
     /// **No default, like ``proximityNamespace``.** Which peers a session trusts, treats as revoked
     /// and bans is the host's rule, not the mechanism's, so ProximityKit ships no session policy and
     /// never falls back to one: a host that supplies none fails to compile. Fernlet's app answers
-    /// `FriendSessionTrustPolicy(vault: proximityTrustVault)` (the `FernletConnections` module) in
-    /// `ProximityHostAdapter.swift`, and every test double answers the same over its own vault.
+    /// `FriendSessionTrustPolicy(vault: proximityTrustVault)` (the `FernletConnections` module, over
+    /// the store's `ProximityTrustVault`) in `ProximityHostAdapter.swift`, and every test double
+    /// answers the same over its own vault.
     func makeProximityTrustPolicy() -> any ProximityTrustPolicy
 }
 

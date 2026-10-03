@@ -819,7 +819,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 return
             }
             guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
-            guard self.store.proximityTrustVault.isTrustedProximityPeer(signingPublicKey: peer.signingPublicKey) else { return }
+            guard self.store.proximityTrustStore.isTrustedProximityPeer(signingPublicKey: peer.signingPublicKey) else { return }
             guard let payload = try? JSONDecoder().decode(ModerationReportPayload.self, from: plaintext) else { return }
             let rows = ModerationReportRelay.verifiedRows(
                 from: payload, senderSigningKey: peer.signingPublicKey, now: Date())
@@ -833,7 +833,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// non-repudiable reports never leak to a merely-committed stranger you didn't keep as a friend. No
     /// provider, an empty set, or no signable rows → sends nothing.
     private func sendModerationReports(to slot: PeerSlot, recipientSigningKey: Data) async {
-        guard store.proximityTrustVault.isTrustedProximityPeer(signingPublicKey: recipientSigningKey) else { return }
+        guard store.proximityTrustStore.isTrustedProximityPeer(signingPublicKey: recipientSigningKey) else { return }
         guard let rows = ownModerationReportsProvider?(), !rows.isEmpty else { return }
         let payload = ModerationReportRelay.buildPayload(ownReports: rows, identity: identity)
         guard !payload.reports.isEmpty else { return }
@@ -847,7 +847,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         registerPayloadHandler(for: .friendState) { [weak self] _, plaintext, peer in
             guard let self, let peer else { return }
             guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
-            guard self.store.proximityTrustVault.isTrustedProximityPeer(signingPublicKey: peer.signingPublicKey) else { return }
+            guard self.store.proximityTrustStore.isTrustedProximityPeer(signingPublicKey: peer.signingPublicKey) else { return }
             guard let payload = try? JSONDecoder().decode(FriendStatePayload.self, from: plaintext),
                   payload.isWellFormed else { return }
             self.onFriendStateReceived?(peer.fingerprint, payload)
@@ -858,7 +858,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// vault-TRUSTED (kept-in-person) peer — symmetric with the receive handler — so the fuzzy wellbeing
     /// vibe never leaks to a merely-committed stranger. A nil provider (opt-out) also sends nothing.
     private func sendFriendState(to slot: PeerSlot, recipientSigningKey: Data) async {
-        guard store.proximityTrustVault.isTrustedProximityPeer(signingPublicKey: recipientSigningKey) else { return }
+        guard store.proximityTrustStore.isTrustedProximityPeer(signingPublicKey: recipientSigningKey) else { return }
         guard let payload = friendStatePayloadProvider?() else { return }
         await sendFeatureEnvelope(PayloadType.friendState.rawValue, encodable: payload, via: slot, sealed: true)
     }

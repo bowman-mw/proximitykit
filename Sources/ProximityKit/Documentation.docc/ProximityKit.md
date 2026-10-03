@@ -115,9 +115,13 @@ checks it again and evicts a slot whose committed key is not the one judged
 holds it `weak`. The session policies are the host's rules, not this module's: Fernlet's, in
 `FernletConnections`, are `FriendSessionTrustPolicy` for friend radios (proximity *is* the
 authorization; only blocked keys ban) and `CoachSessionTrustPolicy` for the future coach channel
-(only a remembered `.trainer` pairing auto-confirms), and ``ProximityTrustVault`` is the
-persistent record store behind both, holding the friend/removed/blocked/reported lifecycle and
-the audit trail. The coordinator records its audit events through the same policy, in this
+(only a remembered `.trainer` pairing auto-confirms), and `ProximityTrustVault`, Fernlet's too and in
+`FernletConnections`, is the persistent record store behind both, holding the
+friend/removed/blocked/reported lifecycle and the audit trail. What the device remembers about a
+peer, whichever session is running, the managers ask the host's ``ProximityTrustStore``
+(``ProximityHost/proximityTrustStore``): whether a key is a remembered, unrevoked peer and whether it
+is blocked, before a friend-state payload, a moderation report or a heart crosses; Fernlet's app
+answers with that vault. The coordinator records its audit events through the same policy, in this
 module's own ``ProximitySessionAudit``, and names no host's record: Fernlet's policies convert each
 into the persisted `TrainerAuditEvent` the vault keeps.
 
@@ -532,7 +536,7 @@ error and its audit line, over namespaces built from literals.
 
 **How a host supplies it.** ``ProximityHost/proximityNamespace`` and
 ``ProximityHost/proximityInstallBinding`` are two of the eight ``ProximityHost`` requirements with no
-default in the protocol extension (the others are the display name, the trusted peers, the vault,
+default in the protocol extension (the others are the display name, the trusted peers, the trust store,
 `isBlockedFingerprint(_:)`, `blockProximityPeer(signingPublicKey:)` and the per-connection trust
 policy, ``ProximityHost/makeProximityTrustPolicy()``), and two of the three it will never
 default (the trust policy is the third), so a host that leaves either out fails to compile instead of running under another app's
@@ -1201,7 +1205,9 @@ Release build the environment-reading half is compiled out entirely.
 ### Trust and verification
 
 The session trust policies, the coach session contract, the keep-as-friend review and the trainer
-export body are Fernlet's rules, so they live in `FernletConnections`; a manager gets each
+export body are Fernlet's rules, and the trust vault holds Fernlet's records, so they live in
+`FernletConnections`. The managers ask the host's records their two trust questions through
+``ProximityTrustStore``, which Fernlet's vault answers; a manager gets each
 connection's policy from ``ProximityHost/makeProximityTrustPolicy()``, and a trainer-mode
 coordinator refuses any inbound blob over ``ProximityCoordinator/maxTrainerModeInboundBytes`` before
 decoding it. A coordinator records its audit events through its policy as ``ProximitySessionAudit``
@@ -1211,7 +1217,7 @@ into the `TrainerAuditEvent` the vault keeps). The vault is not itself a policy.
 
 - ``ProximityTrustPolicy``
 - ``ProximitySessionAudit``
-- ``ProximityTrustVault``
+- ``ProximityTrustStore``
 - ``CoachVerificationCeremony``
 - ``FriendsDiscoveryEntry``
 - ``ProximityVerifyQR``
