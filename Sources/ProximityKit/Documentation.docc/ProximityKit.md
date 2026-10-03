@@ -467,10 +467,11 @@ payload vocabulary, every group of which this module reads off it too: the envel
 the coordinator's session messages and capability rules, the managers' wire2 token, the inventory
 digest's record kinds, the routed type registry's routed types and the mesh engine's own messages.
 The mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
-`ProximityCapability` cases until plan steps A0.4 and A0.5 move them.
+`ProximityCapability` cases until plan steps A0.4, A0.5 and A0.7 move them.
 Some such strings stay outside it until
 a later step (see "What is left for A0.4 onward" below): the 13 feature labels this module reads from
-FernletCrypto's registry, the heart-drop and moderation keychain services and
+FernletCrypto's registry (nine until A0.4, the activities' and the moderation report's four until
+A0.5), the heart-drop and moderation keychain services and
 ``ProximitySupportLayout``'s `Fernlet` folder until A0.4. `ProximityNamespaceBoundaryTests`
 allowlists each feature-label read, each literal that spells `fernlet` and each line that still
 names one of Fernlet's domain types, with the step that removes it. Beside it the
@@ -611,18 +612,28 @@ and recipe-share managers under `.fernlet` and under a namespace whose peer-name
 `ProximityNamespaceSoundnessTests`
 holds the soundness and collision rules over
 namespaces built only from literals.
+`FernletFeatureGoldenTests`, on the crypto-goldens line too, holds the bytes of the Fernlet features
+this module still holds, which their move out of it must keep, to frozen literals: the feature labels
+the heart dead-drop, presence and the ban store hand CryptoKit themselves, the heart-drop and presence
+pair secrets and tags, the ban evidence's reporter tag, a frozen sealed drop and sealed sidecar opened
+through their readers, the prekey bundle's JSON and the identity introduction that gossips it, the
+features' keychain and file names and persisted shapes, presence's advertisement and the
+sealed-backup escrow's provisioning cases.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
-named only on the 20 code lines in 7 files that read the feature labels leaving at A0.4; every
-remaining string literal that spells `fernlet` (36 in 12 files) is on an exact allowlist that names
-why it is still here and the plan step that removes it; and FernletDomainModel's `PayloadType`,
-`ProximityCapability`, `ProximityMode`, `ItemNameModeration`, `ProximityTrustedPeerRecord`,
-`TrainerAuditEvent` and `ConnectionSessionLog` are named only on an exact per-file, per-type
-allowlist of 58 code lines in 8 files: the feature files that leave at A0.4 and the typed doors only
-they go through (the envelope's typed view of its token, the coordinator's typed send), the mesh
-manager's feature sends, capability list and session hearts with the two typed capability gates and
-the host's trusted-peer list (A0.5), and the coordinator's session-mode alias (A0.7 / C5). The last
-two types are named nowhere. The three lists can only shrink.
+named only on the code lines that read the feature labels leaving with their features (A0.4) or with
+the mesh manager's feature parts (A0.5); every remaining string literal that spells `fernlet` is on
+an exact allowlist that names why it is still here and the plan step that removes it;
+FernletDomainModel's `PayloadType`, `ProximityCapability`, `ProximityMode`, `ItemNameModeration`,
+`ProximityTrustedPeerRecord`, `TrainerAuditEvent` and `ConnectionSessionLog` are named only on an
+exact per-file, per-type allowlist: the feature files that leave at A0.4, the activity manager and the
+mesh manager's feature sends, capability list and session hearts with the two typed capability gates
+and the host's trusted-peer list (A0.5), the typed doors only Fernlet's features and the recipe-share
+manager go through, the envelope's typed view of its token and the coordinator's typed send (A0.7),
+and the coordinator's session-mode alias (A0.7 / C5), the last two types named nowhere; and
+`package` is declared only on the doors its list names (see "Package doors" below). The first three
+lists can only shrink, and a door's row lasts exactly as long as the door. The exact per-file lists in
+`ProximityNamespaceBoundaryTests` are the one place the ratchet's numbers live.
 
 **The install binding and the column seal.** The two sealed mesh stores seal through
 ``ProximityColumnCrypto`` (`Support/`), FernletCrypto's `ColumnCrypto` V3 format copied byte for
@@ -685,28 +696,43 @@ passes the host's name) and `PeerTransport`'s discovery doors take no service ty
 policies, the trust records and the peer-name policy come from the host. What still ties this module
 to Fernlet leaves in these steps:
 
-- **A0.4** moves Fernlet's features out, and with them the 13 feature labels this module still reads
-  from FernletCrypto's registry (hearts, presence, activities, moderation and the sealed-backup
-  escrow; the heart-drop and presence derivations become a generic `pairSecret(purpose:)` and
-  `epochTag(purpose:)` called with host purposes), the heart-drop and moderation keychain services,
-  the feature payload formats, the feature files' lines that name Fernlet's domain types (the
-  activities' send hook and item-name rules, the dead-drop's friend records and heart title,
-  presence's friend records and hearts capability) with the typed doors only those features go
-  through (the envelope's typed view of its token and the coordinator's typed send),
-  `ProximitySupportLayout.defaultDirectory` together with
-  `keychainService(besideHeartDrop:in:)`'s comparison against the heart-drop service, and the
-  `FernletFoundation` edge (two `FernletDate` reads and the moderation clock).
+- **A0.4** moves Fernlet's features out: the heart dead-drop, presence, moderation's ban store and
+  ledger, closeness and friend state, and the sealed-backup escrow, which leaves for the App's backup
+  side. With them go nine of the 13 feature labels this module still reads from FernletCrypto's
+  registry (the dead-drop's and presence's, the ban evidence's reporter tag and the escrow's two; the
+  heart-drop and presence pair secrets become the generic `pairSecret(with:purpose:)` under the
+  host's declared feature salts, and their tags leave with their features), the heart-drop and
+  moderation keychain services, the heart payload's format, the feature files' lines that name
+  Fernlet's domain types (the dead-drop's friend records and heart title, presence's friend records
+  and hearts capability), `ProximitySupportLayout.defaultDirectory` together with
+  `keychainService(besideHeartDrop:in:)`'s comparison against the heart-drop service, presence's
+  `FernletDate` read and the moderation clock.
 - **A0.5** splits the routed mesh manager: its feature parts leave with their `PayloadType` sends,
-  their capability list and the session hearts, and with them the two typed capability gates and the
-  host's trusted-peer list, which only features read; the photo code takes the `PrivateMediaStore`
-  edge (`com.fernlet.private-media`) with it.
-- **A0.7 and C5** make the one-to-one radio a profile-driven pair session and add its coach profile:
-  the connection profiles that the coordinator's `Mode`, Fernlet's `ProximityMode` (a session
-  profile, not a token), generalizes into.
+  their capability list and the session hearts, and with them what the mesh manager builds, decodes
+  or calls (the clothing shop, the activity manager with its send hook and item-name rules, the
+  moderation report relay, the session message store and the heart ledger, with their wire
+  payloads' formats, the activities' and the moderation report's four labels and the canonical
+  serializer's domains for them), the two typed capability gates and the host's trusted-peer list,
+  which only features read, and the mesh manager's `FernletDate` read, the last of the
+  `FernletFoundation` edge; the photo code takes the `PrivateMediaStore` edge
+  (`com.fernlet.private-media`) with it.
+- **A0.7 and C5** make the one-to-one radio a profile-driven pair session and add its coach profile.
+  The recipe-share manager, its wire types and status copy, and the typed doors only it and Fernlet's
+  features go through (the envelope's typed view of its token and the coordinator's typed send)
+  leave with the recipe profile (A0.7); the connection profiles are what the coordinator's `Mode`,
+  Fernlet's `ProximityMode` (a session profile, not a token), generalizes into (A0.7 / C5).
 - **Later.** FernletCrypto's 38 twins of the namespace labels retire at plan step C1, with the app's
   duress and probe purposes; `IdentityService`'s `CryptographicPurpose` overloads of `sign` and
   `verify` serve those and the feature labels until then. The DEBUG test-hook names are settled when
   the package leaves Fernlet's tree (A1).
+
+### Package doors
+
+This module declares nothing `package`. A `package` declaration is a door into this module that a
+Fernlet module inside FernletKit may use (the test target too, through `@testable import`, and never
+the app) while a named later step reshapes or replaces what is behind it; a settled seam is `public`,
+with its contract, instead. Rule 5 of `ProximityNamespaceBoundaryTests` lists every door, file by file,
+with the step that closes it, and fails a `package` line no row names or a row whose line is gone.
 
 ## Topics
 
