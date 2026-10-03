@@ -54,7 +54,14 @@
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: pure reads of `Sendable`
 /// values and one synchronous audit line, called from the main-actor identity, radios and managers.
-nonisolated enum ProximityNamespaceGate {
+///
+/// Public, with its two manager doors, ``checkIdentity(_:isOf:event:)`` and
+/// ``mayStart(identityIsOfNamespace:event:)``, as settled mechanism: "a manager acts under one
+/// namespace", so a host's manager built over this module's identity checks it the way this
+/// module's managers do, with the same audit lines (`at`: `construction`, `start`) written through
+/// this module's sink (``ProximityAudit``). The unsound-namespace refusal, its sites and the
+/// violation names stay internal: only this module's identity and radios refuse a namespace.
+public nonisolated enum ProximityNamespaceGate {
 
     /// Where a check stands, as its audit line's `at` value spells it: frozen tokens, never display copy.
     nonisolated enum Site: String, Sendable {
@@ -93,13 +100,17 @@ nonisolated enum ProximityNamespaceGate {
     /// an identity of another family signs under other labels, and one of another installation keeps
     /// its rows under another keychain service.
     ///
+    /// Reads only the two values and refuses nothing itself: on a mismatch it writes `event` once,
+    /// with `at` = `construction` and no other context, and answers `false`, which the caller keeps.
+    ///
     /// - Parameters:
     ///   - identity: The identity the manager was handed.
     ///   - namespace: The manager's namespace, read from its host.
-    ///   - event: The manager's mismatch event, written at `construction` when the two differ.
+    ///   - event: The manager's mismatch event, written at `construction` when the two differ: a
+    ///     frozen token, never display copy.
     /// - Returns: `true` when the identity was built from `namespace`; otherwise `false`, which the
     ///   manager keeps and ``mayStart(identityIsOfNamespace:event:)`` reads at every start or founding.
-    static func checkIdentity(_ identity: IdentityService, isOf namespace: ProximityNamespace, event: String) -> Bool {
+    public static func checkIdentity(_ identity: IdentityService, isOf namespace: ProximityNamespace, event: String) -> Bool {
         guard identity.namespace == namespace else {
             ProximityAudit.log(event, context: ["at": Site.construction.rawValue])
             return false
@@ -110,11 +121,15 @@ nonisolated enum ProximityNamespaceGate {
     /// Whether a manager may start its radio, or the mesh manager found a mesh: only when its identity
     /// is of its namespace.
     ///
+    /// Called first thing at every start, before anything is signed, sealed or advertised; a refusal
+    /// writes `event` with `at` = `start` and no other context, every time it refuses.
+    ///
     /// - Parameters:
     ///   - identityIsOfNamespace: What ``checkIdentity(_:isOf:event:)`` answered at construction.
-    ///   - event: The manager's mismatch event, written at `start` on every refused start or founding.
+    ///   - event: The manager's mismatch event, written at `start` on every refused start or founding:
+    ///     a frozen token, never display copy.
     /// - Returns: `true` to go ahead; `false`, after the audit line, to sign and advertise nothing.
-    static func mayStart(identityIsOfNamespace: Bool, event: String) -> Bool {
+    public static func mayStart(identityIsOfNamespace: Bool, event: String) -> Bool {
         guard identityIsOfNamespace else {
             ProximityAudit.log(event, context: ["at": Site.start.rawValue])
             return false

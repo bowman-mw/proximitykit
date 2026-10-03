@@ -92,13 +92,15 @@ one tests inject through, and the once-per-launch orphan reaper is untouched —
 code that names the attributes type, which is why that type outlives its requester.
 All three resolve the display name they advertise the same way
 (host preference, device name as fallback), and the peer-supplied names that reach chat, hearts,
-vouches, and the keep-as-friend rows pass one sanitize-or-floor coercion (`ProximityDisplayName`,
+vouches, and the keep-as-friend rows pass one sanitize-or-floor coercion
+(``ProximityDisplayName/peerDisplayName(_:in:)``, public so a host's features use the same one, over
 this module's own copy of the generic sanitizer, under the cap and floor of the host's peer-name
 policy: Fernlet's 24 characters and "A friend"); both live in `PeerDisplayNames.swift`, the single
 home of what was a copy per call site. Each connected peer
 gets a ``ProximityCoordinator``, the
 per-connection engine that exchanges signed identity introductions (carrying the UWB discovery
-token, advertised capability tokens, and optionally a heart-drop prekey bundle), starts ranging
+token, advertised capability tokens, and optionally the host's prekey bundle,
+``ProximityPrekeyBundle``, which the coordinator carries without reading), starts ranging
 through a ``RangingProvider`` (``NIRangingSession`` in production), and gates the commit on
 physical closeness: a 15 cm / 0.8 s UWB dwell measured by ``ProximityCommitDetector``, a manual
 confirm on non-UWB hardware, or the QR verification ceremony (``ProximityVerifyQR``) which
@@ -322,16 +324,33 @@ dedups durably (``HeartDropDedupStore``) and records into the shared ``Proximity
 which enforces the bidirectional 5-minute rate limit for every heart transport.
 ``ClosenessLedger`` turns these interactions into the private closeness score.
 
+The prekeys travel as the core wire type ``ProximityPrekeyBundle`` (the prekey store's `Bundle`,
+`PrekeyEntry` and `SignedPrekey` are its names there), inside the signed identity introduction under
+its frozen `heartDropPrekeyBundle` key: the coordinator encodes what its owner's
+``ProximityCoordinator/introductionPrekeyBundleProvider`` returns and hands a verified
+introduction's bundle to ``ProximityCoordinator/onIntroductionPrekeyBundle``, reading no field, and
+the mesh and presence managers wire those two from their own `heartDropBundleProvider` and
+`onPeerPrekeyBundle`. Whether a heart from or to a peer may be recorded is one predicate,
+``ProximityHost/isTrustedUnblockedPeer(signingPublicKey:fingerprint:)``: the host's trust store
+remembers the key and has not removed it, does not hold it blocked, and the host's fingerprint
+block list does not hold the fingerprint. Presence's gate delegates to it and the mesh's routed heart
+path asks it with the admission ledger's key. The host answers one hearts setting,
+``ProximityHost/allowNearbyHearts``, which presence and the mesh's session hearts read; the
+away-delivery consent is no host requirement, and each manager that reads it (presence for its
+not-nearby copy, the mesh for its `heartsAway` capability) takes a `heartsAwayEnabledProvider` of its
+own, nil reading as off.
+
 **Concurrency and persistence invariants.** The target sets `defaultIsolation(MainActor.self)`
 in Swift 6 language mode: managers, coordinators, and stores are `@MainActor` (most
 `@Observable`), while every wire value type, the canonical signing serializer, and the pure
 crypto statics are explicitly `nonisolated` + `Sendable` so untrusted bytes can be decoded and
 signatures verified off the main actor (the WI-9 convention). The managers that mirror
 coordinator state into their own observable properties (``MeshNetworkManager``,
-``ProximityRecipeShareManager``, ``PresenceManager``) drive that mirroring through the internal
-`ObservationLoop` helper (`Engine/ObservationLoop.swift`), which owns the shared
+``ProximityRecipeShareManager``, ``PresenceManager``) drive that mirroring through the
+``ObservationLoop`` helper (`Engine/ObservationLoop.swift`), which owns the shared
 `withObservationTracking` re-arm machinery and holds its owner weakly — including across the
-suspension — so the loop can never pin the manager. Every long-running task those three managers
+suspension — so the loop can never pin the manager; it is public, as settled mechanism, so a host's
+manager that watches the coordinators it owns uses it too. Every long-running task those three managers
 own is also cancelled in an `isolated deinit`, and every record-drop path (stop, refresh, MC
 disconnect, stale/parked sweeps, slot eviction) runs the dropped ``ProximityCoordinator``'s own
 `cancel()` so ranging and the Live Activity anchor stop with it; the mesh manager additionally
@@ -354,8 +373,9 @@ whose content-addressed slot lifecycle ``IdentityService`` reconciles non-silent
 Where those sidecars live is the host's call, not a constant. EVERY device-local sidecar in this
 module hangs off ``ProximityHost/proximitySupportDirectory`` — the friend photo wall's index and
 preferences, ``ProximityHeartLedger``, the three sealed heart-drop stores, ``ModerationLedger``,
-``FriendStateCache``, ``ClosenessLedger`` and ``ProximityActivityManager``'s ledger. There is
-deliberately no argument-less default on ``JSONSidecarFile``: every owner states its root, because a
+``FriendStateCache``, ``ClosenessLedger`` and ``ProximityActivityManager``'s ledger. The heart ledger
+and the activity manager take their file URL with no default, so their owner states the file.
+There is deliberately no argument-less default on ``JSONSidecarFile``: every owner states its root, because a
 default that silently resolves to the process-wide `Application Support/Fernlet` is exactly how a
 store rejoins the shared-root race, and the omission compiles. The root defaults to the host
 namespace's `installation.storage.defaultDirectory` (for Fernlet `Application Support/Fernlet`, the
@@ -556,8 +576,12 @@ with its own: on a mismatch it still constructs, audits `mesh.identity.namespace
 and, for the mesh manager, every founding a caller can begin without one
 (``MeshNetworkManager/startNewMesh(name:)`` and its DEBUG harness's founder ledger; the promotion at a
 first commit needs a peer the radio linked), so that identity founds no mesh and links no peer.
-``HeartDropService`` holds no namespace of its own to compare with; its identity's doors cover it. The checks live in the internal `ProximityNamespaceGate`
-(`Support/`), and `ProximityNamespaceGateTests`, on the crypto-goldens CI line, holds every door to its
+``HeartDropService`` holds no namespace of its own to compare with; its identity's doors cover it. The checks live in
+``ProximityNamespaceGate`` (`Support/`), whose two manager doors,
+``ProximityNamespaceGate/checkIdentity(_:isOf:event:)`` and
+``ProximityNamespaceGate/mayStart(identityIsOfNamespace:event:)``, are public so a host's manager
+built over this module's identity checks it the same way, while the unsound-namespace refusal stays
+internal; `ProximityNamespaceGateTests`, on the crypto-goldens CI line, holds every door to its
 error and its audit line, over namespaces built from literals, and the pair-secret door to its
 refusals and its derivation.
 
@@ -568,7 +592,7 @@ default in the protocol extension (the others are the display name, the trusted 
 policy, ``ProximityHost/makeProximityTrustPolicy()``), and two of the four it will never default,
 because each is the host's identity or rule (the trust store and the trust policy are the others),
 so a host that leaves either out fails to compile instead of running under another app's
-identity or binding. The extension's five defaults are the two hearts settings, the sidecar root
+identity or binding. The extension's four defaults are the in-person hearts setting, the sidecar root
 (`installation.storage.defaultDirectory`, built from the namespace) and both mesh storage scopes
 (built from the namespace and the binding). Fernlet's values are not in this module and never will
 be: `ProximityNamespace.fernlet` and `FernletDeviceBindingAdapter` live in `FernletConnections`,
@@ -629,8 +653,9 @@ the heart dead-drop, presence and the ban store hand CryptoKit themselves, the h
 pair secrets and tags, the ban evidence's reporter tag, a frozen sealed drop and sealed sidecar opened
 through their readers, the prekey bundle's JSON and the identity introduction that gossips it, the
 features' keychain and file names and persisted shapes, presence's advertisement and the
-sealed-backup escrow's provisioning cases, and the two feature salts `.fernlet` declares, under which
-the pair-secret door derives the heart-drop and presence pair secrets' known answers.
+sealed-backup escrow's provisioning cases, the two feature salts `.fernlet` declares, under which
+the pair-secret door derives the heart-drop and presence pair secrets' known answers, and the
+heart-eligibility predicate's three legs as presence's gate answers them.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
 named only on the code lines that read the feature labels leaving with their features (A0.4) or with
@@ -732,21 +757,39 @@ to Fernlet leaves in these steps:
 - **A0.7 and C5** make the one-to-one radio a profile-driven pair session and add its coach profile.
   The recipe-share manager, its wire types and status copy, and the typed doors only it and Fernlet's
   features go through (the envelope's typed view of its token and the coordinator's typed send)
-  leave with the recipe profile (A0.7); the connection profiles are what the coordinator's `Mode`,
-  Fernlet's `ProximityMode` (a session profile, not a token), generalizes into (A0.7 / C5).
+  leave with the recipe profile (A0.7), and the coordinator's two `package` doors close with them;
+  the connection profiles are what the coordinator's `Mode`, Fernlet's `ProximityMode` (a session
+  profile, not a token), generalizes into (A0.7 / C5).
 - **Later.** FernletCrypto's 40 twins of `.fernlet`'s labels (38 protocol labels and the two
   feature salts) retire at plan step C1, with the app's duress and probe purposes;
   `IdentityService`'s `CryptographicPurpose` overloads of `sign` and `verify` serve those and the
   feature labels until then. The DEBUG test-hook names are settled when
-  the package leaves Fernlet's tree (A1).
+  the package leaves Fernlet's tree (A1), and so are the presence radio's `package` doors, published
+  as mechanism or wrapped (see "Package doors" below).
 
 ### Package doors
 
-This module declares nothing `package`. A `package` declaration is a door into this module that a
-Fernlet module inside FernletKit may use (the test target too, through `@testable import`, and never
-the app) while a named later step reshapes or replaces what is behind it; a settled seam is `public`,
-with its contract, instead. Rule 5 of `ProximityNamespaceBoundaryTests` lists every door, file by file,
-with the step that closes it, and fails a `package` line no row names or a row whose line is gone.
+A `package` declaration is a door into this module that a Fernlet module inside FernletKit may use
+(the test target too, through `@testable import`, and never the app) while a named later step
+reshapes or replaces what is behind it; a settled seam is `public`, with its contract, instead. Each
+door's doc comment says so and names its exit (for a protocol witness whose access its type forces,
+the type's doc comment does). The doors, by what they open:
+
+- **The presence radio, until A1.** `PresenceRadioSession`, the seam Fernlet's presence manager drives
+  the radio through, with every requirement; its QUIC conformer, `NetworkPresenceSession`, with
+  `init(namespace:)` and its witnesses; `NetworkPeerChannel`, which the seam's requirements name and a
+  heart connection's coordinator runs over, with `peer`, `notifyConnected()` and its ``PeerTransport``
+  witnesses; `PresenceEpochPosture`, with `epoch`, `instanceName` and the production `minted` and
+  `rotated`; and `PresenceAdvertisement`'s `publishedFields(tags:)`, `isPresenceAdvertisement(_:)` and
+  `tags(from:)`. Before this module leaves FernletKit the seam is published as mechanism or wrapped
+  by a presence engine.
+- **The coordinator's typed send and manual commit, until A0.7.**
+  `ProximityCoordinator.sendPayload(type:summary:payload:sealed:)` and `commitManualProximity()`, which
+  presence's heart delivery and the recipe-share manager call; the profile-driven pair session's API
+  replaces them.
+
+Rule 5 of `ProximityNamespaceBoundaryTests` lists every door, file by file, with the step that closes
+it, and fails a `package` line no row names or a row whose line is gone.
 
 ## Topics
 
@@ -767,6 +810,7 @@ with the step that closes it, and fails a `package` line no row names or a row w
 - ``ProximityNamespace``
 - ``ProximityCryptographicPurpose``
 - ``ProximityNamespaceError``
+- ``ProximityNamespaceGate``
 
 ### Identity and signing
 
@@ -797,6 +841,7 @@ the role and ranging mode with the same raw values.
 - ``ProximityCoordinator``
 - ``ProximityCommitDetector``
 - ``ProximityPayloadHandling``
+- ``ObservationLoop``
 - ``ProximityRole``
 - ``ProximityRangingMode``
 - ``ProximityInspectorRecording``
@@ -2782,6 +2827,7 @@ records rather than app-visible state.
 
 - ``ProximityHeartLedger``
 - ``ReceivedHeartRecord``
+- ``ProximityPrekeyBundle``
 - ``HeartDropService``
 - ``HeartDropOutbox``
 - ``HeartDropDedupStore``
@@ -2871,3 +2917,4 @@ the retired wire payload, **frozen and parked** (decoded, never dispatched, neve
 ### Peer names on screen
 
 - ``PeerNameDisplay``
+- ``ProximityDisplayName``

@@ -115,15 +115,27 @@ public final class ProximityActivityManager {
     @ObservationIgnored private var lastSyncReplyAt: [String: Date] = [:]
     static let syncReplyRateLimitSeconds: TimeInterval = 2
 
+    /// A manager over its persisted hosted and joined activities, loaded from `fileURL` and pruned of
+    /// expired ones.
+    ///
+    /// - Parameters:
+    ///   - store: The host, held `unowned` (the host owns the mesh manager that owns this).
+    ///   - identity: The identity that signs its descriptors, join tokens and rosters, or nil, under
+    ///     which hosting and joining refuse.
+    ///   - fileURL: The ledger file, which the caller always states: there is no default, so no
+    ///     manager silently lands on a process-wide path. ``MeshNetworkManager`` passes
+    ///     ``fileURL(in:)`` of its host's ``ProximityHost/proximitySupportDirectory``; a test passes
+    ///     a file of its own.
+    ///   - now: The clock it stamps, expires and rate-limits by.
     public init(
         store: any ProximityHost,
         identity: IdentityService? = nil,
-        fileURL: URL? = nil,
+        fileURL: URL,
         now: @escaping () -> Date = Date.init
     ) {
         self.store = store
         self.identity = identity
-        self.file = JSONSidecarFile(fileURL: fileURL ?? Self.fileURL(in: ProximitySupportLayout.defaultDirectory))
+        self.file = JSONSidecarFile(fileURL: fileURL)
         self.now = now
         load()
         gcExpired()
@@ -675,7 +687,7 @@ public final class ProximityActivityManager {
     }
 
     /// This store's file inside a given proximity-sidecar root — the ONE definition of its name, so
-    /// the production default and a scoped (per-store) root can never name different files.
+    /// the production root and a scoped (per-store) root can never name different files.
     ///
     /// Given a root rather than fixed because it is shared mutable on-disk state that a wipe reaches:
     /// `clearAll()` removes this file, and `FernletStore.resetAll` calls it (hosted/joined group activities

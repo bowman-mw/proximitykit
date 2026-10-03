@@ -81,7 +81,7 @@ public final class ProximityInspectorEventRecorder: ProximityInspectorRecording 
 // WI-9: mesh wire payloads decoded from peer plaintext — `nonisolated, Sendable` so the decode is
 // not pinned to the MainActor by ProximityKit's `.defaultIsolation(MainActor.self)` (see MeshPayloads.swift).
 /// Body of the identity intro/ack envelope: negotiated ranging mode, the UWB discovery token,
-/// the advertised capability tokens, and the optional heart-drop prekey bundle.
+/// the advertised capability tokens, and the optional prekey bundle the host gossips.
 ///
 /// All later additions are additive optional keys so old decoders keep working; provenance of
 /// the prekey bundle is the intro envelope's Ed25519 signature.
@@ -93,14 +93,16 @@ private nonisolated struct IdentityRangingPayload: Codable, Sendable {
     /// host's `assumedForLegacyPeers` names, see `PeerIdentity.supports(_:in:)`). Raw capability
     /// tokens, kept as strings so a newer build's capability names survive the round-trip.
     let capabilities: [String]?
-    /// Heart-drop prekey bundle gossip (bitchat adoptions Increment 3) — another additive key old
-    /// decoders ignore. Rides the SIGNED intro envelope, so bundle provenance is the envelope's
-    /// Ed25519 signature; there is no second standalone bundle signature to drift out of sync.
-    /// nil when the sender hasn't opted into away hearts (`heartsAway` capability absent too).
-    let heartDropPrekeyBundle: HeartPrekeyStore.Bundle?
+    /// Prekey bundle gossip (bitchat adoptions Increment 3) — another additive key old decoders
+    /// ignore, carried opaquely: what the host's provider returned, or nil when it returned none
+    /// (Fernlet's when the sender hasn't opted into away hearts, `heartsAway` capability absent too).
+    /// Rides the SIGNED intro envelope, so bundle provenance is the envelope's Ed25519 signature;
+    /// there is no second standalone bundle signature to drift out of sync. The property's name is
+    /// the frozen JSON key, so it keeps the dead-drop's spelling.
+    let heartDropPrekeyBundle: ProximityPrekeyBundle?
 
     init(rangingMode: String, discoveryToken: Data?, capabilities: [String]?,
-         heartDropPrekeyBundle: HeartPrekeyStore.Bundle? = nil) {
+         heartDropPrekeyBundle: ProximityPrekeyBundle? = nil) {
         self.rangingMode = rangingMode
         self.discoveryToken = discoveryToken
         self.capabilities = capabilities
@@ -270,7 +272,7 @@ public final class ProximityCoordinator {
         // it, so each call either threw (audited) or spent one of the per-app Live Activity slots a
         // workout or cooking activity needs on something nothing draws. Three shipping construction
         // sites take this default by omitting the argument
-        // (`ProximityRecipeShareManager.handleChannelOpened`, and `PresenceManager`'s heart door
+        // (`ProximityRecipeShareManager.handleChannelReady`, and `PresenceManager`'s heart door
         // plus its teardown seam), so this one line retires all of them; the mesh's two doors and
         // the recipe-share test seam pass `NoopProximityForegroundAnchor()` explicitly and are left
         // alone. `ProximityLiveActivityReaper.endOrphans()` still runs once per launch.
@@ -458,7 +460,14 @@ public final class ProximityCoordinator {
     /// canonical bytes AND surfaced in the RECEIVING device's Connection Inspector. The rationale,
     /// and the receiver-side plan for a localized inspector, live on
     /// `FernletIdentityEnvelope.payloadSummary`.
-    func sendPayload(type: PayloadType, summary: PayloadSummary, payload: Data, sealed: Bool = false) async throws {
+    ///
+    /// Throws ``CoordinatorError/notConnected`` before it signs anything when no peer is connected;
+    /// with `sealed`, seals to the connected peer's key-agreement key when it has one, in the
+    /// framing the peer's capabilities negotiate.
+    ///
+    /// Package access for FernletSocial until A0.7: presence's heart delivery and the recipe-share
+    /// manager are its shipping callers, and the profile-driven pair session's send replaces it.
+    package func sendPayload(type: PayloadType, summary: PayloadSummary, payload: Data, sealed: Bool = false) async throws {
         guard currentTransportPeer != nil else { throw CoordinatorError.notConnected }
         let (finalPayload, encryption) = try sealIfNeeded(payload, sealed: sealed)
         let sentAt = now()
@@ -739,7 +748,14 @@ public final class ProximityCoordinator {
 
     /// Manual proximity confirmation — works for both non-UWB (awaitingManualCommit)
     /// and UWB devices where the debug Force button overrides the proximity gate.
-    func commitManualProximity() async {
+    ///
+    /// Confirms the identity the coordinator holds at a proximity gate and does nothing in any
+    /// other state.
+    ///
+    /// Package access for FernletSocial until A0.7: presence's heart connections auto-commit
+    /// through it, as the recipe-share manager's pairings do, and the profile-driven pair session's
+    /// commit replaces it.
+    package func commitManualProximity() async {
         switch state {
         case .awaitingManualCommit(let peerIdentity), .awaitingProximityCommit(let peerIdentity):
             inspector?.recordCoordinatorEvent("manual proximity commit")
@@ -1100,12 +1116,23 @@ public final class ProximityCoordinator {
     /// only in the coordinator's state.
     public var onPeerDisplayNameDisclosed: ((PeerIdentity) -> Void)?
 
-    /// Heart-drop prekey gossip seams (bitchat adoptions Increment 3), set post-init by the
-    /// owning manager — nil provider means no bundle rides our intro (consent off or feature
-    /// absent), nil receiver means received bundles are ignored. The receiver fires ONLY after
-    /// the intro envelope verified, keyed by the sender's full signing key.
-    public var heartDropPrekeyBundleProvider: (() -> HeartPrekeyStore.Bundle?)?
-    public var onHeartDropPrekeyBundle: ((_ senderSigningPublicKey: Data, _ bundle: HeartPrekeyStore.Bundle) -> Void)?
+    /// The prekey bundle that rides every identity introduction and acknowledgement this
+    /// coordinator sends (bitchat adoptions Increment 3), set post-init by the owning manager.
+    ///
+    /// Read once per introduction, as it is built, and carried opaquely under the introduction's
+    /// frozen `heartDropPrekeyBundle` key (``ProximityPrekeyBundle``): this module reads no field of
+    /// it. Nil, or a provider that returns nil, means no bundle rides the introduction (Fernlet's
+    /// when away hearts are off).
+    public var introductionPrekeyBundleProvider: (() -> ProximityPrekeyBundle?)?
+
+    /// The receiver of the prekey bundle a peer's introduction carried, with the sender's FULL
+    /// signing key, set post-init by the owning manager.
+    ///
+    /// Fires ONLY after the introduction envelope verified and, on a sealed-introduction connection,
+    /// after its sender matched the friend the connection was opened for, so the bundle's provenance
+    /// is the envelope's signature; once per introduction or acknowledgement that carries one. Nil
+    /// means received bundles are ignored.
+    public var onIntroductionPrekeyBundle: ((_ senderSigningPublicKey: Data, _ bundle: ProximityPrekeyBundle) -> Void)?
 
     private func makeIdentityRangingPayload() async throws -> Data {
         let token: Data?
@@ -1118,7 +1145,7 @@ public final class ProximityCoordinator {
             rangingMode: ranging.isHardwareSupported ? RangingMode.uwb.rawValue : RangingMode.rssi.rawValue,
             discoveryToken: token,
             capabilities: localCapabilities,
-            heartDropPrekeyBundle: heartDropPrekeyBundleProvider?()
+            heartDropPrekeyBundle: introductionPrekeyBundleProvider?()
         )
         return try JSONEncoder().encode(payload)
     }
@@ -1380,10 +1407,10 @@ public final class ProximityCoordinator {
         )
         updateInspectorPeer(identity: peerIdentity, transportPeer: peer)
 
-        // Heart-drop prekey gossip (Increment 3): the intro envelope verified above, so the
-        // bundle's provenance is established — hand it to the cache keyed by the FULL signing key.
+        // Prekey gossip (Increment 3): the intro envelope verified above, so the bundle's
+        // provenance is established — hand it to the host's receiver keyed by the FULL signing key.
         if let bundle = rangingPayload?.heartDropPrekeyBundle {
-            onHeartDropPrekeyBundle?(envelope.senderSigningPublicKey, bundle)
+            onIntroductionPrekeyBundle?(envelope.senderSigningPublicKey, bundle)
         }
 
         if envelope.payloadTypeToken == vocabulary.session.identityAcknowledge.payloadType {

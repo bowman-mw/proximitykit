@@ -38,7 +38,11 @@ extension ProximityHost {
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: pure functions over values,
 /// called from the main-actor managers, the nonisolated envelope and the namespace's soundness rules.
-nonisolated enum ProximityDisplayName {
+///
+/// Public, with ``peerDisplayName(_:in:)``, as settled mechanism: every peer-supplied name a host's
+/// feature shows or records passes the one coercion the namespace's soundness rule judges. The
+/// sanitizer under it stays internal.
+public nonisolated enum ProximityDisplayName {
 
     /// Coerces a (possibly untrusted, e.g. wire-received) name into a safe shape WITHOUT throwing: drops
     /// control / zero-width / bidi-override scalars, collapses whitespace runs, and caps the length.
@@ -83,11 +87,17 @@ nonisolated enum ProximityDisplayName {
     /// the sanitize-or-floor idiom used by the heart receive paths, the vouch-list cache, the session
     /// chat store, the keep-as-friend rows and the envelope's sender name.
     ///
+    /// The contract: under a sound namespace the result is never empty, carries no control,
+    /// zero-width or bidirectional-override scalar and no leading, trailing or repeated whitespace,
+    /// and keeps at most the namespace's `installation.peerNames.maxLength` characters (the soundness
+    /// rule holds the floor to exactly what this sanitizer leaves of it). It throws nothing and traps
+    /// on nothing, whatever the input or the namespace.
+    ///
     /// - Parameters:
     ///   - raw: The name as the peer supplied it.
     ///   - namespace: The host's namespace, whose `installation.peerNames` gives the cap and the floor.
     /// - Returns: The sanitized name, or the floor, which a sound namespace never leaves empty.
-    static func peerDisplayName(_ raw: String, in namespace: ProximityNamespace) -> String {
+    public static func peerDisplayName(_ raw: String, in namespace: ProximityNamespace) -> String {
         let policy = namespace.installation.peerNames
         let name = sanitized(raw, maxLength: policy.maxLength)
         return name.isEmpty ? policy.floor : name

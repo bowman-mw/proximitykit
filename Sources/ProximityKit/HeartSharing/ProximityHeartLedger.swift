@@ -135,13 +135,15 @@ public final class ProximityHeartLedger {
     }
 
     /// - Parameters:
-    ///   - fileURL: injectable for tests (relaunch = a new ledger on the same URL); defaults to
-    ///     `Application Support/Fernlet/HeartLedger.json`.
+    ///   - fileURL: the sidecar file, which the caller always states: there is no default, so no
+    ///     ledger silently lands on a process-wide path. Production passes ``fileURL(in:)`` of its
+    ///     host's sidecar root; a test passes a file of its own (relaunch = a new ledger on the same
+    ///     URL).
     ///   - now: injectable clock for the 5-minute rate windows and glow decay.
     ///   - readData: injectable file reader for tests; defaults to `Data(contentsOf:)`.
     ///   - writeData: injectable file writer for tests; defaults to atomic protected sidecar writes.
     public init(
-        fileURL: URL? = nil,
+        fileURL: URL,
         now: @escaping () -> Date = Date.init,
         readData: ((URL) throws -> Data)? = nil,
         writeData: ((Data, URL) throws -> Void)? = nil
@@ -153,7 +155,7 @@ public final class ProximityHeartLedger {
         // lifecycle is `clearAll` (resetAll), not `HeartDropService.wipeForDeleteAll`, so tying
         // it to a key that delete-all removes independently would strand it.
         self.sidecar = ProtectedSidecar(
-            fileURL: fileURL ?? Self.fileURL(in: ProximitySupportLayout.defaultDirectory),
+            fileURL: fileURL,
             empty: PersistedState(),
             auditPrefix: "heartledger",
             now: now,
@@ -351,7 +353,7 @@ public final class ProximityHeartLedger {
     }
 
     /// This ledger's file inside a given proximity-sidecar root — the ONE definition of its name, so
-    /// the production default and a scoped (per-store) root can never name different files.
+    /// the production root and a scoped (per-store) root can never name different files.
     ///
     /// Given a root rather than fixed for the same reason the sealed heart-drop sidecars are (see
     /// ``HeartDropStorageScope``): `clearAll()` removes this file, `FernletStore.resetAll` calls it,

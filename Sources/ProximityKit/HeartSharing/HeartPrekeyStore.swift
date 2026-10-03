@@ -22,60 +22,25 @@ import Security
 @MainActor
 public final class HeartPrekeyStore {
 
-    /// One one-time X25519 prekey's public half plus the id senders use to name it in the
-    /// drop header. Sixteen of these make up a gossiped ``Bundle``.
-    public struct PrekeyEntry: Codable, Equatable, Sendable {
-        public let id: UUID
-        public let publicKey: Data
-        public init(id: UUID, publicKey: Data) {
-            self.id = id
-            self.publicKey = publicKey
-        }
-    }
+    /// One one-time X25519 prekey's public half plus the id senders use to name it in the drop
+    /// header: the core wire type ``ProximityPrekeyBundle/PrekeyEntry``. Sixteen of these make up a
+    /// gossiped ``Bundle``.
+    public typealias PrekeyEntry = ProximityPrekeyBundle.PrekeyEntry
 
     /// The X3DH-style medium-term signed prekey (Track B of
-    /// Docs/Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26.md). What it buys: any friend not
-    /// met in person within `HeartDropPeerBundleCache.maxSealBundleAge` used to get
-    /// static-sealed drops forever — one device compromise then retroactively opened every one
-    /// of them. The SPK gives those drops a medium-term key instead. This is a COVERAGE win,
-    /// not a window win: the private half lives `spkRetention` (~4 weeks), slightly longer than
-    /// a one-time key's. "Signed" as in signed-by-the-identity-envelope: like the one-time
-    /// bundle it only ever travels inside the signed identity intro, so provenance is the
-    /// envelope's Ed25519 signature — no second standalone signature to get out of sync.
-    public struct SignedPrekey: Codable, Equatable, Sendable {
-        public let id: UUID
-        public let publicKey: Data
-        public let created: Date
-        /// Rotation deadline, NOT retention deadline: after this the owner gossips a fresh SPK,
-        /// but keeps this one's private half until `created + spkRetention` so in-flight drops
-        /// still open.
-        public let expires: Date
-        public init(id: UUID, publicKey: Data, created: Date, expires: Date) {
-            self.id = id
-            self.publicKey = publicKey
-            self.created = created
-            self.expires = expires
-        }
-    }
+    /// Docs/Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26.md): the core wire type
+    /// ``ProximityPrekeyBundle/SignedPrekey``. What it buys: any friend not met in person within
+    /// `HeartDropPeerBundleCache.maxSealBundleAge` used to get static-sealed drops forever — one
+    /// device compromise then retroactively opened every one of them. The SPK gives those drops a
+    /// medium-term key instead. This is a COVERAGE win, not a window win: the private half lives
+    /// `spkRetention` (~4 weeks), slightly longer than a one-time key's, so its `expires` is this
+    /// store's rotation deadline and `created + spkRetention` its retention deadline.
+    public typealias SignedPrekey = ProximityPrekeyBundle.SignedPrekey
 
-    /// The gossiped shape — public halves only. Codable so it rides `IdentityRangingPayload`
-    /// as an optional field old decoders ignore. `signedPrekey` is additive-OPTIONAL: old
-    /// peers' bundles decode with nil and keep working; old decoders ignore the extra key.
-    public struct Bundle: Codable, Equatable, Sendable {
-        public let bundleID: UUID
-        public let created: Date
-        public let expires: Date
-        public let keys: [PrekeyEntry]
-        public let signedPrekey: SignedPrekey?
-        public init(bundleID: UUID, created: Date, expires: Date, keys: [PrekeyEntry],
-                    signedPrekey: SignedPrekey? = nil) {
-            self.bundleID = bundleID
-            self.created = created
-            self.expires = expires
-            self.keys = keys
-            self.signedPrekey = signedPrekey
-        }
-    }
+    /// The gossiped shape — public halves only: the core wire type ``ProximityPrekeyBundle``, which
+    /// rides `IdentityRangingPayload` as an optional field old decoders ignore, under the same JSON
+    /// this store's keychain blob and the dead-drop's sealed peer-bundle sidecar hold.
+    public typealias Bundle = ProximityPrekeyBundle
 
     static let batchSize = 16
     public static let bundleLifetime: TimeInterval = 30 * 24 * 3600

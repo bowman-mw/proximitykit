@@ -36,17 +36,14 @@ public protocol ProximityHost: AnyObject {
     var proximityTrustStore: any ProximityTrustStore { get }
     func isBlockedFingerprint(_ fingerprint: String) -> Bool
     func blockProximityPeer(signingPublicKey: Data)
-    /// The in-person hearts opt-in (mesh redesign Phase 4b). `PresenceManager` consults it on the
-    /// send side (block an outbound heart) and the receive side (drop an inbound heart) — the two
-    /// non-UI homes of the setting. Presence VISIBILITY is a separate setting, so hearts-off +
-    /// presence-on means a friend still sees you nearby but a heart to you is silently dropped.
+    /// The in-person hearts opt-in (mesh redesign Phase 4b), the one hearts setting a host answers.
+    /// `PresenceManager` consults it on the send side (block an outbound heart) and the receive side
+    /// (drop an inbound heart), and ``MeshNetworkManager``'s session hearts do too (the send, the
+    /// routed heart's ledger judgement and the hearts capability it advertises). Presence VISIBILITY
+    /// is a separate setting, so hearts-off + presence-on means a friend still sees you nearby but a
+    /// heart to you is silently dropped. The away-delivery opt-in is no host requirement: the
+    /// managers that read it take a provider of their own (`heartsAwayEnabledProvider`).
     var allowNearbyHearts: Bool { get }
-    /// The away-delivery opt-in (bitchat adoptions Increment 3). `PresenceManager` consults it
-    /// only for copy — `notNearbyHeartMessage(firstName:)`, so a failed send doesn't tell a user
-    /// who turned away delivery ON that "hearts travel in person for now". The enforcement homes
-    /// are `HeartDropService.queueHeart`/`syncNow`; the friend row's affordance decision takes it
-    /// as an explicit parameter (`PresenceManager.heartAffordance`) rather than through this host.
-    var heartsAwayDeliveryEnabled: Bool { get }
     /// Root directory for the proximity subsystem's on-disk sidecars — the friend photo-wall index
     /// (`MeshPhotoCache.sealed`, GCM-sealed under the friend-wall media key; a legacy plaintext
     /// `MeshPhotoCache.json` is read once, resealed, and deleted by `PrivateMediaStore.loadIndex()`)
@@ -60,8 +57,8 @@ public protocol ProximityHost: AnyObject {
     /// (`PendingSessionPhotos/`, 2026-09-30), and every manager loads both at init. With one process-wide path, a manager built
     /// in one test reads (and overwrites) the wall of every other live one — and under the test
     /// runner, where XCTest and Swift Testing suites run in parallel in ONE process, that is a live
-    /// cross-suite race. Routing it through the host means the 49 `MeshNetworkManager(store:)` sites
-    /// inherit their store's isolation for free. Same reasoning as
+    /// cross-suite race. Routing it through the host means every `MeshNetworkManager(store:)` site
+    /// inherits its store's isolation for free. Same reasoning as
     /// `FernletStore.photoDocumentsDirectory`, for the corpus on the other side of the media-key split.
     ///
     /// The heart-drop sidecars share this root but need a second half the wall does not: they are
@@ -99,15 +96,17 @@ public protocol ProximityHost: AnyObject {
     /// the radios' presentation strings off it too. It also carries the payload vocabulary, which this
     /// module reads off it as well: the envelope, the coordinator, the managers, the inventory digest,
     /// the routed type registry and the mesh engine's own frames; the mesh features' payload and
-    /// capability tokens are still Fernlet's cases until plan steps A0.4 and A0.5. Some such strings
-    /// stay outside it until plan step A0.4:
-    /// the feature labels, the heart-drop and moderation keychain services and
-    /// ``ProximitySupportLayout``'s folder. `ProximityNamespaceBoundaryTests` allowlists each
-    /// feature-label read, each literal that spells `fernlet` and each line that still names one of
-    /// Fernlet's domain types.
+    /// capability tokens are still Fernlet's cases until plan steps A0.4, A0.5 and A0.7 move them.
+    /// Some such strings stay outside it until a later step: the feature labels this module reads from
+    /// FernletCrypto's registry (the heart dead-drop's, presence's, the ban store's and the sealed-backup
+    /// escrow's until A0.4, the activities' and the moderation report's until A0.5), the heart-drop and
+    /// moderation keychain services and ``ProximitySupportLayout``'s folder until A0.4.
+    /// `ProximityNamespaceBoundaryTests` allowlists each feature-label read, each literal that spells
+    /// `fernlet` and each line that still names one of Fernlet's domain types, with the step that
+    /// removes it.
     ///
     /// **Deliberately no default.** The extension below hands a host that carries no value of its
-    /// own the hearts settings, the sidecar root and the two storage scopes; it hands out no
+    /// own the in-person hearts setting, the sidecar root and the two storage scopes; it hands out no
     /// namespace, and never will. ProximityKit holds no namespace instance and keeps no global, so a
     /// host that supplies none gets a compile error, never another app's identity. Fernlet's app
     /// supplies `ProximityNamespace.fernlet` (the `FernletConnections` module) in
@@ -213,8 +212,6 @@ public extension ProximityHost {
     /// Default for hosts that predate the hearts opt-out (e.g. test doubles). The app's
     /// `FernletStore` overrides this with the live setting.
     var allowNearbyHearts: Bool { true }
-    /// Default for hosts that predate away delivery (test doubles). The app overrides it.
-    var heartsAwayDeliveryEnabled: Bool { false }
     /// The production sidecar home, and the default for hosts that don't redirect it (test doubles
     /// that never touch the wall): the host namespace's `installation.storage.defaultDirectory` (plan
     /// step A0.2.8; for Fernlet `Application Support/Fernlet`, unchanged). The app's `FernletStore`
@@ -227,17 +224,18 @@ public extension ProximityHost {
 /// ``ProximityHost/proximitySupportDirectory`` resolved to. Since plan step A0.2.8 those two, and the
 /// mesh stores' production scopes, resolve the host namespace's
 /// `installation.storage.defaultDirectory` instead, built the same way (Fernlet's spells the same
-/// folder); this one stays for the heart-drop scope's and the feature ledgers' defaults until their
-/// features leave in plan step A0.4.
+/// folder); this one stays only for the defaults of the features that still read it, until they leave
+/// for FernletSocial in plan step A0.4: the heart-drop scope's production directory and the default
+/// file URLs of the closeness ledger, the friend-state cache and the moderation ledger.
+/// ``ProximityHeartLedger`` and ``ProximityActivityManager`` take their file URL with no default.
 public enum ProximitySupportLayout {
     /// `Application Support/Fernlet` — unchanged from the path the mesh photo cache, the heart
     /// ledger and the heart-drop sidecars have always used, so no shipped install is migrated by the
     /// seams that made these injectable.
     /// `nonisolated` against the target's `defaultIsolation(MainActor.self)`: a pure path
     /// computation, read by the nonisolated static default `HeartDropStorageScope.production`. The
-    /// main-actor feature ledgers (`ProximityHeartLedger`, `FriendStateCache`, `ClosenessLedger`,
-    /// `ModerationLedger`, `ProximityActivityManager`) read it too, for their initializers' default
-    /// file URLs.
+    /// main-actor `FriendStateCache`, `ClosenessLedger` and `ModerationLedger` read it too, for their
+    /// initializers' default file URLs.
     public nonisolated static var defaultDirectory: URL {
         // `URL.applicationSupportDirectory` is the non-optional accessor for exactly the path the
         // optional `FileManager.urls(for:in:).first` resolved to (R5: no force unwrap).

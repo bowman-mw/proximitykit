@@ -104,7 +104,7 @@ public enum IdentityError: Error, Equatable {
 /// Key separation is the core invariant: the signing + proximity KA keys are
 /// ThisDeviceOnly and never sync; only the backup-escrow key is synchronizable. The private keys
 /// never leave this type — collaborators pass closures (e.g. `HeartDropSealer.open` takes
-/// `heartDropStaticAgreement`). Several instances coexist in the app (mesh, presence, recipe
+/// `staticKeyAgreement`). Several instances coexist in the app (mesh, presence, recipe
 /// share, heart-drop service) over the same keychain rows; `wipe()` clears the rows plus THIS
 /// instance's cache, so delete-all must call it on every live instance. `@MainActor`; the pure
 /// crypto statics (`verify`, `fingerprint`, tag derivations) are `nonisolated` for off-main use.
@@ -534,9 +534,24 @@ public final class IdentityService {
         return Data(mac).prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// ECDH against the static KA private, for opening static-fallback drops — the private key
-    /// itself never leaves this service (`HeartDropSealer.open` takes this as a closure).
-    public func heartDropStaticAgreement(withEphemeralPublicKey ephemeralPublicKey: Data) throws -> SharedSecret {
+    // MARK: - Static key agreement
+
+    /// X25519 against this identity's static key-agreement private key and a sender's ephemeral
+    /// public key: the one door through which an ephemeral-static seal addressed to this device is
+    /// opened by a collaborator, which takes it as a closure, so the private key itself never leaves
+    /// this service.
+    ///
+    /// Two callers: the routed content-key unwrap (`MeshRoutedContentKeyWrapper.unwrap`, from
+    /// `MeshRoutedItemDelivery`) and the heart dead-drop's static-key fallback
+    /// (`HeartDropSealer.open`, from `HeartDropService`). Each derives its own key from the secret
+    /// under its own label; this answers the raw shared secret and derives nothing.
+    ///
+    /// - Parameter ephemeralPublicKey: The sender's ephemeral X25519 public key, raw.
+    /// - Returns: The shared secret.
+    /// - Throws: ``IdentityError/notProvisioned`` when this identity holds no key-agreement key,
+    ///   ``IdentityError/openFailed`` for a malformed ephemeral key, or what CryptoKit's agreement
+    ///   throws.
+    public func staticKeyAgreement(withEphemeralPublicKey ephemeralPublicKey: Data) throws -> SharedSecret {
         guard let myKey = keyAgreementKey else { throw IdentityError.notProvisioned }
         guard let ephemeralKey = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephemeralPublicKey) else {
             throw IdentityError.openFailed

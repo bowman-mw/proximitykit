@@ -1156,8 +1156,8 @@ public final class PresenceManager: ProximityPayloadHandling {
         )
         // Away-hearts prekey gossip (Increment 3): the sealed presence intro carries our bundle;
         // the friend's verified intro hands theirs over.
-        coordinator.heartDropPrekeyBundleProvider = { [weak self] in self?.heartDropBundleProvider?() }
-        coordinator.onHeartDropPrekeyBundle = { [weak self] key, bundle in self?.onPeerPrekeyBundle?(key, bundle) }
+        coordinator.introductionPrekeyBundleProvider = { [weak self] in self?.heartDropBundleProvider?() }
+        coordinator.onIntroductionPrekeyBundle = { [weak self] key, bundle in self?.onPeerPrekeyBundle?(key, bundle) }
         heartConnections.append(PresenceHeartConnection(
             id: channel.peer.id,
             peer: channel.peer,
@@ -1523,6 +1523,10 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// block check (blocking is local and does not remove a member from the derived roster, so this
     /// is a live case rather than a hypothetical).
     ///
+    /// The legs are the core's ``ProximityHost/isTrustedUnblockedPeer(signingPublicKey:fingerprint:)``,
+    /// which this delegates to and which the mesh's routed heart path asks directly, so the two
+    /// callers still read one definition.
+    ///
     /// - Parameters:
     ///   - signingPublicKey: The peer's Ed25519 signing key.
     ///   - fingerprint: The peer's fingerprint.
@@ -1531,10 +1535,7 @@ public final class PresenceManager: ProximityPayloadHandling {
     static func isHeartEligible(
         signingPublicKey: Data, fingerprint: String, in host: any ProximityHost
     ) -> Bool {
-        let trustStore = host.proximityTrustStore
-        return trustStore.isTrustedProximityPeer(signingPublicKey: signingPublicKey)
-            && !trustStore.isBlockedProximitySigningKey(signingPublicKey)
-            && !host.isBlockedFingerprint(fingerprint)
+        host.isTrustedUnblockedPeer(signingPublicKey: signingPublicKey, fingerprint: fingerprint)
     }
 
     // MARK: - Hearts: status helpers
@@ -1552,13 +1553,13 @@ public final class PresenceManager: ProximityPayloadHandling {
     }
 
     /// Copy for "they aren't nearby and the drop-off couldn't take it either". The `heartsAwayDelivery`
-    /// consent is the ONE thing this manager reads that setting for (`ProximityHost
-    /// .heartsAwayDeliveryEnabled`): with it off, "hearts travel in person" is the honest and
-    /// complete explanation; with it on, the away path was tried (`queueAwayHeart` returned false)
-    /// and failed, so saying hearts only travel in person would contradict the feature the user
-    /// just turned on.
+    /// consent is the ONE thing this manager reads that setting for (``heartsAwayEnabledProvider``,
+    /// off when unwired): with it off, "hearts travel in person" is the honest and complete
+    /// explanation; with it on, the away path was tried (`queueAwayHeart` returned false) and
+    /// failed, so saying hearts only travel in person would contradict the feature the user just
+    /// turned on.
     private func notNearbyHeartMessage(firstName: String) -> String {
-        store.heartsAwayDeliveryEnabled
+        (heartsAwayEnabledProvider?() ?? false)
             ? "\(firstName) isn't nearby, and the heart couldn't be tucked away just now — try again in a moment."
             : "\(firstName) isn't nearby right now — hearts travel in person for now."
     }
@@ -1690,9 +1691,18 @@ public final class PresenceManager: ProximityPayloadHandling {
     /// gossip mirrors MeshNetworkManager's, and `queueAwayHeart` is the race-window fallback —
     /// a live send that discovers the friend just left can hand the heart to the dead-drop
     /// instead of failing (returns true when queued; the ledger cooldown was consumed there).
-    public var heartDropBundleProvider: (() -> HeartPrekeyStore.Bundle?)?
-    public var onPeerPrekeyBundle: ((Data, HeartPrekeyStore.Bundle) -> Void)?
+    public var heartDropBundleProvider: (() -> ProximityPrekeyBundle?)?
+    public var onPeerPrekeyBundle: ((Data, ProximityPrekeyBundle) -> Void)?
     public var queueAwayHeart: ((ProximityTrustedPeerRecord) -> Bool)?
+    /// The away-delivery opt-in, wired by FernletStore to the user's `heartsAwayDelivery` consent.
+    ///
+    /// Read only for COPY, when a heart cannot be delivered in person
+    /// (`notNearbyHeartMessage(firstName:)`), so a failed send doesn't tell a user who turned away
+    /// delivery ON that "hearts travel in person for now". Nil reads as off, matching
+    /// MeshNetworkManager's provider of the same name. The enforcement homes are
+    /// `HeartDropService.queueHeart`/`syncNow`, and the friend row's affordance takes the setting as
+    /// an explicit parameter (``heartAffordance(heartsEnabled:presenceEnabled:reachable:awayDeliveryEnabled:)``).
+    public var heartsAwayEnabledProvider: (() -> Bool)?
 
     /// Group-4 seam: registers a heart connection for an already-discovered peer (with an injected
     /// ranging provider so no real radio starts), then tears it down — exercising the exact

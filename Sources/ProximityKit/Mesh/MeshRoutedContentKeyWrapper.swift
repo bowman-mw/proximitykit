@@ -78,7 +78,7 @@ nonisolated enum MeshRoutedKeyWrapError: Error, Equatable, Sendable {
 /// Mirrors `IdentityService.encryptGroupKey` primitive for primitive with the routed purposes and a
 /// binding-carrying AAD substituted; unlike the group-key wrap it is `nonisolated` and static: the
 /// recipient's private key never enters this type — ``unwrap(_:binding:localFingerprint:localKeyAgreementPublicKey:staticAgreement:in:)``
-/// takes the static-agreement closure (`IdentityService.heartDropStaticAgreement(withEphemeralPublicKey:)`),
+/// takes the static-agreement closure (`IdentityService.staticKeyAgreement(withEphemeralPublicKey:)`),
 /// the `HeartDropSealer.open` shape. Wrapping needs public keys only. Both directions name their
 /// purposes at the primitive, and since ProximityKit plan step A0.2.6 both read them from the
 /// caller's `in purposes:` — the host namespace's `keyDerivation` and `aead` labels, with no default.

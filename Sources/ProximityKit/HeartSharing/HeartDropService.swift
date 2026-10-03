@@ -164,7 +164,7 @@ public final class HeartDropService {
             try identity.ensureProvisioned()
         } catch {
             // Benign here: every later identity use (`FernletIdentityEnvelope.signed`,
-            // `heartDropPairSecret`, `heartDropStaticAgreement`) throws and maps to `.failed`
+            // `heartDropPairSecret`, `staticKeyAgreement`) throws and maps to `.failed`
             // or a skip — but the ROOT cause has to be recorded, or a service that fails every
             // send looks unexplained.
             ProximityAudit.log("heartdrop.identity.provisionFailed",
@@ -716,7 +716,7 @@ public final class HeartDropService {
             let inner = try HeartDropSealer.open(
                 record.payload,
                 prekeyPrivateKey: { [prekeys] id in prekeys.privateKey(forPrekeyID: id) },
-                staticAgreement: { [identity] eph in try identity.heartDropStaticAgreement(withEphemeralPublicKey: eph) },
+                staticAgreement: { [identity] eph in try identity.staticKeyAgreement(withEphemeralPublicKey: eph) },
                 staticPublicKey: identity.localKeyAgreementPublicKey
             )
             return try JSONDecoder().decode(FernletIdentityEnvelope.self, from: inner)

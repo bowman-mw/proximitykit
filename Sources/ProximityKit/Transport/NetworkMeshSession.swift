@@ -168,19 +168,25 @@ protocol NetworkChannelHost: AnyObject {
 /// moment a conformer emits a discovered state. Two policies pointing opposite ways means neither
 /// side dials. Discovery reaches the owner through ``NetworkMeshSession/onPeerDiscovered`` instead,
 /// which is where the live policy already reads it.
+///
+/// Package access for FernletSocial until A1, with ``peer``, ``notifyConnected()`` and the nine
+/// ``PeerTransport`` witnesses (the type's access forces theirs): the presence radio's seam names
+/// the channel (``PresenceRadioSession``'s `onPeerChannelReady` and `channel(for:)`), and Fernlet's
+/// presence manager builds a heart connection's coordinator over it, so the channel exits with that
+/// seam. Its initializer and everything else stay internal: only a radio makes one.
 @MainActor
-final class NetworkPeerChannel: PeerTransport {
+package final class NetworkPeerChannel: PeerTransport {
 
-    /// The peer this channel carries.
-    let peer: PeerHandle
+    /// The peer this channel carries. Package access for FernletSocial until A1, with the type.
+    package let peer: PeerHandle
 
     private weak var host: (any NetworkChannelHost)?
     private let stateSubject = CurrentValueSubject<PeerTransportState, Never>(.idle)
     private let inboundSubject = PassthroughSubject<InboundPeerFrame, Never>()
 
-    var state: AnyPublisher<PeerTransportState, Never> { stateSubject.eraseToAnyPublisher() }
-    var inbound: AnyPublisher<InboundPeerFrame, Never> { inboundSubject.eraseToAnyPublisher() }
-    var connectedPeers: [PeerHandle] { [] }
+    package var state: AnyPublisher<PeerTransportState, Never> { stateSubject.eraseToAnyPublisher() }
+    package var inbound: AnyPublisher<InboundPeerFrame, Never> { inboundSubject.eraseToAnyPublisher() }
+    package var connectedPeers: [PeerHandle] { [] }
 
     init(peer: PeerHandle, host: any NetworkChannelHost) {
         self.peer = peer
@@ -188,17 +194,17 @@ final class NetworkPeerChannel: PeerTransport {
     }
 
     // Discovery and admission belong to the shared session, exactly as they did under MC.
-    func startAdvertising(discoveryInfo: [String: String]) async throws {}
-    func startBrowsing() async throws {}
-    func invite(_ peer: PeerHandle) async throws {}
-    func accept(_ invite: PeerPendingInvite) async throws {}
+    package func startAdvertising(discoveryInfo: [String: String]) async throws {}
+    package func startBrowsing() async throws {}
+    package func invite(_ peer: PeerHandle) async throws {}
+    package func accept(_ invite: PeerPendingInvite) async throws {}
 
     /// Sends one frame. A reliable payload at or above ``MeshTransferStreamTable/bulkFloorBytes``
     /// takes a per-transfer stream of its own (plan §7.1); everything else rides the tunnel's
     /// control stream or a datagram, exactly as it did before those streams existed. **No caller
     /// above this line can tell the difference**, which is the point: `MeshNetworkManager` sends a
     /// friend photo the same way over QUIC as it did over the retired MultipeerConnectivity radio.
-    func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws {
+    package func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws {
         guard let host else { throw PeerTransportError.unexpectedState }
         try await host.send(data, to: peer, mode: mode)
     }
@@ -211,7 +217,7 @@ final class NetworkPeerChannel: PeerTransport {
         host?.openTransferCount(for: peer) ?? 0
     }
 
-    func disconnect() async {
+    package func disconnect() async {
         // Signals idle locally only — the shared radio and its other tunnels keep running.
         stateSubject.send(.idle)
     }
@@ -220,8 +226,9 @@ final class NetworkPeerChannel: PeerTransport {
 
     /// Publishes `.connected`. Called after the owner's `begin()` has completed, matching the
     /// ordering contract the retired MC radio set — it keeps the coordinator out of the wrong
-    /// handshake branch.
-    func notifyConnected() {
+    /// handshake branch. Package access for FernletSocial until A1: presence's heart door calls it
+    /// once its coordinator has begun.
+    package func notifyConnected() {
         stateSubject.send(.connected(peer))
     }
 
