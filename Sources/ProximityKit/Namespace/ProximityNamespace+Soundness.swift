@@ -3,9 +3,10 @@
 //
 // The rules a namespace is judged by: alone, once, when it is built (`soundness`), and against
 // another app's namespace (`familyCollisions(with:)`, `installationCollisions(with:)`). Every loop runs
-// over the namespace's fixed shape — at most 39 labels, three radios, three keychain services, four
-// storage names, forty-six vocabulary fields — or over one value whose length a guard has already
-// bounded, or a string or token list the host wrote.
+// over the namespace's fixed shape — at most 39 protocol labels, three radios, three keychain
+// services, four storage names, forty-six vocabulary fields — or over one value whose length a guard
+// has already bounded, or a string, token list or feature group the host wrote (its declared feature
+// labels are judged beside the protocol's).
 
 import Foundation
 
@@ -105,7 +106,8 @@ nonisolated extension ProximityNamespace {
         var violations = rows
             .filter { !isWellFormedLabel($0.purpose.data) }
             .map { Violation.malformedLabel(field: $0.field) }
-        // R2: every unordered pair once, over at most 39 rows — 741 comparisons.
+        // R2: every unordered pair once, over at most 39 protocol labels plus the feature labels the
+        // host declared: n(n−1)/2 comparisons, 741 for 39 alone and 820 with Fernlet's two salts.
         for (index, row) in rows.enumerated() {
             for other in rows.dropFirst(index + 1) {
                 guard let violation = labelPairViolation(row, other) else { continue }
@@ -529,7 +531,8 @@ nonisolated extension ProximityNamespace {
     /// - Returns: The overlaps, in `mine`-then-`theirs` order.
     private static func labelCollisions(_ mine: [LabelRow], _ theirs: [LabelRow]) -> [Collision] {
         var collisions: [Collision] = []
-        // R2: bounded by the two label lists, at most 39 × 39 comparisons.
+        // R2: bounded by the two label lists, each at most 39 protocol labels plus the feature labels
+        // its host declared: one list's length times the other's.
         for own in mine {
             for other in theirs {
                 guard let kind = overlap(own.purpose.data, other.purpose.data) else { continue }

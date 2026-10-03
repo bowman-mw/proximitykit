@@ -458,10 +458,11 @@ type has no local label). Senders keep emitting frozen English forever.
 ### Protocol namespace: what the host supplies
 
 ``ProximityNamespace`` (`Namespace/`) holds the byte strings by which this module's wire, keychain
-and disk formats identify the app it runs in: the 39 labels, the three radios' values, the QR
-scheme, the identity's and the two mesh seal keys' keychain rows, the storage names and the log
-subsystem, and this module reads every one of those off it, each byte-identical for Fernlet (plan
-steps A0.2 and A0.3 of `Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md`). Its family also carries the radios'
+and disk formats identify the app it runs in: the 39 protocol labels and the feature salts the host
+declares, the three radios' values, the QR scheme, the identity's and the two mesh seal keys'
+keychain rows, the storage names and the log subsystem, and this module reads every one of those off
+it, each byte-identical for Fernlet (plan steps A0.2 and A0.3 of
+`Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md`). Its family also carries the radios'
 presentation strings, which the radios, their postures and ``PeerNameDisplay`` read off it, and the
 payload vocabulary, every group of which this module reads off it too: the envelope's payload rules,
 the coordinator's session messages and capability rules, the managers' wire2 token, the inventory
@@ -482,12 +483,14 @@ namespace or the binding and offers no default for either: no global, no slot, n
 audit sink alone lives in one process-wide slot, ``ProximityAudit`` (see "The audit sink" below).
 
 **What the namespace holds.** Its ``ProximityNamespace/Family`` is what every interoperating app
-shares: the 39 domain-separation labels as ``ProximityCryptographicPurpose`` values
-(``ProximityNamespace/Purposes``: 21 signature transcripts with the verify-only legacy pair, three
-HKDF salts, the QUIC channel binding's TLS exporter label, the two column seals, five AEAD labels and
-seven hash domains, the epoch id's among them), the three radios' service types and ALPNs, the
-mesh heartbeat and three presentation strings (``ProximityNamespace/Radios``: the mesh and
-recipe-share radios' Bonjour instance-name prefix, the presence radio's, and the ephemeral
+shares: the 39 protocol labels and the host's declared feature salts as
+``ProximityCryptographicPurpose`` values (``ProximityNamespace/Purposes``: 21 signature transcripts
+with the verify-only legacy pair, three HKDF salts, the QUIC channel binding's TLS exporter label, the
+two column seals, five AEAD labels and seven hash domains, the epoch id's among them, then
+``ProximityNamespace/FeaturePurposes``, the HKDF salts the host's own features derive pair secrets
+under: Fernlet declares two, its heart dead-drop's and presence's), the three radios' service types
+and ALPNs, the mesh heartbeat and three presentation strings (``ProximityNamespace/Radios``: the
+mesh and recipe-share radios' Bonjour instance-name prefix, the presence radio's, and the ephemeral
 certificates' common name), the verify QR's URL scheme, and the payload vocabulary
 (``ProximityNamespace/Vocabulary``: the coordinator's three session messages with their signed
 summary titles, every payload token the host dispatches and those that must arrive sealed, the
@@ -505,15 +508,21 @@ module's: the QR host `verify`, its query key `d` and version 1, the `FPT2`, `FG
 row's accessibility and synchronizable class, which the key-custody walls read in this module's code.
 
 **Labels are the host's literals; roles are this module's.** A label is a `StaticString` source
-literal handed to a group initializer, the only door that mints a ``ProximityCryptographicPurpose``
-(its own initializer is internal, and it has no `Codable` conformance and no decoding path), so every
-label is a reviewed spelling in the host's source: none is assembled at run time and none arrives
-over the wire. The field it fills fixes its ``ProximityCryptographicPurpose/Role`` (a length-prefixed
-or raw-prefix signature transcript, the verify-only `.absent` legacy pair, a length-prefixed or raw
-hash preimage, an HKDF salt, a column seal, an AEAD prefix, the exporter label), so a host supplies
-bytes and never decides how this module consumes them, and a label in a non-signature role verifies
-nothing. The initializer is total and records ``ProximityNamespace/soundness`` (labels well-formed,
-distinct and prefix-free; radio, QR, keychain and storage values well-formed and distinct; every
+literal handed to a group initializer, or to
+``ProximityCryptographicPurpose/featureKeyDerivationSalt(_:)`` for a salt a host's feature derives
+under: those are the only doors that mint a ``ProximityCryptographicPurpose`` (its own initializer is
+internal, and it has no `Codable` conformance and no decoding path), so every label is a reviewed
+spelling in the host's source: none is assembled at run time and none arrives over the wire. The
+field it fills fixes its ``ProximityCryptographicPurpose/Role`` (a length-prefixed or raw-prefix
+signature transcript, the verify-only `.absent` legacy pair, a length-prefixed or raw hash preimage,
+an HKDF salt, a column seal, an AEAD prefix, the exporter label), and the feature-salt mint gives its
+one role, an HKDF salt, so a host supplies bytes and never decides how this module consumes them, and
+a label in a non-signature role verifies nothing. A feature salt reaches its one door,
+``IdentityService/pairSecret(with:purpose:)``, only when the host's namespace declares it: the door
+refuses any other purpose with ``IdentityError/undeclaredPurpose`` before it reads a key, the
+protocol's own salts included. The initializer is total and records ``ProximityNamespace/soundness``
+(labels well-formed, distinct and prefix-free, the declared feature salts judged with the protocol's;
+radio, QR, keychain and storage values well-formed and distinct; every
 vocabulary token within the bytes its receivers accept (a mesh message within a summary title's 200,
 since the mesh signs it as its frame's title), none repeated within its group (the session and mesh
 messages count as one) and none a rule names left unknown; summary titles, instance-name prefixes
@@ -535,7 +544,8 @@ which needs no provisioned key, throws it before it wraps anything, each auditin
 auditing `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound` or
 `recipe.quic.namespaceUnsound`. Each line's context names the door (`at`: `provision`,
 `groupKeyWrap` or `start`), the violation count and the first violation's case name, never a field
-or a value. Nothing else reads the verdict: the identity's backup-escrow API
+or a value. The pair-secret door needs the provisioned key-agreement key, so under an unsound
+namespace it derives nothing either. Nothing else reads the verdict: the identity's backup-escrow API
 (``IdentityService/provisionBackupEscrowKeyForSealing()`` and its loads, derivations, reconcile and
 adoption) needs no provisioned key and checks none, because it is Fernlet's sealed-backup feature, a
 feature path that leaves at A0.4, whose callers provision first. Each manager also compares the
@@ -548,7 +558,8 @@ and, for the mesh manager, every founding a caller can begin without one
 first commit needs a peer the radio linked), so that identity founds no mesh and links no peer.
 ``HeartDropService`` holds no namespace of its own to compare with; its identity's doors cover it. The checks live in the internal `ProximityNamespaceGate`
 (`Support/`), and `ProximityNamespaceGateTests`, on the crypto-goldens CI line, holds every door to its
-error and its audit line, over namespaces built from literals.
+error and its audit line, over namespaces built from literals, and the pair-secret door to its
+refusals and its derivation.
 
 **How a host supplies it.** ``ProximityHost/proximityNamespace`` and
 ``ProximityHost/proximityInstallBinding`` are two of the eight ``ProximityHost`` requirements with no
@@ -575,7 +586,7 @@ hand it:
 | Reader | How it reads the namespace |
 | --- | --- |
 | ``MeshNetworkManager``, ``PresenceManager``, ``ProximityRecipeShareManager`` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their default identity and their radio from it, and hand it, or its `family.purposes`, to every reader they call. An identity handed to them is compared with it once, in `init`, and one of another namespace never starts their radio. |
-| ``IdentityService`` | Takes it in ``IdentityService/init(namespace:keychainService:)`` (a `nil` service means the namespace's identity service) and keeps it with its ``IdentityService/purposes``: it signs, seals, opens and wraps under its own labels and keeps its four device rows under the namespace's accounts. Its ``ProximityCryptographicPurpose`` overloads of `sign` and `verify` treat a label by its role, and `sign` refuses a verify-only or non-signature label. Under an unsound namespace it refuses to provision and to wrap a group key. |
+| ``IdentityService`` | Takes it in ``IdentityService/init(namespace:keychainService:)`` (a `nil` service means the namespace's identity service) and keeps it with its ``IdentityService/purposes``: it signs, seals, opens and wraps under its own labels and keeps its four device rows under the namespace's accounts. Its ``ProximityCryptographicPurpose`` overloads of `sign` and `verify` treat a label by its role, and `sign` refuses a verify-only or non-signature label. ``IdentityService/pairSecret(with:purpose:)`` derives only under a feature salt its namespace's family declares (`family.purposes.feature`). Under an unsound namespace it refuses to provision and to wrap a group key, and so derives no pair secret. |
 | Builders: envelopes, admission tokens, membership records and messages, the removal quorum, key advertisements, routed items, chunks and receipts, the verify QR | Sign under their signing identity's ``IdentityService/purposes``. |
 | Verifiers: the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
 | The membership digest and its holders: `MeshInventoryDigest`, `MeshMembershipRecordVerifier`, `MeshLedgerAdoption` | Take the whole family (`family:`, or the adoption's `in family:`, with no default), because the digest needs its record kinds beside its labels: every record is tagged with its kind's token from `family.vocabulary.membershipRecordKinds` (`MeshMembershipRecordKind.token(in:)`). The verifier keeps the family as its copy, so its labels and record kinds come from one namespace; an identity's signed digest uses its own namespace's. |
@@ -594,10 +605,10 @@ hand it:
 | Closures that cross an actor | Capture the `Sendable` value when they are made, as ``PresenceManager``'s radio factory does. |
 
 **What pins it.** `ProximityNamespaceGoldenTests`, on the crypto-goldens CI line, holds every value
-`.fernlet` carries to the literal Fernlet shipped before A0.2 (62 rows), each label's role and its
-FernletCrypto twin, soundness, the byte-prefix check over FernletCrypto's 81 registry labels and
-`.fernlet`'s 39 together, one role-versus-consumer cell per hash and transcript consumer, and the
-readers above under `.fernlet` and under a foreign namespace. `ProximityVocabularyGoldenTests`, on
+`.fernlet` carries to the literal Fernlet shipped (64 rows, its two declared feature salts among
+them), each label's role and its FernletCrypto twin, soundness, the byte-prefix check over
+FernletCrypto's 81 registry labels and `.fernlet`'s 41 together, one role-versus-consumer cell per
+hash and transcript consumer, and the readers above under `.fernlet` and under a foreign namespace. `ProximityVocabularyGoldenTests`, on
 the same line, holds every token and presentation string this module's consumers read to the
 literal Fernlet shipped before A0.3, and `.fernlet`'s vocabulary and presentation strings to the
 same literals; it drives the radios, the presence posture mint and the name display under `.fernlet`
@@ -610,7 +621,7 @@ sanitizer to FernletDomainModel's byte for byte and drives the peer-name coercio
 sender reads, the name display, the advertised recipe name, the session message store and the mesh
 and recipe-share managers under `.fernlet` and under a namespace whose peer-name policy is its own.
 `ProximityNamespaceSoundnessTests`
-holds the soundness and collision rules over
+holds the soundness and collision rules, a declared feature salt's place in them included, over
 namespaces built only from literals.
 `FernletFeatureGoldenTests`, on the crypto-goldens line too, holds the bytes of the Fernlet features
 this module still holds, which their move out of it must keep, to frozen literals: the feature labels
@@ -618,7 +629,8 @@ the heart dead-drop, presence and the ban store hand CryptoKit themselves, the h
 pair secrets and tags, the ban evidence's reporter tag, a frozen sealed drop and sealed sidecar opened
 through their readers, the prekey bundle's JSON and the identity introduction that gossips it, the
 features' keychain and file names and persisted shapes, presence's advertisement and the
-sealed-backup escrow's provisioning cases.
+sealed-backup escrow's provisioning cases, and the two feature salts `.fernlet` declares, under which
+the pair-secret door derives the heart-drop and presence pair secrets' known answers.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
 named only on the code lines that read the feature labels leaving with their features (A0.4) or with
@@ -700,8 +712,9 @@ to Fernlet leaves in these steps:
   ledger, closeness and friend state, and the sealed-backup escrow, which leaves for the App's backup
   side. With them go nine of the 13 feature labels this module still reads from FernletCrypto's
   registry (the dead-drop's and presence's, the ban evidence's reporter tag and the escrow's two; the
-  heart-drop and presence pair secrets become the generic `pairSecret(with:purpose:)` under the
-  host's declared feature salts, and their tags leave with their features), the heart-drop and
+  heart-drop and presence pair secrets leave as FernletSocial wrappers over
+  ``IdentityService/pairSecret(with:purpose:)``, under the salts `.fernlet` already declares, and
+  their tags leave with their features), the heart-drop and
   moderation keychain services, the heart payload's format, the feature files' lines that name
   Fernlet's domain types (the dead-drop's friend records and heart title, presence's friend records
   and hearts capability), `ProximitySupportLayout.defaultDirectory` together with
@@ -721,9 +734,10 @@ to Fernlet leaves in these steps:
   features go through (the envelope's typed view of its token and the coordinator's typed send)
   leave with the recipe profile (A0.7); the connection profiles are what the coordinator's `Mode`,
   Fernlet's `ProximityMode` (a session profile, not a token), generalizes into (A0.7 / C5).
-- **Later.** FernletCrypto's 38 twins of the namespace labels retire at plan step C1, with the app's
-  duress and probe purposes; `IdentityService`'s `CryptographicPurpose` overloads of `sign` and
-  `verify` serve those and the feature labels until then. The DEBUG test-hook names are settled when
+- **Later.** FernletCrypto's 40 twins of `.fernlet`'s labels (38 protocol labels and the two
+  feature salts) retire at plan step C1, with the app's duress and probe purposes;
+  `IdentityService`'s `CryptographicPurpose` overloads of `sign` and `verify` serve those and the
+  feature labels until then. The DEBUG test-hook names are settled when
   the package leaves Fernlet's tree (A1).
 
 ### Package doors

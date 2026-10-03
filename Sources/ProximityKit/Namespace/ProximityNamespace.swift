@@ -25,29 +25,30 @@ import Foundation
 /// keeps its own copy, so no read hops an actor and no reader can see a namespace its root did not
 /// hand it. A host that supplies none gets a compile error, never another app's identity. The host
 /// supplies it as ``ProximityHost/proximityNamespace``, the managers keep a copy, and ProximityKit
-/// reads from it all 39 protocol labels, the radio values, the QR scheme, the identity's and the two
-/// mesh seal keys' keychain rows, the storage names and the log subsystem. The radios, their
+/// reads from it all 39 protocol labels and the feature labels the host declares (``FeaturePurposes``:
+/// the only salts ``IdentityService/pairSecret(with:purpose:)`` derives under, judged with the
+/// protocol's), the radio values, the QR scheme, the identity's and the two mesh seal keys' keychain
+/// rows, the storage names and the log subsystem. The radios, their
 /// postures and `PeerNameDisplay` read the radios' three presentation strings off it too, and
 /// ProximityKit shows a peer's name under the installation's peer-name policy (``PeerNames``: the
 /// cap and the floor) wherever it enters except the activity manager, whose joiners' names keep
-/// `ItemNameModeration`'s fixed cap, with no floor, until plan step A0.4 moves activities out. Its
-/// family also carries the payload vocabulary
+/// `ItemNameModeration`'s fixed cap, with no floor, until plan step A0.5 moves activities out with
+/// the mesh manager's feature parts. Its family also carries the payload vocabulary
 /// (``Vocabulary``): the identity envelope seals and parks by its payload rules, the session
 /// coordinator signs and dispatches by its session messages and reads its capability rules, the mesh
 /// and presence managers advertise its wire2 token and the mesh frames by it, the inventory digest
 /// hashes its membership record kinds, the routed type registry builds its rows from its routed
 /// types, and the mesh manager signs and dispatches its engine's own frames by its mesh messages. The
 /// mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
-/// `ProximityCapability` cases until plan steps A0.4 and A0.5 move them; for Fernlet the two
+/// `ProximityCapability` cases until plan steps A0.4, A0.5 and A0.7 move them; for Fernlet the two
 /// spellings are equal, which `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
-/// until plan step A0.4: the 13 feature labels ProximityKit reads from FernletCrypto's registry, the
-/// heart-drop and moderation keychain services and ``ProximitySupportLayout``'s folder.
-/// `ProximityNamespaceBoundaryTests` keeps four rules: no namespace, group or purpose is built outside
-/// `Namespace/`; `FernletCryptoPurpose` stays on its 20 allowlisted lines; every literal that spells
-/// `fernlet` is on an exact allowlist; and Fernlet's domain vocabulary and records (`PayloadType`,
-/// `ProximityCapability`, `ProximityMode`, `ItemNameModeration` and the persisted proximity records)
-/// are named only on the exact lines that leave with their features or the session profile. Each
-/// list can only shrink.
+/// until their features leave: the 13 feature labels ProximityKit reads from FernletCrypto's registry
+/// (nine at plan step A0.4, the activities' and the moderation report's four at A0.5), and until A0.4
+/// the heart-drop and moderation keychain services and ``ProximitySupportLayout``'s folder.
+/// `ProximityNamespaceBoundaryTests` keeps ProximityKit building no namespace, group or purpose
+/// outside `Namespace/`, and holds what is left of Fernlet in it (the registry's feature labels, the
+/// `fernlet` literals, Fernlet's domain types) and its `package` doors to exact per-file lists, each
+/// row naming the plan step that removes it; those lists are the one place the numbers live.
 ///
 /// **Total, judged once, and refused at run time.** ``init(family:installation:)`` never throws or
 /// traps: it runs every soundness rule once and records the verdict in ``soundness``. A host that
@@ -55,7 +56,9 @@ import Foundation
 /// violations. ProximityKit refuses an unsound namespace at run time on its own, reading that stored
 /// verdict and failing closed: ``IdentityService/ensureProvisioned()`` and
 /// ``IdentityService/encryptGroupKey(_:for:)`` throw ``ProximityNamespaceError`` before they touch a
-/// key, and each radio's `start` throws it before it advertises, each with a named audit event
+/// key (so ``IdentityService/pairSecret(with:purpose:)``, which needs the provisioned key-agreement
+/// key, derives nothing under an unsound family either), and each radio's `start` throws it before it
+/// advertises, each with a named audit event
 /// (`identity.namespace.unsound`, `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound`,
 /// `recipe.quic.namespaceUnsound`) whose context names the door, the violation count and the first
 /// violation's case, never a value. Nothing else reads the verdict: the identity's backup-escrow
@@ -114,7 +117,8 @@ public nonisolated struct ProximityNamespace: Hashable, Sendable {
     }
 
     /// Every label with its field path, in declaration order: the signature labels (the legacy pair
-    /// after the QR labels, when accepted), then key derivation, AEAD and hash.
+    /// after the QR labels, when accepted), then key derivation, AEAD and hash, then the feature
+    /// salts the host declares, in the host's order.
     ///
     /// Goldens and prefix checks iterate this; they never scan source.
     public var labelRows: [LabelRow] {

@@ -77,6 +77,13 @@ public enum IdentityError: Error, Equatable {
     /// of the two — that exact length IS a discriminator. Either way the outcome is fail-closed;
     /// only the explanation differs.
     case legacyWireFormat
+    /// A pair secret was asked for under a purpose this identity's namespace does not declare: a
+    /// label in any role but `.keyDerivationSalt`, or a salt outside its family's feature group
+    /// (``ProximityNamespace/FeaturePurposes``), a protocol salt among them. Raised by
+    /// ``IdentityService/pairSecret(with:purpose:)`` before it reads a key, so no key is ever derived
+    /// under a label the namespace's soundness verdict did not judge. Not retryable: the caller named
+    /// another purpose than the one its namespace declares.
+    case undeclaredPurpose
 }
 
 // MARK: - IdentityService
@@ -88,8 +95,9 @@ public enum IdentityError: Error, Equatable {
 /// Responsibilities: provisioning + caching the keychain-backed key pairs
 /// (`ensureProvisioned()`, idempotent, with three migration cases documented inline); signing
 /// (`sign`) and static verification (`verify`); the pairwise ECDH→HKDF→ChaChaPoly seal/open used
-/// for all sealed payloads (with optional wire2 framing); domain-separated pair secrets and
-/// rotating tags for presence recognition and heart-drop day tags; and the WS-1..WS-4
+/// for all sealed payloads (with optional wire2 framing); domain-separated pair secrets (the generic
+/// ``pairSecret(with:purpose:)`` under a declared feature salt, and the heart-drop and presence
+/// derivations) and rotating tags for presence recognition and heart-drop day tags; and the WS-1..WS-4
 /// backup-escrow reconciliation, where CONTENT-ADDRESSED keychain slots make divergent escrow
 /// keys coexist as a detectable `.conflict` instead of silently overwriting each other.
 ///
@@ -205,9 +213,10 @@ public final class IdentityService {
     ///
     /// **Transitional** (plan step A0.2.3). A namespace label signs through the
     /// `ProximityCryptographicPurpose` overload below; this one stays for FernletCrypto's registry:
-    /// the feature labels until plan step A0.4, the app's duress and probe purposes until C1, and
-    /// the tests that name them. Every core label's builder signs through the namespace overload
-    /// since step A0.2.5.
+    /// the activity join token's, roster snapshot's and moderation report's labels until plan step
+    /// A0.5 takes them out with the mesh manager's feature parts, the app's duress and probe purposes
+    /// until C1, and the tests that name them. Every core label's builder signs through the namespace
+    /// overload since step A0.2.5.
     /// The purpose's type picks the overload. No deprecation attribute: warnings are errors.
     public func sign(_ data: Data, purpose: CryptographicPurpose) throws -> Data {
         guard let key = signingKey else { throw IdentityError.notProvisioned }
@@ -439,6 +448,43 @@ public final class IdentityService {
             guard SealedPayloadFraming.hasFrameTag(plaintext) else { return plaintext }
             return try SealedPayloadFraming.unframe(plaintext)
         }
+    }
+
+    // MARK: - Pair secrets under host feature purposes
+
+    /// A pair secret for one of the host's features: X25519 between this device's key-agreement key
+    /// and a peer's, then HKDF-SHA256 with `purpose`'s bytes as the salt, empty info and 32 bytes.
+    ///
+    /// Symmetric by construction, the property a feature's mutual recognition stands on:
+    /// `X25519(a, B) == X25519(b, A)`, the salt is a constant and the info is empty, so both members
+    /// of a pair derive the same key, and only a holder of one of the two private keys can. The salt
+    /// is the host's, a ``ProximityCryptographicPurpose/featureKeyDerivationSalt(_:)`` this identity's
+    /// namespace declares (``ProximityNamespace/FeaturePurposes``), and so a label the namespace's
+    /// soundness verdict judged with every protocol label: no pair secret is derived under a protocol
+    /// salt or under a label that collides with one. The private key never leaves this type; the call
+    /// reads and writes no keychain row and writes no audit line. Main-actor, like the identity.
+    ///
+    /// - Parameters:
+    ///   - peerKeyAgreementPublicKey: The peer's X25519 public key, parsed by the caller, who decides
+    ///     what a malformed one means for its feature.
+    ///   - purpose: The salt.
+    /// - Returns: The 32-byte pair secret.
+    /// - Throws: ``IdentityError/undeclaredPurpose``, checked first, when `purpose` is not a
+    ///   key-derivation salt this identity's namespace declares; ``IdentityError/notProvisioned``
+    ///   before ``ensureProvisioned()`` has loaded the key-agreement key, which it never does under an
+    ///   unsound namespace; the key agreement's own error otherwise.
+    public func pairSecret(
+        with peerKeyAgreementPublicKey: Curve25519.KeyAgreement.PublicKey,
+        purpose: ProximityCryptographicPurpose
+    ) throws -> SymmetricKey {
+        guard purpose.role == .keyDerivationSalt, purposes.feature.declares(purpose) else {
+            throw IdentityError.undeclaredPurpose
+        }
+        guard let myKey = keyAgreementKey else { throw IdentityError.notProvisioned }
+        let shared = try myKey.sharedSecretFromKeyAgreement(with: peerKeyAgreementPublicKey)
+        return shared.hkdfDerivedSymmetricKey(
+            using: SHA256.self, salt: purpose.data, sharedInfo: Data(), outputByteCount: 32
+        )
     }
 
     // MARK: - Heart drops (bitchat adoptions Increment 3)

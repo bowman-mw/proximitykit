@@ -5,7 +5,8 @@
 // 1): ProximityKit's own domain-separation value. It keeps the byte rules of FernletCrypto's
 // `CryptographicPurpose` exactly — the same `data`, the same three framings, the same positional
 // `signingBytes` test — but the host supplies the bytes, as a source literal handed to a
-// `ProximityNamespace` group initializer, and ProximityKit decides how each label is consumed.
+// `ProximityNamespace` group initializer (or, for a salt one of its own features derives under, to
+// `featureKeyDerivationSalt(_:)`), and ProximityKit decides how each label is consumed.
 // A0.2's later commits routed ProximityKit's label reads through the namespace, so every protocol
 // label ProximityKit consumes is one of these.
 
@@ -19,21 +20,26 @@ import Foundation
 /// hash preimage, a key derivation, an authenticated-data layout or a TLS exporter, so changing one
 /// changes a key, a digest, or the bytes an existing signature verifies.
 ///
-/// **Why a label is a source literal.** The host hands the bytes to a ``ProximityNamespace`` group
-/// initializer as a `StaticString`, and a `StaticString` can only be written as a literal. Every label
-/// is therefore a reviewed spelling in somebody's source: a domain assembled at run time is a domain
-/// nobody reviewed, and one assembled from peer or user input lets an attacker choose where their bytes
-/// are accepted. There is no public initializer, no `Codable` conformance and no decoding path, so a
-/// purpose never arrives over the wire or from configuration. FernletCrypto's registry gets the same
-/// guarantee from a `fileprivate` initializer; a host in another module cannot reach one of those, and
-/// a `StaticString` parameter keeps the guarantee structural across the module boundary.
+/// **Why a label is a source literal.** The host hands the bytes over as a `StaticString`, and a
+/// `StaticString` can only be written as a literal. It does so two ways: to a ``ProximityNamespace``
+/// group initializer, for a field the protocol fixes, or to ``featureKeyDerivationSalt(_:)``, for an
+/// HKDF salt one of its own features derives under, which reaches its one door only when the host's
+/// namespace declares it (``ProximityNamespace/FeaturePurposes``). Every label is therefore a reviewed
+/// spelling in somebody's source: a domain assembled at run time is a domain nobody reviewed, and one
+/// assembled from peer or user input lets an attacker choose where their bytes are accepted. There is
+/// no public initializer (the one host-callable mint takes a `StaticString` and fixes the role
+/// itself), no `Codable` conformance and no decoding path, so a purpose never arrives over the wire or
+/// from configuration. FernletCrypto's registry gets the same guarantee from a `fileprivate`
+/// initializer; a host in another module cannot reach one of those, and a `StaticString` parameter
+/// keeps the guarantee structural across the module boundary.
 ///
 /// **Why ProximityKit fixes the role.** ``role`` says which ProximityKit consumer reads the bytes and
 /// how: a length-prefixed transcript, a raw-prefix one, a salt, a column seal, an AAD, an exporter
 /// label. That is a fact about ProximityKit's code, not a host preference, so the namespace field a
-/// label fills decides it and no initializer takes one. A host free to choose could only get it wrong:
-/// a raw-prefix role on a length-prefixed transcript makes ``signingBytes(_:)`` refuse every signature,
-/// and an `.absent` role on a live transcript would accept any bytes at all.
+/// label fills decides it, the feature-salt mint gives its one role, and no initializer takes one. A
+/// host free to choose could only get it wrong: a raw-prefix role on a length-prefixed transcript
+/// makes ``signingBytes(_:)`` refuse every signature, and an `.absent` role on a live transcript would
+/// accept any bytes at all.
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: inert `Sendable` value data,
 /// read from the nonisolated serializers, verifiers and stores.
@@ -84,7 +90,8 @@ public nonisolated struct ProximityCryptographicPurpose: Hashable, Sendable {
     /// Mints a purpose from a host's literal.
     ///
     /// Internal on purpose: only the ``ProximityNamespace`` group initializers call it, each with the
-    /// role its field fixes. `description` copies the literal into a `String` without touching
+    /// role its field fixes, and ``featureKeyDerivationSalt(_:)``, with the one role a host may mint
+    /// for itself. `description` copies the literal into a `String` without touching
     /// `StaticString`'s unsafe-pointer accessors (Power of 10 R9).
     ///
     /// - Parameters:
@@ -93,6 +100,24 @@ public nonisolated struct ProximityCryptographicPurpose: Hashable, Sendable {
     init(_ spelling: StaticString, role: Role) {
         self.rawValue = spelling.description
         self.role = role
+    }
+
+    /// Mints a host feature's HKDF salt from the host's literal: the one role a host may mint a label
+    /// for itself.
+    ///
+    /// The protocol's labels fill the fixed fields of the namespace's groups. A host's feature that
+    /// derives a pair secret (Fernlet's heart dead-drop and presence, for two) needs a salt of its
+    /// own, so the host mints it here, in the `.keyDerivationSalt` role, whole, and declares it in its
+    /// namespace's family (``ProximityNamespace/FeaturePurposes``). The label reaches its one door,
+    /// ``IdentityService/pairSecret(with:purpose:)``, only when that namespace declares it, so the
+    /// namespace's one soundness verdict has judged it with every protocol label (well-formed,
+    /// distinct, prefix-free): a salt minted here and declared nowhere derives nothing. Total and
+    /// pure: it reads nothing but its argument.
+    ///
+    /// - Parameter spelling: The host's source literal.
+    /// - Returns: The salt, its role ``Role/keyDerivationSalt``.
+    public static func featureKeyDerivationSalt(_ spelling: StaticString) -> ProximityCryptographicPurpose {
+        ProximityCryptographicPurpose(spelling, role: .keyDerivationSalt)
     }
 
     /// `Data(rawValue.utf8)`: the label's bytes, with no terminator and no normalization.

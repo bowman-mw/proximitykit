@@ -4,8 +4,11 @@
 // The family half of `ProximityNamespace`: what every interoperating app shares. The labels are
 // grouped and named like FernletCrypto's registry (Signature, KeyDerivation, AEAD, Hash), so each read
 // site A0.2's later commits re-pointed only re-cased the family name. Every label initializer takes
-// `StaticString` and mints each purpose with the role its field fixes; nothing here takes a role. The
-// payload vocabulary the family also carries is declared in `ProximityNamespace+Vocabulary.swift`.
+// `StaticString` and mints each purpose with the role its field fixes; nothing here takes a role. A
+// fifth group, FeaturePurposes, declares the HKDF salts the host's own features derive pair secrets
+// under, each minted by `ProximityCryptographicPurpose.featureKeyDerivationSalt(_:)`, so the one
+// soundness verdict judges them with the protocol's labels. The payload vocabulary the family also
+// carries is declared in `ProximityNamespace+Vocabulary.swift`.
 
 import Foundation
 
@@ -48,7 +51,7 @@ nonisolated extension ProximityNamespace {
     // MARK: - Purposes
 
     /// Every domain-separation label, grouped and named like FernletCrypto's registry so that a read
-    /// site only re-cases the family name.
+    /// site only re-cases the family name, and the feature salts the host declares beside them.
     public nonisolated struct Purposes: Hashable, Sendable {
         /// The labels at the front of signature transcripts.
         public let signature: Signature
@@ -58,19 +61,27 @@ nonisolated extension ProximityNamespace {
         public let aead: AEAD
         /// The labels at the front of hash preimages.
         public let hash: Hash
+        /// The HKDF salts the host's features derive pair secrets under, judged with every label above;
+        /// ``FeaturePurposes/none`` for a host that declares none.
+        public let feature: FeaturePurposes
 
-        /// Assembles the four groups.
+        /// Assembles the four protocol groups and the host's feature salts.
         ///
         /// - Parameters:
         ///   - signature: The signature transcript labels.
         ///   - keyDerivation: The key-derivation, column-seal and exporter labels.
         ///   - aead: The authenticated-data labels.
         ///   - hash: The hash-preimage labels.
-        public init(signature: Signature, keyDerivation: KeyDerivation, aead: AEAD, hash: Hash) {
+        ///   - feature: The feature salts the host declares; none unless it passes some.
+        public init(
+            signature: Signature, keyDerivation: KeyDerivation, aead: AEAD, hash: Hash,
+            feature: FeaturePurposes = .none
+        ) {
             self.signature = signature
             self.keyDerivation = keyDerivation
             self.aead = aead
             self.hash = hash
+            self.feature = feature
         }
     }
 
@@ -367,6 +378,62 @@ nonisolated extension ProximityNamespace {
         }
     }
 
+    // MARK: - FeaturePurposes
+
+    /// The HKDF salts a host's features derive pair secrets under: the labels
+    /// ``IdentityService/pairSecret(with:purpose:)`` consumes, and the only ones a host mints for
+    /// itself.
+    ///
+    /// The protocol's labels fill fixed fields. A host's features are its own, so the host mints each
+    /// salt one of them uses with ``ProximityCryptographicPurpose/featureKeyDerivationSalt(_:)`` and
+    /// declares it here, under a name. Declaring it is what lets it derive: the door refuses any
+    /// purpose its identity's namespace does not declare (``IdentityError/undeclaredPurpose``). Every
+    /// entry is a row of ``ProximityNamespace/labelRows`` at `family.purposes.feature.<name>`, after
+    /// the hash rows and in the host's order, so the namespace's one soundness verdict judges it with
+    /// every protocol label (well-formed, distinct from every other label and prefix-free with it),
+    /// and ``ProximityNamespace/familyCollisions(with:)`` compares it with another family's labels.
+    /// ``none`` declares nothing and adds no row.
+    public nonisolated struct FeaturePurposes: Hashable, Sendable {
+
+        /// One declared label and the name its field path ends with.
+        public nonisolated struct Entry: Hashable, Sendable {
+            /// The last component of the label's field path, `family.purposes.feature.<name>`: how a
+            /// violation, a collision or a golden names the label, never a byte on the wire or in a key.
+            public let name: String
+            /// The label: a ``ProximityCryptographicPurpose/featureKeyDerivationSalt(_:)``.
+            public let purpose: ProximityCryptographicPurpose
+        }
+
+        /// A host that declares no feature salt: no entry, no label row, and no purpose the
+        /// pair-secret door accepts.
+        public static let none = FeaturePurposes([:])
+
+        /// Every declared label, in the host's order.
+        public let entries: [Entry]
+
+        /// Declares the host's feature salts.
+        ///
+        /// Total, like every group initializer: a bad entry is the soundness verdict's to record. A
+        /// label of any role but `.keyDerivationSalt` is judged like the others and still never
+        /// reaches the door, which checks the role too; give each entry its own name, since the name
+        /// is how a violation names its field.
+        ///
+        /// - Parameter named: Each salt's field name and the salt, in the order they are listed.
+        public init(_ named: KeyValuePairs<String, ProximityCryptographicPurpose>) {
+            // R2: bounded by the entries the host wrote.
+            self.entries = named.map { Entry(name: $0.key, purpose: $0.value) }
+        }
+
+        /// Whether `purpose` is one of the declared salts: the same bytes in the same role.
+        ///
+        /// - Parameter purpose: The label a caller asked the pair-secret door to derive under.
+        /// - Returns: `true` when an entry holds a value equal to `purpose`.
+        public func declares(_ purpose: ProximityCryptographicPurpose) -> Bool {
+            // R2: bounded by the entries the host declared.
+            entries.contains { $0.purpose == purpose }
+        }
+    }
+
     // MARK: - Radios
 
     /// One radio's discovery and protocol values.
@@ -476,12 +543,23 @@ nonisolated extension ProximityNamespace.LabelRow {
 
 nonisolated extension ProximityNamespace.Purposes {
 
-    /// Every label in the four groups, in declaration order, under `path`.
+    /// Every label in the four protocol groups, in declaration order, then the declared feature
+    /// salts in the host's order, under `path`.
     func labelRows(under path: String) -> [ProximityNamespace.LabelRow] {
         signature.labelRows(under: path + ".signature")
             + keyDerivation.labelRows(under: path + ".keyDerivation")
             + aead.labelRows(under: path + ".aead")
             + hash.labelRows(under: path + ".hash")
+            + feature.labelRows(under: path + ".feature")
+    }
+}
+
+nonisolated extension ProximityNamespace.FeaturePurposes {
+
+    /// One row per declared salt, in the host's order, each field `path` then its entry's name.
+    func labelRows(under path: String) -> [ProximityNamespace.LabelRow] {
+        // R2: bounded by the entries the host declared.
+        ProximityNamespace.LabelRow.rows(entries.map { (name: $0.name, purpose: $0.purpose) }, under: path)
     }
 }
 
