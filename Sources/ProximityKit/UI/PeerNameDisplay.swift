@@ -3,18 +3,30 @@
 //  ProximityKit
 //
 //  The one rule for what a person READS as another person's name on the in-person surfaces:
-//  the name they chose, or a plain placeholder. Never an identifier (owner decision 2026-09-29:
-//  the hex fingerprint and the random Bonjour instance name were debugging aids, and they do not
-//  belong on the connect, join, session, roster, keep-as-friend or recipe-share path).
+//  the name they chose, never an identifier (owner decision 2026-09-29: the hex fingerprint and
+//  the random Bonjour instance name were debugging aids, and they do not belong on the connect,
+//  join, session, roster, keep-as-friend or recipe-share path). This is the identifier filter, and
+//  it is mechanism: this module knows its own identifiers, and the namespace's soundness rule exists
+//  to keep the filter whole. The plain placeholder a person reads when it refuses a name is the
+//  host's display policy, so this module ships none: Fernlet's is FernletConnections' extension of
+//  this type (`PeerNameDisplay+Placeholders.swift`), over that module's own catalog.
 //
 
 import Foundation
 
-/// What a person reads for a peer: the name that peer chose, or a plain placeholder, and never
-/// an identifier.
+/// What a person reads for a peer: the name that peer chose, and never an identifier.
 ///
-/// **Display text only.** The result is resolved, localized copy. It must never reach a roster,
-/// the trust vault, a removal proposal, `keepProximityFriends`, or any wire payload; those persist
+/// **The filter is this module's; the placeholders are the host's.**
+/// ``personName(_:fingerprint:in:)`` is the identifier filter, with the fingerprint width and shape
+/// it checks, which the namespace's soundness rule protects
+/// (`ProximityNamespace.peerNameFingerprintLength`, which `ProximityVocabularyGoldenTests` holds
+/// equal to `fingerprintLength`). Which plain phrase stands in when it refuses a name is the host's
+/// display policy: Fernlet's app reads it through FernletConnections' extension of this type
+/// (`Placeholder`, `shown`, `firstName` and `text(for:)`, resolved against that module's catalog).
+///
+/// **Display text only.** The name it answers, and the placeholder a host shows in its place, is
+/// display text. It must never reach a roster, the trust vault, a removal proposal,
+/// `keepProximityFriends`, or any wire payload; those persist
 /// ``ProximityCoordinator/PeerIdentity/displayNameOrFingerprint``, which is unchanged and is still
 /// the value audits and the Lane C witness read.
 ///
@@ -28,28 +40,18 @@ import Foundation
 ///   `fernlet-mesh-`), which a slot carries as its `displayHint` and the session's participant
 ///   projection moderates into a truncation at the host's peer-name cap (24 characters for Fernlet).
 ///
-/// Every one of them is turned into the placeholder here, in one place, so a new surface cannot
-/// forget one. The instance name is recognized by the prefix of the namespace each caller passes
-/// (`in namespace:`, last): a peer advertises the prefix of the family both devices share, so the
-/// host's own namespace names it. The checks run on the name already cut to that namespace's
-/// peer-name cap, which its soundness rules keep at least a fingerprint's 16 characters and the
-/// mesh prefix's length, so a cut name still shows what they look for.
+/// Every one of them is refused here, in one place, so a new surface cannot forget one, and reads
+/// as the host's placeholder. The instance name is recognized by the prefix of the namespace each
+/// caller passes (`in namespace:`, last): a peer advertises the prefix of the family both devices
+/// share, so the host's own namespace names it. The checks run on the name already cut to that
+/// namespace's peer-name cap, which its soundness rules keep at least a fingerprint's 16 characters
+/// and the mesh prefix's length, so a cut name still shows what they look for.
 ///
 /// **The accepted false positive.** Someone who literally names themselves sixteen hex characters,
-/// or the mesh prefix and more (`fernlet-mesh-…` for Fernlet), reads as the placeholder. Shorter
-/// hex-looking names (`Ada`, `Dee Cafe`, `deadbeef`) are names and pass. `PeerNameDisplayTests`
-/// pins both halves.
+/// or the mesh prefix and more (`fernlet-mesh-…` for Fernlet), is refused and reads as the
+/// placeholder. Shorter hex-looking names (`Ada`, `Dee Cafe`, `deadbeef`) are names and pass.
+/// `PeerNameDisplayTests` pins both halves.
 public nonisolated enum PeerNameDisplay {
-
-    /// Which plain phrase stands in for a person whose name is not known.
-    public enum Placeholder: Sendable {
-        /// Someone on the connect path whose name has not been shared yet: the nearby rows, the
-        /// session's participants, a join request, a recipe recipient.
-        case nearby
-        /// Someone met in an earlier session whose name never arrived: the keep-as-friend rows and
-        /// the Friends & Blocks list.
-        case met
-    }
 
     /// The width of a canonical fingerprint (`IdentityService.fingerprint(of:)`: 16 hex characters).
     /// Internal so `ProximityVocabularyGoldenTests` holds the namespace's soundness bound
@@ -78,57 +80,6 @@ public nonisolated enum PeerNameDisplay {
         guard !hasFingerprintShape(name) else { return nil }
         guard !name.lowercased().hasPrefix(namespace.family.radios.meshInstanceNamePrefix) else { return nil }
         return name
-    }
-
-    /// The text to render for a peer: ``personName(_:fingerprint:in:)``, or the placeholder.
-    ///
-    /// - Parameters:
-    ///   - raw: The name as received or stored.
-    ///   - fingerprint: The peer's fingerprint, when the caller has it.
-    ///   - placeholder: Which phrase stands in when there is no name. Defaults to ``Placeholder/nearby``.
-    ///   - namespace: The host's namespace, whose mesh instance-name prefix is never a name and whose
-    ///     peer-name cap caps the name.
-    /// - Returns: A string safe to show, already localized. Render it verbatim.
-    public static func shown(
-        _ raw: String, fingerprint: String?, placeholder: Placeholder = .nearby, in namespace: ProximityNamespace
-    ) -> String {
-        personName(raw, fingerprint: fingerprint, in: namespace) ?? text(for: placeholder)
-    }
-
-    /// The first word of the peer's chosen name for warm copy ("Aisha" from "Aisha Bloom"), or the
-    /// WHOLE placeholder when there is no name to take it from.
-    ///
-    /// Taking the first word of ``shown(_:fingerprint:placeholder:in:)`` instead would turn
-    /// "Someone you met" into "Someone", which is why the rule is applied before the split, here.
-    /// `PresenceManager.firstName(of:in:)` delegates to this, so the hearts copy composed inside the
-    /// package (the presence path's refusals) can never interpolate a fingerprint filed as a name.
-    ///
-    /// - Parameters:
-    ///   - raw: The name as received or stored.
-    ///   - fingerprint: The peer's fingerprint, when the caller has it.
-    ///   - placeholder: Which phrase stands in when there is no name. Defaults to ``Placeholder/nearby``.
-    ///   - namespace: The host's namespace, whose mesh instance-name prefix is never a name and whose
-    ///     peer-name cap caps the name.
-    /// - Returns: A string safe to show, already localized. Render it verbatim.
-    public static func firstName(
-        _ raw: String, fingerprint: String?, placeholder: Placeholder = .nearby, in namespace: ProximityNamespace
-    ) -> String {
-        guard let name = personName(raw, fingerprint: fingerprint, in: namespace) else {
-            return text(for: placeholder)
-        }
-        // `personName` collapsed every whitespace run to one space and trimmed the ends.
-        return name.split(separator: " ", maxSplits: 1).first.map(String.init) ?? name
-    }
-
-    /// The localized phrase for a placeholder, resolved against this module's catalog.
-    ///
-    /// - Parameter placeholder: Which phrase.
-    /// - Returns: "Someone nearby" or "Someone you met", in the current locale.
-    public static func text(for placeholder: Placeholder) -> String {
-        switch placeholder {
-        case .nearby: ProximityUICopy.Peer.someoneNearby
-        case .met: ProximityUICopy.Peer.someoneYouMet
-        }
     }
 
     /// Whether `name` is exactly the canonical fingerprint shape: 16 hex characters.

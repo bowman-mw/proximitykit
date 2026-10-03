@@ -36,12 +36,14 @@ tags outward). Its one seam back to app state is the
 drop-in package of its own). The three screens this module used to ship from its `UI/` folder — the
 session-end photo review with its Photos saver and save-failure alert, the keep-as-friend prompt,
 and the fingerprint view — moved to the `FernletProximityUI` module, which depends on this one and
-never the reverse. ``PeerNameDisplay`` deliberately stayed in `UI/`: it imports neither SwiftUI nor
-`FernletUI`, and `FernletSocial`'s `PresenceManager.firstName(of:in:)` calls it (neither module can
-call up into `FernletProximityUI`). It hides the QUIC instance name by the mesh instance-name prefix
-of the namespace each caller passes it.
-Its placeholders are Fernlet display policy rather than mechanism, though, so they leave ProximityKit
-for `FernletConnections` in the plan's step A0.4, while its identifier filter stays here.
+never the reverse. ``PeerNameDisplay`` stays in `UI/` as the identifier filter, which is mechanism:
+it imports neither SwiftUI nor `FernletUI`, and ``PeerNameDisplay/personName(_:fingerprint:in:)``
+hides the QUIC instance name by the mesh instance-name prefix of the namespace each caller passes it
+and is the consumer the namespace's peer-name soundness rule protects. Its placeholders are Fernlet's
+display policy, so they are `FernletConnections`' extension of the type (`Placeholder`, `shown`,
+`firstName` and `text(for:)`, over that module's catalog), which the app's surfaces,
+`FernletProximityUI`'s screens and `FernletSocial`'s `PresenceManager.firstName(of:in:)` call; this
+module ships no placeholder of its own.
 
 **How a session forms.** A radio owner (``MeshNetworkManager`` for the friend mesh,
 ``ProximityRecipeShareManager`` for recipe pairing, `FernletSocial`'s `PresenceManager` for presence
@@ -179,13 +181,14 @@ and ``ProximityCoordinator/onPeerDisplayNameDisclosed`` tells the owning manager
 persists a peer name (rosters, the trust vault, audits) reads
 ``ProximityCoordinator/PeerIdentity/displayNameOrFingerprint``. Every site that RENDERS one goes
 through ``PeerNameDisplay`` instead (owner decision 2026-09-29, reversing the fingerprint title the
-first build showed): a pre-commit peer reads "Someone nearby", never its fingerprint, and the same
-filter turns a fingerprint filed as a name, or the QUIC transport's instance name (the host
-namespace's mesh prefix and 12 hex characters, `fernlet-mesh-…` for Fernlet), into the placeholder;
-every call passes the namespace whose prefix it hides. Hearts copy that uses a first name goes
-through ``PeerNameDisplay/firstName(_:fingerprint:placeholder:in:)``, which `FernletSocial`'s
-`PresenceManager.firstName(of:in:)` delegates to, so a sentence composed over this package cannot
-interpolate a fingerprint either. No wire shape moved: an empty name is a value.
+first build showed): a pre-commit peer reads the host's placeholder ("Someone nearby" for Fernlet),
+never its fingerprint, and the same filter turns a fingerprint filed as a name, or the QUIC
+transport's instance name (the host namespace's mesh prefix and 12 hex characters, `fernlet-mesh-…`
+for Fernlet), into the placeholder; every call passes the namespace whose prefix it hides. Hearts
+copy that uses a first name goes through `PeerNameDisplay.firstName(_:fingerprint:placeholder:in:)`
+(`FernletConnections`' extension), which `FernletSocial`'s `PresenceManager.firstName(of:in:)`
+delegates to, so a sentence composed over this package cannot interpolate a fingerprint either. No
+wire shape moved: an empty name is a value.
 **The mesh has a door of its own** and the invariant holds there too: every mesh frame is signed in
 `MeshNetworkManager.sendEnvelopeCore`, six broadcasts reach slots this device has not committed and
 seated (the coordinator beacon, the admission request, rotation sync, key rotation and ack, the
@@ -449,7 +452,7 @@ and a new manager in this subsystem inherits all three:
 
 ### Localization: nothing on the wire is display copy
 
-The module owns a `Localizable.xcstrings` (added by the 2026-08-22 accessibility review's §4.0) and one copy vault, `ProximityUICopy`, for the three strings it hands out already resolved: the camera's hold-failure line (`ProximityUICopy.Camera`, which `MeshNetworkManager` publishes as `meshError`) and the two name placeholders ``PeerNameDisplay`` hands the app's in-person surfaces ("Someone nearby", "Someone you met"; `ProximityUICopy.Peer`, nonisolated because the helper is). A placeholder is resolved display text and never a token: it must not be persisted, put in a roster or vault row, or sent. The vault used to serve the three SwiftUI surfaces this module shipped — the friend-photo review sheet, the keep-friends prompt, and the photo-save failure alert — and their 28 keys moved with them, byte for byte, to `FernletProximityUI` (`FernletProximityUICopy` and that module's own catalog) in plan step A0.1. Those strings were bare literals once, and a `LocalizedStringKey` literal inside an SPM module resolves against `Bundle.main`, which never consults the module's catalog: untranslatable English with a clean build. Six of them were hiding inside ternaries (`Button(isKept ? "Keeping" : "Keep")`) or in `LocalizedStringKey`-typed properties, where no call-site scan could see them; `LocalizationBoundaryTests.packageDisplayLiteralsPassModuleBundle()` now catches both shapes. **The vault is display copy only.** Nothing below may go in it.
+The module owns a `Localizable.xcstrings` (added by the 2026-08-22 accessibility review's §4.0) and one copy vault, `ProximityUICopy`, for the one string it hands out already resolved: the camera's hold-failure line (`ProximityUICopy.Camera`, which `MeshNetworkManager` publishes as `meshError`). The name placeholders a person reads when ``PeerNameDisplay`` refuses a name are the host's, not this module's: Fernlet's two ("Someone nearby", "Someone you met") are `FernletConnections`' extension of the type and resolve against that module's catalog (`FernletConnectionsCopy.Peer`, keys `proximity.peer.someoneNearby` and `proximity.peer.someoneYouMet`). A placeholder is resolved display text and never a token: it must not be persisted, put in a roster or vault row, or sent. The vault used to serve the three SwiftUI surfaces this module shipped — the friend-photo review sheet, the keep-friends prompt, and the photo-save failure alert — and their 28 keys moved with them, byte for byte, to `FernletProximityUI` (`FernletProximityUICopy` and that module's own catalog) in plan step A0.1. Those strings were bare literals once, and a `LocalizedStringKey` literal inside an SPM module resolves against `Bundle.main`, which never consults the module's catalog: untranslatable English with a clean build. Six of them were hiding inside ternaries (`Button(isKept ? "Keeping" : "Keep")`) or in `LocalizedStringKey`-typed properties, where no call-site scan could see them; `LocalizationBoundaryTests.packageDisplayLiteralsPassModuleBundle()` now catches both shapes. **The vault is display copy only.** Nothing below may go in it.
 
 This module ships English sentences that a bulk localization pass will read as UI strings and that
 must never become `String(localized:)`. Every ``PayloadSummary`` title — "Recipe share",
@@ -617,7 +620,7 @@ hand it:
 | Ids that hash a label: ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)``, ``MeshRecipientReceipt/receiptID(in:)`` | Are functions, not stored properties: a value decoded off the wire carries no namespace, so `Codable` stays namespace-free. |
 | The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkRecipeShareSession` | Take `init(namespace:)` and read their service type, ALPN, heartbeat, exporter label, log subsystem and soundness verdict there, once (their `start` refuses an unsound namespace by that verdict); the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
 | The presence posture: `PresenceEpochPosture` | Is minted, and rotated, with the presence instance-name prefix and the TLS common name its caller passes: `FernletSocial`'s `PresenceManager`'s posture mint, built in `init` from the manager's namespace, passes them. |
-| The name display: ``PeerNameDisplay``, and `FernletSocial`'s `PresenceManager.firstName(of:in:)` over it | Take `in namespace:` last, sanitize under its peer-name cap and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
+| The name display: ``PeerNameDisplay/personName(_:fingerprint:in:)``, with `FernletConnections`' placeholders (`shown`, `firstName`) and `FernletSocial`'s `PresenceManager.firstName(of:in:)` over it | Take `in namespace:` last, sanitize under its peer-name cap and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
 | The peer-name coercion: `ProximityDisplayName.peerDisplayName(_:in:)`, ``FernletIdentityEnvelope/sanitizedSenderDisplayName(in:)`` and ``FernletIdentityEnvelope/disclosedSenderDisplayName(in:)``, `RecipeShareAdvertisedName.publishable(_:in:)`, `SessionMessageStore.receiveIncoming(…in:)` | Take `in namespace:` last and read `installation.peerNames`: a peer's sanitized name keeps at most the cap and reads as the floor when nothing displayable is left, and the advertised recipe name is capped the same way. The managers pass their own namespace (the mesh manager also to its descriptor and incoming-photo coercions, a mesh name under the cap), the coordinator its identity's. `ProximityDisplayName.sanitized(_:maxLength:)` is FernletDomainModel's `ItemNameModeration.sanitizedName` copied scalar for scalar; only the activities still use the original. |
 | Storage scopes: ``MeshSessionStorageScope``, ``MeshRoutedStorageScope`` | Carry the namespace and the install binding (`init(namespace:directory:keychainService:installBinding:)`, ``MeshSessionStorageScope/production(for:installBinding:)``); the two stores read their file names, seal-key accounts and column-seal labels off `scope.namespace`. |
 | Closures that cross an actor | Capture the `Sendable` value when they are made, as `FernletSocial`'s `PresenceManager`'s radio factory does. |
@@ -2906,6 +2909,9 @@ are `FernletSocial`'s.
 - ``SignedModerationReport``
 
 ### Peer names on screen
+
+The identifier filter and the name coercion are this module's; the placeholders a person reads when
+the filter refuses a name are `FernletConnections`' extension of ``PeerNameDisplay``.
 
 - ``PeerNameDisplay``
 - ``ProximityDisplayName``

@@ -5,13 +5,12 @@
 //  This module's copy vault (accessibility review 2026-08-22, §4.0). Sibling of `FernletUICopy`
 //  and `FernletLockCopy`; same reason, same shape.
 //
-//  ProximityKit has no SwiftUI surface of its own any more. The three it shipped — the friend-photo
-//  review sheet, the keep-friends prompt and the photo-save failure alert — moved to
-//  `FernletProximityUI` in plan step A0.1 (Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md §4),
-//  and their 28 keys went with them, unchanged, into `FernletProximityUICopy` and that module's own
-//  catalog. What stays here is the copy this module still hands out as resolved strings: the
-//  camera's hold-failure line (`MeshNetworkManager` publishes it as `meshError`) and the two name
-//  placeholders `PeerNameDisplay` resolves.
+//  ProximityKit has no SwiftUI surface of its own: the friend-photo review sheet, the keep-friends
+//  prompt and the photo-save failure alert are `FernletProximityUI`'s, with their copy in
+//  `FernletProximityUICopy` and that module's own catalog, and the plain placeholder a person reads
+//  when `PeerNameDisplay` refuses a name is the host's (Fernlet's is `FernletConnectionsCopy`'s, in
+//  FernletConnections' catalog). What is here is the one string this module still hands out
+//  resolved: the camera's hold-failure line (`MeshNetworkManager` publishes it as `meshError`).
 //
 //  A `String(localized:)` inside an SPM module that omits `bundle: .module` resolves against
 //  `Bundle.main` — the APP's bundle — which never consults this module's own catalog, so the
@@ -26,10 +25,11 @@
 
 import Foundation
 
-/// Display copy ProximityKit hands out already resolved: the camera's hold-failure line and the
-/// name placeholders ``PeerNameDisplay`` hands the app's in-person surfaces. The review sheet's,
-/// the keep-friends prompt's and the photo-save failure alert's copy is `FernletProximityUICopy`,
-/// in `FernletProximityUI`.
+/// Display copy ProximityKit hands out already resolved: the camera's hold-failure line. The review
+/// sheet's, the keep-friends prompt's and the photo-save failure alert's copy is
+/// `FernletProximityUICopy`, in `FernletProximityUI`, and the name placeholders the app's in-person
+/// surfaces show when ``PeerNameDisplay`` refuses a name are `FernletConnectionsCopy`'s, in
+/// `FernletConnections`.
 ///
 /// Members are computed, not stored, so each lookup happens under the locale in force when the
 /// surface renders. Resolved `String`s rather than `LocalizedStringKey`s, deliberately: a key
@@ -45,23 +45,6 @@ enum ProximityUICopy {
             String(localized: "proximity.camera.holdFailed", defaultValue: "Couldn't keep that photo. Try again.",
                    bundle: .module,
                    comment: "Alert on the in-person camera when a photo just taken could not be saved securely on this phone. No film was used and nothing was shared.")
-        }
-    }
-
-    /// The plain phrases that stand in for a person whose name is not known, read through
-    /// ``PeerNameDisplay``. `nonisolated` because that helper is: a resolved display string has no
-    /// actor to protect, and `Bundle.module` is itself nonisolated.
-    nonisolated enum Peer {
-        /// Someone on the connect path whose name has not been shared yet.
-        static var someoneNearby: String {
-            String(localized: "proximity.peer.someoneNearby", defaultValue: "Someone nearby", bundle: .module,
-                   comment: "Stands in for a nearby person whose name has not been shared yet: the connect rows on the Friends tab, the session's participant list, a join request, a recipe recipient. A plain phrase, shown where a name would be.")
-        }
-
-        /// Someone met in an earlier session whose name never arrived.
-        static var someoneYouMet: String {
-            String(localized: "proximity.peer.someoneYouMet", defaultValue: "Someone you met", bundle: .module,
-                   comment: "Stands in for a person met in person whose name never arrived before the connection ended: the keep-as-friend rows at the end of a session and the Friends & Blocks list.")
         }
     }
 }

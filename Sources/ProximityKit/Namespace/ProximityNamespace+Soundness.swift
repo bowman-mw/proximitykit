@@ -62,9 +62,10 @@ nonisolated extension ProximityNamespace {
     /// one a character at a time (the recipe radio's advertised-name trim) are bounded by the cap.
     static let maximumPeerNameLength = 63
 
-    /// The characters of a key fingerprint, the shape `PeerNameDisplay` hides when a fingerprint was
-    /// filed as a name (`PeerNameDisplay.fingerprintLength`, in `UI/`, out of this folder's reach, which
-    /// `ProximityVocabularyGoldenTests` holds equal). The display cuts a name to the peer-name cap
+    /// The characters of a key fingerprint, the shape this module's name filter,
+    /// `PeerNameDisplay.personName(_:fingerprint:in:)`, refuses when a fingerprint was filed as a name
+    /// (`PeerNameDisplay.fingerprintLength`, in `UI/`, out of this folder's reach, which
+    /// `ProximityVocabularyGoldenTests` holds equal). The filter cuts a name to the peer-name cap
     /// before it looks, so a shorter cap would cut a fingerprint to a name it shows as a person's.
     static let peerNameFingerprintLength = 16
 
@@ -404,9 +405,11 @@ nonisolated extension ProximityNamespace {
     /// prefix, and the floor not empty and byte for byte what ProximityKit's sanitizer makes of it
     /// under the cap, which also keeps it no longer than the cap.
     ///
-    /// The cap's lower bound is the one rule judged across the family and the installation:
-    /// `PeerNameDisplay` cuts a name to the cap before it looks for a fingerprint filed as a name or a
-    /// mesh instance name, so a cap shorter than either would cut one to a name it shows as a person's.
+    /// The cap's lower bound is the one rule judged across the family and the installation: the
+    /// consumer it protects is this module's name filter,
+    /// `PeerNameDisplay.personName(_:fingerprint:in:)`, which cuts a name to the cap before it looks
+    /// for a fingerprint filed as a name or a mesh instance name, so a cap shorter than either would
+    /// cut one to a name it shows as a person's.
     /// The floor's rule is the one here that runs code outside this folder: the floor is judged by the
     /// sanitizer every peer's name passes through (`ProximityDisplayName.sanitized(_:maxLength:)`),
     /// because judging it by any copy of that sanitizer would judge it by a rule that can drift from
