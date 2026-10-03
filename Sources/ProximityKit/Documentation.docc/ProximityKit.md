@@ -676,6 +676,9 @@ without it.
 ### Wire envelope and sealing
 
 - ``FernletIdentityEnvelope``
+- ``PayloadEncryption``
+- ``PayloadSummary``
+- ``DateRange``
 - ``SealedIntroductionEnvelope``
 - ``SealedPayloadFormat``
 - ``SealedPayloadFraming``

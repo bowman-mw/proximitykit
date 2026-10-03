@@ -15,7 +15,7 @@ import FernletDomainModel
 // `nonisolated` Decodable/Encodable requirements under the `.v5` language-mode escape hatch; under
 // Swift 6 it would forbid decoding these untrusted transport bytes — MCSession's when this was
 // written, the QUIC radio's now — off the main actor. Marking the
-// type `nonisolated, Sendable` (matching the FernletDomainModel wire types — PayloadType/PayloadSummary)
+// type `nonisolated, Sendable` (matching the wire types it carries — PayloadType/PayloadSummary)
 // makes decode + signature verification safe from any isolation domain. The two members that touch
 // the `@MainActor` IdentityService/ReplayCache (`verify`, `signed`) stay `@MainActor` explicitly.
 /// The signed wire envelope EVERY peer-to-peer transfer between Fernlet devices travels in:

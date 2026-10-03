@@ -37,8 +37,8 @@ nonisolated extension ProximityNamespace {
     static let maximumRoutedTypeTokenBytes = 64
 
     /// The most characters a summary title may hold: a receiver's bounded `PayloadSummary` decode refuses
-    /// a longer one (FernletDomainModel's `PayloadSummary.maxDetailCharacters`, out of this folder's
-    /// reach, which `ProximityVocabularyGoldenTests` holds equal).
+    /// a longer one (`PayloadSummary.maxDetailCharacters`, in `Wire/`, out of this folder's reach,
+    /// which `ProximityVocabularyGoldenTests` holds equal).
     static let maximumSummaryTitleCharacters = 200
 
     /// The most bytes a DNS-SD instance name may hold: it is one DNS label.
