@@ -1,9 +1,10 @@
 // ProximityNamespace+Installation.swift
 // ProximityKit/Namespace
 //
-// The installation half of `ProximityNamespace`: what belongs to one app on one device. Names only:
-// each keychain row's accessibility and synchronizable class stay ProximityKit code, where the
-// key-custody walls read them, and the directory the names resolve under stays the host's to pass.
+// The installation half of `ProximityNamespace`: what belongs to one app on one device. Names and
+// the peer-name policy only: each keychain row's accessibility and synchronizable class stay
+// ProximityKit code, where the key-custody walls read them, the directory the names resolve under
+// stays the host's to pass, and the sanitizer the policy's cap and floor apply to stays ProximityKit's.
 
 import Foundation
 
@@ -11,8 +12,8 @@ nonisolated extension ProximityNamespace {
 
     // MARK: - Installation
 
-    /// What belongs to this app on this device: its keychain rows, its storage names and its log
-    /// subsystem.
+    /// What belongs to this app on this device: its keychain rows, its storage names, its log
+    /// subsystem and how it shows a peer's name.
     ///
     /// Two apps of one family keep separate installations, so they share a wire and never a key, a file
     /// or a log stream. That matters most on an unsandboxed Mac, where two apps can otherwise reach
@@ -24,6 +25,8 @@ nonisolated extension ProximityNamespace {
         public let storage: Storage
         /// The `os.Logger` subsystem the three radios log under. Never on the wire.
         public let logSubsystem: String
+        /// How this app shows a display name a peer supplied: the cap and the floor.
+        public let peerNames: PeerNames
 
         /// Assembles an installation.
         ///
@@ -31,10 +34,12 @@ nonisolated extension ProximityNamespace {
         ///   - keychain: The identity's and the two mesh seal keys' keychain rows.
         ///   - storage: The default directory's name and the two mesh stores' on-disk names.
         ///   - logSubsystem: The radios' log subsystem.
-        public init(keychain: Keychain, storage: Storage, logSubsystem: String) {
+        ///   - peerNames: How this app shows a peer's name.
+        public init(keychain: Keychain, storage: Storage, logSubsystem: String, peerNames: PeerNames) {
             self.keychain = keychain
             self.storage = storage
             self.logSubsystem = logSubsystem
+            self.peerNames = peerNames
         }
     }
 
@@ -157,6 +162,39 @@ nonisolated extension ProximityNamespace {
         /// ``directoryName`` matches that folder resolves the same path.
         public var defaultDirectory: URL {
             URL.applicationSupportDirectory.appendingPathComponent(directoryName, isDirectory: true)
+        }
+    }
+
+    // MARK: - PeerNames
+
+    /// How this app shows a display name a peer supplied, once ProximityKit's sanitizer has dropped
+    /// the scalars that hide or reorder text and collapsed its whitespace: at most ``maxLength``
+    /// characters of it, or ``floor`` when nothing displayable is left.
+    ///
+    /// Presentation, which is why it is the installation's and not the family's: two apps of one
+    /// family may show a peer's name differently. ProximityKit applies it wherever a peer's name
+    /// enters (an envelope's sender, a roster or descriptor row, a vouch, a chat or heart sender, the
+    /// name display) and caps the name the recipe radio advertises at ``maxLength`` too.
+    /// ``ProximityNamespace/soundness`` holds the cap to 1 to 63 characters and the floor to a name the
+    /// sanitizer leaves exactly as it is, so moderating a floored name again gives the floor back, and
+    /// the floor is never empty, which keeps it apart from a peer's withheld (empty) name.
+    public nonisolated struct PeerNames: Hashable, Sendable {
+        /// The most characters a peer's sanitized name keeps: `Character`s, so a letter and its
+        /// combining marks count once.
+        public let maxLength: Int
+        /// What this device shows, and records, for a peer whose name sanitizes to nothing. It is
+        /// stored wherever the name it stands in for is (a roster row, a trust record), so it is a
+        /// fixed string, not copy resolved at display.
+        public let floor: String
+
+        /// Names the policy.
+        ///
+        /// - Parameters:
+        ///   - maxLength: The most characters a peer's sanitized name keeps.
+        ///   - floor: What a peer's name that sanitizes to nothing is shown as.
+        public init(maxLength: Int, floor: String) {
+            self.maxLength = maxLength
+            self.floor = floor
         }
     }
 }

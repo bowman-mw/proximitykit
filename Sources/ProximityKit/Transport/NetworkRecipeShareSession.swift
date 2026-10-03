@@ -1151,7 +1151,8 @@ private extension NetworkRecipeShareSession {
     /// instance name and the endpoint key that CONTAINS that name, and both are exactly what
     /// P9-2-A's salted peer labelling exists to keep out of anything anyone reads. An absent hint
     /// makes ``RecipeShareAdvertisedName/received(_:hint:)`` fall through to the picker's existing
-    /// "A friend" placeholder for a peer that published no `name`, which is the right answer.
+    /// placeholder, the host's peer-name floor, for a peer that published no `name`, which is the
+    /// right answer.
     func handle(for key: MeshLinkKey) -> PeerHandle {
         let identity = identities.identity(for: key)
         let record = browsedRecords[key]

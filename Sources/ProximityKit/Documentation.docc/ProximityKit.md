@@ -90,8 +90,10 @@ one tests inject through, and the once-per-launch orphan reaper is untouched —
 code that names the attributes type, which is why that type outlives its requester.
 All three resolve the display name they advertise the same way
 (host preference, device name as fallback), and the peer-supplied names that reach chat, hearts,
-vouches, and the keep-as-friend rows pass one sanitize-or-"A friend" coercion; both live in
-`PeerDisplayNames.swift`, the single home of what was a copy per call site. Each connected peer
+vouches, and the keep-as-friend rows pass one sanitize-or-floor coercion (`ProximityDisplayName`,
+this module's own copy of the generic sanitizer, under the cap and floor of the host's peer-name
+policy: Fernlet's 24 characters and "A friend"); both live in `PeerDisplayNames.swift`, the single
+home of what was a copy per call site. Each connected peer
 gets a ``ProximityCoordinator``, the
 per-connection engine that exchanges signed identity introductions (carrying the UWB discovery
 token, advertised capability tokens, and optionally a heart-drop prekey bundle), starts ranging
@@ -165,7 +167,7 @@ the name out early. The introduction's summary is `"Hello"`, never an interpolat
 an identity built from an introduction carries NO name whatever the peer sent
 (``ProximityCoordinator/PeerIdentity/isDisplayNameWithheld``), so the guarantee does not depend on the
 peer's build; the name is adopted from the first verified post-commit envelope that discloses one
-(``FernletIdentityEnvelope/disclosedSenderDisplayName``), once, from the verified signing key only,
+(``FernletIdentityEnvelope/disclosedSenderDisplayName(in:)``), once, from the verified signing key only,
 and ``ProximityCoordinator/onPeerDisplayNameDisclosed`` tells the owning manager. Every site that
 persists a peer name (rosters, the trust vault, audits) reads
 ``ProximityCoordinator/PeerIdentity/displayNameOrFingerprint``. Every site that RENDERS one goes
@@ -491,7 +493,9 @@ membership record kinds, the routed-type tokens and the mesh engine's thirty mes
 plain `String`s, wire data rather than labels, and decoding never produces one. Its
 ``ProximityNamespace/Installation`` is what belongs to one app on one device: the identity's
 keychain service and its four accounts, the two seal-key rows, the default directory name and the
-three storage names, and the radios' log subsystem. Two apps that share a family speak one wire and
+three storage names, the radios' log subsystem, and how it shows a peer's name
+(``ProximityNamespace/PeerNames``: the most characters a peer's sanitized name keeps and the floor
+shown for one that sanitizes to nothing). Two apps that share a family speak one wire and
 still never share a key, a file or a log stream. What names a format rather than an app stays this
 module's: the QR host `verify`, its query key `d` and version 1, the `FPT2`, `FGK2`, `FMGM2` and
 `FMRI1` markers, the column byte `0x03`, the `corrupt` and `chunk` extensions, and each keychain
@@ -509,7 +513,8 @@ nothing. The initializer is total and records ``ProximityNamespace/soundness`` (
 distinct and prefix-free; radio, QR, keychain and storage values well-formed and distinct; every
 vocabulary token within the bytes its receivers accept, none repeated within its group (the session
 and mesh messages count as one) and none a rule names left unknown; summary titles, instance-name
-prefixes and the common name well-formed);
+prefixes and the common name well-formed; the peer-name cap 1 to 63 characters and the floor a name
+this module's sanitizer leaves unchanged);
 ``ProximityNamespace/validated(family:installation:)`` throws the same violations, and
 ``ProximityNamespace/familyCollisions(with:)`` and ``ProximityNamespace/installationCollisions(with:)``
 let a host's own tests show it overlaps no other app.
@@ -569,7 +574,8 @@ hand it:
 | Ids that hash a label: ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)``, ``MeshRecipientReceipt/receiptID(in:)`` | Are functions, not stored properties: a value decoded off the wire carries no namespace, so `Codable` stays namespace-free. |
 | The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkRecipeShareSession` | Take `init(namespace:)` and read their service type, ALPN, heartbeat, exporter label, log subsystem and soundness verdict there, once (their `start` refuses an unsound namespace by that verdict); the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
 | The presence posture: `PresenceEpochPosture` | Is minted, and rotated, with the presence instance-name prefix and the TLS common name its caller passes: ``PresenceManager``'s posture mint, built in `init` from the manager's namespace, passes them. |
-| The name display: ``PeerNameDisplay``, `PresenceManager.firstName(of:in:)` | Take `in namespace:` last and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
+| The name display: ``PeerNameDisplay``, `PresenceManager.firstName(of:in:)` | Take `in namespace:` last, sanitize under its peer-name cap and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
+| The peer-name coercion: `ProximityDisplayName.peerDisplayName(_:in:)`, ``FernletIdentityEnvelope/sanitizedSenderDisplayName(in:)`` and ``FernletIdentityEnvelope/disclosedSenderDisplayName(in:)``, `RecipeShareAdvertisedName.publishable(_:in:)`, `SessionMessageStore.receiveIncoming(…in:)` | Take `in namespace:` last and read `installation.peerNames`: a peer's sanitized name keeps at most the cap and reads as the floor when nothing displayable is left, and the advertised recipe name is capped the same way. The managers pass their own namespace (the mesh manager also to its descriptor and incoming-photo coercions, a mesh name under the cap), the coordinator its identity's. `ProximityDisplayName.sanitized(_:maxLength:)` is FernletDomainModel's `ItemNameModeration.sanitizedName` copied scalar for scalar; only the activities still use the original. |
 | Storage scopes: ``MeshSessionStorageScope``, ``MeshRoutedStorageScope`` | Carry the namespace and the install binding (`init(namespace:directory:keychainService:installBinding:)`, ``MeshSessionStorageScope/production(for:installBinding:)``); the two stores read their file names, seal-key accounts and column-seal labels off `scope.namespace`. |
 | Closures that cross an actor | Capture the `Sendable` value when they are made, as ``PresenceManager``'s radio factory does. |
 
@@ -585,7 +591,10 @@ and under a namespace whose presentation strings are its own, the inventory dige
 registry and a mesh manager under `.fernlet` and under a namespace whose record kinds and routed types
 are its own, the envelope, the coordinator and the mesh's sealed sends under `.fernlet` and under a
 namespace whose payload rules, session messages or capabilities are its own, and a mesh manager's own
-sends and dispatch under a namespace whose mesh messages are its own.
+sends and dispatch under a namespace whose mesh messages are its own; and it holds this module's
+sanitizer to FernletDomainModel's byte for byte and drives the peer-name coercion, the envelope's
+sender reads, the name display, the advertised recipe name, the session message store and the mesh
+and recipe-share managers under `.fernlet` and under a namespace whose peer-name policy is its own.
 `ProximityNamespaceSoundnessTests`
 holds the soundness and collision rules over
 namespaces built only from literals.

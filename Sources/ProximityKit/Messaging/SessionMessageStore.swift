@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import FernletDomainModel
 
 /// The live-session temporary-message store (Phase 5, Docs/Proximity-Mesh-Redesign-2026-07-10.md).
 ///
@@ -13,12 +12,12 @@ import FernletDomainModel
 ///  - **Outbound** — `sendTempMessage(_:)` sanitizes, byte-bounds and frames the text, mints a
 ///    routed item for it, and appends the local echo here **only once the mint staged**.
 ///  - **Inbound** — the routed projection's `.sessionTranscript` arm calls
-///    ``receiveIncoming(id:senderFingerprint:senderDisplayName:text:sentAt:seenAt:)``, which dedupes
+///    ``receiveIncoming(id:senderFingerprint:senderDisplayName:text:sentAt:seenAt:in:)``, which dedupes
 ///    by ``MeshContentKey`` (author **and** id), sanitizes, caps, and returns which of the three
 ///    things it did. The author's fingerprint
 ///    is the origin's signed one resolved against the admission ledger, with the block list and the
 ///    removal set applied **before** the content key is unwrapped; the display name is the body's
-///    own claim, re-moderated here.
+///    own claim, re-moderated here under the manager's namespace's peer-name policy.
 ///  - **Clear** — the manager calls `clear()` at EVERY session-end path and on the next session
 ///    formation, through one funnel (`clearSessionTranscript()`) that also bumps
 ///    `transcriptGeneration`, which is what the projection keys on.
@@ -251,7 +250,8 @@ public final class SessionMessageStore {
     /// `senderFingerprint` from the origin's **signed** manifest against `admissions − removals`,
     /// applied the block list and the removal set before the content key was unwrapped, re-applied
     /// the 13+ gate, judged the session live, and spent the per-origin routed quota.
-    /// `senderDisplayName` is the body's own display claim and is re-moderated here.
+    /// `senderDisplayName` is the body's own display claim and is re-moderated here, under the
+    /// peer-name policy of `namespace`, the manager's.
     ///
     /// Applies, in order: dedup by `(senderFingerprint, id)`, sanitize + length-cap (empty after
     /// sanitize is refused). The dedup key is the PAIR and not the id, because the id is the
@@ -272,7 +272,8 @@ public final class SessionMessageStore {
         senderDisplayName: String,
         text rawText: String,
         sentAt: Date,
-        seenAt: Date
+        seenAt: Date,
+        in namespace: ProximityNamespace
     ) -> Acceptance {
         let key = MeshContentKey(senderFingerprint: senderFingerprint, contentID: id)
         guard !seenKeys.contains(key) else { return .alreadyHeld }
@@ -287,7 +288,7 @@ public final class SessionMessageStore {
                 messageID: id, senderFingerprint: senderFingerprint, text: text,
                 claimedSentAt: sentAt, firstSeenAt: seenAt
             ),
-            displayName: ItemNameModeration.moderatedPeerDisplayName(senderDisplayName),
+            displayName: ProximityDisplayName.peerDisplayName(senderDisplayName, in: namespace),
             isOutgoing: false
         )
         // TF b19 item 6: a message that arrives while the panel is closed is unread. While the panel is

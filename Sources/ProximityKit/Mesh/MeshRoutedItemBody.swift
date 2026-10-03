@@ -55,7 +55,7 @@ nonisolated enum MeshRoutedItemBodyFormat {
     ///
     /// The largest well-formed ``MeshRoutedPhotoHeader`` — a UUID, a date, a display name and up to
     /// `FriendPhotoLimits.maxParticipants` (32) participants, each a fingerprint and a name bounded
-    /// by `ItemNameModeration.maxNameLength` — **measures ~4.2 KB**, so 64 KiB is ~15× it.
+    /// by the host's peer-name cap (Fernlet's 24 characters) — **measures ~4.2 KB**, so 64 KiB is ~15× it.
     /// `theHeaderAllowanceCoversAMaximalHeader` is that claim, measured rather than asserted, and it
     /// pins an 8× floor rather than the measured multiple so an honest header can grow without a
     /// test edit.
@@ -253,7 +253,7 @@ nonisolated struct MeshRoutedPhotoBody: Equatable, Sendable {
 /// a restart, an idle-lapse resume or a rejoin does not restore — or from the gossiped descriptor,
 /// which is strictly WEAKER because a descriptor carries rows for fingerprints other than the
 /// sender's. `SessionMessageStore.receiveIncoming` re-applies
-/// `ItemNameModeration.moderatedPeerDisplayName` to it, so the arm adds no second moderation. Its
+/// `ProximityDisplayName.peerDisplayName(_:in:)` to it, so the arm adds no second moderation. Its
 /// LENGTH, unlike its content, is refused rather than coerced: a decoded name above
 /// ``MeshRoutedTextBody/maxSenderNameUTF8ByteCount`` is `malformed` (P6 item 4 fix review, P3-1).
 nonisolated struct MeshRoutedTextHeader: Codable, Equatable, Sendable {
@@ -305,7 +305,7 @@ nonisolated struct MeshRoutedTextBody: Equatable, Sendable {
 
     /// The widest display name this device will put in a text header, in bytes.
     ///
-    /// `ItemNameModeration.maxNameLength` is 24 **Characters** and has the same unbounded-in-bytes
+    /// The host's peer-name cap (24 **Characters** for Fernlet) has the same unbounded-in-bytes
     /// property the text cap exists for, so the header's own field is byte-bounded too — otherwise
     /// one long grapheme cluster in the local user's own name could push the header past
     /// ``MeshRoutedItemBodyFormat/maxTextHeaderJSONByteCount`` and the seal would refuse the whole
@@ -497,7 +497,7 @@ nonisolated struct MeshRoutedHeartHeader: Codable, Equatable, Sendable {
     /// `recordReceivedHeart(senderDisplayName:)` needs one. It is **stronger** than what the legacy
     /// transport used, which was the envelope's unsigned `senderDisplayName`: here the claim sits
     /// inside an AEAD blob bound to the signed origin. Re-moderated at the receiver with
-    /// `ItemNameModeration.moderatedPeerDisplayName`, and its LENGTH refused rather than coerced
+    /// `ProximityDisplayName.peerDisplayName(_:in:)`, and its LENGTH refused rather than coerced
     /// (``MeshRoutedHeartBody/maxSenderNameUTF8ByteCount``).
     let senderName: String
 
@@ -531,7 +531,7 @@ nonisolated struct MeshRoutedHeartBody: Equatable, Sendable {
     /// The widest display name a routed heart header will carry, in bytes.
     ///
     /// The same figure and the same reasoning as ``MeshRoutedTextBody/maxSenderNameUTF8ByteCount``
-    /// — `ItemNameModeration.maxNameLength` is 24 **Characters** and a grapheme cluster is unbounded
+    /// — the host's peer-name cap is 24 **Characters** for Fernlet and a grapheme cluster is unbounded
     /// in bytes — and here it does more work than there, because the name is this header's only
     /// variable-length field at all: the row's whole cap is arithmetic over this bound. Enforced at
     /// the mint (``bounded(senderName:)``) and on the WIRE (a wider decoded name is

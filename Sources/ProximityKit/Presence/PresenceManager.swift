@@ -1482,8 +1482,9 @@ public final class PresenceManager: ProximityPayloadHandling {
         // right one to persist, never the fingerprint (the item's blind verify).
         let filedName = store.trustedProximityPeers
             .first { $0.signingPublicKey == peer.signingPublicKey }?.displayName
-        let senderName = ItemNameModeration.moderatedPeerDisplayName(
-            peer.isDisplayNameWithheld ? (filedName ?? peer.fingerprint) : peer.displayName
+        let senderName = ProximityDisplayName.peerDisplayName(
+            peer.isDisplayNameWithheld ? (filedName ?? peer.fingerprint) : peer.displayName,
+            in: namespace
         )
         // The ledger drops duplicates (same id) and enforces the 5-minute per-sender receive rate.
         if ledger.recordReceivedHeart(id: payload.id, senderDisplayName: senderName, senderFingerprint: peer.fingerprint) {

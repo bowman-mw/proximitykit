@@ -175,15 +175,21 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
         self.signature = signature
     }
 
-    /// `senderDisplayName` coerced for display or persistence: control/zero-width/bidi scalars
-    /// out, whitespace collapsed, capped at 24 characters.
+    /// `senderDisplayName` coerced for display or persistence under the host's peer-name policy:
+    /// control/zero-width/bidi scalars out, whitespace collapsed, capped at the policy's cap (24
+    /// characters for Fernlet), and the policy's floor when nothing displayable is left.
     ///
     /// The RAW field stays untouched because it is SIGNATURE-COVERED — `verify` recomputes the
     /// canonical bytes from the decoded fields, so sanitizing in `init(from:)` or before
     /// `canonicalBytes` would invalidate every signature over a name that changes under
-    /// sanitisation. Every render and every persist site must read THIS instead.
-    public var sanitizedSenderDisplayName: String {
-        ItemNameModeration.moderatedPeerDisplayName(senderDisplayName)
+    /// sanitisation. Every render and every persist site must read THIS instead. A function rather
+    /// than a property: a decoded envelope carries no namespace, so the reader hands it its own.
+    ///
+    /// - Parameter namespace: The reader's namespace, whose `installation.peerNames` gives the cap
+    ///   and the floor.
+    /// - Returns: The sanitized name, or the floor.
+    public func sanitizedSenderDisplayName(in namespace: ProximityNamespace) -> String {
+        ProximityDisplayName.peerDisplayName(senderDisplayName, in: namespace)
     }
 
     /// The sender's display name **if it disclosed one**, and `nil` when it deliberately did not.
@@ -197,13 +203,17 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
     /// friend" — so it shows a new peer as "A friend" for the whole session, and a pair that keeps
     /// each other writes "A friend" into its roster and trust vault. The reverse is fine: this build
     /// ignores an older peer's introduction name and adopts it from the first post-commit frame.
-    /// No install outside the owner's own devices exists (2026-09-22). ``sanitizedSenderDisplayName``
-    /// cannot express this: its floor turns an empty name into "A friend", which is
-    /// indistinguishable from a peer whose name sanitized away to nothing. Read THIS wherever the
-    /// difference between "withheld" and "blank" decides what a person is shown.
-    public var disclosedSenderDisplayName: String? {
+    /// No install outside the owner's own devices exists (2026-09-22).
+    /// ``sanitizedSenderDisplayName(in:)`` cannot express this: its floor ("A friend" for Fernlet)
+    /// turns an empty name into a name, indistinguishable from a peer whose name sanitized away to
+    /// nothing. Read THIS wherever the difference between "withheld" and "blank" decides what a
+    /// person is shown.
+    ///
+    /// - Parameter namespace: The reader's namespace, as ``sanitizedSenderDisplayName(in:)`` takes it.
+    /// - Returns: The sanitized name (or the floor), or `nil` when the field is empty or blank.
+    public func disclosedSenderDisplayName(in namespace: ProximityNamespace) -> String? {
         guard !senderDisplayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return sanitizedSenderDisplayName
+        return sanitizedSenderDisplayName(in: namespace)
     }
 }
 

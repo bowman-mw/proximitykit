@@ -1469,7 +1469,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                   fingerprint != identity.localFingerprint else { return nil }
             return MeshSessionParticipant(
                 fingerprint: fingerprint,
-                displayName: ItemNameModeration.moderatedPeerDisplayName(slot.peer.displayHint),
+                displayName: ProximityDisplayName.peerDisplayName(slot.peer.displayHint, in: namespace),
                 isLocal: false
             )
         }
@@ -1500,7 +1500,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // `announcePromotedMesh`'s raw `slot.peer.displayHint`) are covered by one coercion. Nothing keys
         // off the roster display name — lookups and removal key on fingerprint — so rewriting an
         // existing entry to the sanitized form is safe.
-        let name = ItemNameModeration.moderatedPeerDisplayName(displayName)
+        let name = ProximityDisplayName.peerDisplayName(displayName, in: namespace)
         if let index = sessionRoster.firstIndex(where: { $0.fingerprint == fingerprint }) {
             sessionRoster[index].displayName = name
         } else {
@@ -1531,7 +1531,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   - name: The disclosed name; moderated here like every other roster ingest.
     func renameSessionParticipant(fingerprint: String, to name: String) {
         guard let index = sessionRoster.firstIndex(where: { $0.fingerprint == fingerprint }) else { return }
-        sessionRoster[index].displayName = ItemNameModeration.moderatedPeerDisplayName(name)
+        sessionRoster[index].displayName = ProximityDisplayName.peerDisplayName(name, in: namespace)
     }
 
     /// Drops the whole live roster. Internal/test seam only — UI finalize paths must NOT call
@@ -3508,7 +3508,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             fingerprint: request.requesterFingerprint,
             // Belt and braces: this method is `public` and accepts an arbitrary payload, so it must
             // not rely on `handleAdmissionRequest` having sanitized the queued copy. Idempotent.
-            displayName: ItemNameModeration.moderatedPeerDisplayName(request.requesterDisplayName),
+            displayName: ProximityDisplayName.peerDisplayName(request.requesterDisplayName, in: namespace),
             signingPublicKey: request.requesterSigningPublicKey,
             keyAgreementPublicKey: request.requesterKeyAgreementPublicKey,
             joinedAt: Date()
@@ -8977,7 +8977,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let merged = MeshMergedHeart(
             giftID: manifest.itemID,
             senderFingerprint: author.fingerprint,
-            senderDisplayName: ItemNameModeration.moderatedPeerDisplayName(body.header.senderName),
+            senderDisplayName: ProximityDisplayName.peerDisplayName(body.header.senderName, in: namespace),
             firstSeenAt: routedIndexForReading(reason: .rung)?
                 .record(for: key)?.firstSeenAt ?? manifest.createdAt
         )
@@ -9449,7 +9449,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             senderFingerprint: author.fingerprint,
             senderSigningPublicKey: author.signingPublicKey,
             session: body.header.session
-        ))
+        ), in: namespace)
         let live = isSessionLive && manifest.meshID == currentMesh?.meshID
         let key = MeshContentKey(senderFingerprint: manifest.originFingerprint, contentID: manifest.itemID)
         switch holdSessionPhoto(photo, key: key, live: live) {
@@ -9525,7 +9525,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             senderDisplayName: body.header.senderName,
             text: body.text,
             sentAt: body.header.sentAt,
-            seenAt: seenAt
+            seenAt: seenAt,
+            in: namespace
         )
         if accepted != .appended {
             ProximityAudit.log(
@@ -12008,7 +12009,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard payload.expiresAt > Date(),
               payload.voucherFingerprint == senderFingerprint else { return }
         let cappedExpiry = min(payload.expiresAt, Date().addingTimeInterval(2 * 3600))
-        let name = ItemNameModeration.moderatedPeerDisplayName(payload.voucherDisplayName)
+        let name = ProximityDisplayName.peerDisplayName(payload.voucherDisplayName, in: namespace)
         vouchCache[payload.voucherFingerprint] = MeshFriendVouchListPayload(
             voucherFingerprint: payload.voucherFingerprint,
             voucherDisplayName: name,
@@ -13276,7 +13277,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             ProximityAudit.log("mesh.descriptor.droppedRejoinBarred", context: ["reason": reason.rawValue])
             return
         }
-        let incoming = Self.sanitizedDescriptor(descriptor)
+        let incoming = Self.sanitizedDescriptor(descriptor, in: namespace)
         // What this device is ADVERTISING before the merge, so a mode (or meshID) that moved is
         // re-published rather than left stale on the radio — review finding P2-2. Nothing on this
         // door used to publish at all: `updateDiscoveryInfo()`'s only callers are `setMeshMode`,
@@ -13364,17 +13365,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Coerces a peer-supplied descriptor into safe display shape before it is adopted, merged, or
     /// re-gossiped: capped name, moderated member display names, and last-write-wins timestamps
-    /// clamped to the near future so a far-future stamp cannot win LWW forever (R3/R5).
-    private static func sanitizedDescriptor(_ descriptor: MeshDescriptor) -> MeshDescriptor {
+    /// clamped to the near future so a far-future stamp cannot win LWW forever (R3/R5). The mesh name
+    /// is sanitized under `namespace`'s peer-name cap, the member names under its peer-name policy.
+    private static func sanitizedDescriptor(_ descriptor: MeshDescriptor, in namespace: ProximityNamespace) -> MeshDescriptor {
         let maxStamp = Date().addingTimeInterval(60)
+        let nameCap = namespace.installation.peerNames.maxLength
         return MeshDescriptor(
             meshID: descriptor.meshID,
-            name: String(ItemNameModeration.sanitizedName(descriptor.name).prefix(maxMeshNameLength)),
+            name: String(ProximityDisplayName.sanitized(descriptor.name, maxLength: nameCap).prefix(maxMeshNameLength)),
             mode: descriptor.mode,
             members: descriptor.members.prefix(maxMeshMembers).map { member in
                 MeshMember(
                     fingerprint: member.fingerprint,
-                    displayName: ItemNameModeration.moderatedPeerDisplayName(member.displayName),
+                    displayName: ProximityDisplayName.peerDisplayName(member.displayName, in: namespace),
                     signingPublicKey: member.signingPublicKey,
                     keyAgreementPublicKey: member.keyAgreementPublicKey,
                     joinedAt: member.joinedAt
@@ -13661,7 +13664,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The name this device already shows for `fingerprint`, for a payload that arrived with it
     /// withheld (Option 1b): this device's own name, else the descriptor member's (as admitted),
     /// else the session roster's (disclosed after commit — or the fingerprint while withheld), else
-    /// the fingerprint itself. Never a blank, never the "A friend" floor.
+    /// the fingerprint itself. Never a blank, never the host's peer-name floor.
     ///
     /// - Parameter fingerprint: The member's fingerprint.
     /// - Returns: The name to show.
@@ -13753,14 +13756,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard !isKnown else { return }
         // Wire boundary: `requesterDisplayName` is peer-supplied and reaches the ADMISSION
         // PROMPT — the one screen where the user decides to admit a stranger. Sanitize HERE
-        // (control/zero-width/bidi scalars out, 24-char cap) so neither the prompt nor the
+        // (control/zero-width/bidi scalars out, the host's peer-name cap) so neither the prompt nor the
         // admitter's roster can be spoofed by a homoglyph or reversed by an RLO override.
         // Safe to rebuild the payload: `allowAdmission`/`declineAdmission` match on
         // `requesterSigningPublicKey`, never on the name, so dedup and removal are unaffected.
         let queued = MeshAdmissionRequestPayload(
             meshID: request.meshID,
             requesterFingerprint: request.requesterFingerprint,
-            requesterDisplayName: ItemNameModeration.moderatedPeerDisplayName(request.requesterDisplayName),
+            requesterDisplayName: ProximityDisplayName.peerDisplayName(request.requesterDisplayName, in: namespace),
             requesterSigningPublicKey: request.requesterSigningPublicKey,
             requesterKeyAgreementPublicKey: request.requesterKeyAgreementPublicKey
         )
@@ -13969,25 +13972,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// payload built from an opened routed body — so the encrypted branch below is unreachable for
     /// routed input. It stays: the `guard let imageData else { return payload }` fallback would
     /// otherwise return an UNSANITIZED payload for a legacy-shaped one, which is the wrong direction
-    /// for a function whose whole job is coercion.
-    private static func sanitizedIncomingPhoto(_ payload: FriendPhotoPayload) -> FriendPhotoPayload {
+    /// for a function whose whole job is coercion. The names are coerced under `namespace`'s
+    /// peer-name policy, the mesh name under its cap.
+    private static func sanitizedIncomingPhoto(_ payload: FriendPhotoPayload, in namespace: ProximityNamespace) -> FriendPhotoPayload {
+        let nameCap = namespace.installation.peerNames.maxLength
         let session = payload.session.map { metadata in
             FriendPhotoSessionMetadata(
                 id: metadata.id,
                 meshID: metadata.meshID,
                 meshName: metadata.meshName.map {
-                    String(ItemNameModeration.sanitizedName($0).prefix(maxMeshNameLength))
+                    String(ProximityDisplayName.sanitized($0, maxLength: nameCap).prefix(maxMeshNameLength))
                 },
                 startedAt: metadata.startedAt,
                 participants: metadata.participants.prefix(maxMeshMembers).map {
                     FriendPhotoSessionParticipant(
                         fingerprint: $0.fingerprint,
-                        displayName: ItemNameModeration.moderatedPeerDisplayName($0.displayName)
+                        displayName: ProximityDisplayName.peerDisplayName($0.displayName, in: namespace)
                     )
                 }
             )
         }
-        let senderName = ItemNameModeration.moderatedPeerDisplayName(payload.senderName)
+        let senderName = ProximityDisplayName.peerDisplayName(payload.senderName, in: namespace)
         if let encryptedImageData = payload.encryptedImageData, let nonce = payload.nonce,
            payload.keyEpoch > 0 {
             return FriendPhotoPayload(

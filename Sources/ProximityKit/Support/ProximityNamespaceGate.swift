@@ -133,6 +133,7 @@ nonisolated enum ProximityNamespaceGate {
         case .malformedSummaryTitle: return "malformedSummaryTitle"
         case .malformedInstanceNamePrefix: return "malformedInstanceNamePrefix"
         case .malformedCommonName: return "malformedCommonName"
+        case .malformedPeerNames: return "malformedPeerNames"
         }
     }
 }

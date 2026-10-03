@@ -466,9 +466,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         // multi-megabyte body is itself the denial-of-service. An honest share is far under 1 MiB
         // (see ProximityRecipeSharePayload.maxWireBytes for the derivation).
         // Peer-supplied name, rendered in the review sheet and every diagnostic below: coerce ONCE
-        // here (control/zero-width/bidi out, 24-char cap). Never coerce it before `verify` — the
-        // raw field is signature-covered.
-        let senderName = ItemNameModeration.moderatedPeerDisplayName(envelope.senderDisplayName)
+        // here (control/zero-width/bidi out, the host's peer-name cap). Never coerce it before
+        // `verify` — the raw field is signature-covered.
+        let senderName = ProximityDisplayName.peerDisplayName(envelope.senderDisplayName, in: namespace)
         guard plaintext.count <= ProximityRecipeSharePayload.maxWireBytes else {
             recordDiagnostic("Dropped an oversized recipe share from \(senderName).")
             return
@@ -602,15 +602,15 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// ``RecipeShareAdvertisedName`` for why a 32-Character cap is not a bound at all once these
     /// fields become a Bonjour TXT record, and why an over-long value is dropped rather than cut.
     ///
-    /// The bound narrows the wire on a second axis too: `sanitizedName` caps at
-    /// ``ItemNameModeration/maxNameLength`` (24) Characters and strips zero-width/bidi scalars,
+    /// The bound narrows the wire on a second axis too: the sanitizer caps at the namespace's
+    /// `installation.peerNames.maxLength` (Fernlet's 24) Characters and strips zero-width/bidi scalars,
     /// where MultipeerConnectivity advertised 32 raw ones. Invisible to a reader — the receiver
-    /// re-caps at 24 with the same function — but it is a narrowing, not just a re-expression.
+    /// re-caps at that cap with the same function — but it is a narrowing, not just a re-expression.
     ///
     /// A name that cannot be published at all (one grapheme wider than the byte bound) omits the
     /// `name` key rather than advertising an empty one, matching
     /// ``MeshLinkAdvertisement/publishedFields``: an absent name falls back to the peer's transport
-    /// hint, an empty one would render as the "A friend" placeholder.
+    /// hint, an empty one would render as the host's peer-name floor.
     /// The `sid` is deliberately **absent**: it belongs to the radio, which mints it with its
     /// instance name and TLS identity at every `start()` and every resume, and joins it to these
     /// fields in ``RecipeShareAdvertisement/publishedFields(from:sessionID:)``. A copy kept here
@@ -620,7 +620,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             RecipeShareAdvertisement.versionKey: RecipeShareAdvertisement.version,
             RecipeShareAdvertisement.modeKey: RecipeShareAdvertisement.mode
         ]
-        let name = RecipeShareAdvertisedName.publishable(displayName)
+        let name = RecipeShareAdvertisedName.publishable(displayName, in: namespace)
         if !name.isEmpty { fields[RecipeShareAdvertisement.nameKey] = name }
         return fields
     }
@@ -982,8 +982,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     }
 
     /// The name to show for a peer, in the picker row and in every "Connection details" line: the
-    /// row this device already drew for it, else the name it advertised, else the picker's own
-    /// "A friend" placeholder.
+    /// row this device already drew for it, else the name it advertised, else the host's peer-name
+    /// floor, the picker's own placeholder.
     ///
     /// **The one rule for naming a peer in anything a user reads**, and a function rather than
     /// `peer.displayHint` because the hint changed meaning with the transport. Under
@@ -992,15 +992,16 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// publishes NEITHER — `displayHint` is empty. A reader that kept the old assumption printed
     /// `fernlet-mesh-3f2a9c81b4de` into the picker and the connection log.
     ///
-    /// No new display string: the placeholder is the one
-    /// ``ItemNameModeration/moderatedPeerDisplayName(_:)`` already answers for an empty name,
-    /// which is what every other pre-handshake surface in this subsystem renders.
+    /// No new display string: the placeholder is the floor
+    /// `ProximityDisplayName.peerDisplayName(_:in:)` already answers for an empty name under the
+    /// manager's namespace, which is what every other pre-handshake surface in this subsystem renders.
     private func displayName(for peer: PeerHandle) -> String {
         if let row = nearbyRecipients.first(where: { $0.id == peer.id }) { return row.displayName }
-        return ItemNameModeration.moderatedPeerDisplayName(
+        return ProximityDisplayName.peerDisplayName(
             RecipeShareAdvertisedName.received(
                 peer.discoveryInfo?[RecipeShareAdvertisement.nameKey], hint: ""
-            )
+            ),
+            in: namespace
         )
     }
 

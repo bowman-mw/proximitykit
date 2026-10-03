@@ -17,8 +17,8 @@ import Foundation
 /// **Two halves.** ``family`` is what every interoperating app shares — the domain-separation labels,
 /// the radios' service types, ALPNs, heartbeat and presentation strings, the QR scheme and the payload
 /// vocabulary — so two apps that supply one family speak one wire. ``installation`` is what belongs to
-/// this app on this device — its keychain rows, its storage names and its log subsystem — so two apps
-/// of one family still never share a key, a file or a log stream.
+/// this app on this device — its keychain rows, its storage names, its log subsystem and how it shows a
+/// peer's name — so two apps of one family still never share a key, a file or a log stream.
 ///
 /// **Built once by the host, never looked up.** ProximityKit holds no instance, offers no default and
 /// keeps no global: no `static var`, no slot, no `@TaskLocal`. The host builds one value at its
@@ -29,7 +29,9 @@ import Foundation
 /// and the managers keep a copy, and by the end of A0.2 ProximityKit reads from it all 39 protocol
 /// labels, the radio values, the QR scheme, the identity's and the two mesh seal keys' keychain rows,
 /// the storage names and the log subsystem. The radios, their postures and `PeerNameDisplay` read
-/// the radios' three presentation strings off it too. Its family also carries the payload vocabulary
+/// the radios' three presentation strings off it too, and wherever a peer's name enters, ProximityKit
+/// shows it under the installation's peer-name policy (``PeerNames``: the cap and the floor). Its
+/// family also carries the payload vocabulary
 /// (``Vocabulary``): the identity envelope seals and parks by its payload rules, the session
 /// coordinator signs and dispatches by its session messages and reads its capability rules, the mesh
 /// and presence managers advertise its wire2 token and the mesh frames by it, the inventory digest
@@ -63,7 +65,8 @@ public nonisolated struct ProximityNamespace: Hashable, Sendable {
     /// What every interoperating app shares: the labels, the radios, the QR scheme and the vocabulary.
     public let family: Family
 
-    /// What belongs to this app on this device: keychain rows, storage names and the log subsystem.
+    /// What belongs to this app on this device: keychain rows, storage names, the log subsystem and the
+    /// peer-name policy.
     public let installation: Installation
 
     /// Every soundness rule's verdict, computed once by ``init(family:installation:)``.
@@ -76,7 +79,7 @@ public nonisolated struct ProximityNamespace: Hashable, Sendable {
     ///
     /// Total: it never throws or traps. Every broken rule is recorded in ``soundness`` instead, in the
     /// order the rules run (labels, radios, QR scheme, keychain, storage, log subsystem, then the
-    /// vocabulary and the radios' presentation strings).
+    /// vocabulary, the radios' presentation strings and the peer-name policy).
     ///
     /// - Parameters:
     ///   - family: What every interoperating app shares.
@@ -199,6 +202,10 @@ public nonisolated struct ProximityNamespace: Hashable, Sendable {
         /// The TLS common name is empty, longer than 64 bytes (X.509's upper bound on a common name),
         /// or not printable ASCII (`0x20`–`0x7E`).
         case malformedCommonName
+        /// The peer-name policy is out of bounds: its cap is not 1 to 63 characters, or its floor is
+        /// empty, longer than the cap, or not exactly what ProximityKit's sanitizer makes of it under
+        /// the cap, which would show a floored name differently each time it is moderated again.
+        case malformedPeerNames(field: String)
     }
 
     // MARK: - Collision

@@ -55,11 +55,15 @@ nonisolated extension ProximityNamespace {
     /// The most bytes the certificates' common name may hold: X.509's upper bound on a common name.
     static let maximumCommonNameBytes = 64
 
+    /// The most characters a peer-name cap may allow: a name is a short label, and the loops that walk
+    /// one a character at a time (the recipe radio's advertised-name trim) are bounded by the cap.
+    static let maximumPeerNameLength = 63
+
     /// Every soundness rule's verdict for one family and installation.
     ///
     /// Runs once, from ``init(family:installation:)``, in a fixed order — labels, radios and heartbeat,
-    /// QR scheme, keychain, storage, log subsystem, then the vocabulary and the radios' presentation
-    /// strings — so equal inputs always record equal verdicts.
+    /// QR scheme, keychain, storage, log subsystem, then the vocabulary, the radios' presentation
+    /// strings and the peer-name policy — so equal inputs always record equal verdicts.
     ///
     /// - Parameters:
     ///   - family: The family to judge.
@@ -78,6 +82,7 @@ nonisolated extension ProximityNamespace {
         }
         violations += vocabularyViolations(family.vocabulary)
         violations += presentationViolations(family.radios)
+        violations += peerNameViolations(installation.peerNames)
         return violations.isEmpty ? .sound : .unsound(violations)
     }
 
@@ -379,6 +384,32 @@ nonisolated extension ProximityNamespace {
         guard (1...maximumCommonNameBytes).contains(name.utf8.count) else { return false }
         // R2: bounded by the guard above, at most 64 bytes.
         return name.utf8.allSatisfy { (0x20...0x7E).contains($0) }
+    }
+
+    // MARK: Peer names
+
+    /// The peer-name policy: the cap 1 to ``maximumPeerNameLength`` characters, and the floor not empty
+    /// and byte for byte what ProximityKit's sanitizer makes of it under the cap, which also keeps it no
+    /// longer than the cap.
+    ///
+    /// The one rule here that runs code outside this folder: the floor is judged by the sanitizer every
+    /// peer's name passes through (`ProximityDisplayName.sanitized(_:maxLength:)`), because judging it by
+    /// any copy of that sanitizer would judge it by a rule that can drift from the one applied.
+    ///
+    /// - Parameter peerNames: The installation's peer-name policy.
+    /// - Returns: The malformed cap, then the malformed floor.
+    private static func peerNameViolations(_ peerNames: PeerNames) -> [Violation] {
+        var violations: [Violation] = []
+        if !(1...maximumPeerNameLength).contains(peerNames.maxLength) {
+            violations.append(.malformedPeerNames(field: PeerNames.maxLengthField))
+        }
+        // R2: the sanitizer and the comparison are bounded by the floor the host wrote; under a cap
+        // below one the sanitizer keeps nothing, so no floor passes.
+        let sanitized = ProximityDisplayName.sanitized(peerNames.floor, maxLength: peerNames.maxLength)
+        if peerNames.floor.isEmpty || !sanitized.utf8.elementsEqual(peerNames.floor.utf8) {
+            violations.append(.malformedPeerNames(field: PeerNames.floorField))
+        }
+        return violations
     }
 
     // MARK: Shared
@@ -758,4 +789,13 @@ nonisolated extension ProximityNamespace.Storage {
             (field: "installation.storage.meshRoutedChunkDirectoryName", value: meshRoutedChunkDirectoryName)
         ]
     }
+}
+
+nonisolated extension ProximityNamespace.PeerNames {
+
+    /// The cap's path from the namespace root.
+    static let maxLengthField = "installation.peerNames.maxLength"
+
+    /// The floor's path from the namespace root.
+    static let floorField = "installation.peerNames.floor"
 }

@@ -982,7 +982,7 @@ public final class ProximityCoordinator {
             trustPolicy?.recordSessionAudit(ProximitySessionAudit(
                 kind: .revokedPeerBlocked,
                 peerFingerprint: fingerprint,
-                peerDisplayName: Self.auditName(of: envelope),
+                peerDisplayName: Self.auditName(of: envelope, in: identity.namespace),
                 payloadType: envelope.payloadTypeToken,
                 message: "Blocked envelope from revoked key"
             ))
@@ -1004,7 +1004,7 @@ public final class ProximityCoordinator {
         trustPolicy?.recordSessionAudit(ProximitySessionAudit(
             kind: .envelopeReceived,
             peerFingerprint: IdentityService.fingerprint(of: envelope.senderSigningPublicKey),
-            peerDisplayName: Self.auditName(of: envelope),
+            peerDisplayName: Self.auditName(of: envelope, in: identity.namespace),
             payloadType: envelope.payloadTypeToken,
             message: "Received \(envelope.payloadTypeToken)"
         ))
@@ -1062,7 +1062,7 @@ public final class ProximityCoordinator {
     ///   peer mid-session;
     /// - **the signing key matches** the identity the handshake verified, so a second peer on the
     ///   same transport cannot name someone else;
-    /// - **the envelope disclosed a name at all** (``FernletIdentityEnvelope/disclosedSenderDisplayName``),
+    /// - **the envelope disclosed a name at all** (``FernletIdentityEnvelope/disclosedSenderDisplayName(in:)``),
     ///   which an introduction and a pre-commit peer's frames do not.
     ///
     /// The state is re-emitted with the named identity because `.connected(peer:)`'s associated
@@ -1071,7 +1071,7 @@ public final class ProximityCoordinator {
     private func adoptDisclosedDisplayName(from envelope: FernletIdentityEnvelope) {
         guard let peer = connectedPeerIdentity, peer.isDisplayNameWithheld,
               peer.signingPublicKey == envelope.senderSigningPublicKey,
-              let disclosed = envelope.disclosedSenderDisplayName else { return }
+              let disclosed = envelope.disclosedSenderDisplayName(in: identity.namespace) else { return }
         let named = PeerIdentity(
             id: peer.id,
             displayName: disclosed,
@@ -1426,11 +1426,12 @@ public final class ProximityCoordinator {
     /// Longest capability token retained — no real token is anywhere near this.
     static let maxCapabilityTokenLength = 32
 
-    /// The name an audit row records for an inbound envelope's sender: the name it disclosed, or its
-    /// fingerprint when it withheld one (Option 1b). Never the "A friend" floor, which would persist
-    /// a name nobody chose and hide who the row is about.
-    private static func auditName(of envelope: FernletIdentityEnvelope) -> String {
-        envelope.disclosedSenderDisplayName ?? IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
+    /// The name an audit row records for an inbound envelope's sender: the name it disclosed, under
+    /// `namespace`'s peer-name policy, or its fingerprint when it withheld one (Option 1b). Never the
+    /// policy's floor for a withheld name, which would persist a name nobody chose and hide who the
+    /// row is about.
+    private static func auditName(of envelope: FernletIdentityEnvelope, in namespace: ProximityNamespace) -> String {
+        envelope.disclosedSenderDisplayName(in: namespace) ?? IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
     }
 
     /// Clamps a peer-supplied capability list at the boundary (count, by the host's `known`, and
@@ -1776,10 +1777,11 @@ extension ProximityCoordinator {
         /// Whether this peer has disclosed no display name yet — Option 1b's pre-commit state.
         ///
         /// An empty ``displayName`` means withheld and nothing else: every other ingest runs
-        /// through `ItemNameModeration.moderatedPeerDisplayName`, whose floor is "A friend", so a
-        /// peer whose name sanitizes away to nothing still arrives non-empty. A surface that shows
-        /// a name must read this first and show ``fingerprint`` instead — a fingerprint two people
-        /// can compare out loud is the honest thing to show for someone nobody has admitted yet.
+        /// through `ProximityDisplayName.peerDisplayName(_:in:)`, whose floor is the host's and never
+        /// empty in a sound namespace, so a peer whose name sanitizes away to nothing still arrives
+        /// non-empty. A surface that shows a name must read this first and show ``fingerprint``
+        /// instead — a fingerprint two people can compare out loud is the honest thing to show for
+        /// someone nobody has admitted yet.
         public var isDisplayNameWithheld: Bool { displayName.isEmpty }
 
         /// What to show for this peer: the disclosed name, or the ``fingerprint`` while it is

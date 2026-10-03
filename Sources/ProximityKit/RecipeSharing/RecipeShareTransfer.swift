@@ -1,5 +1,4 @@
 import Foundation
-import FernletDomainModel
 
 // MARK: - RecipeShareDiscoveryGate
 
@@ -359,35 +358,37 @@ nonisolated struct RecipeShareTransfer: Equatable, Sendable {
 /// random Bonjour instance name instead. Nothing would fail; a friend would just stop having a name.
 ///
 /// Fixing it here rather than in the pass-2 publisher makes the wire match what the receiver already
-/// renders: ``ItemNameModeration/moderatedPeerDisplayName`` re-caps an inbound name at
-/// ``ItemNameModeration/maxNameLength`` (24) Characters, so anything past that was never displayed
-/// by anyone.
+/// renders: `ProximityDisplayName.peerDisplayName(_:in:)` re-caps an inbound name at the host's
+/// `installation.peerNames.maxLength` (Fernlet's 24) Characters, so anything past that was never
+/// displayed by anyone.
 nonisolated enum RecipeShareAdvertisedName {
 
     /// Bytes one advertised name may occupy — the bound ``MeshLinkAdvertisement`` publishes under,
     /// so a name that passes here is publishable by every transport unchanged.
     static let maxByteCount = MeshLinkAdvertisement.maxFieldValueLength
 
-    /// The advertisable form of a local display name: sanitized, capped at
-    /// ``ItemNameModeration/maxNameLength`` Characters, then trimmed on **grapheme** boundaries
+    /// The advertisable form of a local display name: sanitized, capped at `namespace`'s
+    /// `installation.peerNames.maxLength` Characters, then trimmed on **grapheme** boundaries
     /// until it fits ``maxByteCount`` bytes.
     ///
     /// Trimming by Character rather than by byte is what keeps a partial scalar off the wire — a
     /// byte-sliced UTF-8 string is not a string, and the receiver's decoder would drop the whole
     /// field. The loop is bounded by the character cap (Power of 10 rule 2) because that is the most
-    /// characters `sanitizedName` can return.
+    /// characters the sanitizer can return.
     ///
     /// **It answers "" for one real input**: a SINGLE grapheme cluster wider than ``maxByteCount``
-    /// — a base letter under ≥ 32 combining marks, which `sanitizedName` keeps (its invisible set is
+    /// — a base letter under ≥ 32 combining marks, which the sanitizer keeps (its invisible set is
     /// zero-width and bidi scalars, not combining ones). Removing that one Character leaves nothing.
     /// An empty answer is **not publishable**: the caller omits the field rather than advertising
     /// `""`, exactly as ``MeshLinkAdvertisement/publishedFields`` does, because an ABSENT name falls
-    /// back to the peer's own hint while an EMPTY one would reach
-    /// ``ItemNameModeration/moderatedPeerDisplayName`` and render as its placeholder. ``received(_:hint:)``
+    /// back to the peer's own hint while an EMPTY one would reach the receiver's
+    /// `ProximityDisplayName.peerDisplayName(_:in:)` and render as its floor. ``received(_:hint:)``
     /// is the matching receive-side rule.
-    static func publishable(_ raw: String) -> String {
-        var name = ItemNameModeration.sanitizedName(raw)
-        for _ in 0..<ItemNameModeration.maxNameLength {
+    static func publishable(_ raw: String, in namespace: ProximityNamespace) -> String {
+        // An unsound namespace's negative cap keeps nothing, rather than trapping the range below.
+        let cap = max(namespace.installation.peerNames.maxLength, 0)
+        var name = ProximityDisplayName.sanitized(raw, maxLength: cap)
+        for _ in 0..<cap {
             guard name.utf8.count > maxByteCount, !name.isEmpty else { return name }
             name.removeLast()
         }
@@ -397,9 +398,9 @@ nonisolated enum RecipeShareAdvertisedName {
     /// The advertised name to render for a peer, or `hint` when the peer published none.
     ///
     /// The fallback fires for an ABSENT field and an EMPTY one alike, which a bare `??` does not: a
-    /// nil-coalesce passes `""` straight through to ``ItemNameModeration/moderatedPeerDisplayName``,
-    /// which answers its placeholder for an empty string — so a peer this device could have named
-    /// from its own transport hint would lose that name instead. ``publishable(_:)`` already omits
+    /// nil-coalesce passes `""` straight through to `ProximityDisplayName.peerDisplayName(_:in:)`,
+    /// which answers the host's floor for an empty string — so a peer this device could have named
+    /// from its own transport hint would lose that name instead. ``publishable(_:in:)`` already omits
     /// an unpublishable name on this device, but the wire is not ours to assume: an older build, or
     /// a pass-2 publisher that writes the key unconditionally, can still put `""` on the air.
     static func received(_ advertised: String?, hint: String) -> String {

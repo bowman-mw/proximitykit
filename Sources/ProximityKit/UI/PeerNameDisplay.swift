@@ -9,7 +9,6 @@
 //
 
 import Foundation
-import FernletDomainModel
 
 /// What a person reads for a peer: the name that peer chose, or a plain placeholder, and never
 /// an identifier.
@@ -27,7 +26,7 @@ import FernletDomainModel
 /// - the QUIC transport's random Bonjour instance name (the host namespace's
 ///   `family.radios.meshInstanceNamePrefix` plus 12 hex characters; Fernlet's prefix is
 ///   `fernlet-mesh-`), which a slot carries as its `displayHint` and the session's participant
-///   projection moderates into a 24-character truncation.
+///   projection moderates into a truncation at the host's peer-name cap (24 characters for Fernlet).
 ///
 /// Every one of them is turned into the placeholder here, in one place, so a new surface cannot
 /// forget one. The instance name is recognized by the prefix of the namespace each caller passes
@@ -58,16 +57,18 @@ public nonisolated enum PeerNameDisplay {
     ///
     /// - Parameters:
     ///   - raw: The name as received or stored. Peer-supplied, so it is sanitized here
-    ///     (`ItemNameModeration.sanitizedName`) before it is judged.
+    ///     (`ProximityDisplayName.sanitized(_:maxLength:)`, under the namespace's peer-name cap) before
+    ///     it is judged.
     ///   - fingerprint: The peer's fingerprint when the caller has it. A name equal to it (ignoring
     ///     case) is the fingerprint filed as a name. Nil still catches the canonical shape.
     ///   - namespace: The host's namespace. A name that begins with its
     ///     `family.radios.meshInstanceNamePrefix` (compared lowercased, as the soundness rule keeps
-    ///     the prefix) is the QUIC instance name.
+    ///     the prefix) is the QUIC instance name, and its `installation.peerNames.maxLength` caps the
+    ///     name.
     /// - Returns: The sanitized name, or nil when it is empty, is the peer's fingerprint, has the
     ///   shape of a fingerprint, or is the QUIC instance name.
     public static func personName(_ raw: String, fingerprint: String?, in namespace: ProximityNamespace) -> String? {
-        let name = ItemNameModeration.sanitizedName(raw)
+        let name = ProximityDisplayName.sanitized(raw, maxLength: namespace.installation.peerNames.maxLength)
         guard !name.isEmpty else { return nil }
         if let fingerprint, name.caseInsensitiveCompare(fingerprint) == .orderedSame { return nil }
         guard !hasFingerprintShape(name) else { return nil }
@@ -81,7 +82,8 @@ public nonisolated enum PeerNameDisplay {
     ///   - raw: The name as received or stored.
     ///   - fingerprint: The peer's fingerprint, when the caller has it.
     ///   - placeholder: Which phrase stands in when there is no name. Defaults to ``Placeholder/nearby``.
-    ///   - namespace: The host's namespace, whose mesh instance-name prefix is never a name.
+    ///   - namespace: The host's namespace, whose mesh instance-name prefix is never a name and whose
+    ///     peer-name cap caps the name.
     /// - Returns: A string safe to show, already localized. Render it verbatim.
     public static func shown(
         _ raw: String, fingerprint: String?, placeholder: Placeholder = .nearby, in namespace: ProximityNamespace
@@ -101,7 +103,8 @@ public nonisolated enum PeerNameDisplay {
     ///   - raw: The name as received or stored.
     ///   - fingerprint: The peer's fingerprint, when the caller has it.
     ///   - placeholder: Which phrase stands in when there is no name. Defaults to ``Placeholder/nearby``.
-    ///   - namespace: The host's namespace, whose mesh instance-name prefix is never a name.
+    ///   - namespace: The host's namespace, whose mesh instance-name prefix is never a name and whose
+    ///     peer-name cap caps the name.
     /// - Returns: A string safe to show, already localized. Render it verbatim.
     public static func firstName(
         _ raw: String, fingerprint: String?, placeholder: Placeholder = .nearby, in namespace: ProximityNamespace
@@ -126,8 +129,8 @@ public nonisolated enum PeerNameDisplay {
 
     /// Whether `name` is exactly the canonical fingerprint shape: 16 hex characters.
     ///
-    /// - Parameter name: A sanitized name, at most `ItemNameModeration.maxNameLength` characters,
-    ///   so the character check is bounded.
+    /// - Parameter name: A sanitized name, at most the namespace's peer-name cap in characters (63 at
+    ///   most, by its soundness rules), so the character check is bounded.
     /// - Returns: True for a 16-character all-hex string.
     private static func hasFingerprintShape(_ name: String) -> Bool {
         name.count == fingerprintLength && name.allSatisfy(\.isHexDigit)
