@@ -1137,7 +1137,7 @@ public final class PresenceManager: ProximityPayloadHandling {
             trustPolicy: trustPolicy,
             replayCache: replayCache,
             displayName: displayName,
-            capabilities: [ProximityCapability.hearts.rawValue, ProximityCapability.wire2.rawValue],
+            capabilities: [ProximityCapability.hearts.rawValue, namespace.family.vocabulary.capabilities.wire2],
             sealedIntroductionPeerKeyAgreementKey: expectedFriendKA,
             timeoutSeconds: 25
         )

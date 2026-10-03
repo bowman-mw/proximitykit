@@ -461,7 +461,7 @@ nonisolated struct MeshRoutedInventory: Codable, Equatable, Sendable {
 /// unsigned one would be a free probe of another member's delivery map; and it decides what a peer
 /// spends up to the 256 MiB cap on. The cost is one Ed25519 verification per exchange.
 ///
-/// **Not in `FernletIdentityEnvelope.sealingRequiredTypes`, on purpose:** signed-and-unsealed is
+/// **Not in the sealing set (`payloads.sealingRequired`), on purpose:** signed-and-unsealed is
 /// what lets a frame cross a **divergent** pair, the same property that carries the membership
 /// digest and the epoch heads over a reconciling tunnel. A sealed routed digest would be dropped in
 /// exactly the partition the drain exists to heal. Additive: older builds park the token and still

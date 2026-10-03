@@ -11,7 +11,7 @@
 // bundle will travel over the separate `fernlet-coach` trainer channel (`ProximityMode.trainer`, a
 // service type its radio profile brings, `ProximityCoordinator.sendPayload(...)`) to a coach running the
 // separate coaching app — never over the friend mesh. Until then the app shares the reviewed bundle as a
-// file. This type + `PayloadType.workoutCompletion`'s membership in `sealingRequiredTypes` (so an
+// file. This type + `PayloadType.workoutCompletion`'s membership in Fernlet's `payloads.sealingRequired` (so an
 // unsealed send is fail-closed at `verify()`) are the wire seam that later feature will use.
 //
 // WI-9: `public nonisolated struct … : Codable, Equatable, Sendable` — ProximityKit's

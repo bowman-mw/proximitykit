@@ -215,7 +215,7 @@ nonisolated struct MeshRecipientReceipt: Codable, Equatable, Sendable {
 /// The wire frame for a ``MeshRecipientReceipt`` — `PayloadType.meshRecipientReceipt`, signed and
 /// UNSEALED like the routed manifest, chunk and custody receipt beside it.
 ///
-/// **Not in `FernletIdentityEnvelope.sealingRequiredTypes`, on purpose:** a receipt is a plan §3.2
+/// **Not in the sealing set (`payloads.sealingRequired`), on purpose:** a receipt is a plan §3.2
 /// union record that members must be able to forward verbatim so they converge on delivery state.
 /// Pairwise sealing would make a receipt readable only by its first hop and stop the convergence it
 /// exists for. It carries no content — the bytes it is about stay in the recipient's sealed sidecar.

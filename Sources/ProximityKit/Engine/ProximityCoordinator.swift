@@ -25,8 +25,9 @@ public protocol ProximityInspectorRecording: AnyObject {
 
 /// The one callback a ``ProximityCoordinator`` delivers verified application payloads through.
 ///
-/// Fires only after `FernletIdentityEnvelope.verify` succeeded and the type is not a
-/// coordinator-internal one (identity intro/ack, heartbeat); `peer` is the handshake-verified
+/// Fires only after `FernletIdentityEnvelope.verify` succeeded and the token is one the host
+/// dispatches (`payloads.known`) but not one of the coordinator's own session messages (identity
+/// intro/ack, heartbeat); `peer` is the handshake-verified
 /// identity when one exists, else the pending identity — receivers must apply their own
 /// committed/blocked gates. Conformers: ``MeshNetworkManager``, ``ProximityRecipeShareManager``,
 /// ``PresenceManager``. Held `weak` by the coordinator.
@@ -84,9 +85,9 @@ private nonisolated struct IdentityRangingPayload: Codable, Sendable {
     let rangingMode: String
     let discoveryToken: Data?
     /// Phase 1 capability advertisement — an ADDITIVE JSON key: old clients' decoders ignore it,
-    /// and an old client's intro decodes here as `nil` (legacy = photos-only, see
-    /// `PeerIdentity.supports(_:)`). Raw `ProximityCapability` tokens, kept as strings so a newer
-    /// build's capability names survive the round-trip.
+    /// and an old client's intro decodes here as `nil` (a legacy peer, taken to support what the
+    /// host's `assumedForLegacyPeers` names, see `PeerIdentity.supports(_:in:)`). Raw capability
+    /// tokens, kept as strings so a newer build's capability names survive the round-trip.
     let capabilities: [String]?
     /// Heart-drop prekey bundle gossip (bitchat adoptions Increment 3) — another additive key old
     /// decoders ignore. Rides the SIGNED intro envelope, so bundle provenance is the envelope's
@@ -137,14 +138,20 @@ private nonisolated struct SessionHeartbeatPayload: Codable, Sendable {
 ///
 /// Security invariants: every inbound envelope is checked against the trust policy (revoked →
 /// hard fail, blocked → silent drop) and then `verify`'d (signature/expiry/recipient/replay/
-/// mandatory sealing) before dispatch; unknown newer-build payload types are parked, never
-/// dispatched; trainer sessions size-gate the raw wire blob BEFORE decode. On a
+/// mandatory sealing) before dispatch; a token the host does not dispatch (a newer build's payload
+/// type) is parked, never dispatched; trainer sessions size-gate the raw wire blob BEFORE decode. On a
 /// presence-originated heart connection (`sealedIntroductionPeerKeyAgreementKey` set) the
 /// SEALED-INTRODUCTION rule applies: identity intro/ack travel only inside a
 /// ``SealedIntroductionEnvelope`` sealed to the intended friend's KA key, plain identity
 /// envelopes are rejected, and heartbeats are not answered until the sealed identity verified —
 /// a tag-replay forger learns nothing. Sealed sends/receives negotiate wire2 framing off the
 /// peer's advertised capabilities.
+///
+/// Vocabulary: everything token-shaped comes from the identity's namespace
+/// (`family.vocabulary`), read at each use. The introduction, the acknowledgement and the heartbeat
+/// with its reply are signed under `session`'s tokens and titles and dispatched by them; a token
+/// outside `payloads.known` is parked; and `capabilities` supplies the wire2 token, what a peer that
+/// lists no capabilities supports, and the receive bound on a peer's list (twice `known.count`).
 ///
 /// Failure model: connection-phase and proximity-gate timeouts end the session; heartbeat
 /// silence (3× interval) or 3 consecutive send failures end it as `transportLost`; friend mode
@@ -474,14 +481,17 @@ public final class ProximityCoordinator {
     }
 
     /// wire2 gate (bitchat adoptions Increment 2): frame sealed bodies we SEND only when the peer
-    /// advertised `wire2`; unframe sealed bodies we RECEIVE only when the sender advertised it.
+    /// advertised the host's wire2 token (`capabilities.wire2`); unframe sealed bodies we RECEIVE
+    /// only when the sender advertised it.
     /// Both directions key off the same intro exchange, so interpretation is deterministic; the
     /// tolerant tag check inside `open(format: .wire2)` covers the window where a wire2-capable
     /// sender hadn't yet learned OUR capabilities and sealed legacy. Intro/ack envelopes evaluate
     /// before any peer identity exists → `.legacy`, which is exactly right (intros are never
     /// framed — capabilities are unknown when they're built).
     private var peerSealedPayloadFormat: SealedPayloadFormat {
-        (connectedIdentity ?? pendingPeerIdentity)?.supports(.wire2) == true ? .wire2 : .legacy
+        let capabilities = vocabulary.capabilities
+        return (connectedIdentity ?? pendingPeerIdentity)?.supports(capabilities.wire2, in: capabilities) == true
+            ? .wire2 : .legacy
     }
 
     public func cancel() async {
@@ -825,6 +835,11 @@ public final class ProximityCoordinator {
         connectedPeerIdentity == nil ? "" : displayName
     }
 
+    /// The host's payload vocabulary, off this coordinator's identity's namespace: the session
+    /// messages it signs and dispatches by, the payload tokens it dispatches (any other is parked),
+    /// and the capability rules it negotiates wire2 and clamps a peer's list by.
+    private var vocabulary: ProximityNamespace.Vocabulary { identity.namespace.family.vocabulary }
+
     private func sendIdentityIntroduction(to peer: PeerHandle) async {
         do {
             let sentAt = now()
@@ -832,14 +847,14 @@ public final class ProximityCoordinator {
                 identityService: identity,
                 senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
-                payloadType: .identityIntroduction,
-                // DO NOT LOCALIZE this title — it is signed wire bytes, and it is rendered in the
-                // RECEIVER's Connection Inspector, so a translated sender writes its own language
-                // into a stranger's audit log. Full rationale:
+                payloadTypeToken: vocabulary.session.identityIntroduction.payloadType,
+                // The host's title is a frozen wire token, never localized — it is signed wire bytes,
+                // and it is rendered in the RECEIVER's Connection Inspector, so a translated sender
+                // would write its own language into a stranger's audit log. Full rationale:
                 // `FernletIdentityEnvelope.payloadSummary`. Option 1b also took the NAME out of it:
                 // the summary is the one field a receiver renders verbatim, so interpolating the
                 // local name here would have disclosed it in the very frame that withholds it.
-                payloadSummary: PayloadSummary(title: "Hello"),
+                payloadSummary: PayloadSummary(title: vocabulary.session.identityIntroduction.summaryTitle),
                 payload: try await makeIdentityRangingPayload(),
                 createdAt: sentAt,
                 expiresAt: sentAt.addingTimeInterval(5 * 60)
@@ -865,8 +880,8 @@ public final class ProximityCoordinator {
             // identity envelope (a forger sending their own intro to bait a cleartext ack) is
             // rejected outright — the sealed wrapper is the only channel for identity here.
             if usesSealedIntroduction, !unwrapped.cameFromSealedWrapper,
-               let plainType = envelope.payloadType,
-               plainType == .identityIntroduction || plainType == .identityAcknowledge {
+               envelope.payloadTypeToken == vocabulary.session.identityIntroduction.payloadType
+                   || envelope.payloadTypeToken == vocabulary.session.identityAcknowledge.payloadType {
                 inspector?.recordCoordinatorEvent("rejected unsealed identity envelope on a sealed connection")
                 fail("unsealed identity envelope on a sealed-introduction connection")
                 return
@@ -981,12 +996,15 @@ public final class ProximityCoordinator {
         ))
     }
 
-    /// Routes a verified envelope to the coordinator's own handlers or the payload handler.
+    /// Routes a verified envelope to the coordinator's own handlers or the payload handler, by its
+    /// token against the host's vocabulary: the session messages' tokens to the coordinator's own
+    /// handlers, any other token in `payloads.known` to the payload handler.
     ///
-    /// Phase 1 forward tolerance: a payload type only a NEWER build knows arrived on a live
-    /// session. The envelope authenticated (schema/expiry/signature/replay were all enforced by
-    /// `verify`), so this is a well-behaved future peer, not an attack — park it and keep the
-    /// session alive. Never dispatched to the payload handler, never `fail()`.
+    /// Phase 1 forward tolerance: a token outside `payloads.known` — a payload type only a NEWER
+    /// build knows — arrived on a live session. The envelope authenticated
+    /// (schema/expiry/signature/replay were all enforced by `verify`), so this is a well-behaved
+    /// future peer, not an attack — park it and keep the session alive. Never dispatched to the
+    /// payload handler, never `fail()`.
     private func dispatchVerified(
         _ envelope: FernletIdentityEnvelope,
         plaintext: Data,
@@ -994,17 +1012,17 @@ public final class ProximityCoordinator {
         cameFromSealedWrapper: Bool
     ) async throws {
         adoptDisclosedDisplayName(from: envelope)
-        guard let payloadType = envelope.payloadType else {
+        guard vocabulary.payloads.known.contains(envelope.payloadTypeToken) else {
             inspector?.recordCoordinatorEvent("parked unknown payload type \(envelope.payloadTypeToken)")
             return
         }
-        switch payloadType {
-        case .identityIntroduction, .identityAcknowledge:
+        switch envelope.payloadTypeToken {
+        case vocabulary.session.identityIntroduction.payloadType, vocabulary.session.identityAcknowledge.payloadType:
             try await handleIdentityEnvelope(envelope,
                                              plaintext: plaintext,
                                              from: peer,
                                              cameFromSealedWrapper: cameFromSealedWrapper)
-        case .sessionHeartbeat:
+        case vocabulary.session.heartbeat.payloadType:
             await handleHeartbeat(envelope, plaintext: plaintext, from: peer)
         default:
             inspector?.recordCoordinatorEvent("envelope verified \(envelope.payloadTypeToken)")
@@ -1098,10 +1116,10 @@ public final class ProximityCoordinator {
                 identityService: identity,
                 senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
-                payloadType: .identityAcknowledge,
-                // DO NOT LOCALIZE — signed wire bytes, rendered in the receiver's Inspector.
+                payloadTypeToken: vocabulary.session.identityAcknowledge.payloadType,
+                // The host's frozen title — signed wire bytes, rendered in the receiver's Inspector.
                 // See `FernletIdentityEnvelope.payloadSummary`.
-                payloadSummary: PayloadSummary(title: "Identity acknowledged"),
+                payloadSummary: PayloadSummary(title: vocabulary.session.identityAcknowledge.summaryTitle),
                 payload: try await makeIdentityRangingPayload(),
                 createdAt: sentAt,
                 expiresAt: sentAt.addingTimeInterval(5 * 60)
@@ -1203,10 +1221,10 @@ public final class ProximityCoordinator {
                 identityService: identity,
                 senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
-                payloadType: .sessionHeartbeat,
-                // DO NOT LOCALIZE — signed wire bytes, rendered in the receiver's Inspector.
+                payloadTypeToken: vocabulary.session.heartbeat.payloadType,
+                // The host's frozen title — signed wire bytes, rendered in the receiver's Inspector.
                 // See `FernletIdentityEnvelope.payloadSummary`.
-                payloadSummary: PayloadSummary(title: "Heartbeat ack"),
+                payloadSummary: PayloadSummary(title: vocabulary.session.heartbeat.replyTitle),
                 payload: try JSONEncoder().encode(payload),
                 createdAt: now,
                 expiresAt: now.addingTimeInterval(30)
@@ -1348,7 +1366,7 @@ public final class ProximityCoordinator {
             fingerprint: fingerprint,
             rangingMode: rangingMode,
             firstSeenAt: now(),
-            capabilities: Self.clamped(rangingPayload?.capabilities)
+            capabilities: Self.clamped(rangingPayload?.capabilities, in: vocabulary.capabilities)
         )
         updateInspectorPeer(identity: peerIdentity, transportPeer: peer)
 
@@ -1358,7 +1376,7 @@ public final class ProximityCoordinator {
             onHeartDropPrekeyBundle?(envelope.senderSigningPublicKey, bundle)
         }
 
-        if envelope.payloadType == .identityAcknowledge {
+        if envelope.payloadTypeToken == vocabulary.session.identityAcknowledge.payloadType {
             if pendingPeerIdentity == nil && connectedPeerIdentity == nil {
                 pendingPeerIdentity = peerIdentity
             }
@@ -1387,9 +1405,14 @@ public final class ProximityCoordinator {
     }
 
     /// Upper bound on peer-advertised capability tokens kept from an intro (R3/R5): the friend
-    /// channel has no wire-size gate at this layer, and `PeerIdentity.supports(_:)` scans the list
-    /// linearly on every gate. Twice the known capability count leaves room for a newer build.
-    static let maxAdvertisedCapabilities = ProximityCapability.allCases.count * 2
+    /// channel has no wire-size gate at this layer, and `PeerIdentity.supports(_:in:)` scans the list
+    /// linearly on every gate. Twice the host's known capability count leaves room for a newer build.
+    ///
+    /// - Parameter capabilities: The host's capability tokens (`family.vocabulary.capabilities`).
+    /// - Returns: How many of a peer's tokens are kept: twice `capabilities.known.count`.
+    static func maxAdvertisedCapabilities(in capabilities: ProximityNamespace.Capabilities) -> Int {
+        capabilities.known.count * 2
+    }
     /// Longest capability token retained — no real token is anywhere near this.
     static let maxCapabilityTokenLength = 32
 
@@ -1400,11 +1423,13 @@ public final class ProximityCoordinator {
         envelope.disclosedSenderDisplayName ?? IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
     }
 
-    /// Clamps a peer-supplied capability list at the boundary (count and per-token length), so a
-    /// hostile intro cannot inflate a `PeerIdentity` that every later gate walks.
-    private static func clamped(_ capabilities: [String]?) -> [String]? {
+    /// Clamps a peer-supplied capability list at the boundary (count, by the host's `known`, and
+    /// per-token length), so a hostile intro cannot inflate a `PeerIdentity` that every later gate walks.
+    private static func clamped(
+        _ capabilities: [String]?, in host: ProximityNamespace.Capabilities
+    ) -> [String]? {
         capabilities.map { tokens in
-            tokens.prefix(maxAdvertisedCapabilities).map { String($0.prefix(maxCapabilityTokenLength)) }
+            tokens.prefix(maxAdvertisedCapabilities(in: host)).map { String($0.prefix(maxCapabilityTokenLength)) }
         }
     }
 
@@ -1623,10 +1648,10 @@ public final class ProximityCoordinator {
                 identityService: identity,
                 senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
-                payloadType: .sessionHeartbeat,
-                // DO NOT LOCALIZE — signed wire bytes, rendered in the receiver's Inspector.
+                payloadTypeToken: vocabulary.session.heartbeat.payloadType,
+                // The host's frozen title — signed wire bytes, rendered in the receiver's Inspector.
                 // See `FernletIdentityEnvelope.payloadSummary`.
-                payloadSummary: PayloadSummary(title: "Heartbeat"),
+                payloadSummary: PayloadSummary(title: vocabulary.session.heartbeat.pingTitle),
                 payload: try JSONEncoder().encode(payload),
                 createdAt: sentAt,
                 expiresAt: sentAt.addingTimeInterval(interval * 2)
@@ -1775,12 +1800,28 @@ extension ProximityCoordinator {
             self.capabilities = capabilities
         }
 
-        /// Phase 1 capability gate: senders skip payload kinds the peer can't use. `nil`
-        /// capabilities = a legacy peer — every pre-capability friend radio could only exchange
-        /// photos, so legacy is treated as photos-only.
-        public func supports(_ capability: ProximityCapability) -> Bool {
-            guard let capabilities else { return capability == .photos }
-            return capabilities.contains(capability.rawValue)
+        /// Phase 1 capability gate: senders skip payload kinds the peer can't use. Whether the peer
+        /// advertised `token`; for a legacy peer (`nil` capabilities, an intro that predates
+        /// capability advertisement), whether the host takes every such peer to support it
+        /// (`assumedForLegacyPeers`: photos alone for Fernlet, whose pre-capability friend radios
+        /// could only exchange photos).
+        ///
+        /// - Parameters:
+        ///   - token: A capability token.
+        ///   - host: The host's capability tokens (`family.vocabulary.capabilities`).
+        public func supports(_ token: String, in host: ProximityNamespace.Capabilities) -> Bool {
+            guard let capabilities else { return host.assumedForLegacyPeers.contains(token) }
+            return capabilities.contains(token)
+        }
+
+        /// A feature's capability gate: the token form of `supports(_:in:)`, for the capability's
+        /// token.
+        ///
+        /// - Parameters:
+        ///   - capability: A Fernlet capability.
+        ///   - host: The host's capability tokens (`family.vocabulary.capabilities`).
+        public func supports(_ capability: ProximityCapability, in host: ProximityNamespace.Capabilities) -> Bool {
+            supports(capability.rawValue, in: host)
         }
     }
 

@@ -428,7 +428,7 @@ The module owns a `Localizable.xcstrings` (added by the 2026-08-22 accessibility
 
 This module ships English sentences that a bulk localization pass will read as UI strings and that
 must never become `String(localized:)`. Every ``PayloadSummary`` title — "Recipe share",
-"Session ended", "Clothing catalog request", "Hello from …", "Identity acknowledged", "Heartbeat",
+"Session ended", "Clothing catalog request", "Hello", "Identity acknowledged", "Heartbeat",
 "Heartbeat ack", "Good vibes" — is written into the Ed25519 canonical signing bytes by
 `CanonicalSignatureSerializer`, so localizing one makes the signed bytes depend on the sender's
 locale; it is also the text a *different* device shows in its Connection Inspector, so a translated
@@ -450,8 +450,12 @@ scheme, the identity's and the two mesh seal keys' keychain rows, the storage na
 subsystem. Plan step A0.2 of `Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md` moved every read of
 those in this module onto it, each byte-identical for Fernlet. Its family also carries the radios'
 presentation strings, which the radios, their postures and ``PeerNameDisplay`` read off it, and the
-payload vocabulary, which this module's consumers still read from constants of their own until the
-rest of plan step A0.3 re-points them. Some such strings stay outside it until
+payload vocabulary, every group of which this module reads off it too: the envelope's payload rules,
+the coordinator's session messages and capability rules, the managers' wire2 token, the inventory
+digest's record kinds and the routed type registry's routed types. The mesh engine's own payload
+tokens and the features' payload and capability tokens are still Fernlet's `PayloadType` and
+`ProximityCapability` cases until the rest of plan step A0.3 and plan steps A0.4 and A0.5 move them.
+Some such strings stay outside it until
 a later step (see "What A0.2 left for later" below): the 13 feature labels this module reads from
 FernletCrypto's registry, the heart-drop and moderation keychain services and
 ``ProximitySupportLayout``'s `Fernlet` folder until A0.4. `ProximityNamespaceBoundaryTests`
@@ -526,7 +530,10 @@ hand it:
 | Builders: envelopes, admission tokens, membership records and messages, the removal quorum, key advertisements, routed items, chunks and receipts, the verify QR | Sign under their signing identity's ``IdentityService/purposes``. |
 | Verifiers: the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
 | The membership digest and its holders: `MeshInventoryDigest`, `MeshMembershipRecordVerifier`, `MeshLedgerAdoption` | Take the whole family (`family:`, or the adoption's `in family:`, with no default), because the digest needs its record kinds beside its labels: every record is tagged with its kind's token from `family.vocabulary.membershipRecordKinds` (`MeshMembershipRecordKind.token(in:)`). The verifier keeps the family as its copy, so its labels and record kinds come from one namespace; an identity's signed digest uses its own namespace's. |
-| The routed type registry: `MeshRoutedTypeRegistry.increment1(_:)` and its projection `MeshRoutedAckStageTable.increment1(_:)` | Build their rows from the routed types they are handed. ``MeshNetworkManager`` hands them its namespace's `family.vocabulary.routedTypes`, and the manifest mint takes the manager's registry with no default, so this module spells no routed type. |
+| The routed type registry: `MeshRoutedTypeRegistry.increment1(_:)` and its projection `MeshRoutedAckStageTable.increment1(_:)` | Build their rows from the routed types they are handed. ``MeshNetworkManager`` builds its registry once, at `init`, from its namespace's `family.vocabulary.routedTypes`, and the manifest mint takes the manager's registry with no default, so this module spells no routed type. |
+| The envelope: ``FernletIdentityEnvelope/verify(identityService:replayCache:sealedPayloadFormat:)`` | Reads its identity's namespace's `family.vocabulary.payloads`, in the checks' fixed order: an unsealed envelope whose token is in `sealingRequired` is refused, and one whose token is outside `known` is parked (authenticated and replay-recorded, never opened). The token form of `signed` mints under a token the host names; `payloadType` and `isUnknownPayloadType` are Fernlet's typed view of the token. |
+| The session coordinator: ``ProximityCoordinator`` | Reads its identity's namespace's `family.vocabulary` at each use: it signs its introduction, acknowledgement and heartbeat with its reply under `session`'s tokens and titles and dispatches by them, parks a token outside `payloads.known`, and takes the wire2 token, the legacy assumption and its receive bound on a peer's list (twice `capabilities.known.count`) from `capabilities`. |
+| Capability gates: `ProximityCoordinator.PeerIdentity.supports(_:in:)`, `PeerSlot.supports(_:in:)` | Take the host's `capabilities` last: a peer that listed none supports exactly `assumedForLegacyPeers`. The `ProximityCapability` overloads are the features' gates and delegate; the mesh's sealed sends and the coordinator ask for the host's wire2 token, which the mesh and presence managers advertise. |
 | Stateless helpers: the serializer's `canonicalBytes(for:in:)` overloads and `canonicalInventoryDigestBytes`, ``MeshRoutedContentDigest``, ``MeshChunkAssembly``, the item seal and the content-key wrap, ``ProximityVerifyQR/parse(_:in:)``, ``MeshEpochRef/minted(counter:coordinatorFingerprint:meshID:in:)`` | Take `in purposes:` (or `in:` a namespace) last. |
 | Ids that hash a label: ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)``, ``MeshRecipientReceipt/receiptID(in:)`` | Are functions, not stored properties: a value decoded off the wire carries no namespace, so `Codable` stays namespace-free. |
 | The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkRecipeShareSession` | Take `init(namespace:)` and read their service type, ALPN, heartbeat, exporter label and log subsystem there, once; the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
@@ -543,9 +550,11 @@ readers above under `.fernlet` and under a foreign namespace. `ProximityVocabula
 the same line, holds every token and presentation string this module's consumers read to the
 literal Fernlet shipped before A0.3, and `.fernlet`'s vocabulary and presentation strings to the
 same literals; it drives the radios, the presence posture mint and the name display under `.fernlet`
-and under a namespace whose presentation strings are its own, and the inventory digest, the routed
-type registry and a mesh manager under `.fernlet` and under a namespace whose record kinds and routed
-types are its own. `ProximityNamespaceSoundnessTests`
+and under a namespace whose presentation strings are its own, the inventory digest, the routed type
+registry and a mesh manager under `.fernlet` and under a namespace whose record kinds and routed types
+are its own, and the envelope, the coordinator and the mesh's sealed sends under `.fernlet` and under
+a namespace whose payload rules, session messages or capabilities are its own.
+`ProximityNamespaceSoundnessTests`
 holds the soundness and collision rules over
 namespaces built only from literals.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
@@ -609,17 +618,18 @@ without it.
 
 **What A0.2 left for later.**
 
-- **A0.3** routes the rest of the vocabulary. The namespace's family already carries it, judged by
-  its soundness rules, but some of this module's consumers still read their own constants: the
-  envelope its sealing set and `PayloadType`, the coordinator its session tokens, titles and
-  capability rules. A0.3 re-points each at the namespace it holds and deletes the constant, as the
-  presentation strings, the record kinds and the routed types already are: the radios and the
-  presence posture mint their Bonjour instance names (`fernlet-mesh-…` and `fn-…` for Fernlet) and
-  certificates under the namespace's strings and ``PeerNameDisplay`` hides its mesh prefix, the
-  inventory digest tags each record with its family's record kind and the routed type registry
-  builds its rows from its routed types, while the coordinator has no display default (every
-  caller passes the host's name) and `PeerTransport`'s discovery doors take no service type. And
-  this module starts refusing an
+- **A0.3** routes the rest of the vocabulary. The namespace's family carries all of it, judged by
+  its soundness rules, but the mesh engine still reads its own payload tokens off `PayloadType`.
+  A0.3 re-points them at the namespace it holds, as the envelope, the coordinator, the presentation
+  strings, the record kinds and the routed types already are: the envelope seals and parks by the
+  namespace's payload rules, the coordinator signs and dispatches by its session messages and reads
+  its capability rules (the mesh's sealed sends and both managers' advertisements its wire2 token),
+  the radios and the presence posture mint their Bonjour instance names (`fernlet-mesh-…` and `fn-…`
+  for Fernlet) and certificates under the namespace's strings and ``PeerNameDisplay`` hides its mesh
+  prefix, the inventory digest tags each record with its family's record kind and the routed type
+  registry builds its rows from its routed types, while the coordinator has no display default
+  (every caller passes the host's name) and `PeerTransport`'s discovery doors take no service type.
+  And this module starts refusing an
   unsound namespace, failing closed in `ensureProvisioned()`, `encryptGroupKey` and every radio's
   `start`.
 - **A0.4** moves Fernlet's features out, and with them the 13 feature labels this module still reads

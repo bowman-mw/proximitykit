@@ -23,13 +23,15 @@ import FernletDomainModel
 /// and an Ed25519 signature over deterministic canonical bytes.
 ///
 /// Minted only via ``signed(identityService:envelopeID:senderDisplayName:recipientFingerprint:payloadType:payloadEncryption:payloadSummary:payload:createdAt:expiresAt:)``
-/// and consumed only via ``verify(identityService:replayCache:sealedPayloadFormat:)``, which
-/// enforces schema version, expiry, signature, recipient match, mandatory sealing for sensitive
-/// payload types, and replay protection — callers never trust a field before `verify` returns.
+/// (a Fernlet `PayloadType`) or ``signed(identityService:envelopeID:senderDisplayName:recipientFingerprint:payloadTypeToken:payloadEncryption:payloadSummary:payload:createdAt:expiresAt:)``
+/// (a token the host's vocabulary names), and consumed only via
+/// ``verify(identityService:replayCache:sealedPayloadFormat:)``, which enforces schema version,
+/// expiry, signature, recipient match, mandatory sealing for the tokens the host's payload rules
+/// name, and replay protection — callers never trust a field before `verify` returns.
 /// The canonical signing bytes are version-gated (legacy v1 JSON vs the v2 cross-platform binary
 /// serializer in `CanonicalSignatureSerializer`). `payloadTypeToken` keeps the raw wire token so
-/// an envelope from a NEWER build still decodes, re-encodes byte-identically, and verifies — the
-/// unknown type is parked (`isUnknownPayloadType`) and never dispatched, fail-closed. Value type,
+/// an envelope from a NEWER build still decodes, re-encodes byte-identically, and verifies — a
+/// token outside the host's `payloads.known` is parked and never dispatched, fail-closed. Value type,
 /// `nonisolated`/`Sendable`; only `verify`/`signed` touch main-actor state.
 public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable {
     public let schemaVersion: Int                 // 1
@@ -42,8 +44,9 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
     /// see `CodingKeys`). Stored as a string, not a `PayloadType`, so an envelope minted by a NEWER
     /// build — a token this build has no case for — still decodes, re-encodes byte-identically, and
     /// signature-verifies (both canonical forms sign the raw token). This is the EnumDecodeCompat
-    /// freeze/park pattern adapted to the wire: the unknown token is parked here, surfaced as
-    /// `payloadType == nil` / `isUnknownPayloadType`, and never dispatched to payload handlers.
+    /// freeze/park pattern adapted to the wire: a token outside the verifying identity's namespace's
+    /// `payloads.known` is parked by `verify` and never dispatched to payload handlers, and
+    /// `payloadType` / `isUnknownPayloadType` are Fernlet's typed view of the same token.
     public let payloadTypeToken: String
     public let payloadEncryption: PayloadEncryption
     /// The sender-authored disclosure summary. **DO NOT LOCALIZE — this is a wire token, not UI copy.**
@@ -73,13 +76,16 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
     public let expiresAt: Date?
     public var signature: Data                     // Ed25519 over canonical JSON (this field is zeroed during signing)
 
-    /// The payload type this build knows, or `nil` when `payloadTypeToken` came from a newer build
-    /// (parked). Callers MUST gate dispatch on this being non-nil.
+    /// Fernlet's typed view of `payloadTypeToken`: the `PayloadType` case it spells, or `nil` when
+    /// Fernlet has no case for it. Feature code and tests read it, and Fernlet's feature dispatch
+    /// gates on it being non-nil. `verify` itself parks by the verifying identity's namespace
+    /// (`payloads.known`), which for Fernlet holds exactly these cases' tokens, so the two agree there.
     public var payloadType: PayloadType? { PayloadType(rawValue: payloadTypeToken) }
 
-    /// True when the sender used a payload type this build doesn't know. The envelope still
-    /// verifies (schema/expiry/signature/recipient/replay) but its payload is never decrypted
-    /// or dispatched — fail-closed by non-dispatch.
+    /// Fernlet's typed view of a parked envelope: true when the sender used a token Fernlet has no
+    /// `PayloadType` case for. Under Fernlet's namespace such an envelope still verifies
+    /// (schema/expiry/signature/recipient/replay) but its payload is never decrypted or dispatched —
+    /// fail-closed by non-dispatch.
     public var isUnknownPayloadType: Bool { payloadType == nil }
 
     /// Wire-compatibility mapping: `payloadTypeToken` occupies the original `payloadType` key.
@@ -135,9 +141,10 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
         )
     }
 
-    /// Raw-token initializer — the escape hatch for re-signing/tamper fixtures and tests that need
-    /// an envelope whose payload type this build doesn't know. Production signing always goes
-    /// through the typed initializer above (`signed` mints only known types).
+    /// Raw-token initializer — what both `signed` factories mint through (the token form signs a
+    /// token the host's vocabulary names, such as the coordinator's session messages), and the
+    /// escape hatch for re-signing/tamper fixtures and tests that need an envelope whose token the
+    /// verifier's vocabulary doesn't know.
     public init(
         schemaVersion: Int,
         envelopeID: UUID,
@@ -242,17 +249,13 @@ extension FernletIdentityEnvelope {
         case sealingRequired
     }
 
-    // Payload types that must always be delivered sealed to the recipient.
-    // A misbehaving sender that omits sealing is rejected at the receiver even if the transport
-    // is already encrypted, closing the misbehaving-sender gap for sensitive content.
-    private static let sealingRequiredTypes: Set<PayloadType> = [.friendPhoto, .recipeShare, .clothingCatalog, .friendHeart, .tempMessage, .itemReport, .friendState, .activityOffer, .activityJoinGrant, .activityRosterSnapshot, .activitySync, .trainerPlan, .trainerPlanDelta, .workoutCompletion, .workoutLiveUpdate, .verifyChallenge, .verifyResponse]
-
     /// Verifies the envelope signature, recipient, expiry, and replay status; returns the plaintext payload.
     /// `@MainActor`: reads the `@MainActor` IdentityService key state (`open`, `localFingerprint`) and the
     /// `@MainActor` ReplayCache. The signature math itself (`IdentityService.verify` + `canonicalBytes`) is
     /// `nonisolated` and could run off-main, but recipient/replay/decrypt need the actor's state.
-    /// `sealedPayloadFormat`: pass `.wire2` only when the SENDER advertised the `wire2` capability —
-    /// sealed bodies are then unframed (tolerantly) after decryption. Unsealed payloads ignore it.
+    /// `sealedPayloadFormat`: pass `.wire2` only when the SENDER advertised the host's wire2
+    /// capability token (`capabilities.wire2`) — sealed bodies are then unframed (tolerantly) after
+    /// decryption. Unsealed payloads ignore it.
     /// `replayCache`: nil ONLY for callers with their own durable dedup that must accept envelopes
     /// older than the cache's 24 h window (the heart dead-drop, whose pickup window is 7 days) —
     /// every live-radio path keeps passing one.
@@ -260,6 +263,10 @@ extension FernletIdentityEnvelope {
     /// `purposes.signature.identityEnvelopeV2`, or for a schema-v1 envelope the verify-only
     /// `legacyV1.identityEnvelopeV1` — which a family that refuses legacy peers does not have, so
     /// there a schema-v1 envelope is `signatureInvalid`.
+    /// The sealing gate and the park read the same namespace's payload rules
+    /// (`family.vocabulary.payloads`): a token in `sealingRequired` must arrive sealed to the
+    /// recipient, so a misbehaving sender that omits sealing is refused even over an encrypted
+    /// transport, and a token outside `known` is parked.
     @MainActor
     public func verify(
         identityService: IdentityService,
@@ -290,19 +297,20 @@ extension FernletIdentityEnvelope {
             throw VerifyError.recipientMismatch
         }
 
-        if let payloadType, Self.sealingRequiredTypes.contains(payloadType), payloadEncryption == .none {
+        let payloads = identityService.namespace.family.vocabulary.payloads
+        if payloads.sealingRequired.contains(payloadTypeToken), payloadEncryption == .none {
             throw VerifyError.sealingRequired
         }
 
         try replayCache?.recordIfNew(envelopeID: envelopeID, createdAt: createdAt)
 
-        // Unknown (newer-build) payload type: the envelope authenticated and its ID is now
-        // replay-recorded (so unknown-type spam can't bypass replay protection), but the payload
-        // is parked — never decrypted, and the sealing gate above is skipped because this build
-        // has no sealing semantics for the type. Fail-closed by non-dispatch: callers gate
-        // dispatch on `payloadType`, and returning empty bytes keeps the payload unreadable even
-        // if a caller forgets.
-        guard !isUnknownPayloadType else { return Data() }
+        // A token the host does not dispatch (a newer build's payload type): the envelope
+        // authenticated and its ID is now replay-recorded (so unknown-type spam can't bypass replay
+        // protection), but the payload is parked — never decrypted, and the sealing gate above
+        // never names it, because the host's sealing set is drawn from what it knows (soundness
+        // rule `unknownToken`). Fail-closed by non-dispatch: callers dispatch only tokens they know,
+        // and returning empty bytes keeps the payload unreadable even if a caller forgets.
+        guard payloads.known.contains(payloadTypeToken) else { return Data() }
 
         switch payloadEncryption {
         case .none:
@@ -322,8 +330,10 @@ extension FernletIdentityEnvelope {
 // MARK: - Signed factory
 
 extension FernletIdentityEnvelope {
-    /// Creates a signed envelope. `signature` is computed over the canonical bytes of all other fields.
-    /// `@MainActor`: signs with the `@MainActor` IdentityService private key state.
+    /// Creates a signed envelope for one of Fernlet's payload types: exactly the envelope
+    /// ``signed(identityService:envelopeID:senderDisplayName:recipientFingerprint:payloadTypeToken:payloadEncryption:payloadSummary:payload:createdAt:expiresAt:)``
+    /// signs for the type's raw value. `@MainActor`: signs with the `@MainActor` IdentityService
+    /// private key state.
     @MainActor
     public static func signed(
         identityService: IdentityService,
@@ -337,6 +347,30 @@ extension FernletIdentityEnvelope {
         createdAt: Date = Date(),
         expiresAt: Date? = nil
     ) throws -> FernletIdentityEnvelope {
+        try signed(
+            identityService: identityService, envelopeID: envelopeID, senderDisplayName: senderDisplayName,
+            recipientFingerprint: recipientFingerprint, payloadTypeToken: payloadType.rawValue,
+            payloadEncryption: payloadEncryption, payloadSummary: payloadSummary, payload: payload,
+            createdAt: createdAt, expiresAt: expiresAt)
+    }
+
+    /// Creates a signed envelope under a raw payload token: the form for a token the host's
+    /// vocabulary names, such as the coordinator's session messages. `signature` is computed over
+    /// the canonical bytes of all other fields, under `identityService`'s namespace label.
+    /// `@MainActor`: signs with the `@MainActor` IdentityService private key state.
+    @MainActor
+    public static func signed(
+        identityService: IdentityService,
+        envelopeID: UUID = UUID(),
+        senderDisplayName: String,
+        recipientFingerprint: String? = nil,
+        payloadTypeToken: String,
+        payloadEncryption: PayloadEncryption = .none,
+        payloadSummary: PayloadSummary,
+        payload: Data,
+        createdAt: Date = Date(),
+        expiresAt: Date? = nil
+    ) throws -> FernletIdentityEnvelope {
         var envelope = FernletIdentityEnvelope(
             schemaVersion: currentSchemaVersion,
             envelopeID: envelopeID,
@@ -344,7 +378,7 @@ extension FernletIdentityEnvelope {
             senderKeyAgreementPublicKey: identityService.localKeyAgreementPublicKey,
             senderDisplayName: senderDisplayName,
             recipientFingerprint: recipientFingerprint,
-            payloadType: payloadType,
+            payloadTypeToken: payloadTypeToken,
             payloadEncryption: payloadEncryption,
             payloadSummary: payloadSummary,
             payload: payload,

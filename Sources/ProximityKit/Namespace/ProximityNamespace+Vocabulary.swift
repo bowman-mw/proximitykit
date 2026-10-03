@@ -4,11 +4,14 @@
 // The family's payload vocabulary: the tokens every interoperating app signs into its envelopes and
 // routed manifests and hashes into its membership digests, and the payload rules that hang on them.
 // Tokens are the host's `String`s, like the radios' service types and ALPNs: wire data, never crypto
-// labels, so none is a `StaticString` and none takes a role. ProximityKit reads the membership record
-// kinds (the inventory digest hashes them) and the routed types (the routed type registry builds its
-// rows from them) here; its other consumers still read constants of their own for the rest
-// until plan step A0.3 re-points each one here, and for Fernlet the two are equal, which
-// `ProximityVocabularyGoldenTests` holds.
+// labels, so none is a `StaticString` and none takes a role. ProximityKit reads every group here: the
+// identity envelope the payload rules (it seals and parks by them), the session coordinator the
+// session messages and the capabilities, the mesh and presence managers the wire2 token they
+// advertise (and the mesh frames by), the inventory digest the membership record kinds and the routed
+// type registry the routed types. The mesh engine's own payload tokens and its features' payload and
+// capability tokens are still Fernlet's `PayloadType` and `ProximityCapability` cases until the rest
+// of plan step A0.3 and plan steps A0.4 and A0.5 move them, and for Fernlet the two spellings are
+// equal, which `ProximityVocabularyGoldenTests` holds.
 
 import Foundation
 

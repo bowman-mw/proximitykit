@@ -352,9 +352,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// signs this side's under; since A0.2.8 the storage scopes its host builds carry it too. Its
     /// family is what the membership verifiers and the ledger adoption keep, so the inventory digest
     /// tags every record with its family's record kinds, and its routed types are the tokens of the
-    /// routed type registry's rows (``routedTypes``). What this manager still spells itself, its
-    /// features' values and the photo stores' names, leaves with those features (plan steps A0.4 and
-    /// A0.5).
+    /// routed type registry's rows (``routedTypes``, built from them once at `init`). Every capability
+    /// gate here asks under its capabilities: the wire2 token this manager advertises and frames
+    /// sealed sends for, and what a peer that lists no capabilities is taken to support.
+    /// What this manager still spells itself, its own payload tokens (Fernlet's `PayloadType`, until
+    /// the rest of plan step A0.3), its features' values and capability tokens and the photo stores'
+    /// names, leaves with those features (plan steps A0.4 and A0.5).
     /// `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
@@ -665,6 +668,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         self.store = store
         let namespace = store.proximityNamespace
         self.namespace = namespace
+        self.hostRoutedTypeRegistry = MeshRoutedTypeRegistry.increment1(namespace.family.vocabulary.routedTypes)
         self.transport = transport ?? NetworkMeshSession(namespace: namespace)
         let id = identity ?? IdentityService(namespace: namespace)
         // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
@@ -826,7 +830,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Phase 4: fuzzy state + appearance exchange rides the friend session. The committed-slot gate has
     /// run; require a verified, unblocked, vault-trusted sender and a well-formed payload, then hand it to
-    /// the app (which applies its own opt-in + caches). Sealed (in `sealingRequiredTypes`).
+    /// the app (which applies its own opt-in + caches). Sealed (in Fernlet's `payloads.sealingRequired`).
     private func registerFriendStateHandler() {
         registerPayloadHandler(for: .friendState) { [weak self] _, plaintext, peer in
             guard let self, let peer else { return }
@@ -900,7 +904,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// activity manager's "who can I offer/gossip to right now" seam.
     private func committedActivityPeerFingerprints() -> [String] {
         slots.compactMap { slot in
-            guard let fingerprint = slot.fingerprint, slot.supports(.activities) else { return nil }
+            guard let fingerprint = slot.fingerprint, slot.supports(.activities, in: namespace.family.vocabulary.capabilities) else { return nil }
             return fingerprint
         }
     }
@@ -956,7 +960,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameter fingerprint: The friend.
     /// - Returns: whether a linked, hearts-capable slot faces them.
     public func hasLiveHeartSlot(forFingerprint fingerprint: String) -> Bool {
-        slots.contains { $0.fingerprint == fingerprint && $0.supports(.hearts) }
+        slots.contains { $0.fingerprint == fingerprint && $0.supports(.hearts, in: namespace.family.vocabulary.capabilities) }
     }
 
     /// Sends one in-session heart over the ROUTED store (P6 item 6, plan §12).
@@ -6040,17 +6044,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         MeshRoutedStore(scope: store.meshRoutedStorage)
     }
 
+    /// The shipping routed type registry: built once, in `init`, from ``namespace``'s routed types,
+    /// and read through ``routedTypes`` unless a test narrowed or widened it.
+    @ObservationIgnored private let hostRoutedTypeRegistry: MeshRoutedTypeRegistry
+
     /// The routed type registry this device admits, resolves and forwards by (P5 item 11, plan §11).
     ///
     /// The **one** shipping read of the registry value: the verifier's accepted-token set, the
     /// ack-stage projection, the re-entry stage branch and the four forwarding gates all resolve
     /// through this property, so a build cannot register a token at one door and refuse it at
-    /// another. Its rows' tokens are the host's: the registry is built from the routed types of
-    /// ``namespace``, so this manager mints, accepts and acknowledges its host's spellings and no
-    /// other. `routedTypeRegistryForTesting` is the `@testable` seam that makes the build-narrowed
-    /// doors — unreachable in one shipping build — reachable in a cell.
+    /// another. Its rows' tokens are the host's: the registry is built once, at `init`, from the
+    /// routed types of ``namespace`` (``hostRoutedTypeRegistry``), so this manager mints, accepts and
+    /// acknowledges its host's spellings and no other. `routedTypeRegistryForTesting` is the
+    /// `@testable` seam that makes the build-narrowed doors — unreachable in one shipping build —
+    /// reachable in a cell.
     private var routedTypes: MeshRoutedTypeRegistry {
-        routedTypeRegistryForTesting ?? MeshRoutedTypeRegistry.increment1(namespace.family.vocabulary.routedTypes)
+        routedTypeRegistryForTesting ?? hostRoutedTypeRegistry
     }
 
     /// How many routed content ids one AUTHOR may occupy in this session's replay window (P5 item
@@ -12069,8 +12078,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func localCapabilities() -> [String] {
         var capabilities = [ProximityCapability.photos.rawValue]
         // wire2 (bitchat adoptions Increment 2): sealed-payload compress+pad framing. A wire
-        // format, not a user feature — no opt-out; advertised by every build that ships it.
-        capabilities.append(ProximityCapability.wire2.rawValue)
+        // format, not a user feature — no opt-out; advertised by every build that ships it, under
+        // the host's wire2 token, the one every peer's sealed sends look for.
+        capabilities.append(namespace.family.vocabulary.capabilities.wire2)
         // heartsAway (bitchat adoptions Increment 3): advertised only when the user opted into
         // away delivery — signals our intro carries a prekey bundle and we accept drops.
         if heartsAwayEnabledProvider?() == true {
@@ -12119,7 +12129,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// legacy client would park-and-drop it anyway — skip the bytes), and only while sharing is
     /// enabled locally. Internal seam so tests can pin the gate without a transport.
     func shouldOfferShopCatalog(to peerIdentity: ProximityCoordinator.PeerIdentity) -> Bool {
-        clothingShop.isSharingEnabled && peerIdentity.supports(.shop)
+        clothingShop.isSharingEnabled && peerIdentity.supports(.shop, in: namespace.family.vocabulary.capabilities)
     }
 
     /// Installs this manager's callbacks on its radio and, for a radio that authenticates peers
@@ -13038,7 +13048,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         activeVerifyQR = nil // single use
         let response = VerifyResponsePayload(challengeNonce: payload.challengeNonce, signature: signature)
-        let supportsWire2 = ceremonyPeerIdentity(of: slot)?.supports(.wire2) ?? slot.supports(.wire2)
+        let capabilities = namespace.family.vocabulary.capabilities
+        let supportsWire2 = ceremonyPeerIdentity(of: slot)?.supports(capabilities.wire2, in: capabilities)
+            ?? slot.supports(capabilities.wire2, in: capabilities)
         spawnHostPinned {
             await self.sendVerifyEnvelope(
                 .verifyResponse,
@@ -13088,12 +13100,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         to peer: ProximityCoordinator.PeerIdentity,
         via slot: PeerSlot
     ) async {
+        let capabilities = namespace.family.vocabulary.capabilities
         await sendVerifyEnvelope(
             type,
             encodable: encodable,
             toKeyAgreementKey: peer.keyAgreementPublicKey,
             fingerprint: peer.fingerprint,
-            supportsWire2: peer.supports(.wire2),
+            supportsWire2: peer.supports(capabilities.wire2, in: capabilities),
             via: slot
         )
     }
@@ -14157,18 +14170,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         // Phase 3b: hand our own signed moderation reports to this committed friend (one-hop relay).
         // The send method additionally requires the recipient be a vault-trusted (kept) friend.
-        if peerIdentity.supports(.moderation) {
+        if peerIdentity.supports(.moderation, in: namespace.family.vocabulary.capabilities) {
             let recipientKey = peerIdentity.signingPublicKey
             spawnHostPinned { [weak self] in await self?.sendModerationReports(to: slot, recipientSigningKey: recipientKey) }
         }
         // Phase 4: share our fuzzy vibe + appearance with this committed friend (kept friends only).
-        if peerIdentity.supports(.friendState) {
+        if peerIdentity.supports(.friendState, in: namespace.family.vocabulary.capabilities) {
             let recipientKey = peerIdentity.signingPublicKey
             spawnHostPinned { [weak self] in await self?.sendFriendState(to: slot, recipientSigningKey: recipientKey) }
         }
         // Phase 6: offer any activities we host to this committed peer + exchange a roster version digest
         // so the highest verified snapshot converges. The manager sends via its wired `send` closure.
-        if peerIdentity.supports(.activities) {
+        if peerIdentity.supports(.activities, in: namespace.family.vocabulary.capabilities) {
             activities.onPeerCommitted(fingerprint: peerIdentity.fingerprint)
         }
     }
@@ -14203,7 +14216,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Asks a just-committed peer for its catalog (commit symmetry — see `noteSlotCommittedForShop`).
     /// Signed like every control payload but not sealed: it carries nothing (the summary is the whole
-    /// body, mirroring `.sessionGoodbye`), and it is deliberately NOT in `sealingRequiredTypes`.
+    /// body, mirroring `.sessionGoodbye`), and it is deliberately NOT in Fernlet's `payloads.sealingRequired`.
     private func sendShopCatalogRequest(to slot: PeerSlot) async {
         // DO NOT LOCALIZE "Clothing catalog request" — as the doc comment above says, the summary is
         // the whole body here, so this literal is signed wire bytes AND the receiving peer's
@@ -14445,10 +14458,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) async -> Bool {
         if sealed {
             guard let kaKey = slot.verifiedKeyAgreementPublicKey else { return false }
+            let capabilities = namespace.family.vocabulary.capabilities
             return await sendEnvelopeCore(
                 type,
                 encodable: encodable,
-                sealTo: (kaKey: kaKey, supportsWire2: slot.supports(.wire2)),
+                sealTo: (kaKey: kaKey, supportsWire2: slot.supports(capabilities.wire2, in: capabilities)),
                 fingerprint: slot.fingerprint,
                 via: slot,
                 auditSendFailure: true
@@ -15630,8 +15644,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// A narrowed or widened routed type registry for one manager, or nil for the shipping value
-    /// ``MeshRoutedTypeRegistry/increment1(_:)`` over the host namespace's routed types. `internal`
-    /// for `@testable` unit tests only.
+    /// ``MeshRoutedTypeRegistry/increment1(_:)`` over the host namespace's routed types, built once at
+    /// `init`. `internal` for `@testable` unit tests only.
     ///
     /// P5 item 11's four forwarding gates are *unreachable in one shipping build* — nothing carrying
     /// an unregistered token can be admitted, so no such record exists at rest. This seam is what

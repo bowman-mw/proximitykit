@@ -30,10 +30,14 @@ import Foundation
 /// labels, the radio values, the QR scheme, the identity's and the two mesh seal keys' keychain rows,
 /// the storage names and the log subsystem. The radios, their postures and `PeerNameDisplay` read
 /// the radios' three presentation strings off it too. Its family also carries the payload vocabulary
-/// (``Vocabulary``): the inventory digest hashes its membership record kinds and the routed type
-/// registry builds its rows from its routed types, while its other consumers still read
-/// constants of their own for the rest until the rest of plan step A0.3 re-points them; for Fernlet
-/// the two spellings are equal, which `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
+/// (``Vocabulary``): the identity envelope seals and parks by its payload rules, the session
+/// coordinator signs and dispatches by its session messages and reads its capability rules, the mesh
+/// and presence managers advertise its wire2 token and the mesh frames by it, the inventory digest
+/// hashes its membership record kinds and the routed type registry builds its rows from its routed
+/// types. The mesh engine's own payload tokens and its features' payload and capability tokens are
+/// still Fernlet's `PayloadType` and `ProximityCapability` cases until the rest of plan step A0.3 and
+/// plan steps A0.4 and A0.5 move them; for Fernlet the two spellings are equal, which
+/// `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
 /// until plan step A0.4: the 13 feature labels ProximityKit reads from FernletCrypto's registry, the
 /// heart-drop and moderation keychain services and ``ProximitySupportLayout``'s folder.
 /// `ProximityNamespaceBoundaryTests` keeps three rules: no namespace, group or purpose is built outside

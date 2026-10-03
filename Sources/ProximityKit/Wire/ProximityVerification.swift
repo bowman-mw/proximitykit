@@ -188,7 +188,7 @@ public nonisolated enum ProximityVerifyQR {
     }
 }
 
-/// Scanner → displayer, sealed (`sealingRequiredTypes`): quotes the scanned QR's nonce (so only
+/// Scanner → displayer, sealed (in Fernlet's `payloads.sealingRequired`): quotes the scanned QR's nonce (so only
 /// the live display is honored) plus a fresh challenge nonce.
 public nonisolated struct VerifyChallengePayload: Codable, Equatable, Sendable {
     public let qrNonce: Data

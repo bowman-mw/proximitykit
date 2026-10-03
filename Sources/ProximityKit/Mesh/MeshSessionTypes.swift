@@ -96,8 +96,9 @@ public struct PeerSlot: Identifiable {
     var verifiedKeyAgreementPublicKey: Data?
     /// Raw capability tokens the peer advertised in its identity intro/ack (Phase 1), captured at slot
     /// commit from `ProximityCoordinator.PeerIdentity`. `nil` = a legacy peer whose intro predates
-    /// capability advertisement (treated as photos-only). Lets a room broadcast (e.g. temp messages)
-    /// skip slots whose peer can't use the payload, without re-plumbing the PeerIdentity to the sender.
+    /// capability advertisement (taken to support what the host's `assumedForLegacyPeers` names:
+    /// photos alone for Fernlet). Lets a room broadcast (e.g. temp messages) skip slots whose peer
+    /// can't use the payload, without re-plumbing the PeerIdentity to the sender.
     var peerCapabilities: [String]? = nil
     var joinedEpoch: Int = 0
     var distanceSamples: [MeshDistanceSample] = []
@@ -107,11 +108,26 @@ public struct PeerSlot: Identifiable {
     /// (2026-09-22). Per slot, so it dies with the slot and a peer that re-dials is judged afresh.
     var returningMemberReseat: MeshReturningMemberReseat = .open
 
-    /// Phase 1 capability gate for room broadcasts, mirroring `ProximityCoordinator.PeerIdentity.supports`:
-    /// a legacy peer with no advertised capabilities is photos-only.
-    func supports(_ capability: ProximityCapability) -> Bool {
-        guard let peerCapabilities else { return capability == .photos }
-        return peerCapabilities.contains(capability.rawValue)
+    /// Phase 1 capability gate for room broadcasts, mirroring
+    /// `ProximityCoordinator.PeerIdentity.supports(_:in:)`: whether the peer advertised `token`, and
+    /// for a legacy peer with no advertised capabilities, whether the host takes every such peer to
+    /// support it (`assumedForLegacyPeers`).
+    ///
+    /// - Parameters:
+    ///   - token: A capability token.
+    ///   - host: The host's capability tokens (`family.vocabulary.capabilities`).
+    func supports(_ token: String, in host: ProximityNamespace.Capabilities) -> Bool {
+        guard let peerCapabilities else { return host.assumedForLegacyPeers.contains(token) }
+        return peerCapabilities.contains(token)
+    }
+
+    /// A feature's capability gate: the token form of `supports(_:in:)`, for the capability's token.
+    ///
+    /// - Parameters:
+    ///   - capability: A Fernlet capability.
+    ///   - host: The host's capability tokens (`family.vocabulary.capabilities`).
+    func supports(_ capability: ProximityCapability, in host: ProximityNamespace.Capabilities) -> Bool {
+        supports(capability.rawValue, in: host)
     }
 }
 

@@ -17,7 +17,7 @@ import Foundation
 /// A single session-scoped chat message on the wire — **frozen and parked** (network migration P6
 /// item 4).
 ///
-/// Still `Codable`, still sealed-only (`.tempMessage` is in `sealingRequiredTypes`), and no longer
+/// Still `Codable`, still sealed-only (`.tempMessage` is in Fernlet's `payloads.sealingRequired`), and no longer
 /// emitted or dispatched by anything: chat rides the routed store as a `MeshRoutedTextBody` inside
 /// a signed manifest's per-recipient wrap. This value stays so an older peer's frame parks by name
 /// rather than failing a session, and because it is the sealing-required CONTROL several wire suites

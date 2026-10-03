@@ -110,7 +110,7 @@ nonisolated struct MeshRoutedDrainAnswer: Codable, Equatable, Sendable {
 
 /// The `fernlet.mesh.routed-drain-answer.v1` frame: the answer, its signer, and the signature.
 ///
-/// **Not in `FernletIdentityEnvelope.sealingRequiredTypes`, on purpose:** signed-and-unsealed is
+/// **Not in the sealing set (`payloads.sealingRequired`), on purpose:** signed-and-unsealed is
 /// what lets a frame cross a **divergent** pair, the property that already carries the membership
 /// digest, the epoch heads and item 5's routed digest over a reconciling tunnel. A sealed answer
 /// would be dropped in exactly the partition the drain exists to heal. Additive: older builds park
