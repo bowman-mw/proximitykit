@@ -46,8 +46,8 @@ nonisolated extension ProximityNamespace {
     // MARK: - Keychain
 
     /// The names of the keychain rows ProximityKit writes for the device identity and the two mesh seal
-    /// keys. The heart-drop and moderation keychain services are still ProximityKit literals until
-    /// plan step A0.4 takes their features out.
+    /// keys. The heart-drop keychain service is still a ProximityKit literal until plan step A0.4 takes
+    /// its feature out; the moderation ban store's is FernletSocial's.
     ///
     /// Row names only. Each row's accessibility and synchronizable class stay ProximityKit code, where
     /// the key-custody walls read them: a host names its rows and never weakens how they are kept.
@@ -127,7 +127,7 @@ nonisolated extension ProximityNamespace {
     // MARK: - Storage
 
     /// The on-disk names ProximityKit writes for its default directory and the two mesh stores. Until
-    /// plan step A0.4 the heart-drop scope and the feature ledgers default instead to
+    /// plan step A0.4 the heart-drop scope defaults instead to
     /// ``ProximitySupportLayout/defaultDirectory``, which spells Fernlet's folder.
     public nonisolated struct Storage: Hashable, Sendable {
         /// The folder under Application Support that a host passing no root of its own gets.

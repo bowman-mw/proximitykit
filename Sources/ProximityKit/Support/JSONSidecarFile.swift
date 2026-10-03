@@ -1,17 +1,25 @@
 // JSONSidecarFile.swift
 // ProximityKit/Support
 //
-// The shared best-effort JSON sidecar idiom used by the device-local ProximityKit stores
-// (FriendStateCache, ClosenessLedger, ModerationLedger, ProximityActivityManager, and the mesh
-// photo-wall preferences). One home for the load/save/remove plumbing those stores previously
+// The shared best-effort JSON sidecar idiom used by the device-local stores: ProximityKit's activity
+// manager and mesh photo-wall preferences, and FernletSocial's moderation ledger, closeness ledger
+// and friend-state cache. One home for the load/save/remove plumbing those stores previously
 // repeated verbatim; each store keeps its own PersistedState shape and post-decode mapping.
 
 import Foundation
 
 /// Best-effort JSON file persistence for a device-local sidecar in Application Support
-/// (`.completeFileProtection`, never synced) — the shared plumbing behind ``FriendStateCache``,
-/// ``ClosenessLedger``, ``ModerationLedger``, ``ProximityActivityManager``, and the mesh
-/// photo-wall preferences in `MeshNetworkManager`.
+/// (`.completeFileProtection`, never synced) — the shared plumbing behind
+/// ``ProximityActivityManager`` and the mesh photo-wall preferences in `MeshNetworkManager`, and
+/// behind FernletSocial's `ModerationLedger`, `ClosenessLedger` and `FriendStateCache`.
+///
+/// Package access for FernletSocial until A0.5, with ``init(fileURL:)``, ``fileURL(in:name:)``,
+/// ``load()``, ``save(_:)`` and ``removeFile()``: FernletSocial's three ledgers persist through it while
+/// the activity manager and the photo-wall preferences still use it here, and it moves to
+/// FernletSocial with them when the mesh manager's feature parts leave
+/// (`ProximityNamespaceBoundaryTests`' rule 5 lists its lines with that exit). The stored `fileURL`
+/// stays internal. Every failure it audits goes through ``ProximityAudit`` under its `sidecar.*`
+/// name, whichever module's store it serves.
 ///
 /// This is deliberately the *naive* idiom: no failure is recoverable here — writes and removals
 /// are best-effort (they audit-log and move on) and a read failure is indistinguishable from
@@ -26,18 +34,28 @@ import Foundation
 /// `save(_:)` preserves the stores' exact operation order — encode (bail + log on failure), create the
 /// parent directory, then an atomic `.completeFileProtection` write — and, unlike
 /// ``ProtectedSidecar``'s writer, does NOT exclude the file from backup.
-struct JSONSidecarFile<State: Codable> {
+package struct JSONSidecarFile<State: Codable> {
     /// The on-disk location of the sidecar. Owners resolve it with `fileURL(in:name:)` against
     /// their host's ``ProximityHost/proximitySupportDirectory``; tests inject their own.
     let fileURL: URL
 
+    /// A sidecar at `fileURL`, which its owner always states (there is no default root). Package access
+    /// for FernletSocial until A0.5, with the type.
+    ///
+    /// - Parameter fileURL: The sidecar's file: `fileURL(in:name:)` of the owner's sidecar root, or a
+    ///   test's own file.
+    package init(fileURL: URL) {
+        self.fileURL = fileURL
+    }
+
     /// This sidecar's file inside a given proximity-sidecar root — the ONE definition of the layout,
-    /// so a scoped (per-store) root and the production default can never disagree.
+    /// so a scoped (per-store) root and the production root can never disagree.
     ///
     /// Every store here is shared MUTABLE on-disk state that some wipe reaches, and the test runner
     /// puts many stores in one process, so the root has to be per-instance rather than constant —
-    /// see ``ProximityHost/proximitySupportDirectory`` for the full reasoning.
-    nonisolated static func fileURL(in directory: URL, name: String) -> URL {
+    /// see ``ProximityHost/proximitySupportDirectory`` for the full reasoning. Package access for
+    /// FernletSocial until A0.5, with the type.
+    package nonisolated static func fileURL(in directory: URL, name: String) -> URL {
         directory.appendingPathComponent(name)
     }
 
@@ -47,8 +65,9 @@ struct JSONSidecarFile<State: Codable> {
     // rejoins the shared-root race, and the omission compiles.
 
     /// Reads + decodes the sidecar. `nil` on ANY failure — absent, unreadable (including a
-    /// locked-device read of a protected file), or undecodable.
-    func load() -> State? {
+    /// locked-device read of a protected file), or undecodable. Package access for FernletSocial
+    /// until A0.5, with the type.
+    package func load() -> State? {
         guard let data = try? Data(contentsOf: fileURL),
               let state = try? JSONDecoder().decode(State.self, from: data) else { return nil }
         return state
@@ -58,8 +77,9 @@ struct JSONSidecarFile<State: Codable> {
     /// `.completeFileProtection` write. Still best-effort — the state is reconstructible
     /// convenience state and the next mutation retries the write — but every failure is NAMED in
     /// the audit log (R7) instead of vanishing, since a `.completeFileProtection` write on a
-    /// locked device is the common silent case.
-    func save(_ state: State) {
+    /// locked device is the common silent case. Package access for FernletSocial until A0.5, with the
+    /// type.
+    package func save(_ state: State) {
         let data: Data
         do {
             data = try JSONEncoder().encode(state)
@@ -85,8 +105,9 @@ struct JSONSidecarFile<State: Codable> {
 
     /// Deletes the sidecar file — the `clearAll` / reset-everything path. Best-effort, but an
     /// "already gone" removal is the expected case and everything else is audit-logged (R7): a
-    /// silently-failed removal would leave device-local social state on disk after a wipe.
-    func removeFile() {
+    /// silently-failed removal would leave device-local social state on disk after a wipe. Package
+    /// access for FernletSocial until A0.5, with the type.
+    package func removeFile() {
         do {
             try FileManager.default.removeItem(at: fileURL)
         } catch CocoaError.fileNoSuchFile {

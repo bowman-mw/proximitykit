@@ -71,8 +71,8 @@ public nonisolated struct ModerationReportPayload: Codable, Equatable, Sendable 
 ///
 /// The no-transitive-relay rule is the Sybil defense — each device tallies over reports it
 /// verified itself. Stateless namespace enum; ``MeshNetworkManager`` calls `buildPayload` on slot
-/// commit and `verifiedRows` in its `.itemReport` handler, with storage owned by the app-side
-/// ``ModerationLedger``.
+/// commit and `verifiedRows` in its `.itemReport` handler, with storage owned by FernletSocial's
+/// `ModerationLedger`, which the app files the verified rows in.
 public enum ModerationReportRelay {
     /// Builds a payload of the local user's OWN rows (reporter == local key), each signed. Carries both
     /// reports AND their retractions, so undoing a report propagates to peers who already stored it (a
@@ -82,8 +82,8 @@ public enum ModerationReportRelay {
     /// key are sent too, and dropping them is not the harmless privacy win it looks like. Because the
     /// relay is strictly one-hop (`verifiedRows` requires `reporterSigningPublicKey == senderSigningKey`,
     /// so no third party ever forwards a row), the reporter is the ONLY party that can ever deliver a row
-    /// naming a device as its subject — those rows are the sole evidence source for
-    /// ``ModerationBanStore/reconcile(rows:localSigningKey:)``'s self-ban branch. Filtering them here
+    /// naming a device as its subject — those rows are the sole evidence source for FernletSocial's
+    /// `ModerationBanStore.reconcile(rows:localSigningKey:)` and its self-ban branch. Filtering them here
     /// would make `isSelfBanned` unreachable and silently delete the shipped "a maker whose items are
     /// repeatedly reported loses their shop for a while" behaviour, with nothing in the build to say so.
     /// `ModerationBanTests.testForeignRowsNamingLocalKeySelfBanTheShop` pins this. That the report is

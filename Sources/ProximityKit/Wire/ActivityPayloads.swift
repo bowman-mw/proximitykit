@@ -26,8 +26,8 @@ import FernletDomainModel
 /// SHA-256 over the canonical descriptor bytes — the stable identity of an activity's parameters
 /// that the signed token binds.
 ///
-/// Lives here (not DomainModel) so the domain model stays crypto-free, exactly like
-/// ``ModerationContentHash``.
+/// Lives here (not DomainModel) so the domain model stays crypto-free, exactly like FernletSocial's
+/// `ModerationContentHash`.
 public nonisolated enum ActivityParamsHash {
     public static func of(_ descriptor: ActivityDescriptor) -> Data {
         Data(SHA256.hash(data: canonicalBytes(for: descriptor)))

@@ -1,6 +1,6 @@
 # ``ProximityKit``
 
-Fernlet's self-contained peer-to-peer subsystem: signed identity, QUIC + UWB session formation, trust lifecycle, and every in-person social feature (photos, recipes, the clothing shop, chat, hearts, activities, moderation).
+Fernlet's self-contained peer-to-peer subsystem: signed identity, QUIC + UWB session formation, trust lifecycle, and the in-person social features still built into it (photos, recipes, the clothing shop, chat, hearts, activities, the moderation report relay); moderation's ban store and ledger, closeness and friend state are `FernletSocial`'s.
 
 ## Overview
 
@@ -20,8 +20,8 @@ step A0.2 only for the feature labels that leave with their features and for the
 `CryptographicPurpose` signing overloads; see "Protocol namespace" below), `FernletDomainModel` (the
 features' payload vocabulary and models, the host's trusted-peer record type and the session mode,
 Fernlet's vocabulary and record types named only on the lines `ProximityNamespaceBoundaryTests`
-allowlists, which leave with their features or the session profile) and `FernletFoundation` (two `FernletDate` reads and the
-moderation clock). It therefore sits on
+allowlists, which leave with their features or the session profile) and `FernletFoundation` (two
+`FernletDate` reads). It therefore sits on
 the *protected* side of the S3 privacy wall: it may reach a sealed `Private*` store, and the
 walled `AIProviders` / `CloudKitSync` targets can never import it (nor it them — the dead-drop's
 CloudKit transport is injected app-side through the `HeartDropTransporting` seam, so this module
@@ -202,8 +202,9 @@ cached metadata-only on the `PrivateMediaStore` wall), the in-person clothing sh
 (``MeshClothingShop``, with its 1-hour post-session browse window), vanish-at-session-end chat
 (``SessionMessageStore`` — deliberately not Codable so a message can never enter a snapshot, and
 since P6 item 4 a *projection* over routed ciphertext rather than the only copy),
-in-session hearts, the one-hop moderation relay (``ModerationReportRelay`` →
-``ModerationLedger`` → ``ModerationBanStore``), fuzzy friend state (``FriendStateCache``), and
+in-session hearts, the one-hop moderation relay (``ModerationReportRelay``, whose verified rows the
+app files in `FernletSocial`'s `ModerationLedger` and `ModerationBanStore`), fuzzy friend state
+(whose payloads the app caches in `FernletSocial`'s `FriendStateCache`), and
 Group Activities (``ProximityActivityManager``, whose authorization is a host-signed,
 invitee-key-bound token rather than the shared handshake). Feature payloads dispatch through a
 registry whose committed-slot gate is the security boundary — behind the payload door's attribution
@@ -282,20 +283,11 @@ Photo-library save failures surface through one shared mapping in `FernletProxim
 `PhotoSaveFailure` rendered by the `photoSaveFailureAlert(_:failure:)` view modifier — so every
 save surface (review sheets and the album carousel) shows identical wording.
 
-**Store bans answer to their evidence (2026-09-24).** ``ModerationBanStore/reconcile(rows:localSigningKey:)``
-runs in both directions. It applies the 30-day ban the one-hop report set warrants, recording the
-evidence the ban rests on as `BanEvidence` — reporter TAGS (salted digests under
-`FernletCryptoPurpose.Hash.moderationBanReporterTagV1`, never keys, because the self-ban row outlives
-"Delete everything"), artwork hashes and report seqs. And it LIFTS an active ban once the reporters
-themselves have positively withdrawn enough of that evidence — a relayed `retract` superseding their
-report — that what is left no longer reaches the threshold (`ModerationBanRecovery`, counted without
-the per-reporter cap so the test is monotone and can only err towards keeping a ban). The invariant
-the recovery hangs off: **only a positive withdrawal counts.** An absent row (a wiped ledger, a
-reinstall, an evicted row, a blocked or removed reporter), a decayed row and every clock move leave
-the evidence where it was, and the self-ban ignores the banned device's own rows, so nothing the
-banned person does alone can lift it. A record written without evidence — before this change, or by
-the direct `applySelfBan` path — can only serve out. Policy note:
-`Docs/Moderation-SelfBan-Recovery-2026-09-23.md`.
+**Store bans are `FernletSocial`'s.** The relay above only carries signed rows; the ledger they are
+filed in, the tamper-resistant ban clock that reconciles them in both directions (applying a
+warranted ban, lifting one whose reporters positively withdrew enough of its evidence) and the
+content hash a report binds an artwork by live in that module, whose landing page states the
+invariants.
 
 **Presence and hearts.** ``PresenceManager`` runs a standing radio that broadcasts only rotating
 pairwise-DH tags — no names, no stable identifiers — so kept friends recognize each other nearby
@@ -322,7 +314,7 @@ friend is away, ``HeartDropService`` seals the heart (``HeartDropSealer``, forwa
 and queues it in the ``HeartDropOutbox`` for the injected dead-drop transport; the receive side
 dedups durably (``HeartDropDedupStore``) and records into the shared ``ProximityHeartLedger``,
 which enforces the bidirectional 5-minute rate limit for every heart transport.
-``ClosenessLedger`` turns these interactions into the private closeness score.
+`FernletSocial`'s `ClosenessLedger` turns these interactions into the private closeness score.
 
 The prekeys travel as the core wire type ``ProximityPrekeyBundle`` (the prekey store's `Bundle`,
 `PrekeyEntry` and `SignedPrekey` are its names there), inside the signed identity introduction under
@@ -363,8 +355,9 @@ remaining `end(_:dismissalPolicy:)` call. Signing inputs come from the determini
 binary serializer in `CanonicalSignatureSerializer.swift` (domain-tagged per signed type,
 cross-platform stable; the legacy JSON encoder is retained verify-only). Persistence follows one
 stance throughout: small JSON sidecars in Application Support with `.completeFileProtection`,
-never synced — the best-effort stores share the internal `JSONSidecarFile` helper
-(`Support/JSONSidecarFile.swift`), while the heart-sharing sidecars additionally load through
+never synced — the best-effort stores share the `JSONSidecarFile` helper
+(`Support/JSONSidecarFile.swift`, a `package` door that `FernletSocial`'s three ledgers persist
+through too; see "Package doors"), while the heart-sharing sidecars additionally load through
 ``ProtectedSidecar`` (sealed at rest via ``HeartDropSidecarSeal``), which classifies read
 failures so a locked-device read can never be mistaken for "empty" and overwrite real data. Key
 material lives in the keychain, ThisDeviceOnly, except the deliberately-synced backup-escrow key
@@ -372,10 +365,11 @@ whose content-addressed slot lifecycle ``IdentityService`` reconciles non-silent
 
 Where those sidecars live is the host's call, not a constant. EVERY device-local sidecar in this
 module hangs off ``ProximityHost/proximitySupportDirectory`` — the friend photo wall's index and
-preferences, ``ProximityHeartLedger``, the three sealed heart-drop stores, ``ModerationLedger``,
-``FriendStateCache``, ``ClosenessLedger`` and ``ProximityActivityManager``'s ledger. The heart ledger
-and the activity manager take their file URL with no default, so their owner states the file.
-There is deliberately no argument-less default on ``JSONSidecarFile``: every owner states its root, because a
+preferences, ``ProximityHeartLedger``, the three sealed heart-drop stores and
+``ProximityActivityManager``'s ledger — and Fernlet's app builds `FernletSocial`'s moderation,
+friend-state and closeness ledgers on the same root. The heart ledger and the activity manager take
+their file URL with no default, so their owner states the file. There is
+deliberately no argument-less default on ``JSONSidecarFile``: every owner states its root, because a
 default that silently resolves to the process-wide `Application Support/Fernlet` is exactly how a
 store rejoins the shared-root race, and the omission compiles. The root defaults to the host
 namespace's `installation.storage.defaultDirectory` (for Fernlet `Application Support/Fernlet`, the
@@ -490,9 +484,9 @@ digest's record kinds, the routed type registry's routed types and the mesh engi
 The mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
 `ProximityCapability` cases until plan steps A0.4, A0.5 and A0.7 move them.
 Some such strings stay outside it until
-a later step (see "What is left for A0.4 onward" below): the 13 feature labels this module reads from
-FernletCrypto's registry (nine until A0.4, the activities' and the moderation report's four until
-A0.5), the heart-drop and moderation keychain services and
+a later step (see "What is left for A0.4 onward" below): the 12 feature labels this module reads from
+FernletCrypto's registry (eight until A0.4, the activities' and the moderation report's four until
+A0.5), the heart-drop keychain service and
 ``ProximitySupportLayout``'s `Fernlet` folder until A0.4. `ProximityNamespaceBoundaryTests`
 allowlists each feature-label read, each literal that spells `fernlet` and each line that still
 names one of Fernlet's domain types, with the step that removes it. Beside it the
@@ -647,10 +641,11 @@ and recipe-share managers under `.fernlet` and under a namespace whose peer-name
 `ProximityNamespaceSoundnessTests`
 holds the soundness and collision rules, a declared feature salt's place in them included, over
 namespaces built only from literals.
-`FernletFeatureGoldenTests`, on the crypto-goldens line too, holds the bytes of the Fernlet features
-this module still holds, which their move out of it must keep, to frozen literals: the feature labels
-the heart dead-drop, presence and the ban store hand CryptoKit themselves, the heart-drop and presence
-pair secrets and tags, the ban evidence's reporter tag, a frozen sealed drop and sealed sidecar opened
+`FernletFeatureGoldenTests`, on the crypto-goldens line too, holds the bytes of Fernlet's features
+over this module, the ones it still holds and the ones already in `FernletSocial`, which every move
+must keep, to frozen literals: the feature labels the heart dead-drop, presence and the ban store hand
+CryptoKit themselves, the heart-drop and presence pair secrets and tags, the ban evidence's reporter
+tag and a reported artwork's content hash, a frozen sealed drop and sealed sidecar opened
 through their readers, the prekey bundle's JSON and the identity introduction that gossips it, the
 features' keychain and file names and persisted shapes, presence's advertisement and the
 sealed-backup escrow's provisioning cases, the two feature salts `.fernlet` declares, under which
@@ -693,8 +688,8 @@ operation still reaches the stores. The golden runs the column vectors pinned be
 copy and checks that it and `ColumnCrypto` open each other's blobs and refuse alike.
 
 **The keychain mechanism.** This module's key stores (the identity's four device rows and its
-backup-escrow rows, the two mesh seal keys, the heart-drop prekey blob and sidecar seal key, the
-moderation bans) reach the keychain through ``ProximityKeychainItem`` (`Support/`), FernletFoundation's
+backup-escrow rows, the two mesh seal keys, the heart-drop prekey blob and sidecar seal key) reach
+the keychain through ``ProximityKeychainItem`` (`Support/`), FernletFoundation's
 `KeychainItem` mechanism copied member for member: delete-then-add `store` with its `synchronizable:`
 and `replacing:` scopes, `load`, `loadDistinguishingAbsence`, `loadAll`,
 `loadAllDistinguishingFailure`, `delete`, `deleteReportingStatus`, `deleteAll` and
@@ -733,18 +728,17 @@ passes the host's name) and `PeerTransport`'s discovery doors take no service ty
 policies, the trust records and the peer-name policy come from the host. What still ties this module
 to Fernlet leaves in these steps:
 
-- **A0.4** moves Fernlet's features out: the heart dead-drop, presence, moderation's ban store and
-  ledger, closeness and friend state, and the sealed-backup escrow, which leaves for the App's backup
-  side. With them go nine of the 13 feature labels this module still reads from FernletCrypto's
-  registry (the dead-drop's and presence's, the ban evidence's reporter tag and the escrow's two; the
-  heart-drop and presence pair secrets leave as FernletSocial wrappers over
-  ``IdentityService/pairSecret(with:purpose:)``, under the salts `.fernlet` already declares, and
-  their tags leave with their features), the heart-drop and
-  moderation keychain services, the heart payload's format, the feature files' lines that name
-  Fernlet's domain types (the dead-drop's friend records and heart title, presence's friend records
-  and hearts capability), `ProximitySupportLayout.defaultDirectory` together with
-  `keychainService(besideHeartDrop:in:)`'s comparison against the heart-drop service, presence's
-  `FernletDate` read and the moderation clock.
+- **A0.4** moves Fernlet's remaining features out: the heart dead-drop and presence to
+  `FernletSocial`, which holds moderation's ban store, ledger and content hash, closeness, friend
+  state and the parked chat payload, and the sealed-backup escrow to the App's backup side. With them
+  go eight of the 12 feature labels this module still reads from FernletCrypto's registry (the
+  dead-drop's and presence's and the escrow's two; the heart-drop and presence pair secrets leave as
+  FernletSocial wrappers over ``IdentityService/pairSecret(with:purpose:)``, under the salts
+  `.fernlet` already declares, and their tags leave with their features), the heart-drop keychain
+  service, the heart payload's format, the feature files' lines that name Fernlet's domain types (the
+  dead-drop's friend records and heart title, presence's friend records and hearts capability),
+  `ProximitySupportLayout.defaultDirectory` together with `keychainService(besideHeartDrop:in:)`'s
+  comparison against the heart-drop service, and presence's `FernletDate` read.
 - **A0.5** splits the routed mesh manager: its feature parts leave with their `PayloadType` sends,
   their capability list and the session hearts, and with them what the mesh manager builds, decodes
   or calls (the clothing shop, the activity manager with its send hook and item-name rules, the
@@ -753,7 +747,8 @@ to Fernlet leaves in these steps:
   serializer's domains for them), the two typed capability gates and the host's trusted-peer list,
   which only features read, and the mesh manager's `FernletDate` read, the last of the
   `FernletFoundation` edge; the photo code takes the `PrivateMediaStore` edge
-  (`com.fernlet.private-media`) with it.
+  (`com.fernlet.private-media`) with it, and the JSON sidecar's `package` door closes as the sidecar
+  moves to `FernletSocial` with the activity manager and the photo-wall preferences.
 - **A0.7 and C5** make the one-to-one radio a profile-driven pair session and add its coach profile.
   The recipe-share manager, its wire types and status copy, and the typed doors only it and Fernlet's
   features go through (the envelope's typed view of its token and the coordinator's typed send)
@@ -787,9 +782,16 @@ the type's doc comment does). The doors, by what they open:
   `ProximityCoordinator.sendPayload(type:summary:payload:sealed:)` and `commitManualProximity()`, which
   presence's heart delivery and the recipe-share manager call; the profile-driven pair session's API
   replaces them.
+- **The JSON sidecar, until A0.5.** `JSONSidecarFile` (`Support/JSONSidecarFile.swift`): the type, its
+  `init(fileURL:)`, the `fileURL(in:name:)` layout and `load()`, `save(_:)` and `removeFile()`, the
+  naive best-effort idiom `FernletSocial`'s moderation, closeness and friend-state ledgers persist
+  through while ``ProximityActivityManager`` and the mesh's photo-wall preferences still use it here.
+  It moves to `FernletSocial` with them when the mesh manager's feature parts leave. Its failures
+  audit through ``ProximityAudit`` under their `sidecar.*` names, whichever module's store it serves.
 
 Rule 5 of `ProximityNamespaceBoundaryTests` lists every door, file by file, with the step that closes
-it, and fails a `package` line no row names or a row whose line is gone.
+it, and fails a `package` line no row names or a row whose line is gone; that list is the one place
+the counts live.
 
 ## Topics
 
@@ -2301,7 +2303,7 @@ by the union *before* the ledger sees it, so the cooldown is judged once rather 
 **A branch's approval is not a free pass** (§21.3's decision, taken deliberately). The 13+ age gate
 and the local block/ban re-run at the *receiving* member through ``MeshContentGates``, folded once
 from the seams that already enforce them — `isChatAllowed`, ``ProximityHost/isBlockedFingerprint(_:)``,
-``ModerationBanStore/isPeerBanned(fingerprint:)``. They are a **view filter over an unmutated union**,
+`FernletSocial`'s `ModerationBanStore.isPeerBanned(fingerprint:)`. They are a **view filter over an unmutated union**,
 the same shape as the termination downgrade: a blocked sender's message still unions everywhere, and
 a member whose age gate refuses chat simply renders no transcript — re-opening the gate reveals the
 merged records with no second merge. The photo ``MeshMergedPhoto/keyEpoch`` rides through the union
@@ -2814,14 +2816,11 @@ back out of the ledger**. A developed, departed or terminated mesh is barred fro
 Membership-event frames are internal to the module and listed above, not here: they carry signed
 records rather than app-visible state.
 
-### Presence and closeness
+### Presence
 
 - ``PresenceManager``
 - ``PresenceEpochPosture``
 - ``PresencePostureError``
-- ``FriendStateCache``
-- ``CachedFriendState``
-- ``ClosenessLedger``
 
 ### Hearts
 
@@ -2889,11 +2888,11 @@ nothing left this device. The causes are tokens: the app maps them to localized 
 
 Chat rides the **routed store** since P6 item 4: ``MeshRoutedTextBody`` sealed under a signed
 manifest with an immutable destination set. ``SessionMessageStore`` is the memory-only UI projection
-over it — a derivation in plan §10.3's total order, not an append log — and ``TempMessagePayload`` is
-the retired wire payload, **frozen and parked** (decoded, never dispatched, never emitted).
+over it — a derivation in plan §10.3's total order, not an append log — and `FernletSocial`'s
+`TempMessagePayload` is the retired wire payload, **frozen and parked** (decodable, never dispatched,
+never emitted).
 
 - ``SessionMessageStore``
-- ``TempMessagePayload``
 
 ### Group Activities
 
@@ -2907,9 +2906,9 @@ the retired wire payload, **frozen and parked** (decoded, never dispatched, neve
 
 ### Moderation
 
-- ``ModerationLedger``
-- ``ModerationBanStore``
-- ``ModerationContentHash``
+The report relay and its payload are this module's; the ledger, the ban store and the content hash
+are `FernletSocial`'s.
+
 - ``ModerationReportRelay``
 - ``ModerationReportPayload``
 - ``SignedModerationReport``

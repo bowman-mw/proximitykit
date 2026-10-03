@@ -182,11 +182,12 @@ nonisolated enum ProximityKeychainItem {
     /// ``loadAll(service:synchronizable:)`` reporting its outcome: the rows, or the `OSStatus` that
     /// stopped the enumeration from producing them.
     ///
-    /// The distinction is load-bearing where a promise is made about the row set:
-    /// `ModerationBanStore.clearPeerBansForDeleteAll` enumerates the moderation service to find every
-    /// peer-ban row to delete, and a failed enumeration must not read as "nothing to delete" under a
-    /// clean result. `errSecItemNotFound` is not such a failure: a service that holds nothing lands in
-    /// ``EnumerationResult/rows(_:)`` as `[]`.
+    /// The distinction is load-bearing where a promise is made about the row set (that every row was
+    /// found, so every row was cleared): a failed enumeration must not read as "nothing to delete"
+    /// under a clean result. No store in this module makes that promise, so
+    /// ``loadAll(service:synchronizable:)``, the backup-escrow reconcile's enumeration, which collapses
+    /// the failure on purpose, is this member's one caller. `errSecItemNotFound` is not such a failure:
+    /// a service that holds nothing lands in ``EnumerationResult/rows(_:)`` as `[]`.
     static func loadAllDistinguishingFailure(
         service: String,
         synchronizable: SynchronizableScope = .any
