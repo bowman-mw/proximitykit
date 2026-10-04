@@ -426,11 +426,27 @@ nonisolated extension ProximityNamespace {
 
         /// Whether `purpose` is one of the declared salts: the same bytes in the same role.
         ///
+        /// Bytes, never text: the labels' ``ProximityCryptographicPurpose/data`` are compared, not their
+        /// spellings, because Swift's `String` equality (and the purpose's synthesized `==` over its
+        /// `rawValue`) is Unicode canonical equivalence, under which `"K"` and the Kelvin sign
+        /// `"\u{212A}"` compare equal. A spelling that is only equivalent to a declared salt is other
+        /// bytes, which the soundness verdict never judged, so it is not declared.
+        ///
         /// - Parameter purpose: The label a caller asked the pair-secret door to derive under.
-        /// - Returns: `true` when an entry holds a value equal to `purpose`.
+        /// - Returns: `true` when an entry's label has `purpose`'s bytes and role.
         public func declares(_ purpose: ProximityCryptographicPurpose) -> Bool {
+            declaredLabel(matching: purpose) != nil
+        }
+
+        /// The declared label with `purpose`'s bytes and role, or nil: the salt the pair-secret door
+        /// derives under, so the bytes it hands HKDF are always a declared entry's.
+        ///
+        /// - Parameter purpose: The label a caller asked the pair-secret door to derive under.
+        /// - Returns: The first entry's label whose ``ProximityCryptographicPurpose/data`` and role equal
+        ///   `purpose`'s, or nil when none does.
+        func declaredLabel(matching purpose: ProximityCryptographicPurpose) -> ProximityCryptographicPurpose? {
             // R2: bounded by the entries the host declared.
-            entries.contains { $0.purpose == purpose }
+            entries.first { $0.purpose.data == purpose.data && $0.purpose.role == purpose.role }?.purpose
         }
     }
 

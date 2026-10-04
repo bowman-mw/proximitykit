@@ -401,8 +401,11 @@ public final class IdentityService {
     /// is the host's, a ``ProximityCryptographicPurpose/featureKeyDerivationSalt(_:)`` this identity's
     /// namespace declares (``ProximityNamespace/FeaturePurposes``), and so a label the namespace's
     /// soundness verdict judged with every protocol label: no pair secret is derived under a protocol
-    /// salt or under a label that collides with one. The private key never leaves this type; the call
-    /// reads and writes no keychain row and writes no audit line. Main-actor, like the identity.
+    /// salt or under a label that collides with one. A declaration matches by bytes and role, never by
+    /// Unicode text, and the door derives under the matching declared label's bytes, which equal
+    /// `purpose`'s by then: a spelling only canonically equivalent to a declared salt is refused, and
+    /// the bytes HKDF reads are always a declared entry's. The private key never leaves this type; the
+    /// call reads and writes no keychain row and writes no audit line. Main-actor, like the identity.
     ///
     /// - Parameters:
     ///   - peerKeyAgreementPublicKey: The peer's X25519 public key, parsed by the caller, who decides
@@ -417,7 +420,9 @@ public final class IdentityService {
         with peerKeyAgreementPublicKey: Curve25519.KeyAgreement.PublicKey,
         purpose: ProximityCryptographicPurpose
     ) throws -> SymmetricKey {
-        guard purpose.role == .keyDerivationSalt, purposes.feature.declares(purpose) else {
+        // From here `purpose` is the declared label, byte-equal to the caller's: HKDF reads only bytes
+        // the namespace's soundness verdict judged.
+        guard purpose.role == .keyDerivationSalt, let purpose = purposes.feature.declaredLabel(matching: purpose) else {
             throw IdentityError.undeclaredPurpose
         }
         guard let myKey = keyAgreementKey else { throw IdentityError.notProvisioned }

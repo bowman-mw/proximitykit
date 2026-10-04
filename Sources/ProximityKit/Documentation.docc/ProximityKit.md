@@ -539,9 +539,13 @@ signature transcript, the verify-only `.absent` legacy pair, a length-prefixed o
 an HKDF salt, a column seal, an AEAD prefix, the exporter label), and the feature-salt mint gives its
 one role, an HKDF salt, so a host supplies bytes and never decides how this module consumes them, and
 a label in a non-signature role verifies nothing. A feature salt reaches its one door,
-``IdentityService/pairSecret(with:purpose:)``, only when the host's namespace declares it: the door
+``IdentityService/pairSecret(with:purpose:)``, only when the host's namespace declares it, byte for
+byte in its role (``ProximityNamespace/FeaturePurposes/declares(_:)`` compares the label's bytes,
+never its text, which Swift's `String` would compare by Unicode canonical equivalence): the door
 refuses any other purpose with ``IdentityError/undeclaredPurpose`` before it reads a key, the
-protocol's own salts included. The initializer is total and records ``ProximityNamespace/soundness``
+protocol's own salts and a spelling only canonically equivalent to a declared salt included, and it
+derives under the declared label's bytes. The initializer is total and records
+``ProximityNamespace/soundness``
 (labels well-formed, distinct and prefix-free, the declared feature salts judged with the protocol's;
 radio, QR, keychain and storage values well-formed and distinct; every
 vocabulary token within the bytes its receivers accept (a mesh message within a summary title's 200,
@@ -588,17 +592,19 @@ error and its audit line, over namespaces built from literals, and the pair-secr
 refusals and its derivation.
 
 **How a host supplies it.** ``ProximityHost/proximityNamespace`` and
-``ProximityHost/proximityInstallBinding`` are two of the eight ``ProximityHost`` requirements with no
+``ProximityHost/proximityInstallBinding`` are two of the nine ``ProximityHost`` requirements with no
 default in the protocol extension (the others are the display name, the trusted peers, the trust store,
-`isBlockedFingerprint(_:)`, `blockProximityPeer(signingPublicKey:)` and the per-connection trust
-policy, ``ProximityHost/makeProximityTrustPolicy()``), and two of the four it will never default,
-because each is the host's identity or rule (the trust store and the trust policy are the others),
-so a host that leaves either out fails to compile instead of running under another app's
-identity or binding. The extension's five defaults are the in-person hearts setting, the sidecar root
-(`installation.storage.defaultDirectory`, built from the namespace), both mesh storage scopes
-(built from the namespace and the binding) and the identity a manager builds when it is handed none
-(``ProximityHost/makeProximityIdentity()``: an identity of the namespace with no provisioning
-participant; Fernlet's app answers its own factory's, which carries its sealed-backup escrow key).
+`isBlockedFingerprint(_:)`, `blockProximityPeer(signingPublicKey:)`, the per-connection trust
+policy, ``ProximityHost/makeProximityTrustPolicy()``, and the identity a manager builds when it is
+handed none, ``ProximityHost/makeProximityIdentity()``), and two of the five it will never default,
+because each is the host's identity, custody or rule (the trust store, the trust policy and the
+identity are the others), so a host that leaves either out fails to compile instead of running under
+another app's identity or binding. The identity is the host's custody: a host that keeps keys beside
+the device identity answers one carrying its ``IdentityProvisioningParticipant`` (Fernlet's app answers
+its own factory's, which carries its sealed-backup escrow key), and this module never guesses one. The
+extension's four defaults are the in-person hearts setting, the sidecar root
+(`installation.storage.defaultDirectory`, built from the namespace) and both mesh storage scopes
+(built from the namespace and the binding).
 Fernlet's values are not in this module and never will
 be: `ProximityNamespace.fernlet` and `FernletDeviceBindingAdapter` live in `FernletConnections`,
 which depends on this module, so ProximityKit cannot name them. Fernlet's app answers both in
@@ -812,8 +818,9 @@ the type's doc comment does). The doors, by what they open:
   audit through ``ProximityAudit`` under their `sidecar.*` names, whichever module's store it serves.
 
 Rule 5 of `ProximityNamespaceBoundaryTests` lists every door, file by file, with the step that closes
-it, and fails a `package` line no row names or a row whose line is gone; that list is the one place
-the counts live.
+it, and fails a `package` line no row names (any code line on which `package` is an access modifier,
+a setter's `package(set)` included, however its declaration goes on) or a row whose line is gone;
+that list is the one place the counts live.
 
 ## Topics
 

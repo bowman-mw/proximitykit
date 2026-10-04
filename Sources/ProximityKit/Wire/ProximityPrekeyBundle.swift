@@ -10,9 +10,12 @@
 // and keeps their private halves, and names this type `Bundle`, `PrekeyEntry` and `SignedPrekey`).
 //
 // Its JSON is wire: the introduction's `heartDropPrekeyBundle` key, a host's keychain blob and its
-// sealed caches all hold it, and no type name reaches the bytes, only the stored properties' keys in
-// their declared order. `FernletFeatureGoldenTests` holds the JSON to frozen literals both ways and
-// drives the introduction that gossips it.
+// sealed caches all hold it, and no type name reaches the bytes, only the stored properties' keys and
+// their values. What is frozen is that set of keys and values, never their order: every production
+// encoder is a plain `JSONEncoder()`, which writes an object's keys in no fixed order (it changes from
+// one launch to the next), every reader decodes by key, and the introduction's signature covers the
+// bytes as received. `FernletFeatureGoldenTests` holds the JSON to frozen literals both ways, written
+// with sorted keys, and drives the introduction that gossips it.
 //
 // `nonisolated` + `Sendable` against ProximityKit's `.defaultIsolation(MainActor.self)`, like every
 // wire type here, so the introduction that carries it decodes off the main actor.
@@ -35,12 +38,17 @@ import Foundation
 /// ignores, so the envelope's Ed25519 signature is its provenance and no second standalone signature
 /// can drift out of sync.
 ///
-/// **The JSON is frozen.** The bytes are the stored properties' keys, in their declared order, under
-/// `JSONEncoder`'s default date and data strategies: `bundleID`, `created`, `expires`, `keys` (each
-/// `id`, `publicKey`) and, only when present, `signedPrekey` (`id`, `publicKey`, `created`,
-/// `expires`), an additive optional key that an older peer's bundle leaves out and an older decoder
-/// ignores. No type name reaches them, so every introduction, keychain blob and sealed cache already
-/// written decodes unchanged. `FernletFeatureGoldenTests` holds them to frozen literals both ways.
+/// **The JSON is frozen as keys and values, in no particular order.** The bytes hold the stored
+/// properties' keys and their values under `JSONEncoder`'s default date and data strategies:
+/// `bundleID`, `created`, `expires`, `keys` (each `id`, `publicKey`) and, only when present,
+/// `signedPrekey` (`id`, `publicKey`, `created`, `expires`), an additive optional key that an older
+/// peer's bundle leaves out and an older decoder ignores. Their order is not part of the format: every
+/// production encoder is a plain `JSONEncoder()`, which writes an object's keys in an order that
+/// changes from one launch to the next, every reader decodes by key, and the envelope's signature
+/// covers the bytes as received, so reordering the stored properties changes no wire, and raw bytes
+/// from two encodings must never be compared. No type name reaches them, so every introduction,
+/// keychain blob and sealed cache already written decodes unchanged. `FernletFeatureGoldenTests`
+/// holds them to frozen literals both ways, written with sorted keys.
 ///
 /// `nonisolated` and `Sendable`: a pure value, decoded with the introduction off the main actor.
 public nonisolated struct ProximityPrekeyBundle: Codable, Equatable, Sendable {
