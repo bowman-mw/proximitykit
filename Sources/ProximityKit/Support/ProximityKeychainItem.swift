@@ -4,11 +4,11 @@
 // ProximityKit plan step A0.2.11 (Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md §4 A0.2, "Copied
 // into ProximityKit: … the `KeychainItem` mechanism (not Fernlet's `Account` enum)"): the generic
 // data-protection keychain accessors ProximityKit's key stores call, copied from FernletFoundation's
-// `KeychainItem` member for member. Only the mechanism came across: the ten members this module used,
-// the scope and result types they need, and the delete audit lines, which now go through
-// `ProximityAudit` under the same event names and context. Fernlet's catalogue stayed behind: the
-// `Account` names, the typed overloads, the service constants, the device sealing-key mint and the
-// update-in-place primitive nothing here calls.
+// `KeychainItem` member for member. Only the mechanism came across: ten members (the type's doc says
+// which this module's stores still call), the scope and result types they need, and the delete audit
+// lines, which now go through `ProximityAudit` under the same event names and context. Fernlet's
+// catalogue stayed behind: the `Account` names, the typed overloads, the service constants, the device
+// sealing-key mint and the update-in-place primitive nothing here calls.
 
 import Foundation
 import Security
@@ -27,11 +27,20 @@ import Security
 /// Two subtleties carried over unchanged:
 /// - The keychain treats `kSecAttrSynchronizable` as part of an item's primary key, so an
 ///   iCloud-synced item and a device-only item can coexist under one service + account as two
-///   distinct rows. ``SynchronizableScope`` targets one of them; the identity's backup-escrow
-///   reconciliation depends on telling them apart.
+///   distinct rows. ``SynchronizableScope`` targets one of them; an escrow store that keeps both
+///   variants depends on telling them apart.
 /// - ``store(_:account:service:accessibility:synchronizable:replacing:)`` is delete-then-add, and its
 ///   `replacing` scope decides which variant the delete removes: a narrow scope when promoting an
 ///   escrow item, so a genuine key that just synced in is not clobbered.
+///
+/// **Members this module no longer calls stay.** ProximityKit's own stores (the identity's four
+/// device rows and the two mesh seal keys) use the reads that distinguish absence, `store` under its
+/// default scopes and the whole-service deletes. The nil-collapsing ``load(account:service:synchronizable:)``,
+/// the two enumerations, the `.synced` / `.local` scopes and a narrow `replacing:` have no caller
+/// here: they served the sealed-backup escrow, which is its host's (Fernlet's `SealedBackupEscrowKey`,
+/// in the app, through FernletFoundation's original). They stay because this type is that original
+/// copied member for member, and `ProximityNamespaceGoldenTests` holds every query dictionary to the
+/// original's, so the two keep reading, listing and clearing each other's rows alike.
 ///
 /// ``delete(account:service:synchronizable:)`` and ``deleteAll(service:)`` audit a failed delete
 /// through ``ProximityAudit`` as `keychain.delete.failed` (context `service`, `account`, `status`) and
@@ -48,7 +57,8 @@ nonisolated enum ProximityKeychainItem {
     ///
     /// The default `.any` matches either (`kSecAttrSynchronizableAny`). `.synced` / `.local` tell an
     /// iCloud-Keychain-replicated item from a device-only one when both can exist under the same
-    /// service + account, which the identity's backup-escrow reconciliation relies on.
+    /// service + account, which an escrow reconciliation relies on; no store in this module passes
+    /// either (see the type's doc for why they stay).
     enum SynchronizableScope {
         /// Match either variant (`kSecAttrSynchronizableAny`), the default.
         case any
@@ -99,9 +109,10 @@ nonisolated enum ProximityKeychainItem {
     // MARK: - Reads and writes
 
     /// Stores `data`, first removing any colliding item. `replacing` controls which synchronizable
-    /// variant is removed before the add: the default `.any` overwrites whatever is there; `.local`
-    /// (or `.synced`) removes only that variant, for promoting a device-only escrow item without
-    /// removing a genuine key that just synced in under the same account.
+    /// variant is removed before the add: the default `.any` overwrites whatever is there, and every
+    /// store in this module passes it; `.local` (or `.synced`) removes only that variant, for promoting
+    /// a device-only escrow item without removing a genuine key that just synced in under the same
+    /// account.
     ///
     /// - Returns: the `SecItemAdd` status (`errSecSuccess` on success). Not discardable (R7): a failed
     ///   add means the secret was never persisted, and every caller is minting key material whose
@@ -162,14 +173,15 @@ nonisolated enum ProximityKeychainItem {
     }
 
     /// Enumerates every generic-password item under `service` (optionally restricted to a
-    /// synchronizable scope), returning each item's account + data. Used by the content-addressed
-    /// backup-escrow store, whose keys live at accounts derived from their own public keys, so the
-    /// reconcile path enumerates to discover the full set. Query `.synced` and `.local` separately to
-    /// learn each row's sync status. Returns `[]` on no match or error.
+    /// synchronizable scope), returning each item's account + data. Written for a content-addressed
+    /// escrow store, whose keys live at accounts derived from their own public keys, so its reconcile
+    /// path enumerates to discover the full set; no store in this module enumerates (see the type's
+    /// doc for why it stays). Query `.synced` and `.local` separately to learn each row's sync status.
+    /// Returns `[]` on no match or error.
     ///
     /// - Important: the error collapse is the whole difference from
     ///   ``loadAllDistinguishingFailure(service:synchronizable:)``, and it is only safe where an
-    ///   unreadable service and an empty one warrant the same behavior (the escrow reconcile finds
+    ///   unreadable service and an empty one warrant the same behavior (an escrow reconcile finds
     ///   nothing to reconcile and retries later). A caller that promises something about the row set
     ///   must use the distinguishing variant.
     static func loadAll(service: String, synchronizable: SynchronizableScope = .any) -> [(account: String, data: Data)] {
@@ -184,10 +196,10 @@ nonisolated enum ProximityKeychainItem {
     ///
     /// The distinction is load-bearing where a promise is made about the row set (that every row was
     /// found, so every row was cleared): a failed enumeration must not read as "nothing to delete"
-    /// under a clean result. No store in this module makes that promise, so
-    /// ``loadAll(service:synchronizable:)``, the backup-escrow reconcile's enumeration, which collapses
-    /// the failure on purpose, is this member's one caller. `errSecItemNotFound` is not such a failure:
-    /// a service that holds nothing lands in ``EnumerationResult/rows(_:)`` as `[]`.
+    /// under a clean result. No store in this module makes that promise or enumerates at all, so
+    /// ``loadAll(service:synchronizable:)``, which collapses the failure on purpose, is this member's one
+    /// caller, and has none here itself. `errSecItemNotFound` is not such a failure: a service that
+    /// holds nothing lands in ``EnumerationResult/rows(_:)`` as `[]`.
     static func loadAllDistinguishingFailure(
         service: String,
         synchronizable: SynchronizableScope = .any

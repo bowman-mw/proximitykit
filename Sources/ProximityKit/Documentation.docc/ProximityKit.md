@@ -377,8 +377,10 @@ through too; see "Package doors"), while data of record loads through ``Protecte
 classifies read failures so a locked-device read can never be mistaken for "empty" and overwrite
 real data: the heart ledger here, and `FernletSocial`'s three heart-drop sidecars, sealed at rest
 through its ``SidecarSeal`` hooks by that module's `HeartDropSidecarSeal`. Key
-material lives in the keychain, ThisDeviceOnly, except the deliberately-synced backup-escrow key
-whose content-addressed slot lifecycle ``IdentityService`` reconciles non-silently.
+material lives in the keychain, ThisDeviceOnly. Keys a host keeps beside the identity's rows, under
+its keychain service, are the host's: its identity's ``IdentityProvisioningParticipant`` accounts for
+them at fixed points of provisioning and wipe (Fernlet's is its app's sealed-backup escrow key, the
+one deliberately synced key), and this module keeps none.
 
 Where those sidecars live is the host's call, not a constant. EVERY device-local sidecar in this
 module hangs off ``ProximityHost/proximitySupportDirectory`` — the friend photo wall's index and
@@ -485,9 +487,9 @@ digest's record kinds, the routed type registry's routed types and the mesh engi
 The mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
 `ProximityCapability` cases until plan steps A0.5 and A0.7 move them.
 Some such strings stay outside it until
-a later step (see "What is left for A0.4 onward" below): the 6 feature labels this module reads from
-FernletCrypto's registry (the sealed-backup escrow's two until A0.4, the activities' and the
-moderation report's four until A0.5). The heart dead-drop's keychain service and the
+a later step (see "What is left for A0.4 onward" below): the 4 feature labels this module reads from
+FernletCrypto's registry, the activities' and the moderation report's, until A0.5 (the sealed-backup
+escrow's two are the app's, with its escrow). The heart dead-drop's keychain service and the
 moderation ban store's are `FernletSocial`'s, and so is presence, with its labels and the heart
 payload format it checks. `ProximityNamespaceBoundaryTests`
 allowlists each feature-label read, each literal that spells `fernlet` and each line that still
@@ -561,14 +563,12 @@ auditing `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound` or
 `recipe.quic.namespaceUnsound`. Each line's context names the door (`at`: `provision`,
 `groupKeyWrap` or `start`), the violation count and the first violation's case name, never a field
 or a value. The pair-secret door needs the provisioned key-agreement key, so under an unsound
-namespace it derives nothing either. Nothing else reads the verdict: the identity's backup-escrow API
-(``IdentityService/provisionBackupEscrowKeyForSealing()`` and its loads, derivations, reconcile and
-adoption) needs no provisioned key and checks none, because it is Fernlet's sealed-backup feature, a
-feature path that leaves at A0.4, whose callers provision first. Each manager also compares the
-namespace of an identity handed to it through its `identity:` seam (no shipping caller passes one)
-with its own: on a mismatch it still constructs, audits `mesh.identity.namespaceMismatch`,
-`presence.identity.namespaceMismatch` or `recipeShare.identity.namespaceMismatch` (at
-`construction`), and refuses with the same event (at `start`), first thing, every start of its radio
+namespace it derives nothing either, and no provisioning participant is called. Nothing else reads
+the verdict. Each manager also compares the namespace of the identity it holds with its own, one
+handed to it through its `identity:` seam (no shipping caller passes one) or, handed none, the one its
+host's ``ProximityHost/makeProximityIdentity()`` builds: on a mismatch it still constructs, audits
+`mesh.identity.namespaceMismatch`, `presence.identity.namespaceMismatch` or
+`recipeShare.identity.namespaceMismatch` (at `construction`), and refuses with the same event (at `start`), first thing, every start of its radio
 and, for the mesh manager, every founding a caller can begin without one
 (``MeshNetworkManager/startNewMesh(name:)`` and its DEBUG harness's founder ledger; the promotion at a
 first commit needs a peer the radio linked), so that identity founds no mesh and links no peer.
@@ -589,12 +589,15 @@ default in the protocol extension (the others are the display name, the trusted 
 policy, ``ProximityHost/makeProximityTrustPolicy()``), and two of the four it will never default,
 because each is the host's identity or rule (the trust store and the trust policy are the others),
 so a host that leaves either out fails to compile instead of running under another app's
-identity or binding. The extension's four defaults are the in-person hearts setting, the sidecar root
-(`installation.storage.defaultDirectory`, built from the namespace) and both mesh storage scopes
-(built from the namespace and the binding). Fernlet's values are not in this module and never will
+identity or binding. The extension's five defaults are the in-person hearts setting, the sidecar root
+(`installation.storage.defaultDirectory`, built from the namespace), both mesh storage scopes
+(built from the namespace and the binding) and the identity a manager builds when it is handed none
+(``ProximityHost/makeProximityIdentity()``: an identity of the namespace with no provisioning
+participant; Fernlet's app answers its own factory's, which carries its sealed-backup escrow key).
+Fernlet's values are not in this module and never will
 be: `ProximityNamespace.fernlet` and `FernletDeviceBindingAdapter` live in `FernletConnections`,
 which depends on this module, so ProximityKit cannot name them. Fernlet's app answers both in
-`ProximityHostAdapter.swift`, as eleven of the test target's sixteen doubles do; the other five,
+`ProximityHostAdapter.swift`, as twelve of the test target's seventeen doubles do; the other five,
 `ProximityNamespaceGoldenTests`' three hosts and `ProximityVocabularyGoldenTests`' two, take the
 namespace, and two of the golden's hosts the binding, from the cell that builds them, so a cell can
 run one under another app's namespace, a namespace with some of Fernlet's groups replaced, or a
@@ -606,8 +609,8 @@ hand it:
 
 | Reader | How it reads the namespace |
 | --- | --- |
-| ``MeshNetworkManager``, ``ProximityRecipeShareManager``, and `FernletSocial`'s `PresenceManager` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their default identity and their radio from it, and hand it, or its `family.purposes`, to every reader they call. An identity handed to them is compared with it once, in `init`, and one of another namespace never starts their radio. |
-| ``IdentityService`` | Takes it in ``IdentityService/init(namespace:keychainService:)`` (a `nil` service means the namespace's identity service) and keeps it with its ``IdentityService/purposes``: it signs, seals, opens and wraps under its own labels and keeps its four device rows under the namespace's accounts. Its ``ProximityCryptographicPurpose`` overloads of `sign` and `verify` treat a label by its role, and `sign` refuses a verify-only or non-signature label. ``IdentityService/pairSecret(with:purpose:)`` derives only under a feature salt its namespace's family declares (`family.purposes.feature`). Under an unsound namespace it refuses to provision and to wrap a group key, and so derives no pair secret. |
+| ``MeshNetworkManager``, ``ProximityRecipeShareManager``, and `FernletSocial`'s `PresenceManager` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their radio from it, take their default identity from ``ProximityHost/makeProximityIdentity()``, and hand the namespace, or its `family.purposes`, to every reader they call. The identity they hold, handed to them or built by their host, is compared with it once, in `init`, and one of another namespace never starts their radio. |
+| ``IdentityService`` | Takes it in ``IdentityService/init(namespace:keychainService:provisioningParticipant:)`` (a `nil` service means the namespace's identity service) and keeps it with its ``IdentityService/purposes``: it signs, seals, opens and wraps under its own labels and keeps its four device rows under the namespace's accounts. Its ``ProximityCryptographicPurpose`` overloads of `sign` and `verify` treat a label by its role, and `sign` refuses a verify-only or non-signature label. ``IdentityService/pairSecret(with:purpose:)`` derives only under a feature salt its namespace's family declares (`family.purposes.feature`). Under an unsound namespace it refuses to provision and to wrap a group key, and so derives no pair secret. |
 | Builders: envelopes, admission tokens, membership records and messages, the removal quorum, key advertisements, routed items, chunks and receipts, the verify QR | Sign under their signing identity's ``IdentityService/purposes``. |
 | Verifiers: the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
 | The membership digest and its holders: `MeshInventoryDigest`, `MeshMembershipRecordVerifier`, `MeshLedgerAdoption` | Take the whole family (`family:`, or the adoption's `in family:`, with no default), because the digest needs its record kinds beside its labels: every record is tagged with its kind's token from `family.vocabulary.membershipRecordKinds` (`MeshMembershipRecordKind.token(in:)`). The verifier keeps the family as its copy, so its labels and record kinds come from one namespace; an identity's signed digest uses its own namespace's. |
@@ -651,13 +654,14 @@ each read where its feature reads it, the heart-drop and presence pair secrets a
 evidence's reporter tag and a reported artwork's content hash, a frozen sealed drop and sealed sidecar opened
 through their readers, the prekey bundle's JSON and the identity introduction that gossips it, the
 features' keychain and file names and persisted shapes, presence's advertisement and the
-sealed-backup escrow's provisioning cases, the two feature salts `.fernlet` declares, under which
+sealed-backup escrow's provisioning cases (over the identity the app's factory builds, which carries
+the escrow as its provisioning participant), the two feature salts `.fernlet` declares, under which
 the pair-secret door derives the heart-drop and presence pair secrets' known answers, and the
 heart-eligibility predicate's three legs as presence's gate answers them.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
-named only on the code lines that read the feature labels leaving with their features (A0.4) or with
-the mesh manager's feature parts (A0.5); every remaining string literal that spells `fernlet` is on
+named only on the code lines that read the feature labels leaving with the mesh manager's feature
+parts (A0.5); every remaining string literal that spells `fernlet` is on
 an exact allowlist that names why it is still here and the plan step that removes it;
 FernletDomainModel's `PayloadType`, `ProximityCapability`, `ProximityMode`, `ItemNameModeration`,
 `ProximityTrustedPeerRecord`, `TrainerAuditEvent` and `ConnectionSessionLog` are named only on an
@@ -690,13 +694,17 @@ cache and its task-local test seam stay the only ones, and an override flipped i
 operation still reaches the stores. The golden runs the column vectors pinned before A0.2 through the
 copy and checks that it and `ColumnCrypto` open each other's blobs and refuse alike.
 
-**The keychain mechanism.** This module's key stores (the identity's four device rows and its
-backup-escrow rows, and the two mesh seal keys) reach
+**The keychain mechanism.** This module's key stores (the identity's four device rows and the two
+mesh seal keys) reach
 the keychain through ``ProximityKeychainItem`` (`Support/`), FernletFoundation's
 `KeychainItem` mechanism copied member for member: delete-then-add `store` with its `synchronizable:`
 and `replacing:` scopes, `load`, `loadDistinguishingAbsence`, `loadAll`,
 `loadAllDistinguishingFailure`, `delete`, `deleteReportingStatus`, `deleteAll` and
-`deleteAllReportingStatus`, with the same empty-name guards and status handling. Each query
+`deleteAllReportingStatus`, with the same empty-name guards and status handling. The stores here call
+the reads that distinguish absence, `store` under its default scopes and the whole-service deletes;
+the nil-collapsing read, the enumerations, the `.synced` / `.local` scopes and a narrow `replacing:`
+have no caller in this module (they served the sealed-backup escrow, now its host's) and stay member
+for member. Each query
 dictionary is built in one place and is FernletFoundation's for the same call, so every row written
 before the copy reads back unchanged and a host may still read or clear these services with its own
 accessor, as Fernlet's tests do. Fernlet's catalogue stayed behind (its `Account` names, typed
@@ -731,9 +739,9 @@ passes the host's name) and `PeerTransport`'s discovery doors take no service ty
 policies, the trust records and the peer-name policy come from the host. What still ties this module
 to Fernlet leaves in these steps:
 
-- **A0.4** moves Fernlet's remaining features out: the sealed-backup escrow to the App's backup
-  side, and with it the escrow's two of the 6 feature labels this module still reads from
-  FernletCrypto's registry. `FernletSocial` holds A0.4's other features: presence (its
+- **A0.4** leaves none of its features here. The sealed-backup escrow is the app's
+  (`SealedBackupEscrowKey`, the provisioning participant every identity the app builds carries, with
+  the escrow's two feature labels), and `FernletSocial` holds A0.4's other features: presence (its
   manager, over the presence radio's `package` doors, and its pair secret and tag, the pair secret a
   wrapper over ``IdentityService/pairSecret(with:purpose:)`` under the salt `.fernlet` declares), the
   heart dead-drop (with its heart-drop derivations, its keychain service and the mesh stores' services
@@ -816,6 +824,7 @@ the counts live.
 ### Identity and signing
 
 - ``IdentityService``
+- ``IdentityProvisioningParticipant``
 - ``IdentityError``
 - ``ProximityKeychainItem``
 - ``ReplayCache``

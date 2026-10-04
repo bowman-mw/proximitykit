@@ -24,14 +24,13 @@
 /// Each door throws ``ProximityNamespaceError`` carrying every violation, exactly as
 /// ``ProximityNamespace/soundness`` records them, and writes nothing else.
 ///
-/// **Nothing else reads the verdict.** The identity's backup-escrow API
-/// (``IdentityService/provisionBackupEscrowKeyForSealing()``,
-/// ``IdentityService/loadBackupEscrowKeyForOpen()``, the sealed-backup key derivations and the escrow
-/// reconcile and adoption) needs no provisioned key and checks none: it is Fernlet's sealed-backup
-/// feature, a feature path that leaves this module in plan step A0.4, and Fernlet's backup paths call
-/// ``IdentityService/ensureProvisioned()`` before it. Nor do the paths that use no identity key: the
-/// mesh manager's launch restore opens, and may re-seal, the host's sealed session context under its
-/// storage scope, and the presence manager mints its posture before its radio's door refuses.
+/// **Nothing else reads the verdict.** An identity's provisioning participant
+/// (``IdentityProvisioningParticipant``) is called only from inside
+/// ``IdentityService/ensureProvisioned()``, after its refusal, and from ``IdentityService/wipe()``, so
+/// under an unsound namespace no participant is told of a mint. Nor do the paths that use no identity
+/// key read it: the mesh manager's launch restore opens, and may re-seal, the host's sealed session
+/// context under its storage scope, and the presence manager mints its posture before its radio's door
+/// refuses.
 ///
 /// **It reads the stored verdict, nothing else.** No rule runs again here: the namespace judged itself
 /// once, when it was built, and the identity and the radios keep that verdict beside the values they
@@ -43,7 +42,9 @@
 /// what.
 ///
 /// **One namespace per manager.** The mesh, presence and recipe-share managers compare the namespace of
-/// an identity they are handed (their `identity:` seam, which no shipping caller uses) with their own.
+/// the identity they hold with their own: one they are handed (their `identity:` seam, which no
+/// shipping caller uses) or, handed none, the one their host's ``ProximityHost/makeProximityIdentity()``
+/// builds.
 /// On a mismatch a manager still constructs, as it does when provisioning fails, but audits
 /// `<area>.identity.namespaceMismatch` (at `construction`) and refuses with the same event (at
 /// `start`), first thing, every start of its radio and, for the mesh manager, both foundings of a mesh

@@ -147,8 +147,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     @ObservationIgnored private unowned let store: any ProximityHost
     /// The host's protocol identity, read once from ``store`` at construction and kept as this
     /// manager's own copy (ProximityKit plan step A0.2.3), so no later read reaches back to the
-    /// host. The default identity is built from it, and since A0.2.7 so is the radio, which reads
-    /// its service type, ALPN and log subsystem off it. `nonisolated`: inert `Sendable` value data.
+    /// host. The default identity, the host's ``ProximityHost/makeProximityIdentity()``, is checked
+    /// against it, and since A0.2.7 the radio is built from it, which reads its service type, ALPN and
+    /// log subsystem off it. `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The radio this manager drives. Built once, at construction, because several of this
     /// manager's decisions (the inbound gate, the pause flag, a discovery callback) are reachable
@@ -156,8 +157,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// conformer through the init seam and exercise them with no Bonjour anywhere.
     @ObservationIgnored private let session: any RecipeShareRadioSession
     @ObservationIgnored private let identity: IdentityService
-    /// Whether ``identity`` is of ``namespace``, decided once at `init`. False only when the
-    /// `identity:` seam handed this manager an identity of another namespace: the manager still
+    /// Whether ``identity`` is of ``namespace``, decided once at `init`. False only when the identity
+    /// this manager holds, handed in through the `identity:` seam or answered by the host's
+    /// ``ProximityHost/makeProximityIdentity()``, is of another namespace: the manager still
     /// constructs, as it does when provisioning fails, and ``start()`` refuses every start of the radio
     /// (`recipeShare.identity.namespaceMismatch`), so nothing is advertised under two namespaces.
     @ObservationIgnored private let identityIsOfNamespace: Bool
@@ -213,14 +215,14 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// `@MainActor` and a main-actor type cannot be a default-argument value.
     ///
     /// `identity` is the same seam `PresenceManager` and `MeshNetworkManager` already take (owner-calls
-    /// item 4c, 2026-09-22): nil is this device's own identity, built from the host's
-    /// ``ProximityHost/proximityNamespace`` on its production keychain service, and a test passes
-    /// one on a service of its own. Without it a test that exercised
-    /// ``wipeIdentityForDeleteAll()`` would have wiped the TEST HOST's real identity — the test
-    /// bundle runs inside the app on that Simulator and shares its keychain — so the wipe's EFFECT
-    /// was untestable here and only its existence was pinned. An identity of another namespace than
-    /// the host's is refused: the manager constructs, audits `recipeShare.identity.namespaceMismatch`
-    /// and never starts its radio.
+    /// item 4c, 2026-09-22): nil is this device's own identity, the host's
+    /// ``ProximityHost/makeProximityIdentity()``, under its ``ProximityHost/proximityNamespace`` on its
+    /// production keychain service, and a test passes one on a service of its own. Without it a test
+    /// that exercised ``wipeIdentityForDeleteAll()`` would have wiped the TEST HOST's real identity —
+    /// the test bundle runs inside the app on that Simulator and shares its keychain — so the wipe's
+    /// EFFECT was untestable here and only its existence was pinned. An identity of another namespace
+    /// than the host's is refused: the manager constructs, audits
+    /// `recipeShare.identity.namespaceMismatch` and never starts its radio.
     init(
         store: any ProximityHost,
         makeSession: (() -> any RecipeShareRadioSession)?,
@@ -230,7 +232,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         let namespace = store.proximityNamespace
         self.namespace = namespace
         self.session = makeSession?() ?? NetworkRecipeShareSession(namespace: namespace)
-        let id = injected ?? IdentityService(namespace: namespace)
+        let id = injected ?? store.makeProximityIdentity()
         self.identityIsOfNamespace = ProximityNamespaceGate.checkIdentity(
             id, isOf: namespace, event: "recipeShare.identity.namespaceMismatch")
         do {

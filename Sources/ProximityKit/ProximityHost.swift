@@ -99,28 +99,29 @@ public protocol ProximityHost: AnyObject {
     /// the routed type registry and the mesh engine's own frames; the mesh features' payload and
     /// capability tokens are still Fernlet's cases until plan steps A0.5 and A0.7 move them.
     /// Some such strings stay outside it until a later step: the feature labels this module reads from
-    /// FernletCrypto's registry (the sealed-backup escrow's until A0.4, the activities' and the
-    /// moderation report's until A0.5); the heart dead-drop's keychain service and the moderation ban
-    /// store's are FernletSocial's, which also names presence's epoch-tag prefix.
+    /// FernletCrypto's registry (the activities' and the moderation report's, until A0.5); the heart
+    /// dead-drop's keychain service and the moderation ban store's are FernletSocial's, which also names
+    /// presence's epoch-tag prefix, and the sealed-backup escrow's labels are its app's.
     /// `ProximityNamespaceBoundaryTests` allowlists each feature-label read, each literal that spells
     /// `fernlet` and each line that still names one of Fernlet's domain types, with the step that
     /// removes it.
     ///
     /// **Deliberately no default.** The extension below hands a host that carries no value of its
-    /// own the in-person hearts setting, the sidecar root and the two storage scopes; it hands out no
-    /// namespace, and never will. ProximityKit holds no namespace instance and keeps no global, so a
-    /// host that supplies none gets a compile error, never another app's identity. Fernlet's app
-    /// supplies `ProximityNamespace.fernlet` (the `FernletConnections` module) in
-    /// `ProximityHostAdapter.swift`, as eleven of the test target's sixteen doubles do; the other
+    /// own the in-person hearts setting, the sidecar root, the two storage scopes and the default
+    /// identity; it hands out no namespace, and never will. ProximityKit holds no namespace instance
+    /// and keeps no global, so a host that supplies none gets a compile error, never another app's
+    /// identity. Fernlet's app supplies `ProximityNamespace.fernlet` (the `FernletConnections` module)
+    /// in `ProximityHostAdapter.swift`, as twelve of the test target's seventeen doubles do; the other
     /// five, `ProximityNamespaceGoldenTests`' three hosts and `ProximityVocabularyGoldenTests`' two,
     /// take theirs from the cell that builds them: another app's, or Fernlet's with some of its groups
     /// replaced, in the cells that test one.
     ///
     /// Read once, at construction: ``MeshNetworkManager`` and ``ProximityRecipeShareManager`` here,
-    /// and FernletSocial's `PresenceManager`, each keep their own copy and build the identity and the
-    /// radio they own by default from it, so no later read reaches back to the host. The
-    /// extension below also builds this host's default sidecar root and both storage scopes from it,
-    /// and every scope carries it to the store that reads its names.
+    /// and FernletSocial's `PresenceManager`, each keep their own copy, build the radio they own by
+    /// default from it and check against it the identity they own (``makeProximityIdentity()`` by
+    /// default), so no later read reaches back to the host. The extension below also builds this
+    /// host's default sidecar root, both storage scopes and the default identity from it, and every
+    /// scope carries it to the store that reads its names.
     var proximityNamespace: ProximityNamespace { get }
 
     /// The host's install binding: the per-install bytes the two
@@ -155,6 +156,24 @@ public protocol ProximityHost: AnyObject {
     /// the store's `ProximityTrustVault`) in `ProximityHostAdapter.swift`, and every test double
     /// answers the same over its own vault.
     func makeProximityTrustPolicy() -> any ProximityTrustPolicy
+
+    /// A fresh device identity for a manager that was handed none: the identity
+    /// ``MeshNetworkManager``, ``ProximityRecipeShareManager`` and FernletSocial's `PresenceManager`
+    /// build by default, once each, at construction.
+    ///
+    /// **The host's custody.** A host that keeps keys of its own beside the device identity's rows
+    /// answers an identity that carries its ``IdentityProvisioningParticipant``, so every identity a
+    /// manager holds provisions under that host's rules. Fernlet's app answers its factory's identity,
+    /// whose participant is its sealed-backup escrow key, in `ProximityHostAdapter.swift`. The default
+    /// below builds `IdentityService(namespace: proximityNamespace)`: this device's identity under the
+    /// host's namespace, with no participant, which adopts or mints the device keys and nothing else,
+    /// and which every test double takes.
+    ///
+    /// A new value per call, built from the host's values and reading and writing nothing until the
+    /// manager provisions it. Each manager checks it against its namespace
+    /// (``ProximityNamespaceGate/checkIdentity(_:isOf:event:)``) before anything else: an identity of
+    /// another namespace makes it audit `<area>.identity.namespaceMismatch` and start no radio.
+    func makeProximityIdentity() -> IdentityService
 }
 
 public extension ProximityHost {
@@ -218,4 +237,8 @@ public extension ProximityHost {
     /// step A0.2.8; for Fernlet `Application Support/Fernlet`, unchanged). The app's `FernletStore`
     /// overrides it with a per-instance root.
     var proximitySupportDirectory: URL { proximityNamespace.installation.storage.defaultDirectory }
+    /// Default for hosts that keep no keys beside the device identity (test doubles): this device's
+    /// identity under the host's namespace, on the namespace's identity service, with no provisioning
+    /// participant. The app's `FernletStore` overrides it with its factory's identity.
+    func makeProximityIdentity() -> IdentityService { IdentityService(namespace: proximityNamespace) }
 }

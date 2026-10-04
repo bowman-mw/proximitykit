@@ -342,8 +342,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private unowned let store: any ProximityHost
     /// The host's protocol identity, read once from ``store`` at construction and kept as this
     /// manager's own copy (ProximityKit plan step A0.2.3), so no later read reaches back to the
-    /// host. The default identity is built from it, and since step A0.2.4 its purposes are what the
-    /// membership verifiers, the ledger adoption and the admission-token check run under; since
+    /// host. The default identity, the host's ``ProximityHost/makeProximityIdentity()``, is checked
+    /// against it, and since step A0.2.4 its purposes are what the membership verifiers, the ledger adoption and the admission-token check run under; since
     /// A0.2.5 the six routed verifiers too, the QR ceremony's scan, response and check, and the
     /// channel introduction this manager signs as the transport's ``MeshIntroductionAuthority``;
     /// since A0.2.6 the routed item it seals and hashes, the chunk and receipt ids its replay window
@@ -375,8 +375,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// has no other entry point.
     @ObservationIgnored private var transportHandlers = MeshTransportHandlers()
     @ObservationIgnored private let identity: IdentityService
-    /// Whether ``identity`` is of ``namespace``, decided once at `init`. False only when the
-    /// `identity:` seam handed this manager an identity of another namespace: the manager still
+    /// Whether ``identity`` is of ``namespace``, decided once at `init`. False only when the identity
+    /// this manager holds, handed in through the `identity:` seam or answered by the host's
+    /// ``ProximityHost/makeProximityIdentity()``, is of another namespace: the manager still
     /// constructs, as it does when provisioning fails, and refuses with `mesh.identity.namespaceMismatch`,
     /// first thing, every start of the radio (`startSearching()`) and both foundings a caller can begin
     /// without one (`startNewMesh(name:)` and the DEBUG harness's `armFounderLedgerForHarness()`); the
@@ -653,15 +654,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// gap where manager-level invite behaviour could not be asserted at tier 1 at all.
     ///
     /// `identity` is the same kind of seam for the device's own keys, and exists for one reason: a
-    /// device has exactly ONE proximity identity, so the default ``IdentityService`` — built from the
-    /// host's ``ProximityHost/proximityNamespace`` — is keyed on its one process-wide keychain
-    /// service, and two managers built in a single test process are therefore
-    /// literally the same device, sharing a fingerprint. That makes a two-node tier-1 scenario
-    /// (P4 item 2's wire exchange, `MeshMergeExchangeTests`) impossible to state honestly. Passing a
-    /// distinctly-keyed identity is the only thing that separates them. Nothing in shipping code
-    /// passes it: the public initializer above cannot, so a Release build always takes this device's
-    /// real identity. An identity of another namespace than the host's is refused: the manager
-    /// constructs, audits `mesh.identity.namespaceMismatch` and never starts its radio or founds a mesh.
+    /// device has exactly ONE proximity identity, so the default ``IdentityService`` — the host's
+    /// ``ProximityHost/makeProximityIdentity()``, under its ``ProximityHost/proximityNamespace`` — is
+    /// keyed on its one process-wide keychain service, and two managers built in a single test
+    /// process are therefore literally the same device, sharing a fingerprint. That makes a two-node
+    /// tier-1 scenario (P4 item 2's wire exchange, `MeshMergeExchangeTests`) impossible to state
+    /// honestly. Passing a distinctly-keyed identity is the only thing that separates them. Nothing in
+    /// shipping code passes it: the public initializer above cannot, so a Release build always takes
+    /// this device's real identity. An identity of another namespace than the host's is refused: the
+    /// manager constructs, audits `mesh.identity.namespaceMismatch` and never starts its radio or
+    /// founds a mesh.
     ///
     /// `heldPhotoKeys` is the third seam, for the pending corpus's at-rest key: nil (every shipping
     /// path) takes the device-bound keychain row; a test passes an in-memory or wrong key to reach
@@ -670,7 +672,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameters:
     ///   - store: The host this manager's roots, vaults and namespace hang off.
     ///   - transport: The radio, or nil for the one this build selects, built from the host's namespace.
-    ///   - identity: The device identity, or nil for this device's own under the host's namespace.
+    ///   - identity: The device identity, or nil for the host's ``ProximityHost/makeProximityIdentity()``.
     ///   - heldPhotoKeys: The pending corpus's key provider, or nil for the keychain row.
     init(
         store: any ProximityHost,
@@ -683,7 +685,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         self.namespace = namespace
         self.hostRoutedTypeRegistry = MeshRoutedTypeRegistry.increment1(namespace.family.vocabulary.routedTypes)
         self.transport = transport ?? NetworkMeshSession(namespace: namespace)
-        let id = identity ?? IdentityService(namespace: namespace)
+        let id = identity ?? store.makeProximityIdentity()
         self.identityIsOfNamespace = ProximityNamespaceGate.checkIdentity(
             id, isOf: namespace, event: "mesh.identity.namespaceMismatch")
         // Fail-soft: the manager still constructs, but a failed provisioning is NAMED (R7) —
@@ -14638,9 +14640,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     // MARK: - Delete-all
 
     /// Delete-all seam (bitchat adoptions Increment 1, Docs/PrivacyWipeCoverage.md): wipes the
-    /// proximity identity keypairs + backup-escrow rows (this manager owns one of the three live
-    /// `IdentityService` caches — presence and recipe share hold the others over the same
-    /// keychain rows) and drops the mesh photo cache's in-memory media key so a post-wipe write
+    /// proximity identity keypairs + every row its host keeps beside them under the identity's
+    /// service (Fernlet's backup-escrow rows), with its participant's in-memory key (this manager owns
+    /// one of the three live `IdentityService` caches — presence and recipe share hold the others over
+    /// the same keychain rows) and drops the mesh photo cache's in-memory media key so a post-wipe write
     /// can't use the orphaned key. Breaks every trust relationship on purpose.
     ///
     /// **The MC peer-identity archive leg RETIRED here on 2026-09-21** — decision D-4.4, the

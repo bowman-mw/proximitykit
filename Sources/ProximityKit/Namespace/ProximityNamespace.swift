@@ -42,11 +42,10 @@ import Foundation
 /// mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
 /// `ProximityCapability` cases until plan steps A0.5 and A0.7 move them; for Fernlet the two
 /// spellings are equal, which `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
-/// until their features leave: the 6 feature labels ProximityKit reads from FernletCrypto's registry
-/// (the sealed-backup escrow's two at plan step A0.4, the activities' and the moderation report's
-/// four at A0.5); the heart dead-drop's and the moderation ban store's keychain services are
-/// FernletSocial's, and so is presence, whose pair secret derives under a feature salt its host's
-/// family declares.
+/// until their features leave: the 4 feature labels ProximityKit reads from FernletCrypto's registry,
+/// the activities' and the moderation report's, until plan step A0.5; the heart dead-drop's and the
+/// moderation ban store's keychain services are FernletSocial's, and so is presence, whose pair secret
+/// derives under a feature salt its host's family declares.
 /// `ProximityNamespaceBoundaryTests` keeps ProximityKit building no namespace, group or purpose
 /// outside `Namespace/`, and holds what is left of Fernlet in it (the registry's feature labels, the
 /// `fernlet` literals, Fernlet's domain types) and its `package` doors to exact per-file lists, each
@@ -63,11 +62,10 @@ import Foundation
 /// advertises, each with a named audit event
 /// (`identity.namespace.unsound`, `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound`,
 /// `recipe.quic.namespaceUnsound`) whose context names the door, the violation count and the first
-/// violation's case, never a value. Nothing else reads the verdict: the identity's backup-escrow
-/// API, Fernlet's sealed-backup feature until plan step A0.4, needs no provisioned key and checks
-/// none. A manager handed an identity of another namespace refuses every start of its radio, and the
-/// mesh manager every founding of a mesh, before it signs, seals or advertises anything, so that
-/// identity founds no mesh and links no peer.
+/// violation's case, never a value. Nothing else reads the verdict. A manager whose identity is of
+/// another namespace, handed to it or built by its host's ``ProximityHost/makeProximityIdentity()``,
+/// refuses every start of its radio, and the mesh manager every founding of a mesh, before it signs,
+/// seals or advertises anything, so that identity founds no mesh and links no peer.
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`, like every type in
 /// `Namespace/`: inert value data, read from nonisolated code.
