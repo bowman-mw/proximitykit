@@ -129,7 +129,7 @@ struct MeshTransportHandlers {
 /// **That deadline is five minutes, not the 25 s / 60 s connection-phase timer.** `handleChannelReady`
 /// arms `timeoutSeconds: isProximityJoin ? 25 : 60`, but `ProximityCoordinator.transitionToProximityGate`
 /// cancels it the moment the identity introduction verifies and arms a five-minute proximity gate
-/// in its place (`Engine/ProximityCoordinator.swift:1320`) — which is precisely the state a
+/// in its place (in `Engine/ProximityCoordinator.swift`) — which is precisely the state a
 /// provisionally admitted stranger sits in, so five minutes is the number this cause is about.
 /// It is also why the refund is capped rather than unlimited: five minutes rate-limits an
 /// all-timeout endpoint's re-offers, it does not bound them

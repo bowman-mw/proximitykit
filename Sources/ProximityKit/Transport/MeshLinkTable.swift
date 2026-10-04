@@ -369,7 +369,7 @@ nonisolated struct MeshLinkTable {
     /// was ever made and the six-offer cap would never be reached — the sweep would re-offer it for
     /// the life of the session, which is exactly the unbounded shape
     /// ``maxReproposalsPerEndpoint`` exists to forbid. The five-minute proximity gate
-    /// (`Engine/ProximityCoordinator.swift:1320`) rate-limits that loop to roughly one offer per
+    /// (`ProximityCoordinator.transitionToProximityGate`) rate-limits that loop to roughly one offer per
     /// five minutes per endpoint; it does not bound it, and a bound is what this table trades in.
     /// Two is what the refund is for — an endpoint gets its six offers plus two more, eight in all
     /// — and it is finite for the shape it must not sustain.
@@ -467,7 +467,7 @@ nonisolated struct MeshLinkTable {
     /// minutes**, not the 25 s / 60 s connection-phase timer `handleChannelReady` arms:
     /// `ProximityCoordinator.transitionToProximityGate` cancels that one the moment the identity
     /// introduction verifies and replaces it with a five-minute gate
-    /// (`Engine/ProximityCoordinator.swift:1320`) — which is exactly the state a provisionally
+    /// (in `Engine/ProximityCoordinator.swift`) — which is exactly the state a provisionally
     /// admitted stranger sits in. Charging that end to a budget the table deliberately never
     /// refills is how a genuine friend who cannot get two phones together on the sixth attempt is
     /// locked out for the rest of the session (D-4.3 Option 1's "two bounds to name").

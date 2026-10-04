@@ -10,7 +10,7 @@
 // advertise (and the mesh frames by), the inventory digest the membership record kinds, the routed
 // type registry the routed types, and the mesh manager the mesh messages its engine signs and
 // dispatches its own frames under. The mesh features' payload and capability tokens are still
-// Fernlet's `PayloadType` and `ProximityCapability` cases until plan steps A0.4 and A0.5 move them,
+// Fernlet's `PayloadType` and `ProximityCapability` cases until plan steps A0.5 and A0.7 move them,
 // and for Fernlet the two spellings are equal, which `ProximityVocabularyGoldenTests` holds.
 
 import Foundation

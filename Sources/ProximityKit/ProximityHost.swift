@@ -166,8 +166,10 @@ public protocol ProximityHost: AnyObject {
     /// manager holds provisions under that host's rules. Fernlet's app answers its factory's identity,
     /// whose participant is its sealed-backup escrow key, in `ProximityHostAdapter.swift`. The default
     /// below builds `IdentityService(namespace: proximityNamespace)`: this device's identity under the
-    /// host's namespace, with no participant, which adopts or mints the device keys and nothing else,
-    /// and which every test double takes.
+    /// host's namespace, with no participant, which adopts or mints the device keys and nothing else.
+    /// Sixteen of the test target's seventeen doubles take it; the seventeenth,
+    /// `ProximityNamespaceGateTests`' `ForeignIdentityHost`, answers an identity of another namespace,
+    /// so each manager's check of its host's identity can be seen refusing.
     ///
     /// A new value per call, built from the host's values and reading and writing nothing until the
     /// manager provisions it. Each manager checks it against its namespace
@@ -237,8 +239,10 @@ public extension ProximityHost {
     /// step A0.2.8; for Fernlet `Application Support/Fernlet`, unchanged). The app's `FernletStore`
     /// overrides it with a per-instance root.
     var proximitySupportDirectory: URL { proximityNamespace.installation.storage.defaultDirectory }
-    /// Default for hosts that keep no keys beside the device identity (test doubles): this device's
-    /// identity under the host's namespace, on the namespace's identity service, with no provisioning
-    /// participant. The app's `FernletStore` overrides it with its factory's identity.
+    /// Default for hosts that keep no keys beside the device identity (sixteen of the test target's
+    /// seventeen doubles): this device's identity under the host's namespace, on the namespace's
+    /// identity service, with no provisioning participant. The app's `FernletStore` overrides it with
+    /// its factory's identity, and `ProximityNamespaceGateTests`' `ForeignIdentityHost` with an identity
+    /// of another namespace.
     func makeProximityIdentity() -> IdentityService { IdentityService(namespace: proximityNamespace) }
 }

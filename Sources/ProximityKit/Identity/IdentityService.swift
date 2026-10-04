@@ -107,8 +107,9 @@ public enum IdentityError: Error, Equatable {
 /// and so offers no default identity (a manager asks its host, ``ProximityHost/makeProximityIdentity()``).
 /// An identity of an unsound namespace refuses to provision and to wrap a group key
 /// (``ensureProvisioned()``, ``encryptGroupKey(_:for:)``), so it never holds its signing or
-/// key-agreement key, calls no participant, and nothing is signed, wrapped, sealed to a peer or
-/// opened from one under that namespace.
+/// key-agreement key, tells its participant of no adoption or mint, and nothing is signed, wrapped,
+/// sealed to a peer or opened from one under that namespace. ``wipe()`` reads no verdict: under any
+/// namespace it sweeps the rows, clears the keys and tells the participant.
 @MainActor
 public final class IdentityService {
 
@@ -604,7 +605,7 @@ public final class IdentityService {
     /// ``namespace`` judged itself unsound throws ``ProximityNamespaceError`` with every violation and
     /// audits `identity.namespace.unsound` (at `provision`), on every call: it never holds its signing
     /// or key-agreement key, so nothing signs, seals to a peer or opens from one under that namespace,
-    /// and no participant is called.
+    /// and provisioning calls no participant (``wipe()``, which reads no verdict, still tells it).
     public func ensureProvisioned() throws {
         try ProximityNamespaceGate.refuseUnsound(
             namespace.soundness, event: "identity.namespace.unsound", at: .provision)
@@ -799,7 +800,9 @@ public final class IdentityService {
     ///
     /// Sweeps every row under ``keychainService``, the participant's beside the device identity's
     /// included, then clears the in-memory keys and tells the ``provisioningParticipant`` the rows
-    /// are gone, so it drops what it holds in memory too.
+    /// are gone, so it drops what it holds in memory too. It reads no soundness verdict: an identity
+    /// of an unsound namespace, which never provisioned, still sweeps, clears and tells its
+    /// participant.
     ///
     /// R7: the sweep's `OSStatus` is checked, not dropped. The in-memory keys are cleared FIRST —
     /// so this process holds no identity either way — and only then is a refusing keychain reported

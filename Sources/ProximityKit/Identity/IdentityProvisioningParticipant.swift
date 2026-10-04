@@ -24,8 +24,11 @@ import CryptoKit
 /// row) is kept first, and anything it throws stops provisioning before the identity writes a row;
 /// it calls ``identityMintedDeviceKeys(_:)`` only once the four fresh rows are on disk and adopted,
 /// never after a failed mint. ``IdentityService/wipe()`` calls ``identityWiped(_:)`` after it has
-/// swept the identity's service and cleared its keys, whether or not the sweep succeeded. The
-/// identity's soundness refusal comes first: under an unsound namespace no participant is called.
+/// swept the identity's service and cleared its keys, whether or not the sweep succeeded.
+/// Provisioning's soundness refusal comes first: under an unsound namespace
+/// ``IdentityService/ensureProvisioned()`` throws before it calls the participant, so none is told
+/// of an adoption or asked or told of a mint. A wipe reads no verdict: it sweeps, clears and tells
+/// the participant under any namespace, sound or not.
 ///
 /// **What leaves the identity.** The device's signing and key-agreement private keys never reach a
 /// participant. The one private key that does is the previous build's key-agreement key the reader
@@ -65,7 +68,8 @@ import CryptoKit
     func identityMintedDeviceKeys(_ identity: IdentityService)
 
     /// The identity swept its rows and cleared its keys; called whether or not the sweep reported
-    /// success, so a participant drops what it holds in memory either way.
+    /// success, and under any namespace, sound or not (a wipe reads no soundness verdict), so a
+    /// participant drops what it holds in memory either way.
     ///
     /// - Parameter identity: The identity that was wiped.
     func identityWiped(_ identity: IdentityService)

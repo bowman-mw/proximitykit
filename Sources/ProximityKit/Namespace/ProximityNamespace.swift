@@ -41,15 +41,17 @@ import Foundation
 /// types, and the mesh manager signs and dispatches its engine's own frames by its mesh messages. The
 /// mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
 /// `ProximityCapability` cases until plan steps A0.5 and A0.7 move them; for Fernlet the two
-/// spellings are equal, which `ProximityVocabularyGoldenTests` holds. Some strings stay outside it
-/// until their features leave: the 4 feature labels ProximityKit reads from FernletCrypto's registry,
-/// the activities' and the moderation report's, until plan step A0.5; the heart dead-drop's and the
-/// moderation ban store's keychain services are FernletSocial's, and so is presence, whose pair secret
-/// derives under a feature salt its host's family declares.
+/// spellings are equal, which `ProximityVocabularyGoldenTests` holds. Some strings stay outside it:
+/// the 4 feature labels ProximityKit reads from FernletCrypto's registry, the activities' and the
+/// moderation report's, until plan step A0.5 takes them out with the mesh manager's feature parts;
+/// and the strings of the features that left, which their modules spell (the heart dead-drop's and
+/// the moderation ban store's keychain services are FernletSocial's, and so is presence, whose pair
+/// secret derives under a feature salt its host's family declares).
 /// `ProximityNamespaceBoundaryTests` keeps ProximityKit building no namespace, group or purpose
-/// outside `Namespace/`, and holds what is left of Fernlet in it (the registry's feature labels, the
+/// outside `Namespace/`, holds what is left of Fernlet in it (the registry's feature labels, the
 /// `fernlet` literals, Fernlet's domain types) and its `package` doors to exact per-file lists, each
-/// row naming the plan step that removes it; those lists are the one place the numbers live.
+/// row naming the plan step that removes it (those lists are the one place the numbers live), and
+/// refuses a declaration, extension or alias of any type that left it for FernletSocial or the app.
 ///
 /// **Total, judged once, and refused at run time.** ``init(family:installation:)`` never throws or
 /// traps: it runs every soundness rule once and records the verdict in ``soundness``. A host that

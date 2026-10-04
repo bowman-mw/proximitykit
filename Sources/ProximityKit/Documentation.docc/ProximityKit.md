@@ -16,14 +16,17 @@ social exhaust (who you met, who sent you warmth, who you reported) lives in dev
 files that are deliberately **never** part of the synced snapshot.
 
 **Position in the FernletKit graph and the S3 wall.** The `ProximityKit` target depends on
-`PrivateMediaStore` (the sealed photo index behind the mesh photo cache), `FernletCrypto` (since plan
-step A0.2 only for the feature labels that leave with their features and for the
-`CryptographicPurpose` signing overloads; see "Protocol namespace" below), `FernletDomainModel` (the
+`PrivateMediaStore` (the sealed photo index behind the mesh photo cache, until the photo feature
+leaves with the mesh manager's feature parts at plan step A0.5), `FernletCrypto` (only for the 4
+feature labels of the activities and the moderation report, which leave with the mesh manager's
+feature parts at A0.5, and for the `CryptographicPurpose` signing overloads the app's duress and
+probe signatures sign through until C1; see "Protocol namespace" below), `FernletDomainModel` (the
 features' payload vocabulary and models, the host's trusted-peer record type and the session mode,
 Fernlet's vocabulary and record types named only on the lines `ProximityNamespaceBoundaryTests`
-allowlists, which leave with their features or the session profile) and `FernletFoundation` (one
-`FernletDate` read, the mesh manager's). It therefore sits on
-the *protected* side of the S3 privacy wall: it may reach a sealed `Private*` store, and the
+allowlists, which leave with the mesh manager's feature parts, the recipe profile or the session
+profile) and `FernletFoundation` (one `FernletDate` read, the mesh manager's, until A0.5). It
+therefore sits on the *protected* side of the S3 privacy wall: it may reach a sealed `Private*`
+store, and the
 walled `AIProviders` / `CloudKitSync` targets can never import it (nor it them, nor
 `FernletSocial`, whose heart dead-drop gets its CloudKit transport injected app-side through
 FernletDomainModel's `HeartDropTransporting` seam and so only ever hands ciphertext + rotating day
@@ -487,7 +490,7 @@ digest's record kinds, the routed type registry's routed types and the mesh engi
 The mesh features' payload and capability tokens are still Fernlet's `PayloadType` and
 `ProximityCapability` cases until plan steps A0.5 and A0.7 move them.
 Some such strings stay outside it until
-a later step (see "What is left for A0.4 onward" below): the 4 feature labels this module reads from
+a later step (see "What is left for A0.5 onward" below): the 4 feature labels this module reads from
 FernletCrypto's registry, the activities' and the moderation report's, until A0.5 (the sealed-backup
 escrow's two are the app's, with its escrow). The heart dead-drop's keychain service and the
 moderation ban store's are `FernletSocial`'s, and so is presence, with its labels and the heart
@@ -563,8 +566,10 @@ auditing `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound` or
 `recipe.quic.namespaceUnsound`. Each line's context names the door (`at`: `provision`,
 `groupKeyWrap` or `start`), the violation count and the first violation's case name, never a field
 or a value. The pair-secret door needs the provisioned key-agreement key, so under an unsound
-namespace it derives nothing either, and no provisioning participant is called. Nothing else reads
-the verdict. Each manager also compares the namespace of the identity it holds with its own, one
+namespace it derives nothing either, and provisioning calls no participant: none is told of an
+adoption or asked or told of a mint. ``IdentityService/wipe()`` reads no verdict, so under any
+namespace it sweeps the identity's rows, clears its keys and tells its participant. Nothing else
+reads the verdict. Each manager also compares the namespace of the identity it holds with its own, one
 handed to it through its `identity:` seam (no shipping caller passes one) or, handed none, the one its
 host's ``ProximityHost/makeProximityIdentity()`` builds: on a mismatch it still constructs, audits
 `mesh.identity.namespaceMismatch`, `presence.identity.namespaceMismatch` or
@@ -648,16 +653,17 @@ and recipe-share managers under `.fernlet` and under a namespace whose peer-name
 holds the soundness and collision rules, a declared feature salt's place in them included, over
 namespaces built only from literals.
 `FernletFeatureGoldenTests`, on the crypto-goldens line too, holds the bytes of Fernlet's features
-over this module, the ones it still holds and the ones already in `FernletSocial`, which every move
-must keep, to frozen literals: the feature labels of the heart dead-drop, presence and the ban store,
-each read where its feature reads it, the heart-drop and presence pair secrets and tags, the ban
-evidence's reporter tag and a reported artwork's content hash, a frozen sealed drop and sealed sidecar opened
-through their readers, the prekey bundle's JSON and the identity introduction that gossips it, the
-features' keychain and file names and persisted shapes, presence's advertisement and the
-sealed-backup escrow's provisioning cases (over the identity the app's factory builds, which carries
-the escrow as its provisioning participant), the two feature salts `.fernlet` declares, under which
-the pair-secret door derives the heart-drop and presence pair secrets' known answers, and the
-heart-eligibility predicate's three legs as presence's gate answers them.
+over this module, the ones in `FernletSocial` and the app and the ones this module still carries for
+them, which no move may change, to frozen literals: the feature labels of the heart dead-drop,
+presence and the ban store, each read where its feature reads it, the heart-drop and presence pair
+secrets and tags, the ban evidence's reporter tag and a reported artwork's content hash, a frozen
+sealed drop and sealed sidecar opened through their readers, the prekey bundle's JSON and the
+identity introduction that gossips it, the features' keychain and file names and persisted shapes,
+presence's advertisement and the sealed-backup escrow's provisioning cases (over the identity the
+app's factory builds, which carries the escrow as its provisioning participant), the two feature
+salts `.fernlet` declares, under which the pair-secret door derives the heart-drop and presence pair
+secrets' known answers, and the heart-eligibility predicate's three legs as presence's gate answers
+them.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
 named only on the code lines that read the feature labels leaving with the mesh manager's feature
@@ -669,9 +675,14 @@ exact per-file, per-type allowlist: the activity manager and the
 mesh manager's feature sends, capability list and session hearts with the two typed capability gates
 and the host's trusted-peer list (A0.5), the typed doors only Fernlet's features and the recipe-share
 manager go through, the envelope's typed view of its token and the coordinator's typed send (A0.7),
-and the coordinator's session-mode alias (A0.7 / C5), the last two types named nowhere; and
-`package` is declared only on the doors its list names (see "Package doors" below). The first three
-lists can only shrink, and a door's row lasts exactly as long as the door. The exact per-file lists in
+and the coordinator's session-mode alias (A0.7 / C5), the last two types named nowhere;
+`package` is declared only on the doors its list names (see "Package doors" below); and no type that
+left this module for `FernletSocial` or the app (the heart dead-drop's, presence's, moderation's,
+closeness's and friend state's types, the parked chat payload, the deleted support layout and the
+sealed-backup escrow's) is declared, extended or aliased here again, a list that only grows as A0.5
+and A0.7 move features out, because a feature that came back under its old name with no Fernlet
+string, label or domain type of its own would pass the other rules. The first three lists can only
+shrink, and a door's row lasts exactly as long as the door. The exact per-file lists in
 `ProximityNamespaceBoundaryTests` are the one place the ratchet's numbers live.
 
 **The install binding and the column seal.** The two sealed mesh stores seal through
@@ -731,32 +742,35 @@ exactly as they did when this module named `FernletAuditLog` itself. `ProximityA
 the canary for that install: every test asserting that an event was not logged would pass vacuously
 without it.
 
-**What is left for A0.4 onward.** The vocabulary and the session rules are the host's: every group
+**What is left for A0.5 onward.** The vocabulary and the session rules are the host's: every group
 of the vocabulary is read off the namespace its reader holds (the reader table above), the radios
 and the presence posture mint their Bonjour instance names (`fernlet-mesh-…` and `fn-…` for Fernlet)
 and certificates under the namespace's strings, the coordinator has no display default (every caller
 passes the host's name) and `PeerTransport`'s discovery doors take no service type, and the trust
-policies, the trust records and the peer-name policy come from the host. What still ties this module
-to Fernlet leaves in these steps:
+policies, the trust records and the peer-name policy come from the host. Fernlet's social features
+are its own modules': `FernletSocial` holds presence (its manager, over the presence radio's
+`package` doors, and its pair secret and tag, the pair secret a wrapper over
+``IdentityService/pairSecret(with:purpose:)`` under the salt `.fernlet` declares), the heart
+dead-drop (with its heart-drop derivations, its keychain service and the mesh stores' services
+derived beside it), moderation's ban store, ledger and content hash, closeness, friend state and the
+parked chat payload, and the sealed-backup escrow is the app's (`SealedBackupEscrowKey`, the
+provisioning participant every identity the app builds carries, with the escrow's two feature
+labels); `ProximityNamespaceBoundaryTests` keeps every one of their types out of this module. What
+still ties this module to Fernlet leaves in these steps:
 
-- **A0.4** leaves none of its features here. The sealed-backup escrow is the app's
-  (`SealedBackupEscrowKey`, the provisioning participant every identity the app builds carries, with
-  the escrow's two feature labels), and `FernletSocial` holds A0.4's other features: presence (its
-  manager, over the presence radio's `package` doors, and its pair secret and tag, the pair secret a
-  wrapper over ``IdentityService/pairSecret(with:purpose:)`` under the salt `.fernlet` declares), the
-  heart dead-drop (with its heart-drop derivations, its keychain service and the mesh stores' services
-  derived beside it), moderation's ban store, ledger and content hash, closeness, friend state and the
-  parked chat payload.
 - **A0.5** splits the routed mesh manager: its feature parts leave with their `PayloadType` sends,
   their capability list and the session hearts, and with them what the mesh manager builds, decodes
   or calls (the clothing shop, the activity manager with its send hook and item-name rules, the
   moderation report relay, the session message store and the heart ledger, with their wire
   payloads' formats, the activities' and the moderation report's four labels and the canonical
   serializer's domains for them), the two typed capability gates and the host's trusted-peer list,
-  which only features read, and the mesh manager's `FernletDate` read, the last of the
-  `FernletFoundation` edge; the photo code takes the `PrivateMediaStore` edge
-  (`com.fernlet.private-media`) with it, and the JSON sidecar's `package` door closes as the sidecar
-  moves to `FernletSocial` with the activity manager and the photo-wall preferences.
+  which only features read. Three of this module's edges leave with them: the mesh manager's
+  `FernletDate` read is the last of the `FernletFoundation` edge, the photo code takes the
+  `PrivateMediaStore` edge (`com.fernlet.private-media`) with it, and the four labels are the last
+  `FernletCrypto` serves but for the `CryptographicPurpose` overloads (below); and the
+  `FernletDomainModel` lines that rule 4 lists for them go too. The JSON sidecar's `package` door
+  closes as the sidecar moves to `FernletSocial` with the activity manager and the photo-wall
+  preferences.
 - **A0.7 and C5** make the one-to-one radio a profile-driven pair session and add its coach profile.
   The recipe-share manager, its wire types and status copy, and the typed doors only it and Fernlet's
   features go through (the envelope's typed view of its token and the coordinator's typed send)

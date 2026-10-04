@@ -181,8 +181,8 @@ nonisolated func canonicalUTF8Ordered(_ lhs: String, _ rhs: String) -> Bool {
 // inventory digest ("what content I am carrying, and for whom") from the membership one ("what
 // records I hold"); and the drain answer ("we are in sync") from the routed inventory digest ("here is
 // everything I hold"), or a stale quiescence bit could close a merge window that should still be
-// open. The four tags left below are the activity and moderation features', which move with their
-// features at A0.4.
+// open. The four tags left below are the activity and moderation features', which leave with those
+// features when the mesh manager's feature parts do (plan step A0.5).
 //
 // Group Activities (Phase 6). Distinct tags so an activity descriptor hash, a join token, and a roster
 // snapshot can never cross-validate one another (or the mesh types above).

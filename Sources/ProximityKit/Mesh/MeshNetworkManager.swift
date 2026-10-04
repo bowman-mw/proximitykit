@@ -361,7 +361,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// ``MeshPayloadRole`` by them. What this manager still spells itself, its features' payload
     /// tokens (Fernlet's `PayloadType`, sent through ``sendFeatureEnvelope(_:encodable:via:sealed:)``
     /// and registered by token), values and capability tokens and the photo stores' names, leaves
-    /// with those features (plan steps A0.4 and A0.5).
+    /// with its feature parts (plan step A0.5).
     /// `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
@@ -14507,7 +14507,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// The same send for a feature's payload, under the token its caller passes: Fernlet's
     /// `PayloadType` raw value, spelled at each feature call site, so the lines that name it are the
-    /// feature lines that leave with their features (plan steps A0.4 and A0.5). The mesh's own frames
+    /// feature lines that leave with the manager's feature parts (plan step A0.5). The mesh's own frames
     /// never come through here: they are sent by role, through ``sendEnvelope(_:encodable:via:sealed:)``.
     private func sendFeatureEnvelope(_ token: String, encodable: some Encodable, via slot: PeerSlot, sealed: Bool = false) async {
         _ = await sendEnvelopeReportingResult(token, encodable: encodable, via: slot, sealed: sealed)
@@ -15657,7 +15657,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `timeoutSeconds: isProximityJoin ? 25 : 60` `handleChannelReady` sets — that one is the
     /// connection-phase timer, and `ProximityCoordinator.transitionToProximityGate` cancels it the
     /// moment the identity introduction verifies and arms a five-minute proximity gate in its place
-    /// (`Engine/ProximityCoordinator.swift:1320`), which is exactly the state a provisionally
+    /// (in `Engine/ProximityCoordinator.swift`), which is exactly the state a provisionally
     /// admitted stranger sits in. Charging that end to `MeshLinkTable.maxReproposalsPerEndpoint`,
     /// which is never refilled, locks a pair who keep missing the 15 cm hold out of each other for
     /// the rest of the session on the sixth try — and D-4.3 Option 1 makes that reachable far more
