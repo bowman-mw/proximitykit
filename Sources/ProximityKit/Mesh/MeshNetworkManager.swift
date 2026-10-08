@@ -143,13 +143,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `@ObservationIgnored`, so a view reading a computed form would never re-render on the unlock
     /// that opens it. Refreshed at every change of those inputs (``refreshHeldPhotosCanBeShown()``).
     public private(set) var heldPhotosCanBeShown = false
-    /// The friend-mesh clothing shop (Phase 3a): catalogs exchanged during the session + the 1-hour
-    /// post-session browse window. Registered on the payload registry in `init`; lifecycle hooks fire
-    /// from the same moments that drive the friend-review batch — but the two deliberately diverge on
-    /// session FORMATION (the first slot commit, via `noteSlotCommittedForShop`): the review batch
-    /// survives it, the shop window closes. Search starts (startJoin/startNewMesh — which fire on every
-    /// Social-tab entry and scene reactivation) touch NEITHER.
-    public let clothingShop = MeshClothingShop()
     /// Phase 6 (Group Activities): the state + host-authoritative roster/token brain. Rides this friend
     /// mesh (no new radio); constructed + wired in `init`. Memory + a device-local sidecar (NEVER synced).
     public let activities: ProximityActivityManager
@@ -201,8 +194,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// codebase refuses — and `sessionEndClearsAStrandedInFlightHeartClaim` still holds it to its
     /// lifetime.
     @ObservationIgnored private var sessionHeartSendsInFlight: Set<String> = []
-    /// Phase 5: a friend session committed with this fingerprint (an in-person meeting) — feeds closeness.
-    @ObservationIgnored public var onFriendSessionCommitted: ((String) -> Void)?
     /// A photo was exchanged with this friend in the current session (feeds the closeness photo signal).
     @ObservationIgnored public var onFriendPhotoSession: ((String) -> Void)?
     /// The live-session temporary-message store (Phase 5): the current session's chat transcript.
@@ -464,32 +455,25 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// endpoint for the same reason as `peerRetryCount`: a deliberate eviction that stopped being
     /// recognized would be re-invited by its own retry.
     @ObservationIgnored private var locallyKickedEndpoints: Set<PeerEndpointKey> = []
-    /// Slots the local shop catalog was already sent to (belt-and-braces once-per-slot guard — the
-    /// commit transition in checkCoordinatorStates fires once per fingerprint change already). Pruned
-    /// per-slot on eviction (removeSlot/disconnectSlot) so a rejoining friend re-exchanges — the
-    /// transport's peerMap persists across a remote teardown, so a returning peer reuses its old slot
-    /// UUID. `clothingCatalogRequest` responses deliberately BYPASS this set (idempotent — the receiver
-    /// replaces by fingerprint).
-    @ObservationIgnored private var sentShopCatalogSlotIDs: Set<UUID> = []
-    /// Per-slot rate limit for `clothingCatalogRequest` responses (request-spam amplification guard:
-    /// each response is a full catalog send). Pruned with `sentShopCatalogSlotIDs`.
-    @ObservationIgnored private var shopCatalogRequestResponseAt: [UUID: Date] = [:]
     /// True from the first slot COMMIT of a session (formation) until the session ends (the same
     /// `!isSessionLive` condition the review promotion keys on — so a link blip no longer ends the
-    /// formation, and the heal that follows it is not a new one). Gates the
-    /// Phase-3a formation hook in `noteSlotCommittedForShop` so `clothingShop.beginNewSession()` fires
-    /// exactly once per formation — later commits, ``announcePromotedMesh()``'s committed loop, and a
-    /// re-handshake of the only committed slot must not re-fire it mid-session.
-    @ObservationIgnored private var hasFormedShopSession = false
-    /// Test seam: fires with the slot ID whenever a shop-catalog send is initiated (commit offer or
-    /// request response) and the provider produced a catalog — unit tests can't observe the real
-    /// channel (no live radio behind the test slots).
-    @ObservationIgnored var onShopCatalogSendForTesting: ((UUID) -> Void)?
-    /// Test seam: fires AFTER a `clothingCatalogRequest` send completes — i.e. after the commit
-    /// task's last touch of manager state. Tests that drive commits await this so the async send
-    /// task drains inside the test's lifetime (the manager's `unowned store` must not be reached
-    /// after the test's store deallocates).
-    @ObservationIgnored var onShopCatalogRequestSendForTesting: ((UUID) -> Void)?
+    /// formation, and the heal that follows it is not a new one). The session-formation fact (plan
+    /// step A0.5.6): `noteSlotCommittedForShop` reads it into ``MeshSlotCommit/formsSession`` and
+    /// sets it, so the formation legs — the session observer's (the clothing shop's new session) and
+    /// the engine's own (the chat transcript's clear) — run exactly once per formation; later commits,
+    /// ``announcePromotedMesh()``'s committed loop, and a re-handshake of the only committed slot must
+    /// not re-run them mid-session. Reset by `endSessionIfEnded()`.
+    @ObservationIgnored private var hasFormedSession = false
+    /// The host's session observer (plan step A0.5.6, S15): told each moment of a session's life its
+    /// features act on — a slot commit, a slot loss, a search stop, a session end — at the one site
+    /// where it happens, in today's order (``MeshSessionObserver`` states the contract).
+    ///
+    /// **Weak**: the object that installs it owns it (for Fernlet, FernletSocial's mesh composition,
+    /// which owns this manager too), so a manager whose observer is gone runs every moment with no
+    /// host leg. Installed before anything else can reach the manager — Fernlet's composition sets it
+    /// inside the initializer that builds the manager — so no commit, ending or radio start runs
+    /// without it.
+    @ObservationIgnored public weak var sessionObserver: (any MeshSessionObserver)?
     /// Test seam: fires ONCE per `sendTempMessage(_:)` call with what the send decided (P6 item 4).
     ///
     /// Re-aimed from the retired per-slot fan-out, which fired once per addressed slot with that
@@ -766,7 +750,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         self.photoWallPreferences = preferencesStore.load() ?? FriendPhotoWallPreferences()
         loadPhotoCorpora(now: Date())
         setupMeshSession()
-        registerClothingShopHandler()
         registerModerationReportHandler()
         registerFriendStateHandler()
         registerActivityHandlers()
@@ -817,34 +800,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         prunePhotoWallPreferences()
         loadHeldPhotoIndex(now: now)
         reconcileHeldPhotosIfReady(now: now)
-    }
-
-    /// Phase 3a: the shop rides the friend mesh as registered feature payloads. The dispatch default's
-    /// committed-slot gate has already run by the time these fire; the remaining guards mirror
-    /// the routed photo projection: a transport-VERIFIED fingerprint is required (catalogs are keyed
-    /// by it exclusively — never a display name) and blocked fingerprints drop silently.
-    private func registerClothingShopHandler() {
-        registerPayloadHandler(for: .clothingCatalog) { [weak self] envelope, plaintext, peer in
-            guard let self else { return }
-            guard let fingerprint = peer?.fingerprint else {
-                ProximityAudit.log("mesh.clothingCatalog.droppedUnverifiedSender")
-                return
-            }
-            guard !self.store.isBlockedFingerprint(fingerprint) else { return }
-            self.clothingShop.receiveCatalog(envelope, plaintext: plaintext, verifiedFingerprint: fingerprint)
-        }
-        // Commit-symmetry request (spec: "Catalog delivery must not assume commit symmetry"): a
-        // committed peer is asking for our catalog because ITS commit landed after OUR once-per-slot
-        // send. The payload carries nothing — the verified sender identity is the whole message.
-        registerPayloadHandler(for: .clothingCatalogRequest) { [weak self] _, _, peer in
-            guard let self else { return }
-            guard let fingerprint = peer?.fingerprint else {
-                ProximityAudit.log("mesh.clothingCatalogRequest.droppedUnverifiedSender")
-                return
-            }
-            guard !self.store.isBlockedFingerprint(fingerprint) else { return }
-            self.respondToShopCatalogRequest(fromVerifiedFingerprint: fingerprint, identity: peer)
-        }
     }
 
     /// Phase 3b: one-hop moderation reports ride the friend mesh. The committed-slot gate has already
@@ -1451,9 +1406,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Whether this session is still LIVE — the ONE predicate "has the session ended" is the
     /// negation of, and the **only** thing the session-end ceremony may key on (P6 item 2 fix).
     ///
-    /// **Session end means MESH end, never slot loss.** The three hooks
-    /// (``promoteSessionToPendingReviewIfSessionEnded()``, ``openShopWindowIfSessionEnded()``,
-    /// ``clearSessionMessagesIfSessionEnded()``) and the app's review presentation
+    /// **Session end means MESH end, never slot loss.** The session-end funnel `endSessionIfEnded()`
+    /// (the review promotion, the session observer's ending — the post-session shop window — and the
+    /// transcript's clear) and the app's review presentation
     /// (`ConnectView.presentDisconnectReviewIfNeeded()`) read this and nothing else, so the four
     /// doors below are the whole list of ways a session can end:
     ///
@@ -10080,9 +10035,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Three legs, and each closes a different way of projecting into the wrong room:
     ///
-    /// 1. ``isSessionLive`` — the ONE predicate `clearSessionMessagesIfSessionEnded()` keys on, so
-    ///    the gate and the clear can never disagree. A **blip** leaves it true (item 2's fix), so a
-    ///    message that completes during one is projected rather than lost.
+    /// 1. ``isSessionLive`` — the ONE predicate the session-end funnel `endSessionIfEnded()` keys
+    ///    on, so the gate and the clear can never disagree. A **blip** leaves it true (item 2's fix),
+    ///    so a message that completes during one is projected rather than lost.
     /// 2. the item's **mesh** — mesh A's ciphertext outlives the move to mesh B (expiry is A's
     ///    `hardDeadline + 20 min`), so without this A's messages would appear in B's transcript.
     /// 3. the item's **transcript generation** — because leg 1 is REVERSIBLE and the clear is not.
@@ -12608,13 +12563,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         localCapabilitiesProvider?() ?? [namespace.family.vocabulary.capabilities.wire2]
     }
 
-    /// Phase 3a outbound gate: send our catalog only to peers advertising the `shop` capability (a
-    /// legacy client would park-and-drop it anyway — skip the bytes), and only while sharing is
-    /// enabled locally. Internal seam so tests can pin the gate without a transport.
-    func shouldOfferShopCatalog(to peerIdentity: ProximityCoordinator.PeerIdentity) -> Bool {
-        clothingShop.isSharingEnabled && peerIdentity.supports(.shop, in: namespace.family.vocabulary.capabilities)
-    }
-
     /// Installs this manager's callbacks on its radio and, for a radio that authenticates peers
     /// itself, hands it the introduction authority.
     ///
@@ -12776,8 +12724,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         isProximityJoin = false
         peerRetryCount.removeAll()
         locallyKickedEndpoints.removeAll()
-        sentShopCatalogSlotIDs.removeAll()
-        shopCatalogRequestResponseAt.removeAll()
+        // The search-stop moment (S15), before the radio is stood down and the slots are dropped:
+        // Fernlet's observer clears the clothing shop's per-slot send tracking here.
+        sessionObserver?.meshSearchDidStop()
         transport.stop()
         // Door 3's clock has nothing left to count once the radios are down — and door 1/2 have
         // already said the session is over by the time this funnel runs.
@@ -12792,11 +12741,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         clearGroupKeyState()
         // Teardown path (leaveSession/leaveMesh/stopJoin funnel through here): the last committed
         // slot is gone, so any unreviewed roster and any unreviewed session photos promote into the
-        // pending review batch and any held shop catalogs open the post-session shop window
-        // (Phase 3a).
-        promoteSessionToPendingReviewIfSessionEnded()
-        openShopWindowIfSessionEnded()
-        clearSessionMessagesIfSessionEnded()
+        // pending review batch, the session observer is told the session ended (Fernlet's opens the
+        // post-session shop window over any held catalogs, Phase 3a), and the transcript vanishes.
+        endSessionIfEnded()
     }
 
     /// The advertised TXT payload: version + the per-launch session id, plus the mesh identifiers
@@ -13084,18 +13031,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         outstandingAdmissionRequestBySlot.removeValue(forKey: slot.id)
         slots.removeAll { $0.id == slot.id }
         slotTrustPolicies.removeValue(forKey: slot.id)
-        pruneShopSendTracking(for: slot.id)
+        // The slot-loss moment (S15): Fernlet's observer prunes the clothing shop's send tracking for
+        // this slot, so a rejoining friend re-exchanges catalogs.
+        sessionObserver?.meshSlotDidLeave(slotID: slot.id)
         rerankSlots()
         // A peer whose slot is gone leaves the merge window's reach set, so the verdict is spent at
         // the moment it changes rather than at the next inbound frame. `rerankSlots()` is NOT an
         // evaluation site and must not become one: it moves `kind`, which the rule never reads.
         concludeMergeIfConverged()
-        promoteSessionToPendingReviewIfSessionEnded()
-        openShopWindowIfSessionEnded()
-        clearSessionMessagesIfSessionEnded()
-        // Door 3's clock starts HERE for a founded session (fix review P2-1): the hooks above just
-        // answered "still live", so somebody has to count the five minutes the app only counts on
-        // tab entry.
+        endSessionIfEnded()
+        // Door 3's clock starts HERE for a founded session (fix review P2-1): the session-end check
+        // above just answered "still live", so somebody has to count the five minutes the app only
+        // counts on tab entry.
         armSessionGiveUpClock(now: Date())
     }
 
@@ -13117,15 +13064,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         outstandingAdmissionRequestBySlot.removeValue(forKey: slot.id)
         slots.removeAll { $0.id == slot.id }
         slotTrustPolicies.removeValue(forKey: slot.id)
-        pruneShopSendTracking(for: slot.id)
+        // The slot-loss moment (S15), as in `removeSlot`.
+        sessionObserver?.meshSlotDidLeave(slotID: slot.id)
         rerankSlots()
         // A peer whose slot is gone leaves the merge window's reach set, so the verdict is spent at
         // the moment it changes rather than at the next inbound frame. `rerankSlots()` is NOT an
         // evaluation site and must not become one: it moves `kind`, which the rule never reads.
         concludeMergeIfConverged()
-        promoteSessionToPendingReviewIfSessionEnded()
-        openShopWindowIfSessionEnded()
-        clearSessionMessagesIfSessionEnded()
+        endSessionIfEnded()
         armSessionGiveUpClock(now: Date())
     }
 
@@ -13144,14 +13090,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             locallyKickedEndpoints.insert(peer.endpoint)
         }
         transport.disconnectPeer(peer, cause: cause)
-    }
-
-    /// Slot eviction prunes the shop send-tracking so a REJOINING friend re-exchanges catalogs: the
-    /// transport's peerMap persists across a remote teardown, so a returning peer reuses its old slot
-    /// UUID — without this, the once-per-slot guard would silently skip its re-commit send forever.
-    private func pruneShopSendTracking(for slotID: UUID) {
-        sentShopCatalogSlotIDs.remove(slotID)
-        shopCatalogRequestResponseAt.removeValue(forKey: slotID)
     }
 
     /// The name the session roster records for a peer committing now.
@@ -14620,45 +14558,40 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         photoWallPreferencesStore.save(photoWallPreferences)
     }
 
-    // MARK: - Clothing shop (Phase 3a)
+    // MARK: - Session commit and end (the session observer's moments)
 
-    /// The per-commit shop hook, called from `onSlotConnected` for every slot commit. Two jobs:
+    /// The per-commit hook, called from `onSlotConnected` for every slot commit. Three steps, in order:
     ///
-    /// 1. **Session formation** (spec: "'Next session start' = first slot COMMIT, not search start"):
-    ///    the FIRST commit after a no-session state is when the previous post-session window closes
-    ///    and its catalogs drop — startJoin/startNewMesh must never do this (they fire on every
-    ///    Social-tab entry / scene dip). `hasFormedShopSession` makes the reset once-per-formation:
-    ///    later commits (including the founding's own, which re-enter via onSlotConnected's fingerprint
-    ///    transition) and a mid-session re-handshake of the sole committed slot can't wipe catalogs.
-    ///    This also covers the transient-drop case: last slot lost mid-outing opens the window; a
-    ///    re-commit lands here, closes it, clears catalogs, and the exchange re-runs.
-    /// 2. **Catalog offer** — send our catalog once per slot, pairwise sealed (the same sendEnvelope
-    ///    path photos use; `slot.verifiedKeyAgreementPublicKey` was set just before onSlotConnected),
-    ///    capability-gated, nil provider (sharing off) sends nothing — PLUS a
-    ///    `clothingCatalogRequest` for the peer's catalog: our send fires at OUR commit, but the
-    ///    peer's registry gate requires the PEER's commit, so a slightly-later committer would drop
-    ///    our catalog forever under once-per-slot tracking. The request, sent at its own commit,
-    ///    makes the exchange commit-order-independent (spec: "Catalog delivery must not assume
-    ///    commit symmetry").
+    /// 1. **The session-formation fact** (spec: "'Next session start' = first slot COMMIT, not search
+    ///    start"): the FIRST commit after a no-session state forms a session — startJoin/startNewMesh
+    ///    must never do this (they fire on every Social-tab entry / scene dip). `hasFormedSession` makes
+    ///    it once-per-formation: later commits (including the founding's own, which re-enter via
+    ///    onSlotConnected's fingerprint transition) and a mid-session re-handshake of the sole committed
+    ///    slot form nothing. This also covers the transient-drop case: last slot lost mid-outing ends a
+    ///    session that holds no mesh; a re-commit lands here and forms the next one.
+    /// 2. **The session observer's commit** (S15), told that fact: the host's legs for a commit, in the
+    ///    host's own order. Fernlet's (FernletSocial's mesh composition) feeds closeness first; on a
+    ///    formation it closes the previous post-session shop window and drops its catalogs; and it
+    ///    offers this device's clothing catalog once per slot, pairwise sealed and capability-gated,
+    ///    with a `clothingCatalogRequest` for the peer's, so the exchange does not depend on which side
+    ///    commits first (spec: "Catalog delivery must not assume commit symmetry").
+    /// 3. **The engine's own legs**, in their order: the transcript's clear on a formation, then this
+    ///    peer's moderation-report and friend-state sends and the activities offer. The clear follows
+    ///    the observer's legs: each of those is a memory-only write or a task spawned to run after this
+    ///    hook returns, so none reads the transcript before it is cleared.
     ///
-    /// Internal seam so unit tests can drive a slot commit without a live handshake.
+    /// Internal seam so unit tests can drive a slot commit without a live handshake; its spelling
+    /// (named for the shop's hook) is one of the engine names the package's rename pass settles.
     func noteSlotCommittedForShop(slot: PeerSlot, identity peerIdentity: ProximityCoordinator.PeerIdentity) {
-        // Phase 5: this committed friend is physically present — feed closeness (day-capped downstream).
-        onFriendSessionCommitted?(peerIdentity.fingerprint)
-        if !hasFormedShopSession {
-            hasFormedShopSession = true
-            clothingShop.beginNewSession()
+        let formsSession = !hasFormedSession
+        hasFormedSession = true
+        sessionObserver?.meshSlotDidCommit(
+            MeshSlotCommit(slot: slot, peer: peerIdentity, formsSession: formsSession)
+        )
+        if formsSession {
             // Phase 5: a NEW session forms with an empty transcript. Messages already cleared at the
             // prior session end; this is belt-and-braces and covers the transient-drop → re-commit case.
             clearSessionTranscript()
-            sentShopCatalogSlotIDs.removeAll()
-            shopCatalogRequestResponseAt.removeAll()
-        }
-        if shouldOfferShopCatalog(to: peerIdentity), sentShopCatalogSlotIDs.insert(slot.id).inserted {
-            spawnHostPinned { [weak self] in
-                await self?.sendShopCatalog(to: slot)
-                await self?.sendShopCatalogRequest(to: slot)
-            }
         }
         // Phase 3b: hand our own signed moderation reports to this committed friend (one-hop relay).
         // The send method additionally requires the recipient be a vault-trusted (kept) friend.
@@ -14678,59 +14611,43 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// Answers a verified `clothingCatalogRequest` from a committed, unblocked peer (the registry gate
-    /// + handler already enforced both): re-send our catalog to that slot, BYPASSING the once-per-slot
-    /// guard — idempotent, the receiver replaces by fingerprint. Rate-limited per slot so a hostile
-    /// peer can't use requests as a send-amplification lever, and gated on the same sharing-enabled +
-    /// capability checks as the commit-time offer.
-    private func respondToShopCatalogRequest(
-        fromVerifiedFingerprint fingerprint: String,
-        identity peerIdentity: ProximityCoordinator.PeerIdentity?
-    ) {
-        guard let peerIdentity, shouldOfferShopCatalog(to: peerIdentity) else { return }
-        guard let slot = slots.first(where: { $0.fingerprint == fingerprint }) else { return }
-        let now = Date()
-        if let last = shopCatalogRequestResponseAt[slot.id],
-           now.timeIntervalSince(last) < MeshClothingShop.perSenderRateLimitSeconds {
-            return
-        }
-        shopCatalogRequestResponseAt[slot.id] = now
-        spawnHostPinned { [weak self] in await self?.sendShopCatalog(to: slot) }
-    }
-
-    /// Sends this device's current catalog to a committed slot, pairwise sealed. A nil provider
-    /// result (sharing disabled, or the app never wired it) sends nothing — the payload-layer opt-out.
-    private func sendShopCatalog(to slot: PeerSlot) async {
-        guard let payload = clothingShop.localCatalogProvider?() else { return }
-        onShopCatalogSendForTesting?(slot.id)
-        await sendFeatureEnvelope(PayloadType.clothingCatalog.rawValue, encodable: payload, via: slot, sealed: true)
-    }
-
-    /// Asks a just-committed peer for its catalog (commit symmetry — see `noteSlotCommittedForShop`).
-    /// Signed like every control payload but not sealed: it carries nothing (the summary is the whole
-    /// body, mirroring `.sessionGoodbye`), and it is deliberately NOT in Fernlet's `payloads.sealingRequired`.
-    private func sendShopCatalogRequest(to slot: PeerSlot) async {
-        // DO NOT LOCALIZE "Clothing catalog request" — as the doc comment above says, the summary is
-        // the whole body here, so this literal is signed wire bytes AND the receiving peer's
-        // Inspector row. See `FernletIdentityEnvelope.payloadSummary`.
-        await sendFeatureEnvelope(
-            PayloadType.clothingCatalogRequest.rawValue,
-            encodable: PayloadSummary(title: "Clothing catalog request"), via: slot
-        )
-        onShopCatalogRequestSendForTesting?(slot.id)
-    }
-
-    /// Phase 3a: the shop window opens at the same last-committed-slot-gone moment that promotes
-    /// `pendingFriendReview` — call sites mirror `promoteSessionToPendingReviewIfSessionEnded()` exactly.
-    /// The same moment ends the formed-session epoch: the NEXT slot commit is a new formation.
+    /// The session-end moment, at the same last-committed-slot-gone sites that have always run the
+    /// ending (`stopSearching()`, `removeSlot`, `disconnectSlot`): when the session has ENDED, its legs
+    /// run in this order —
     ///
-    /// ``isSessionLive``, not `isInSession` and not ``hasCommittedPeer`` — same reason as the review
-    /// promotion (P6 item 2 and its fix). A blip must not open the post-session shop window over a
-    /// session that is still running.
-    private func openShopWindowIfSessionEnded() {
+    /// 1. the review promotion: the roster and the session's unreviewed photos move into
+    ///    `pendingFriendReview` (``promoteSessionToPendingReviewIfSessionEnded()``);
+    /// 2. the formed-session epoch ends: the NEXT slot commit is a new formation;
+    /// 3. the session observer's ending (S15): Fernlet's opens the clothing shop's one-hour post-session
+    ///    window over the catalogs it holds (Phase 3a);
+    /// 4. Phase 5: messages VANISH. Where the shop KEEPS catalogs through a 1-hour window, the
+    ///    transcript is dropped immediately — nothing to retain, nothing to sync — and with it the
+    ///    in-session heart's feedback and its in-flight claims.
+    ///
+    /// Idempotent and cheap: a site that finds the session still live does nothing, and a later
+    /// teardown that finds it still ended re-runs legs that have nothing left to move.
+    ///
+    /// ``isSessionLive``, not `isInSession` and not ``hasCommittedPeer`` (P6 item 2 and its fix): §12's
+    /// privacy rule — the transcript vanishes at session end — silently stopped holding for every
+    /// founded pair on `isInSession`, and on ``hasCommittedPeer`` it went the other way and deleted a
+    /// live room's transcript, and opened the post-session shop window, on a two-second link drop.
+    /// Item 4's live-transcript projection reads the same predicate, so the clear and the gate can
+    /// never disagree.
+    private func endSessionIfEnded() {
         guard !isSessionLive else { return }
-        hasFormedShopSession = false
-        clothingShop.openWindowAtSessionEnd()
+        promoteSessionToPendingReviewIfSessionEnded()
+        hasFormedSession = false
+        sessionObserver?.meshSessionDidEnd(MeshSessionEnd())
+        clearSessionTranscript()
+        // TF b19 item 5: drop any lingering in-session heart feedback so a "Sent"/failure line
+        // can't outlive the session that produced it (there is no "Sending…" state on this path any
+        // more — P6 item 6 made the mint synchronous).
+        sessionHeartStateClearTask?.cancel()
+        sessionHeartStateClearTask = nil
+        sessionHeartState = .idle
+        // The slots these claims named are gone; a stale claim would refuse the first heart of the
+        // NEXT session (the deliver task's own `defer` never runs if its slot died mid-flight).
+        sessionHeartSendsInFlight.removeAll()
     }
 
     // MARK: - Temporary messages (Phase 5)
@@ -14837,33 +14754,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return outcome
     }
 
-    /// Phase 5: messages VANISH at session end. Called at the same last-committed-slot-gone moment that
-    /// promotes `pendingFriendReview` / opens the shop window — but where the shop KEEPS catalogs through
-    /// a 1-hour window, the transcript is dropped immediately. Nothing to retain, nothing to sync.
-    ///
-    /// ``isSessionLive`` (P6 item 2 and its fix): §12's privacy rule — the transcript vanishes at
-    /// session end — silently stopped holding for every founded pair on `isInSession`, and on
-    /// ``hasCommittedPeer`` it went the other way and deleted a live room's transcript on a
-    /// two-second link drop. Item 4's live-transcript projection reads the same predicate, so the
-    /// clear and the gate can never disagree.
-    private func clearSessionMessagesIfSessionEnded() {
-        guard !isSessionLive else { return }
-        clearSessionTranscript()
-        // TF b19 item 5: drop any lingering in-session heart feedback so a "Sent"/failure line
-        // can't outlive the session that produced it (there is no "Sending…" state on this path any
-        // more — P6 item 6 made the mint synchronous).
-        sessionHeartStateClearTask?.cancel()
-        sessionHeartStateClearTask = nil
-        sessionHeartState = .idle
-        // The slots these claims named are gone; a stale claim would refuse the first heart of the
-        // NEXT session (the deliver task's own `defer` never runs if its slot died mid-flight).
-        sessionHeartSendsInFlight.removeAll()
-    }
-
     /// The ONE place the transcript is dropped, so the generation cannot be bumped by one clear and
     /// not another (P6 item 2 fix review, finding P2-3).
     ///
-    /// **Three callers, all real:** session end (``clearSessionMessagesIfSessionEnded()``), the next
+    /// **Three callers, all real:** session end (`endSessionIfEnded()`), the next
     /// session's formation (``noteSlotCommittedForShop(slot:identity:)``), and the app's delete-all
     /// funnel through ``beginPrivacyWipe()``. The third was a fourth, bypassing clear until P6 item
     /// 4's fix review found it (`FernletStore.clearInboxesAndExports` called
