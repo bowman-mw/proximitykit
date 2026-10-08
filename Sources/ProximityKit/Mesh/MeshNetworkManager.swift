@@ -449,8 +449,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var sessionQuotaMeshID: UUID?
     @ObservationIgnored private var photoSessionStartedAt: Date?
     @ObservationIgnored private var activePhotoSessionID: UUID?
-    // voucherFingerprint → cached payload; never persisted across app launches
-    @ObservationIgnored private var vouchCache: [String: MeshFriendVouchListPayload] = [:]
     /// Re-invite attempts spent per DEVICE for failed proximity-join connections.
     ///
     /// Keyed on ``PeerEndpointKey``, not `peer.id`, and that is the whole point of the key: the
@@ -648,7 +646,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Hard cap on outstanding removal proposals (backstop against spoofed proposer fingerprints).
     private static let maxPendingRemovalProposals = 16
 
-    /// The app's entry point: a manager over the radio.
+    /// A manager over the radio, holding the device identity its host's
+    /// ``ProximityHost/makeProximityIdentity()`` answers.
     ///
     /// That is `NetworkMeshSession` — Network.framework/QUIC on `_fernlet-mesh2._udp` — since the
     /// MC→QUIC cutover (2026-09-21), and since the deletion round (2026-09-22) the only radio the
@@ -659,23 +658,43 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         self.init(store: store, transport: nil)
     }
 
+    /// The app's entry point: a manager over the radio, holding the device identity its host's
+    /// features were handed (plan step A0.5.5, S12).
+    ///
+    /// A host whose features sign under the device identity asks its host door once and hands the
+    /// same identity to the manager and to those features, so the engine never exposes its own: for
+    /// Fernlet that is FernletSocial's mesh composition, the one shipping caller. The radio is the
+    /// one ``init(store:)`` builds. The identity is checked against the host's namespace and
+    /// provisioned exactly as the identity ``init(store:)`` asks its host for: one of another
+    /// namespace makes the manager audit `mesh.identity.namespaceMismatch` and never start its radio
+    /// or found a mesh, and a failed provisioning is audited `mesh.identity.provisionFailed`, in that
+    /// order.
+    ///
+    /// - Parameters:
+    ///   - store: The host this manager's roots, vaults and namespace hang off.
+    ///   - identity: The device identity, built by the host's door.
+    public convenience init(store: any ProximityHost, identity: IdentityService) {
+        self.init(store: store, transport: nil, identity: identity)
+    }
+
     /// The designated initializer, taking the radio.
     ///
     /// `nil` means "whatever this build selects", which is what the public initializer passes. Tests
     /// pass an in-memory fake; that seam is the whole of P2 item 8, and what closes the long-standing
     /// gap where manager-level invite behaviour could not be asserted at tier 1 at all.
     ///
-    /// `identity` is the same kind of seam for the device's own keys, and exists for one reason: a
-    /// device has exactly ONE proximity identity, so the default ``IdentityService`` — the host's
-    /// ``ProximityHost/makeProximityIdentity()``, under its ``ProximityHost/proximityNamespace`` — is
-    /// keyed on its one process-wide keychain service, and two managers built in a single test
-    /// process are therefore literally the same device, sharing a fingerprint. That makes a two-node
-    /// tier-1 scenario (P4 item 2's wire exchange, `MeshMergeExchangeTests`) impossible to state
-    /// honestly. Passing a distinctly-keyed identity is the only thing that separates them. Nothing in
-    /// shipping code passes it: the public initializer above cannot, so a Release build always takes
-    /// this device's real identity. An identity of another namespace than the host's is refused: the
-    /// manager constructs, audits `mesh.identity.namespaceMismatch` and never starts its radio or
-    /// founds a mesh.
+    /// `identity` is the device's own keys. In shipping code only ``init(store:identity:)`` passes one,
+    /// the identity its host's door built for the host's features (plan step A0.5.5), so a Release
+    /// build always holds this device's real identity; nil, which ``init(store:)`` passes, asks the
+    /// host's ``ProximityHost/makeProximityIdentity()`` for it. In tests it is a seam with one reason
+    /// to exist: a device has exactly ONE proximity identity, so the default ``IdentityService`` —
+    /// under the host's ``ProximityHost/proximityNamespace`` — is keyed on its one process-wide
+    /// keychain service, and two managers built in a single test process are therefore literally the
+    /// same device, sharing a fingerprint. That makes a two-node tier-1 scenario (P4 item 2's wire
+    /// exchange, `MeshMergeExchangeTests`) impossible to state honestly. Passing a distinctly-keyed
+    /// identity is the only thing that separates them. An identity of another namespace than the
+    /// host's is refused: the manager constructs, audits `mesh.identity.namespaceMismatch` and never
+    /// starts its radio or founds a mesh.
     ///
     /// `heldPhotoKeys` is the third seam, for the pending corpus's at-rest key: nil (every shipping
     /// path) takes the device-bound keychain row; a test passes an in-memory or wrong key to reach
@@ -959,8 +978,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// no live slot is now sealed, wrapped, staged and custodied until a link forms or the origin
     /// departs and hands custody on, which is the whole point of the routed store.
     ///
-    /// **What that costs, named rather than hidden.** Capabilities arrive with a slot
-    /// (``localCapabilities()`` appends `.hearts` only while `store.allowNearbyHearts` is on),
+    /// **What that costs, named rather than hidden.** Capabilities arrive with a slot (the host's
+    /// capability list, ``localCapabilitiesProvider``, lists `.hearts` only while `allowNearbyHearts` is on),
     /// `MeshSessionRosterEntry` carries none and is memory-only, and item 1's key advertisement
     /// carries a key rather than a capability — so for a member with no live slot this device knows
     /// neither their build nor their opt-out. The heart may therefore be staged for a peer that will
@@ -3781,10 +3800,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .meshFriendVouchList:
             // COMMITTED SLOTS ONLY since D-4.3's Option 1b half. A vouch list names the sender's
             // whole trusted-peer graph, and it was the one frame in this switch that a
-            // merely-linked peer could push into `vouchCache` — where it composes "Friend of …"
+            // merely-linked peer could push into the vouch cache — where it composes "Friend of …"
             // labels for people it has never been introduced to. Its own two senders have always
             // been commit-side (`onSlotConnected`, `announcePromotedMesh`), so nothing honest
             // targets an uncommitted slot; the gate only closes the receive half of that asymmetry.
+            // The cache and its hygiene are the host's (`vouchListExchange`, plan step A0.5.5);
+            // the gate, its line and the decode stay here.
             guard slot.fingerprint != nil else {
                 ProximityAudit.log(
                     "mesh.vouchList.droppedUncommittedSlot",
@@ -3793,7 +3814,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
                 return
             }
             if let payload = try? decoder.decode(MeshFriendVouchListPayload.self, from: plaintext) {
-                receiveVouchList(payload, senderFingerprint: peer?.fingerprint)
+                vouchListExchange?.receiveVouchList(payload, senderFingerprint: peer?.fingerprint)
             }
         case .meshRemovalProposal, .meshRemovalSecond:
             dispatchRemovalPayload(payloadType, plaintext: plaintext, decoder: decoder, peer: peer, slot: slot)
@@ -12463,13 +12484,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: - Friend-of-friend labels
 
-    /// Returns a label like "Friend of Aisha" if any cached voucher lists this fingerprint as trusted.
-    public func vouchLabel(for fingerprint: String) -> String? {
-        let now = Date()
-        return vouchCache.values
-            .first { $0.expiresAt > now && $0.trustedFingerprints.contains(fingerprint) }
-            .map { "Friend of \($0.voucherDisplayName)" }
-    }
+    /// The host's vouch-list content (plan step A0.5.5, S14): the list ``sendVouchList(to:)`` sends a
+    /// just-committed peer, and the keeper of every list the vouch arm decodes from a committed slot.
+    ///
+    /// nil, the default, sends no vouch list and drops every decoded one; a host installs its exchange
+    /// while it builds the manager, before any slot can commit. Held strongly for the manager's
+    /// lifetime. The frame stays the engine's: the vouch role and token, the committed-slot gate and
+    /// its `mesh.vouchList.droppedUncommittedSlot` line, the decode and both commit-time sends.
+    @ObservationIgnored public var vouchListExchange: (any MeshVouchListExchange)?
 
     public func block(_ participant: MeshSessionParticipant) {
         let signingPublicKey = currentMesh?.members
@@ -12481,59 +12503,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         store.blockProximityPeer(signingPublicKey: signingPublicKey)
     }
 
-    /// Phase 2 gate (Docs/Proximity-Mesh-Redesign-2026-07-10.md, "Phase 2 — Friend minting"):
-    /// the vouch-list broadcast disclosed every unblocked trusted fingerprint to all session
-    /// peers, and was dormant only because the trust vault had no production writers. Friend
-    /// minting (Phase 2) is exactly what would have switched it on, so it is gated OFF here.
-    /// Re-enable only with an explicit consent design for sharing the friend graph.
-    @ObservationIgnored var isVouchListBroadcastEnabled = false
-
-    /// The payload `sendVouchList` would broadcast, or nil while the broadcast is disabled.
-    /// Internal seam so tests can pin both the gate (default off ⇒ nil) and the machinery
-    /// (forced on ⇒ correct fingerprint filtering) without a live transport.
-    func vouchListPayloadForBroadcast() -> MeshFriendVouchListPayload? {
-        guard isVouchListBroadcastEnabled else { return nil }
-        let trusted = store.trustedProximityPeers
-            .filter { $0.blockedAt == nil && $0.revokedAt == nil }
-            .map { $0.fingerprint }
-        return MeshFriendVouchListPayload(
-            voucherFingerprint: identity.localFingerprint,
-            voucherDisplayName: displayName,
-            trustedFingerprints: trusted,
-            expiresAt: Date().addingTimeInterval(2 * 3600)
-        )
-    }
-
+    /// Sends `slot` the vouch list ``vouchListExchange`` builds for it now, signed under the vouch
+    /// token, or nothing when there is no exchange or it answers nil.
     private func sendVouchList(to slot: PeerSlot) async {
-        guard let payload = vouchListPayloadForBroadcast() else { return }
+        guard let payload = vouchListExchange?.vouchListForBroadcast() else { return }
         await sendEnvelope(.meshFriendVouchList, encodable: payload, via: slot)
-    }
-
-    /// Inbound counterpart of the Phase-2 vouch gate. While `isVouchListBroadcastEnabled` is
-    /// off, inbound vouch lists are dropped wholesale — no cache write, no "Friend of …" label:
-    /// the gate exists because vouch lists disclose a peer's friend graph without a consent
-    /// design, and accepting/rendering them would keep that disclosure live on the receive side
-    /// even with our own broadcast off. When enabled, the cached entry is hygiened: expiry is
-    /// capped at the protocol's 2 h TTL (the wire value is sender-controlled) and the
-    /// peer-supplied display name is sanitized before it is stored or rendered.
-    /// Internal seam so tests can drive it without a live transport.
-    func receiveVouchList(_ payload: MeshFriendVouchListPayload, senderFingerprint: String?) {
-        guard isVouchListBroadcastEnabled else { return }
-        guard payload.expiresAt > Date(),
-              payload.voucherFingerprint == senderFingerprint else { return }
-        let cappedExpiry = min(payload.expiresAt, Date().addingTimeInterval(2 * 3600))
-        let name = ProximityDisplayName.peerDisplayName(payload.voucherDisplayName, in: namespace)
-        vouchCache[payload.voucherFingerprint] = MeshFriendVouchListPayload(
-            voucherFingerprint: payload.voucherFingerprint,
-            voucherDisplayName: name,
-            trustedFingerprints: payload.trustedFingerprints,
-            expiresAt: cappedExpiry
-        )
-    }
-
-    /// Test seam: the cached (gated, capped, sanitized) vouch payload for a voucher, if any.
-    func cachedVouchList(from voucherFingerprint: String) -> MeshFriendVouchListPayload? {
-        vouchCache[voucherFingerprint]
     }
 
     // MARK: - Private helpers
@@ -12572,28 +12546,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slots.filter { $0.kind == .active }
     }
 
-    /// The capability tokens advertised in this device's identity introduction. Photos always (the
-    /// mesh's founding feature); `shop` only while clothing-shop sharing is enabled — the opt-out is
-    /// payload-layer (Phase 3a), so an opted-out device neither advertises nor is sent catalogs.
-    /// Snapshot at coordinator creation (capabilities ride the handshake intro); a mid-session toggle
-    /// affects the NEXT session's advertisement, while its send/receive effect is immediate via the
-    /// provider gates. Internal seam so tests can pin the gate without a live channel.
     /// Away-hearts gossip seams (bitchat adoptions Increment 3), wired by FernletStore: the local
-    /// prekey bundle to ride our intros (nil = consent off or feature absent), the sink for
-    /// friends' verified bundles, and the consent flag gating the `heartsAway` advertisement.
+    /// prekey bundle to ride our intros (nil = consent off or feature absent), and the sink for
+    /// friends' verified bundles. The consent flag gating the `heartsAway` advertisement is the
+    /// host's capability list's (``localCapabilitiesProvider``).
     public var heartDropBundleProvider: (() -> ProximityPrekeyBundle?)?
     public var onPeerPrekeyBundle: ((Data, ProximityPrekeyBundle) -> Void)?
-    public var heartsAwayEnabledProvider: (() -> Bool)?
 
     /// Whether this device may take part in live-session chat at all — the 13+ age gate (see
-    /// `AgeAssuranceRecord`). Optional-and-nil means NOT allowed, matching `heartsAwayEnabledProvider`:
+    /// `AgeAssuranceRecord`). Optional-and-nil means NOT allowed, as with the host's away-hearts consent:
     /// a manager nobody wired stays silent rather than opening a messaging surface to a child.
     ///
     /// Enforced in FOUR places since P6 item 4, because any one alone is insufficient:
-    /// 1. `localCapabilities()` withholds `.messages` — now an **advertisement only**: it is a
-    ///    truthful statement that this device is above the line and will show a transcript, and
-    ///    nothing reads it to decide a destination any more, because a routed manifest binds
-    ///    wraps ≡ destinations and the roster carries no capabilities.
+    /// 1. the advertised capability list (``localCapabilitiesProvider``, whose host composer reads
+    ///    ``isChatAllowed`` since plan step A0.5.5) withholds `.messages` — now an **advertisement
+    ///    only**: it is a truthful statement that this device is above the line and will show a
+    ///    transcript, and nothing reads it to decide a destination any more, because a routed
+    ///    manifest binds wraps ≡ destinations and the roster carries no capabilities.
     /// 2. `sendTempMessage(_:)` refuses by name (`MeshTextSendOutcome.ageGated`), so nothing leaves
     ///    this device.
     /// 3. the **projection** refuses before the unwrap, so a gated device decrypts nothing rather
@@ -12616,54 +12585,27 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// the in-session UI can withhold the chat affordance from the same value the transport enforces.
     public var isChatAllowed: Bool { chatAllowedProvider?() == true }
 
+    /// The host's capability list (plan step A0.5.5, S13): the whole ordered list of capability
+    /// tokens this device advertises in its identity introduction, or nil for the engine's own,
+    /// which is the host's wire2 framing token alone.
+    ///
+    /// The list is advertised verbatim, in its order — the order is a signed byte of the
+    /// introduction and of its acknowledgement — and read once per coordinator, when a peer's
+    /// coordinator is built, so a switch the provider reads reaches the next session's
+    /// introductions, never one already sent. A host that ships the wire2 framing lists its wire2
+    /// token (``ProximityNamespace/Capabilities``), since a peer frames its sealed sends to this
+    /// device that way only when this device advertises it. Installed while the manager is built,
+    /// before any coordinator exists; nothing else in the engine reads it.
+    @ObservationIgnored public var localCapabilitiesProvider: (() -> [String])?
+
+    /// The capability tokens advertised in this device's identity introduction: the host's list
+    /// (``localCapabilitiesProvider``), verbatim, or, with none installed, the host's wire2 token
+    /// alone — the one capability the engine itself implements (sealed-payload compress+pad
+    /// framing, bitchat adoptions Increment 2). Snapshot at coordinator creation (capabilities ride
+    /// the handshake intro); a mid-session toggle affects the NEXT session's advertisement.
+    /// Internal seam so tests can read the advertisement without a live channel.
     func localCapabilities() -> [String] {
-        var capabilities = [ProximityCapability.photos.rawValue]
-        // wire2 (bitchat adoptions Increment 2): sealed-payload compress+pad framing. A wire
-        // format, not a user feature — no opt-out; advertised by every build that ships it, under
-        // the host's wire2 token, the one every peer's sealed sends look for.
-        capabilities.append(namespace.family.vocabulary.capabilities.wire2)
-        // heartsAway (bitchat adoptions Increment 3): advertised only when the user opted into
-        // away delivery — signals our intro carries a prekey bundle and we accept drops.
-        if heartsAwayEnabledProvider?() == true {
-            capabilities.append(ProximityCapability.heartsAway.rawValue)
-        }
-        if clothingShop.isSharingEnabled {
-            capabilities.append(ProximityCapability.shop.rawValue)
-        }
-        // Phase 5: temporary messages are a core in-session feature with no separate v1 opt-out —
-        // session membership (the UWB dwell + admission) IS the consent gate. The one thing that DOES
-        // withhold it is the 13+ age gate: a device below the line never advertises `messages`, so
-        // friends' devices skip it in the room broadcast instead of sending into a surface it will drop.
-        if isChatAllowed {
-            capabilities.append(ProximityCapability.messages.rawValue)
-        }
-        // Content-moderation reports are a safety feature with no opt-out — always advertised so a
-        // friend's device knows it may hand us the reports it has verified.
-        capabilities.append(ProximityCapability.moderation.rawValue)
-        // Phase 4: advertise fuzzy-state exchange only when the user opted in, so a friend sends us their
-        // vibe only if we accept (and share) ours.
-        if friendStateEnabledProvider?() == true {
-            capabilities.append(ProximityCapability.friendState.rawValue)
-        }
-        // Phase 6: group activities are session-scoped; membership (the UWB dwell + the host's explicit
-        // confirm) is the consent gate, so advertise unconditionally like messages. Offers are only sent
-        // for activities the user chose to host, so there is nothing to opt out of.
-        capabilities.append(ProximityCapability.activities.rawValue)
-        // TF b19 item 5: in-session hearts ride the live mesh session. Advertise `.hearts` ONLY when this
-        // device has opted in (`allowNearbyHearts`). The receiver enforces that same opt-out (plus the
-        // trusted-friend requirement + block list) before recording anything, so advertising it while
-        // opted out would make an opted-out device look heart-reachable: a sender would send, see a false
-        // "Sent … good vibes", and burn the 5-minute cooldown even though the receiver silently drops it
-        // (`receiveSessionHeart`). Gating the advertisement means opted-out peers never appear reachable,
-        // so the sender's button reflects the true unavailable state. Also lets a sender skip peers on an
-        // older build (no `.friendHeart` mesh handler) and fall back to presence.
-        //
-        // Accepted limitation: capabilities are exchanged once at the session handshake, so toggling this
-        // setting mid-session does not retroactively update peers already connected in the session.
-        if store.allowNearbyHearts {
-            capabilities.append(ProximityCapability.hearts.rawValue)
-        }
-        return capabilities
+        localCapabilitiesProvider?() ?? [namespace.family.vocabulary.capabilities.wire2]
     }
 
     /// Phase 3a outbound gate: send our catalog only to peers advertising the `shop` capability (a
