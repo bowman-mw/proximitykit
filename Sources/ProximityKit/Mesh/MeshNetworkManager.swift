@@ -146,16 +146,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Phase 6 (Group Activities): the state + host-authoritative roster/token brain. Rides this friend
     /// mesh (no new radio); constructed + wired in `init`. Memory + a device-local sidecar (NEVER synced).
     public let activities: ProximityActivityManager
-    /// Phase 3b (one-hop moderation relay): the local user's own moderation report rows, supplied by the
-    /// app so ProximityKit signs + hands them to a committed friend; and the sink for peers' verified
-    /// report rows (stored + reconciled by the app).
-    @ObservationIgnored public var ownModerationReportsProvider: (() -> [ModerationLedgerEntry])?
-    @ObservationIgnored public var onModerationRowsReceived: (([ModerationLedgerEntry]) -> Void)?
-    /// Phase 4 (fuzzy state): whether the user opted into sharing (gates the advertised capability); the
-    /// local fuzzy-state + appearance payload to send; and the sink for a friend's received state.
-    @ObservationIgnored public var friendStateEnabledProvider: (() -> Bool)?
-    @ObservationIgnored public var friendStatePayloadProvider: (() -> FriendStatePayload?)?
-    @ObservationIgnored public var onFriendStateReceived: ((String, FriendStatePayload) -> Void)?
     /// Device-local hearts ledger (received-heart records + the 5-minute per-friend rate limit),
     /// SHARED with the presence path (TF b19 item 5). In-session hearts ride the live mesh channel
     /// instead of the fragile on-demand presence connect, but they record through the SAME ledger so
@@ -750,8 +740,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         self.photoWallPreferences = preferencesStore.load() ?? FriendPhotoWallPreferences()
         loadPhotoCorpora(now: Date())
         setupMeshSession()
-        registerModerationReportHandler()
-        registerFriendStateHandler()
         registerActivityHandlers()
         // Phase 6: give the activity manager the two mesh seams it needs — a sealed/unsealed send to a
         // verified fingerprint's committed slot, and the list of committed peers advertising `.activities`.
@@ -800,63 +788,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         prunePhotoWallPreferences()
         loadHeldPhotoIndex(now: now)
         reconcileHeldPhotosIfReady(now: now)
-    }
-
-    /// Phase 3b: one-hop moderation reports ride the friend mesh. The committed-slot gate has already
-    /// run; the remaining guards require a transport-verified, unblocked, vault-TRUSTED sender (reports
-    /// count only from friends accepted in person — the Sybil defense). `.itemReport` is sealed, so an
-    /// unsealed bundle was already rejected at `verify()`; each row's Ed25519 signature is re-checked
-    /// against the sender key inside `verifiedRows`, and rows the sender didn't personally sign drop.
-    private func registerModerationReportHandler() {
-        registerPayloadHandler(for: .itemReport) { [weak self] _, plaintext, peer in
-            guard let self else { return }
-            guard let peer else {
-                ProximityAudit.log("mesh.itemReport.droppedUnverifiedSender")
-                return
-            }
-            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
-            guard self.store.proximityTrustStore.isTrustedProximityPeer(signingPublicKey: peer.signingPublicKey) else { return }
-            guard let payload = try? JSONDecoder().decode(ModerationReportPayload.self, from: plaintext) else { return }
-            let rows = ModerationReportRelay.verifiedRows(
-                from: payload, senderSigningKey: peer.signingPublicKey, now: Date())
-            guard !rows.isEmpty else { return }
-            self.onModerationRowsReceived?(rows)
-        }
-    }
-
-    /// Hands this device's OWN signed reports to a committed friend (one-hop). Gated on the recipient
-    /// being a vault-TRUSTED (kept-in-person) peer — symmetric with the receive handler — so your signed,
-    /// non-repudiable reports never leak to a merely-committed stranger you didn't keep as a friend. No
-    /// provider, an empty set, or no signable rows → sends nothing.
-    private func sendModerationReports(to slot: PeerSlot, recipientSigningKey: Data) async {
-        guard store.proximityTrustStore.isTrustedProximityPeer(signingPublicKey: recipientSigningKey) else { return }
-        guard let rows = ownModerationReportsProvider?(), !rows.isEmpty else { return }
-        let payload = ModerationReportRelay.buildPayload(ownReports: rows, identity: identity)
-        guard !payload.reports.isEmpty else { return }
-        await sendFeatureEnvelope(PayloadType.itemReport.rawValue, encodable: payload, via: slot, sealed: true)
-    }
-
-    /// Phase 4: fuzzy state + appearance exchange rides the friend session. The committed-slot gate has
-    /// run; require a verified, unblocked, vault-trusted sender and a well-formed payload, then hand it to
-    /// the app (which applies its own opt-in + caches). Sealed (in Fernlet's `payloads.sealingRequired`).
-    private func registerFriendStateHandler() {
-        registerPayloadHandler(for: .friendState) { [weak self] _, plaintext, peer in
-            guard let self, let peer else { return }
-            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
-            guard self.store.proximityTrustStore.isTrustedProximityPeer(signingPublicKey: peer.signingPublicKey) else { return }
-            guard let payload = try? JSONDecoder().decode(FriendStatePayload.self, from: plaintext),
-                  payload.isWellFormed else { return }
-            self.onFriendStateReceived?(peer.fingerprint, payload)
-        }
-    }
-
-    /// Sends our fuzzy state + appearance to a committed friend. Gated on the recipient being a
-    /// vault-TRUSTED (kept-in-person) peer — symmetric with the receive handler — so the fuzzy wellbeing
-    /// vibe never leaks to a merely-committed stranger. A nil provider (opt-out) also sends nothing.
-    private func sendFriendState(to slot: PeerSlot, recipientSigningKey: Data) async {
-        guard store.proximityTrustStore.isTrustedProximityPeer(signingPublicKey: recipientSigningKey) else { return }
-        guard let payload = friendStatePayloadProvider?() else { return }
-        await sendFeatureEnvelope(PayloadType.friendState.rawValue, encodable: payload, via: slot, sealed: true)
     }
 
     /// Phase 6: Group Activities ride the friend mesh as registered feature payloads. The dispatch
@@ -14571,14 +14502,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///    session that holds no mesh; a re-commit lands here and forms the next one.
     /// 2. **The session observer's commit** (S15), told that fact: the host's legs for a commit, in the
     ///    host's own order. Fernlet's (FernletSocial's mesh composition) feeds closeness first; on a
-    ///    formation it closes the previous post-session shop window and drops its catalogs; and it
-    ///    offers this device's clothing catalog once per slot, pairwise sealed and capability-gated,
-    ///    with a `clothingCatalogRequest` for the peer's, so the exchange does not depend on which side
-    ///    commits first (spec: "Catalog delivery must not assume commit symmetry").
-    /// 3. **The engine's own legs**, in their order: the transcript's clear on a formation, then this
-    ///    peer's moderation-report and friend-state sends and the activities offer. The clear follows
-    ///    the observer's legs: each of those is a memory-only write or a task spawned to run after this
-    ///    hook returns, so none reads the transcript before it is cleared.
+    ///    formation it closes the previous post-session shop window and drops its catalogs; it offers
+    ///    this device's clothing catalog once per slot, pairwise sealed and capability-gated, with a
+    ///    `clothingCatalogRequest` for the peer's, so the exchange does not depend on which side
+    ///    commits first (spec: "Catalog delivery must not assume commit symmetry"); and it hands this
+    ///    peer, when it advertises each, this device's own signed moderation reports and its fuzzy
+    ///    friend state, each to a vault-trusted friend only.
+    /// 3. **The engine's own legs**, in their order: the transcript's clear on a formation, then the
+    ///    activities offer. The clear follows the observer's legs: each of those is a memory-only write
+    ///    or a task spawned to run after this hook returns, so none reads the transcript before it is
+    ///    cleared.
     ///
     /// Internal seam so unit tests can drive a slot commit without a live handshake; its spelling
     /// (named for the shop's hook) is one of the engine names the package's rename pass settles.
@@ -14592,17 +14525,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // Phase 5: a NEW session forms with an empty transcript. Messages already cleared at the
             // prior session end; this is belt-and-braces and covers the transient-drop → re-commit case.
             clearSessionTranscript()
-        }
-        // Phase 3b: hand our own signed moderation reports to this committed friend (one-hop relay).
-        // The send method additionally requires the recipient be a vault-trusted (kept) friend.
-        if peerIdentity.supports(.moderation, in: namespace.family.vocabulary.capabilities) {
-            let recipientKey = peerIdentity.signingPublicKey
-            spawnHostPinned { [weak self] in await self?.sendModerationReports(to: slot, recipientSigningKey: recipientKey) }
-        }
-        // Phase 4: share our fuzzy vibe + appearance with this committed friend (kept friends only).
-        if peerIdentity.supports(.friendState, in: namespace.family.vocabulary.capabilities) {
-            let recipientKey = peerIdentity.signingPublicKey
-            spawnHostPinned { [weak self] in await self?.sendFriendState(to: slot, recipientSigningKey: recipientKey) }
         }
         // Phase 6: offer any activities we host to this committed peer + exchange a roster version digest
         // so the highest verified snapshot converges. The manager sends via its wired `send` closure.
@@ -16078,6 +16000,18 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         slot.peerCapabilities = peerCapabilities
         slot.stableDistanceMeters = stableDistanceMeters
         slots.append(slot)
+    }
+
+    /// Whether the payload registry holds a handler for `token`, so a test's composition rig can check
+    /// that its host installed every feature handler it owes this manager before any frame arrives:
+    /// the registry is otherwise observable only by delivering a frame, and a handler may drop a frame
+    /// with no line at all (friend state's drops an unattributed one silently). `internal` for
+    /// `@testable` unit tests only.
+    ///
+    /// - Parameter token: The payload token, verbatim.
+    /// - Returns: Whether ``registerPayloadHandler(forToken:handler:)`` registered a handler for it.
+    func hasPayloadHandlerForTesting(forToken token: String) -> Bool {
+        registeredPayloadHandlers[token] != nil
     }
 
     /// A narrowed or widened routed type registry for one manager, or nil for the shipping value

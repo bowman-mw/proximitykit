@@ -213,17 +213,15 @@ nonisolated func canonicalUTF8Ordered(_ lhs: String, _ rhs: String) -> Bool {
 // inventory digest ("what content I am carrying, and for whom") from the membership one ("what
 // records I hold"); and the drain answer ("we are in sync") from the routed inventory digest ("here is
 // everything I hold"), or a stale quiescence bit could close a merge window that should still be
-// open. The four tags left below are the activity and moderation features', which leave with those
-// features when the mesh manager's feature parts do (plan step A0.5).
+// open. The three tags left below are the activity feature's, which leave with it when the mesh
+// manager's activity parts do (plan step A0.5.8); the moderation report row's tag and its bytes left
+// for FernletSocial's `FeatureCanonicalBytes.swift` with the report relay (plan step A0.5.7).
 //
 // Group Activities (Phase 6). Distinct tags so an activity descriptor hash, a join token, and a roster
 // snapshot can never cross-validate one another (or the mesh types above).
 private nonisolated let canonicalActivityDescriptorDomain = FernletCryptoPurpose.Signature.activityDescriptorV2.data
 private nonisolated let canonicalActivityJoinTokenDomain = FernletCryptoPurpose.Signature.activityJoinTokenV2.data
 private nonisolated let canonicalActivityRosterSnapshotDomain = FernletCryptoPurpose.Signature.activityRosterSnapshotV2.data
-// Moderation report row (Phase 3b). Distinct tag so a report signature can never cross-validate any
-// other signed type.
-private nonisolated let canonicalModerationReportDomain = FernletCryptoPurpose.Signature.moderationReportV2.data
 
 // MARK: - Identity envelope
 
@@ -374,29 +372,6 @@ public nonisolated func canonicalBytes(for snapshot: ActivityRosterSnapshot) -> 
     writer.appendDate(snapshot.issuedAt)
     writer.appendLengthPrefixed(snapshot.hostSigningPublicKey)
     // hostSignature: deliberately excluded.
-    return writer.bytes
-}
-
-// MARK: - Moderation report (Phase 3b)
-
-/// Canonical signing bytes for a `ModerationLedgerEntry` — the deterministic bytes a reporter signs and
-/// a receiver re-derives to verify. Both ends produce identical bytes for the same row. `createdAt` is
-/// bound at whole-second resolution (a hostile future date is part of the signature; the receiver may
-/// then clamp the STORED createdAt for decay without touching verification). Length-prefixing makes the
-/// encoding injective — no value can shift a field boundary — and `appendDate` saturates instead of
-/// trapping on an out-of-range wire date. There is no legacy encoder: this row type never signed before.
-public nonisolated func canonicalBytes(for entry: ModerationLedgerEntry) -> Data {
-    var writer = CanonicalByteWriter()
-    writer.appendLengthPrefixed(canonicalModerationReportDomain)
-    writer.appendString(entry.kind.rawValue)
-    writer.appendLengthPrefixed(entry.reporterSigningPublicKey)
-    writer.appendLengthPrefixed(entry.subjectSigningPublicKey)
-    writer.appendUUID(entry.itemID)
-    writer.appendLengthPrefixed(entry.contentHash)
-    writer.appendString(entry.reasonToken)
-    writer.appendUInt64(entry.reporterSeq)
-    writer.appendDate(entry.createdAt)
-    // signature: lives on `SignedModerationReport`, not the entry — nothing to exclude here.
     return writer.bytes
 }
 
