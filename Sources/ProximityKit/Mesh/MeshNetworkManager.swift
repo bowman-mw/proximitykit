@@ -696,6 +696,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let namespace = store.proximityNamespace
         self.namespace = namespace
         self.hostRoutedTypeRegistry = MeshRoutedTypeRegistry.increment1(namespace.family.vocabulary.routedTypes)
+        self.residentRoutedRows = MeshRoutedTypeRegistry.increment1Rows(namespace.family.vocabulary.routedTypes)
         self.transport = transport ?? NetworkMeshSession(namespace: namespace)
         let id = identity ?? store.makeProximityIdentity()
         self.identityIsOfNamespace = ProximityNamespaceGate.checkIdentity(
@@ -756,6 +757,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         activities.committedActivityPeerFingerprints = { [weak self] in
             self?.committedActivityPeerFingerprints() ?? []
         }
+        registerBuiltInProjectionHandlers()
     }
 
     /// Ends every long-running task the manager owns if it is released without `stopSearching()`
@@ -1030,9 +1032,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// did not. Since the item 6 fix review an **absent** ledger is refused the same way, rather
     /// than optional-chained past into a send with no cooldown (P3-5).
     ///
-    /// **New:** the delivery is the three lines every routed sender uses — frame a body, ask the
-    /// registry for the token, call the one origination door — with the audience stated as a single
-    /// recipient, which is what the heart row's `.singleRecipient` column means.
+    /// **New:** the delivery is the three lines every routed sender uses — take its resident row's
+    /// token and ask the registry whether that row is registered, frame a body, call the one
+    /// origination door — with the audience stated as a single recipient, which is what the heart
+    /// row's `.singleRecipient` column means.
     ///
     /// **Gone:** the live-slot lookup, and with it `.sending`. The mint is fully synchronous, so
     /// `.sending` was never an observable state on this path; the presence fallback keeps its own.
@@ -1065,7 +1068,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         defer { sessionHeartSendsInFlight.remove(friend.fingerprint) }
         let giftID = UUID()
-        guard let typeToken = routedTypes.token(forCanonicalStore: .heartLedger),
+        let typeToken = residentRoutedRows.heart.token
+        guard isRoutedTypeRegistered(typeToken),
               let body = framedSessionHeartBody(giftID: giftID, typeToken: typeToken) else {
             return failSessionHeart(.couldNotSend, friend)
         }
@@ -1086,8 +1090,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `typeToken` is passed IN rather than spelled here, and it is not a style choice:
     /// `noShippingCodeBranchesOnARoutedTypeToken` forbids the token type's qualified constants
     /// anywhere in this file — **including inside an audit context**, which is where the first draft
-    /// of this function put one and where the wall caught it — so the caller's
-    /// `token(forCanonicalStore:)` answer is the only spelling the manager may hold.
+    /// of this function put one and where the wall caught it — so the caller's resident-row token
+    /// (`residentRoutedRows.heart.token`, asked of the registry first) is the only spelling the
+    /// manager may hold.
     private func framedSessionHeartBody(giftID: UUID, typeToken: String) -> Data? {
         let header = MeshRoutedHeartHeader(
             id: giftID,
@@ -3497,7 +3502,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             noteRoutedShareRefusal(.sealFailed, error: error)
             return
         }
-        guard let typeToken = routedTypes.token(forCanonicalStore: .friendPhotoWall) else {
+        let typeToken = residentRoutedRows.photo.token
+        guard isRoutedTypeRegistered(typeToken) else {
             noteRoutedShareRefusal(.mintFailed, error: nil)
             return
         }
@@ -4212,36 +4218,45 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// leg answers those from then on.
     @ObservationIgnored private var routedItemTranscriptGeneration: [MeshRoutedItemKey: Int] = [:]
 
-    /// The routed type tokens this build can actually hand to a canonical store — one per store
-    /// ``dispatchRoutedPlaintext(_:store:author:manifest:seenAt:)`` has an arm for **and may write**,
-    /// asked of the registry rather than typed (D-13.31).
+    /// The registered projection handlers, keyed by routed type token, each in the box
+    /// ``registerRoutedProjectionHandler(_:forToken:)`` built for it (plan step A0.5.2, S9).
     ///
-    /// **Two stores, and `.heartLedger` is deliberately NOT one of them** — P6 item 6 refused to add
-    /// it, and the refusal is the design rather than an omission. A heart's plaintext pass **is** its
-    /// ack ceremony (`routedAckEvidence` → `heartLedgerJudgement`, reached through
-    /// `commitLocalDelivery`), and that door writes no rung and returns evidence, so a projection arm
-    /// for it could not produce the `MeshRoutedHeartAck` the ack needs. Adding the token would break
-    /// twice: every heart would reach the dispatch's early return, be logged `noDispatchArm` and
-    /// **permanently occupy job 5's 16-slot allowance** — R-19's starvation, reintroduced by the edit
-    /// meant to honour R-19 — and, because job 5's list does not shrink as work is done (unlike job
-    /// 4's, which is keyed on the stored recipient receipt) while the mark is memory-only, every
-    /// restart would re-enumerate every delivered heart and re-stream its blob to re-ask the ledger
-    /// until expiry. The structural reason the heart belongs on job 4's list is that job 4's list
-    /// shrinks. D-13.34's rule as written is "P6 adds each store here in the same edit that lands its
-    /// arm", and no arm is landed for hearts.
+    /// Bounded by the registry's rows: a registration is refused for a token with no row, so the map
+    /// never holds more than ``MeshRoutedTypeRegistry/maxEntries`` handlers. Held for the manager's
+    /// lifetime and never cleared — a mesh change, a wipe and a session end leave it as it is — and
+    /// it holds each handler strongly, which is why the built-ins hold the manager `unowned`.
+    @ObservationIgnored private var routedProjectors: [String: RoutedProjector] = [:]
+
+    /// The routed type tokens this build can actually hand to a canonical store right now: the
+    /// tokens of the registry's rows whose registered projection handler says it is projectable,
+    /// asked of the registry and the handlers rather than typed (D-13.31, plan step A0.5.2).
+    ///
+    /// **Two rows, and the heart's is deliberately NOT one of them** — P6 item 6 refused to add it,
+    /// and the refusal is the design rather than an omission: no handler is registered for the
+    /// heart row, and ``registerRoutedProjectionHandler(_:forToken:)`` refuses one for any judge row.
+    /// A heart's plaintext pass **is** its ack ceremony (`routedAckEvidence` →
+    /// `heartLedgerJudgement`, reached through `commitLocalDelivery`), and that door writes no rung
+    /// and returns evidence, so a projection handler for it could not produce the
+    /// `MeshRoutedHeartAck` the ack needs. Projecting the token would break twice: every heart would
+    /// reach the dispatch's early return, be logged `noDispatchArm` and **permanently occupy job 5's
+    /// 16-slot allowance** — R-19's starvation, reintroduced by the edit meant to honour R-19 — and,
+    /// because job 5's list does not shrink as work is done (unlike job 4's, which is keyed on the
+    /// stored recipient receipt) while the mark is memory-only, every restart would re-enumerate
+    /// every delivered heart and re-stream its blob to re-ask the ledger until expiry. The structural
+    /// reason the heart belongs on job 4's list is that job 4's list shrinks.
     ///
     /// Everything that spends a bounded per-pass allowance on projection work reads this, so an
     /// unfinishable type cannot occupy a slot forever (R-19).
     ///
-    /// **`.sessionTranscript` is conditional on ``isChatAllowed``**, which is R-19's own rule applied
-    /// to a device that cannot finish the type rather than to a build that cannot: below the 13+
-    /// line every text item would refuse at the arm, and sixteen of them sorted first would strand
-    /// a photo behind them until expiry — the index is ordered by origin fingerprint, so that
-    /// position is an attacker's to choose.
+    /// **The text row is conditional on ``isChatAllowed``** — its built-in handler's
+    /// `isProjectable` — which is R-19's own rule applied to a device that cannot finish the type
+    /// rather than to a build that cannot: below the 13+ line every text item would refuse at its
+    /// handler's age gate, and sixteen of them sorted first would strand a photo behind them until
+    /// expiry — the index is ordered by origin fingerprint, so that position is an attacker's to
+    /// choose.
     private var projectableRoutedTypeTokens: Set<String> {
-        var stores: [MeshRoutedCanonicalStore] = [.friendPhotoWall]
-        if isChatAllowed { stores.append(.sessionTranscript) }
-        return Set(stores.compactMap { routedTypes.token(forCanonicalStore: $0) })
+        // R2: bounded by the registry's rows (at most `MeshRoutedTypeRegistry.maxEntries`).
+        routedTypes.tokens.filter { routedProjectors[$0]?.isProjectable() == true }
     }
 
     // MARK: Routed backpressure state (P5 item 9, plan §11)
@@ -6158,6 +6173,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The shipping routed type registry: built once, in `init`, from ``namespace``'s routed types,
     /// and read through ``routedTypes`` unless a test narrowed or widened it.
     @ObservationIgnored private let hostRoutedTypeRegistry: MeshRoutedTypeRegistry
+
+    /// The engine's resident routed rows by name, built once in `init` from the same routed types as
+    /// ``hostRoutedTypeRegistry`` (plan step A0.5.2, S9).
+    ///
+    /// Read for exactly two things: the token each built-in projection handler registers under, and
+    /// the token each of the three senders mints under — always behind ``isRoutedTypeRegistered(_:)``,
+    /// so a test's narrowed registry still refuses the mint. Never a second registry: no door admits,
+    /// resolves or forwards by it.
+    @ObservationIgnored private let residentRoutedRows: MeshRoutedResidentRows
 
     /// The routed type registry this device admits, resolves and forwards by (P5 item 11, plan §11).
     ///
@@ -8521,7 +8545,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// whole pass at every rising edge. A text item whose transcript is gone is exactly that
     /// population, and it is the one an ended session creates by the dozen.
     ///
-    /// Only the transcript store has an answer here; every other store is left to its arm.
+    /// Only a `.session` row has an answer here — a pure read of the registry row's content scope
+    /// and the engine's own ``transcriptLiveness(for:)`` (plan step A0.5.2); every other row is left
+    /// to its handler.
     ///
     /// - Parameters:
     ///   - ref: The item, from the list the pass already read.
@@ -8537,10 +8563,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     func isProjectableAtThisPass(_ ref: MeshRoutedItemRef, in index: MeshRoutedIndex) -> Bool {
         guard let manifest = index.record(for: ref.key)?.manifest,
               let entry = routedTypes.entry(for: manifest.typeToken) else { return true }
-        switch entry.canonicalStore {
-        case .friendPhotoWall, .heartLedger:
+        switch entry.contentScope {
+        case .persistent:
             return true
-        case .sessionTranscript:
+        case .session:
             return transcriptLiveness(for: manifest) != .endedForGood
         }
     }
@@ -9191,8 +9217,48 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: Routed delivery projection (P5 item 13, plan §11, §12)
 
-    /// Hands one already-delivered routed item's plaintext to the canonical store its registered
-    /// type names — behind the two access predicates, and only then.
+    /// Registers the projection handler for one routed type: from here on an item of `token` that
+    /// passes the engine's guard chain is offered to `handler` (plan step A0.5.2, S9).
+    ///
+    /// The contract. Answers `false` and stores nothing when `token` has no row in this device's
+    /// routed type registry, or when its row is a judge row — one whose final ack is the foreground
+    /// decrypt and ledger commit, whose plaintext pass is its ack ceremony and never a projection —
+    /// so a refused registration leaves the row answering `mesh.routedProjection.noDispatchArm` for
+    /// good, and the caller checks the answer (which is why it is not `@discardableResult`). Answers
+    /// `true` once the handler is held: strongly, for the manager's lifetime, and replacing any
+    /// handler registered for the token before. Register before the first re-entry pass can run: an
+    /// item whose row has no handler yet is refused for now, and the row is not enumerated for
+    /// projection until a handler says it is projectable.
+    ///
+    /// The handler is kept in a box built here over `H.Body` — its two pre-open answers, and an
+    /// open-then-project step that runs the engine's one generic opener with `H.Body` and then the
+    /// handler's canonical write — so the engine's dispatch never opens an existential handler.
+    ///
+    /// - Parameters:
+    ///   - handler: The routed type's projection handler.
+    ///   - token: The routed type token it projects, verbatim.
+    /// - Returns: whether the handler was registered.
+    public func registerRoutedProjectionHandler<H: MeshRoutedProjectionHandler>(
+        _ handler: H, forToken token: String
+    ) -> Bool {
+        guard let entry = routedTypes.entry(for: token) else { return false }
+        guard !entry.requiresForegroundDecryptBeforeFinal else { return false }
+        routedProjectors[token] = RoutedProjector(                    // R3: bounded by the registry's rows
+            isProjectable: { handler.isProjectable },
+            verdictBeforeOpen: { handler.verdictBeforeOpen($0) },
+            openThenProject: { blob, manifest, delivery, identity, mayDecryptRoutedContent in
+                let body = try MeshRoutedItemDelivery.openBody(
+                    H.Body.self, blob: blob, manifest: manifest, identity: identity,
+                    mayDecryptRoutedContent: mayDecryptRoutedContent
+                )
+                return handler.projectRoutedItem(body, delivery: delivery)
+            }
+        )
+        return true
+    }
+
+    /// Hands one already-delivered routed item's plaintext to the projection handler registered for
+    /// its type, which writes its canonical store — behind the two access predicates, and only then.
     ///
     /// **Everything above it is unchanged.** The replay verdict, the verifiers, the store doors, the
     /// custody rung and the recipient receipt all ran on ciphertext, and the photo stage is final on
@@ -9294,81 +9360,220 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return .refusedForNow
         }
         return dispatchRoutedPlaintext(
-            blob, store: entry.canonicalStore, author: author, manifest: manifest, seenAt: seenAt
+            blob, entry: entry, author: author, manifest: manifest, seenAt: seenAt
         )
     }
 
-    /// Routes one item's ciphertext to the canonical store its REGISTRY ROW names, and answers
-    /// whether the item still owes the projection anything (P6 item 4).
+    /// Hands one item to the projection handler registered for its token, and answers whether the
+    /// item still owes the projection anything (P6 item 4; a token-keyed lookup of a registered
+    /// ``MeshRoutedProjectionHandler`` since plan step A0.5.2, where it was a `switch` over the
+    /// row's canonical store).
     ///
-    /// The `switch` is on `entry.canonicalStore` — a **resolved value**, which
-    /// `noShippingCodeBranchesOnARoutedTypeToken` permits by name and which matches none of its six
-    /// needles. Never a token spelling: the registry is the only per-type source, and a sender asks
-    /// it for a token exactly as this asks it for a store.
+    /// The lookup is keyed on `manifest.typeToken` — a **lookup argument**, which
+    /// `noShippingCodeBranchesOnARoutedTypeToken` permits and which matches none of its needles —
+    /// and the only row column read is a resolved value. Reached only from
+    /// ``routedProjectionVerdict(key:manifest:seenAt:)``, behind the whole guard chain (the mutation
+    /// predicate included) and after the blob read. The order inside is the engine's:
     ///
-    /// Each arm opens its own body, because that is the one step that differs per family, and the
-    /// open is therefore inside the arm rather than above the switch — the caller cannot know the
-    /// body type before the store is resolved. A body that will not open is `refusedForGood`: a
-    /// malformed framing and an id mismatch are permanent facts about origin-signed bytes, and a
-    /// text item costs its origin ~600 bytes, so leaving sixteen of them in the retry list is a
-    /// permanent projection outage for photos too (they share the one 16-item allowance).
+    /// 1. **A judge row, or a row no handler projects**, logs `mesh.routedProjection.noDispatchArm`
+    ///    and answers `refusedForNow` — the heart arm's answer before the lookup, and never the
+    ///    unknown row's FINAL one, because the row is registered and a handler may still be. For a
+    ///    judge row it is unreachable by construction since P6 item 6 — the re-entry pass never
+    ///    enumerates its token and `finishLocalRungs` filters the live door's call by the same
+    ///    derived fact — and kept fail-closed anyway.
+    /// 2. **The delivery** is built: the signed facts, the ledger's author, `seenAt`, and for a
+    ///    `.session` row the engine's own ``transcriptLiveness(for:)``. Computed before the open,
+    ///    which changes nothing: between here and the handler's write only its pre-open answer (an
+    ///    audit line at most) and the decrypt run, synchronously, and neither writes the mesh, the
+    ///    generation map or the session state the liveness reads.
+    /// 3. **The handler's pre-open verdict** — the photo row's tombstone and held-copy settlement,
+    ///    the text row's 13+ age gate — so an item it refuses is never decrypted.
+    /// 4. **The open**, through the engine's one generic opener as the handler's `Body`, under one
+    ///    `do`/`catch`. A body that will not open is `refusedForGood` with one
+    ///    `mesh.routedProjection.openFailed` line: a malformed framing and an id mismatch are
+    ///    permanent facts about origin-signed bytes, and a text item costs its origin ~600 bytes, so
+    ///    leaving sixteen of them in the retry list is a permanent projection outage for photos too
+    ///    (they share the one 16-item allowance).
+    /// 5. **The handler's canonical write**, once, whose verdict is the item's.
     ///
     /// - Parameters:
     ///   - blob: The item's complete ciphertext.
-    ///   - store: The canonical store the registry row names.
+    ///   - entry: The item's registry row.
     ///   - author: The origin, as the admission ledger resolved it.
     ///   - manifest: The origin's signed manifest.
     ///   - seenAt: When this device first saw the item — the receiver-local anchor §10.3's clamp
     ///     and the transcript's ordering need. Never a clock read here.
-    /// - Returns: the arm's verdict.
+    /// - Returns: the handler's verdict, or the refusal that stopped it.
     private func dispatchRoutedPlaintext(
         _ blob: Data,
-        store canonicalStore: MeshRoutedCanonicalStore,
+        entry: MeshRoutedTypeEntry,
         author: MeshRosterMember,
         manifest: MeshRoutedManifest,
         seenAt: Date
     ) -> MeshRoutedProjectionVerdict {
-        switch canonicalStore {
-        case .friendPhotoWall:
-            // FIRST, before the body is opened and before the quota (invariant I5): a photo this
-            // phone already answered is refused for good by its (origin, item id) tombstone, so a
-            // custody copy still live in the mesh can never become a photo here again; one already
-            // held or on the wall is handed on without a second write.
-            if let settled = routedPhotoSettlement(manifest) { return settled }
-            guard let body = openedRoutedPhotoBody(blob, manifest: manifest) else {
-                return .refusedForGood
-            }
-            return routedCanonicalDispatch(body, author: author, manifest: manifest)
-        case .sessionTranscript:
-            // Leg 3 of the 13+ gate — advertisement, send, projection, and leg 4 is the
-            // enumeration filter in `projectableRoutedTypeTokens`. Applied BEFORE the unwrap, so a
-            // device below the line decrypts nothing rather than decrypting and discarding, and it
-            // is the ONE place the arm reads it: a second check with nothing saying which is live
-            // is the shape the retired handler's block check had. FINAL, because the gate is a
-            // durable product rule about this recipient and the transcript it would have entered
-            // belongs to this session.
-            guard isChatAllowed else {
-                ProximityAudit.log("mesh.routedProjection.transcriptAgeGated")
-                return .refusedForGood
-            }
-            guard let body = openedRoutedTextBody(blob, manifest: manifest) else {
-                return .refusedForGood
-            }
-            return routedCanonicalDispatch(
-                body, author: author, manifest: manifest, seenAt: seenAt
-            )
-        case .heartLedger:
-            // **Unreachable by construction since P6 item 6, and kept fail-closed anyway.** A
-            // heart's plaintext pass is its ack ceremony (`heartLedgerJudgement`), not a
-            // projection: `projectableRoutedTypeTokens` deliberately omits the token, so the
-            // re-entry pass never enumerates one, and `finishLocalRungs` filters the live door's
-            // call by the same derived fact. The arm stays because the `switch` is exhaustive over
-            // a resolved value — and because an arm that refuses is the right answer for a future
-            // store this build has no writer for.
+        guard !entry.requiresForegroundDecryptBeforeFinal,
+              let projector = routedProjectors[manifest.typeToken] else {
             ProximityAudit.log(
                 "mesh.routedProjection.noDispatchArm", context: ["type": manifest.typeToken]
             )
             return .refusedForNow
+        }
+        let delivery = MeshRoutedDelivery(
+            manifest: manifest,
+            author: MeshRoutedAuthor(fingerprint: author.fingerprint, signingPublicKey: author.signingPublicKey),
+            seenAt: seenAt,
+            sessionLiveness: entry.contentScope == .session ? transcriptLiveness(for: manifest) : nil
+        )
+        if let verdict = projector.verdictBeforeOpen(delivery) { return verdict }
+        do {
+            return try projector.openThenProject(blob, manifest, delivery, identity, mayDecryptRoutedContent)
+        } catch {
+            ProximityAudit.log(
+                "mesh.routedProjection.openFailed",
+                context: heldMeshAuditContext(
+                    ["type": manifest.typeToken, "error": String(describing: error)]
+                )
+            )
+            return .refusedForGood
+        }
+    }
+
+    /// One registered projection handler, type-erased at registration over its `Body` (plan step
+    /// A0.5.2; the design's fallback for opening an existential handler inside the engine): the
+    /// dispatch calls these three closures and never names the handler's type.
+    ///
+    /// Each closure holds its handler strongly, as the projector map holds the box for the manager's
+    /// lifetime; none holds the manager, so a box can never keep the manager alive.
+    private struct RoutedProjector {
+        /// The handler's ``MeshRoutedProjectionHandler/isProjectable``, read at each enumeration.
+        let isProjectable: () -> Bool
+        /// The handler's ``MeshRoutedProjectionHandler/verdictBeforeOpen(_:)``.
+        let verdictBeforeOpen: (_ delivery: MeshRoutedDelivery) -> MeshRoutedProjectionVerdict?
+        /// The engine's one generic open with the handler's `Body`, then the handler's
+        /// ``MeshRoutedProjectionHandler/projectRoutedItem(_:delivery:)``. Throws only what the open
+        /// throws: the canonical write never throws.
+        let openThenProject: (
+            _ blob: Data, _ manifest: MeshRoutedManifest, _ delivery: MeshRoutedDelivery,
+            _ identity: IdentityService, _ mayDecryptRoutedContent: Bool
+        ) throws -> MeshRoutedProjectionVerdict
+    }
+
+    /// Registers the two built-in projection handlers as the init's last step (plan step A0.5.2):
+    /// the photo row's and the temporary-message row's, each under its resident row's token.
+    ///
+    /// Each answer is bound to a constant and then asserted, never `assert(register…)`: a Release
+    /// build does not evaluate an `assert`'s condition, so the registration would vanish with it. A
+    /// refusal is unreachable in a shipping build — both rows are this manager's own resident rows,
+    /// neither is a judge row, and no test registry exists yet while the manager is being built —
+    /// and the routed suites pin that both rows project.
+    private func registerBuiltInProjectionHandlers() {
+        let photoRegistered = registerRoutedProjectionHandler(
+            BuiltInPhotoProjection(manager: self), forToken: residentRoutedRows.photo.token
+        )
+        assert(photoRegistered, "the photo row's built-in projection handler was refused")
+        let textRegistered = registerRoutedProjectionHandler(
+            BuiltInTextProjection(manager: self), forToken: residentRoutedRows.tempMessage.token
+        )
+        assert(textRegistered, "the temporary-message row's built-in projection handler was refused")
+    }
+
+    /// The photo row's projection handler while photos are the engine's (plan step A0.5.2): the
+    /// settlement before the open, then the photo arm, each called as it is.
+    ///
+    /// Holds its manager `unowned`: the manager owns it through its projector map, so it never
+    /// outlives the manager and must not keep it alive.
+    private final class BuiltInPhotoProjection: MeshRoutedProjectionHandler {
+
+        /// The routed photo body this row decodes to.
+        typealias Body = MeshRoutedPhotoBody
+
+        /// The manager whose settlement and photo arm this calls.
+        unowned let manager: MeshNetworkManager
+
+        /// Builds the handler over the manager that registers and owns it.
+        ///
+        /// - Parameter manager: The manager.
+        init(manager: MeshNetworkManager) {
+            self.manager = manager
+        }
+
+        /// Always: the photo row is never gated off the enumeration.
+        var isProjectable: Bool { true }
+
+        /// FIRST, before the body is opened and before the quota (invariant I5): a photo this phone
+        /// already answered is refused for good by its (origin, item id) tombstone, so a custody copy
+        /// still live in the mesh can never become a photo here again; one already held or on the
+        /// wall is handed on without a second write.
+        ///
+        /// - Parameter delivery: The item's signed facts.
+        /// - Returns: the settlement's verdict, or nil to open the item.
+        func verdictBeforeOpen(_ delivery: MeshRoutedDelivery) -> MeshRoutedProjectionVerdict? {
+            manager.routedPhotoSettlement(delivery)
+        }
+
+        /// The photo arm: the per-origin quota, the sanitised hold and the closeness hook.
+        ///
+        /// - Parameters:
+        ///   - body: The opened photo body.
+        ///   - delivery: The item's signed facts.
+        /// - Returns: the arm's verdict.
+        func projectRoutedItem(
+            _ body: MeshRoutedPhotoBody, delivery: MeshRoutedDelivery
+        ) -> MeshRoutedProjectionVerdict {
+            manager.routedCanonicalDispatch(body, delivery: delivery)
+        }
+    }
+
+    /// The temporary-message row's projection handler while chat is the engine's (plan step A0.5.2):
+    /// the 13+ age gate before the open, then the text arm, called as it is.
+    ///
+    /// Holds its manager `unowned`, for the photo handler's reason.
+    private final class BuiltInTextProjection: MeshRoutedProjectionHandler {
+
+        /// The routed text body this row decodes to.
+        typealias Body = MeshRoutedTextBody
+
+        /// The manager whose age gate and text arm this calls.
+        unowned let manager: MeshNetworkManager
+
+        /// Builds the handler over the manager that registers and owns it.
+        ///
+        /// - Parameter manager: The manager.
+        init(manager: MeshNetworkManager) {
+            self.manager = manager
+        }
+
+        /// Leg 4 of the 13+ gate: below the line the text row is not enumerated for projection at
+        /// all, so a gated device's text items never spend an allowance slot.
+        var isProjectable: Bool { manager.isChatAllowed }
+
+        /// Leg 3 of the 13+ gate — advertisement, send, projection, and leg 4 is ``isProjectable``.
+        /// Applied BEFORE the unwrap, so a device below the line decrypts nothing rather than
+        /// decrypting and discarding, and it is the ONE place an item's projection reads it: a second
+        /// check with nothing saying which is live is the shape the retired handler's block check
+        /// had. FINAL, because the gate is a durable product rule about this recipient and the
+        /// transcript it would have entered belongs to this session.
+        ///
+        /// - Parameter delivery: The item's signed facts.
+        /// - Returns: `refusedForGood` below the line, nil to open the item.
+        func verdictBeforeOpen(_ delivery: MeshRoutedDelivery) -> MeshRoutedProjectionVerdict? {
+            guard manager.isChatAllowed else {
+                ProximityAudit.log("mesh.routedProjection.transcriptAgeGated")
+                return .refusedForGood
+            }
+            return nil
+        }
+
+        /// The text arm: the engine's session liveness, the per-origin budget, then the transcript.
+        ///
+        /// - Parameters:
+        ///   - body: The opened text body.
+        ///   - delivery: The item's signed facts and its session liveness.
+        /// - Returns: the arm's verdict.
+        func projectRoutedItem(
+            _ body: MeshRoutedTextBody, delivery: MeshRoutedDelivery
+        ) -> MeshRoutedProjectionVerdict {
+            manager.routedCanonicalDispatch(body, delivery: delivery)
         }
     }
 
@@ -9479,37 +9684,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case notYet
     }
 
-    /// The one plaintext seam's manager-side caller: the predicate is passed in by name and the
-    /// refusal is named in an audit line rather than swallowed.
-    private func openedRoutedPhotoBody(
-        _ blob: Data, manifest: MeshRoutedManifest
-    ) -> MeshRoutedPhotoBody? {
-        do {
-            return try MeshRoutedItemDelivery.openPhotoBody(
-                blob, manifest: manifest, identity: identity,
-                mayDecryptRoutedContent: mayDecryptRoutedContent
-            )
-        } catch {
-            ProximityAudit.log(
-                "mesh.routedProjection.openFailed",
-                context: heldMeshAuditContext(
-                    ["type": manifest.typeToken, "error": String(describing: error)]
-                )
-            )
-            return nil
-        }
-    }
-
     /// Whether a routed photo's identity is already settled on this phone, asked before its body is
     /// opened: tombstoned → `refusedForGood` (it was answered — kept, discarded or deleted — and must
     /// never come back; the verdict takes it off the retry list), already held or on the wall →
-    /// `handedOn` with nothing written, otherwise nil.
+    /// `handedOn` with nothing written, otherwise nil. The photo row's pre-open verdict, through its
+    /// built-in handler (plan step A0.5.2).
     ///
-    /// Keyed on the SIGNED origin and item id (``MeshContentKey``), never the id alone: a member
-    /// who copies another member's item id can neither make the genuine photo look settled nor get
-    /// it tombstoned.
-    private func routedPhotoSettlement(_ manifest: MeshRoutedManifest) -> MeshRoutedProjectionVerdict? {
-        let key = HeldPhotoKey(origin: manifest.originFingerprint, itemID: manifest.itemID)
+    /// Keyed on the SIGNED origin and item id the delivery carries (``MeshContentKey``), never the
+    /// id alone: a member who copies another member's item id can neither make the genuine photo
+    /// look settled nor get it tombstoned.
+    private func routedPhotoSettlement(_ delivery: MeshRoutedDelivery) -> MeshRoutedProjectionVerdict? {
+        let key = HeldPhotoKey(origin: delivery.originFingerprint, itemID: delivery.itemID)
         switch heldPhotoSettlement(key) {
         case .answered?:
             ProximityAudit.log("mesh.routedProjection.photoAlreadyAnswered", context: heldMeshAuditContext())
@@ -9529,26 +9714,28 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// the closeness hook is called with the **origin** rather than the courier.
     ///
     /// **Live is the SIGNED mesh id's call**: the photo belongs to the live session when a session
-    /// is live and `manifest.meshID` is the current mesh — never the optional, peer-supplied
-    /// `header.session`, so a session-less photo from the live mesh joins the live roll (and is
-    /// stamped with its metadata) instead of disturbing it as an awaiting one. A late arrival — the
-    /// session ended, a reunion delivery, another mesh — is held awaiting and re-triggers the review.
+    /// is live and the delivery's signed `meshID` is the current mesh — never the optional,
+    /// peer-supplied `header.session`, so a session-less photo from the live mesh joins the live roll
+    /// (and is stamped with its metadata) instead of disturbing it as an awaiting one. A late arrival
+    /// — the session ended, a reunion delivery, another mesh — is held awaiting and re-triggers the
+    /// review.
     ///
     /// A hold that cannot be persisted (the corpus is full, or no key) is `refusedForNow`: the item
     /// stays in routed custody and is retried after the review frees room. An unsafe image is
     /// refused for good, as no retry can change it.
     ///
-    /// The one call site is ``dispatchRoutedPlaintext(_:store:author:manifest:seenAt:)``, which has
-    /// just consulted ``mayMutateCanonicalStoreWithRoutedContent``; the pin in
-    /// `MeshRoutedLockedDeviceTests` is what makes a second, ungated one a build failure. It takes
-    /// **no clock**: the one instant it stores is the origin's signed `addedAt`, and the hold's own
-    /// `heldAt` is this phone's clock at the write, read there.
+    /// The one call site is the photo row's built-in handler's `projectRoutedItem(_:delivery:)`,
+    /// which the engine calls only from ``dispatchRoutedPlaintext(_:entry:author:manifest:seenAt:)``,
+    /// behind ``mayMutateCanonicalStoreWithRoutedContent``; the pins in `MeshRoutedLockedDeviceTests`
+    /// are what make a second, ungated one a build failure. It reads the delivery the engine built
+    /// (plan step A0.5.2) where it read the manifest and the ledger's author, field for field. It
+    /// takes **no clock**: the one instant it stores is the origin's signed `addedAt`, and the
+    /// hold's own `heldAt` is this phone's clock at the write, read there.
     private func routedCanonicalDispatch(
         _ body: MeshRoutedPhotoBody,
-        author: MeshRosterMember,
-        manifest: MeshRoutedManifest
+        delivery: MeshRoutedDelivery
     ) -> MeshRoutedProjectionVerdict {
-        guard allowIncomingRoutedPhoto(body.header.id, from: manifest) else {
+        guard allowIncomingRoutedPhoto(body.header.id, from: delivery.quotaKey) else {
             return .refusedForGood
         }
         let photo = Self.sanitizedIncomingPhoto(FriendPhotoPayload(
@@ -9556,15 +9743,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             imageData: body.imageData,
             addedAt: body.header.addedAt,
             senderName: body.header.senderName,
-            senderFingerprint: author.fingerprint,
-            senderSigningPublicKey: author.signingPublicKey,
+            senderFingerprint: delivery.author.fingerprint,
+            senderSigningPublicKey: delivery.author.signingPublicKey,
             session: body.header.session
         ), in: namespace)
-        let live = isSessionLive && manifest.meshID == currentMesh?.meshID
-        let key = MeshContentKey(senderFingerprint: manifest.originFingerprint, contentID: manifest.itemID)
+        let live = isSessionLive && delivery.meshID == currentMesh?.meshID
+        let key = MeshContentKey(senderFingerprint: delivery.originFingerprint, contentID: delivery.itemID)
         switch holdSessionPhoto(photo, key: key, live: live) {
         case .held:
-            if live { onFriendPhotoSession?(author.fingerprint) }
+            if live { onFriendPhotoSession?(delivery.author.fingerprint) }
             return .handedOn
         case .alreadyHeld:
             return .handedOn
@@ -9581,8 +9768,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Nothing here re-implements what `SessionMessageStore` already owns — dedup by id, the
     /// sanitizer, the display-name moderation, the 500-row cap and §10.3's ordering all live there,
     /// and the arm would be a second copy of each. What it adds is the two things the store cannot
-    /// know: whether this device's session is still the one the message belongs to, and whether the
-    /// origin has spent its per-mesh message budget.
+    /// know: whether this device's session is still the one the message belongs to (the engine's
+    /// ``MeshRoutedDelivery/sessionLiveness``, computed by ``transcriptLiveness(for:)`` for the text
+    /// row since plan step A0.5.2), and whether the origin has spent its per-mesh message budget.
     ///
     /// Two things are corrected rather than reproduced. The attribution's FINGERPRINT comes from
     /// the origin's signed manifest resolved against `admissions − removals`, where the legacy
@@ -9592,33 +9780,36 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// handler checked it after decoding; the arm therefore adds no second block check, and must
     /// not grow one.
     ///
-    /// The one call site is ``dispatchRoutedPlaintext(_:store:author:manifest:seenAt:)``, which has
-    /// just consulted ``mayMutateCanonicalStoreWithRoutedContent``; the pin in
-    /// `MeshRoutedLockedDeviceTests` is what makes a second, ungated one a build failure.
+    /// The one call site is the text row's built-in handler's `projectRoutedItem(_:delivery:)`, which
+    /// the engine calls only from ``dispatchRoutedPlaintext(_:entry:author:manifest:seenAt:)``, behind
+    /// ``mayMutateCanonicalStoreWithRoutedContent``; the pins in `MeshRoutedLockedDeviceTests` are what
+    /// make a second, ungated one a build failure. It reads the delivery the engine built (plan step
+    /// A0.5.2) where it read the manifest and the ledger's author, field for field.
     ///
     /// It takes **no clock**: `sentAt` is the origin's own claim and `seenAt` is a stored fact
-    /// about the item (the index's `firstSeenAt`, or the delivery pass's injected instant), passed
-    /// in rather than read here.
+    /// about the item (the index's `firstSeenAt`, or the delivery pass's injected instant), carried
+    /// in the delivery rather than read here.
     private func routedCanonicalDispatch(
         _ body: MeshRoutedTextBody,
-        author: MeshRosterMember,
-        manifest: MeshRoutedManifest,
-        seenAt: Date
+        delivery: MeshRoutedDelivery
     ) -> MeshRoutedProjectionVerdict {
-        switch transcriptLiveness(for: manifest) {
+        // The engine computes the liveness for every `.session` row and the text row is one, so a
+        // nil is unreachable: it answers the retryable refusal rather than guess a FINAL one.
+        guard let liveness = delivery.sessionLiveness else { return .refusedForNow }
+        switch liveness {
         case .live:
             break
         case .endedForGood:
             ProximityAudit.log(
                 "mesh.routedProjection.transcriptSessionEnded",
-                context: ["type": manifest.typeToken, "mesh": manifest.meshID.uuidString]
+                context: ["type": delivery.typeToken, "mesh": delivery.meshID.uuidString]
             )
             return .refusedForGood
         case .notLiveRightNow:
             ProximityAudit.log("mesh.routedProjection.transcriptNotLiveYet")
             return .refusedForNow
         }
-        guard allowIncomingRoutedText(body.header.id, from: manifest) else {
+        guard allowIncomingRoutedText(body.header.id, from: delivery.quotaKey) else {
             return .refusedForGood
         }
         // Folded at the call site so the gate value cannot disagree with the seam it came from.
@@ -9631,11 +9822,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let accepted = sessionMessages.receiveIncoming(
             id: body.header.id,
-            senderFingerprint: author.fingerprint,
+            senderFingerprint: delivery.author.fingerprint,
             senderDisplayName: body.header.senderName,
             text: body.text,
             sentAt: body.header.sentAt,
-            seenAt: seenAt,
+            seenAt: delivery.seenAt,
             in: namespace
         )
         if accepted != .appended {
@@ -9676,27 +9867,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return isSessionLive ? .live : .notLiveRightNow
     }
 
-    /// The one plaintext seam's manager-side caller for text: the predicate is passed in by name
-    /// and the refusal is named in an audit line rather than swallowed.
-    private func openedRoutedTextBody(
-        _ blob: Data, manifest: MeshRoutedManifest
-    ) -> MeshRoutedTextBody? {
-        do {
-            return try MeshRoutedItemDelivery.openTextBody(
-                blob, manifest: manifest, identity: identity,
-                mayDecryptRoutedContent: mayDecryptRoutedContent
-            )
-        } catch {
-            ProximityAudit.log(
-                "mesh.routedProjection.openFailed",
-                context: heldMeshAuditContext(
-                    ["type": manifest.typeToken, "error": String(describing: error)]
-                )
-            )
-            return nil
-        }
-    }
-
     /// The incoming per-origin MESSAGE budget, keyed on the ITEM's mesh (D-13.23) — the twin of
     /// ``allowIncomingRoutedPhoto(_:from:)``, and the routed path's replacement for the retired
     /// per-sender token bucket.
@@ -9719,10 +9889,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// caps, the replay window, the 500-row transcript ring and `maxSeenIDs` (2000).
     /// Internal rather than private so its three legs have a behavioural cell rather than only a
     /// constants pin: making the body `return true` used to redden nothing (P6 item 4 fix review,
-    /// finding P2-4). **Not a door** — no caller outside this type, and the one shipping caller is
-    /// the text arm.
+    /// finding P2-4). **Not a door** — no caller outside this type. Since plan step A0.5.2 the text
+    /// arm calls the budget form with its delivery's key (``MeshRoutedDelivery/quotaKey``, the same
+    /// `(mesh, origin)` key this form takes from the manifest), and this form is the cells' spelling.
     func allowIncomingRoutedText(_ messageID: UUID, from manifest: MeshRoutedManifest) -> Bool {
-        let budget = MeshRoutedOriginQuotaKey(manifest)
+        allowIncomingRoutedText(messageID, from: MeshRoutedOriginQuotaKey(manifest))
+    }
+
+    /// The per-origin message budget itself, counted against `budget`: the text arm's call, with
+    /// the key its delivery carries (plan step A0.5.2). See
+    /// ``allowIncomingRoutedText(_:from:)``'s manifest form for the policy and its bounds.
+    ///
+    /// - Parameters:
+    ///   - messageID: The message's id, as its body signed it.
+    ///   - budget: The item's `(mesh, origin)` budget key.
+    /// - Returns: whether the message may enter the transcript.
+    private func allowIncomingRoutedText(_ messageID: UUID, from budget: MeshRoutedOriginQuotaKey) -> Bool {
         var accepted = routedOriginTextQuota[budget] ?? []
         if accepted.contains(messageID) { return true }
         guard accepted.count < Self.maxTextMessagesPerSenderPerSession else {
@@ -9746,8 +9928,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// closed still belongs to the generation it arrived in, and recording it only once the gate
     /// opens would let the clear in between pass unnoticed.
     ///
-    /// Recorded for every item and read only by the transcript arm. Memory-only and bounded by
-    /// `MeshRoutedStoreFormat.maxItems`, cleared with the rest of the drain state at a mesh change.
+    /// Recorded for every item and read only by ``transcriptLiveness(for:)``, for the items of a
+    /// `.session` row. Memory-only and bounded by `MeshRoutedStoreFormat.maxItems`, cleared with the
+    /// rest of the drain state at a mesh change.
     private func noteRoutedItemOffered(_ key: MeshRoutedItemKey) {
         guard routedItemTranscriptGeneration[key] == nil else { return }
         guard routedItemTranscriptGeneration.count < MeshRoutedStoreFormat.maxItems else {
@@ -9762,8 +9945,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Re-sends of an already-accepted id are free, exactly as the legacy counter allowed, so a
     /// re-projection after a restart cannot cost a slot it already spent.
-    private func allowIncomingRoutedPhoto(_ photoID: UUID, from manifest: MeshRoutedManifest) -> Bool {
-        let budget = MeshRoutedOriginQuotaKey(manifest)
+    ///
+    /// Counted against `budget`, the delivery's ``MeshRoutedDelivery/quotaKey`` — the item's signed
+    /// `(mesh, origin)` — since plan step A0.5.2, where it built the same key from the manifest.
+    private func allowIncomingRoutedPhoto(_ photoID: UUID, from budget: MeshRoutedOriginQuotaKey) -> Bool {
         var accepted = routedOriginPhotoQuota[budget] ?? []
         if accepted.contains(photoID) { return true }
         guard accepted.count < Self.maxPhotosPerSenderPerSession else {
@@ -10411,9 +10596,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The ONE predicate every decrypt of routed content consults (P5 item 10, D-10.12).
     ///
     /// Consultation sites: **two, both real since P5 item 13** — this device's own outer guard in
-    /// `projectRoutedItemIfPermitted(key:manifest:)`, and the parameter
-    /// `MeshRoutedItemDelivery.openPhotoBody(_:manifest:identity:mayDecryptRoutedContent:)` guards
-    /// on as its first line, so the two halves of one fact are stated at both ends. The source wall
+    /// `projectRoutedItemIfPermitted(key:manifest:)`, and the parameter the routed delivery door
+    /// guards on as its first line, which the projection hands over through
+    /// `MeshRoutedItemDelivery.openBody(_:blob:manifest:identity:mayDecryptRoutedContent:)` (plan step
+    /// A0.5.2), so the two halves of one fact are stated at both ends. The source wall
     /// (`everyRoutedPlaintextSeamNamesItsPredicate`) pins the unwrap and the item open to that one
     /// file and requires it to hold a `guard` on this spelling, not a mention.
     ///
@@ -12196,10 +12382,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// 3. the **projection** refuses before the unwrap, so a gated device decrypts nothing rather
     ///    than decrypting and discarding — the leg the retired `.tempMessage` handler used to hold,
     ///    and still necessary for the same reason: (1) is only an advertisement, and a peer on a
-    ///    modified build or with cached capabilities can still address us.
-    /// 4. `projectableRoutedTypeTokens` leaves `.sessionTranscript` out entirely while the gate is
-    ///    shut, so a gated device's text items never spend a projection allowance slot either
-    ///    (R-19 applied to a device that cannot finish a type rather than a build that cannot).
+    ///    modified build or with cached capabilities can still address us. Since plan step A0.5.2
+    ///    it is the text row's built-in projection handler's pre-open verdict.
+    /// 4. `projectableRoutedTypeTokens` leaves the text row out entirely while the gate is shut —
+    ///    its built-in handler's `isProjectable` reads this gate — so a gated device's text items
+    ///    never spend a projection allowance slot either (R-19 applied to a device that cannot
+    ///    finish a type rather than a build that cannot).
     ///
     /// Consequence, named for the owner rather than fixed here: a below-13 member of a mesh still
     /// STORES and acknowledges the ciphertext of every message, because destinations are
@@ -14078,9 +14266,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// before it can ever reach the persistent wall) (R3/R5): moderated sender name, moderated +
     /// capped session participants, capped mesh name.
     ///
-    /// Its one caller is now ``routedCanonicalDispatch(_:author:manifest:)``, which hands it a
-    /// payload built from an opened routed body — so the encrypted branch below is unreachable for
-    /// routed input. It stays: the `guard let imageData else { return payload }` fallback would
+    /// Its one caller is now the photo arm, `routedCanonicalDispatch(_: MeshRoutedPhotoBody,
+    /// delivery:)`, which hands it a payload built from an opened routed body — so the encrypted
+    /// branch below is unreachable for routed input. It stays: the
+    /// `guard let imageData else { return payload }` fallback would
     /// otherwise return an UNSANITIZED payload for a legacy-shaped one, which is the wrong direction
     /// for a function whose whole job is coercion. The names are coerced under `namespace`'s
     /// peer-name policy, the mesh name under its cap.
@@ -14389,9 +14578,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Send a live-session chat message to the room, as a **routed item** (P6 item 4, plan §12).
     ///
-    /// The same three lines ``shareRoutedPhoto(itemID:addedAt:imageData:session:)`` uses: ask the
-    /// registry for `.sessionTranscript`'s token, frame a ``MeshRoutedTextBody`` under the family's
-    /// frozen framing, and hand it to ``originateRoutedItem(body:typeToken:itemID:audience:now:)``, which
+    /// The same three lines ``shareRoutedPhoto(itemID:addedAt:imageData:session:)`` uses: take the
+    /// temporary-message row's resident token and ask the registry whether that row is registered,
+    /// frame a ``MeshRoutedTextBody`` under the family's frozen framing, and hand it to
+    /// ``originateRoutedItem(body:typeToken:itemID:audience:now:)``, which
     /// pushes it once to every committed slot and leaves the drain to carry it to everyone else.
     /// The legacy per-slot sealed `.tempMessage` fan-out — and with it the `messages` capability
     /// read, the live-slot requirement and the "no offline queue" rule — is **gone**: a message to
@@ -14441,7 +14631,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         let id = UUID()
         let now = Date()
-        guard let typeToken = routedTypes.token(forCanonicalStore: .sessionTranscript) else {
+        let typeToken = residentRoutedRows.tempMessage.token
+        guard isRoutedTypeRegistered(typeToken) else {
             return noteTextSendOutcome(.refused(.mintFailed))
         }
         let body: Data

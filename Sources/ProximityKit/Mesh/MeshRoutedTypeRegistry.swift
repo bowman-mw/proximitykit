@@ -93,30 +93,32 @@ nonisolated enum MeshRoutedExpiryRule: String, CaseIterable, Equatable, Sendable
     }
 }
 
-// MARK: - MeshRoutedCanonicalStore
+// MARK: - MeshRoutedContentScope
 
-/// Which canonical store a routed type's plaintext lands in once P6 routes it (plan §12) — a frozen
-/// TOKEN, never a closure and never a store type, so this file stays clock-free, store-free and
-/// `nonisolated`.
+/// How long a routed type's projected content lives on a destination — the row's content-scope
+/// column (plan step A0.5.2, which replaced the canonical-store column with it).
 ///
-/// **Read by P6's dispatch, by nothing today.** Item 10's job 4c is a documented, counted no-op and
-/// no routed code writes a canonical store in increment 1; the slot is declared now so P6 adds a row,
-/// not a `switch`. Said plainly rather than dressed up as enforcement.
-nonisolated enum MeshRoutedCanonicalStore: String, CaseIterable, Equatable, Sendable {
-    /// The friend-photo wall behind `PrivateMediaStore` and the existing review flow.
-    case friendPhotoWall
-    /// The session transcript — `SessionMessageStore` is the memory-only projection; the sealed
-    /// routed inbox beneath it is the durable truth (§12).
-    case sessionTranscript
-    /// `ProximityHeartLedger`, whose dedup, cooldown and closeness rules are never re-implemented.
-    case heartLedger
+/// The engine reads it for one thing. A `.session` row's items may enter only the session they were
+/// first offered in, so the projection computes ``MeshTranscriptLiveness`` for each of them and hands
+/// it to the row's handler, and the re-entry pass skips an item whose session has ended for good
+/// before spending an allowance slot on it; a `.persistent` row's items are left to their handler.
+/// Which store the plaintext lands in is the registered projection handler's business and never a
+/// column: a row names no store, so this file stays clock-free, store-free and `nonisolated`. Frozen
+/// English, never on the wire.
+public nonisolated enum MeshRoutedContentScope: String, CaseIterable, Equatable, Sendable {
+    /// Content that outlives the session it arrived in — a photo, a heart.
+    case persistent
+    /// Content that belongs to the session it was offered in and leaves with that session's
+    /// transcript — a message.
+    case session
 }
 
 // MARK: - MeshRoutedTypeEntry
 
 /// One routed type's declaration — plan §11's five columns (size cap, destination semantics,
 /// relay-retention, final-ack condition, expiry) plus the two adjacent ones items 4 and 10 put on
-/// the same row: the foreground-decrypt requirement (derived) and the canonical store (declared).
+/// the same row: the foreground-decrypt requirement (derived) and the content scope (declared; the
+/// canonical-store column until plan step A0.5.2).
 ///
 /// **The normative rule, and P6 is held to it:** once a token is registered, its ``finalAck`` and
 /// ``destinations`` are as frozen as the token itself. A ``finalAck`` disagreement between two builds
@@ -124,7 +126,7 @@ nonisolated enum MeshRoutedCanonicalStore: String, CaseIterable, Equatable, Send
 /// alone while the origin believes it delivered. A type whose semantics change gets a NEW token
 /// (`…routed-type.<kind>.v2`) registered beside the old one, and the old row stays until no build
 /// mints it. Only ``maxItemByteCount`` (loosening is safe in any order; tightening only once the
-/// fleet is on the new build) and ``canonicalStore`` may be edited in place; ``expiry`` is not
+/// fleet is on the new build) and ``contentScope`` may be edited in place; ``expiry`` is not
 /// editable at all in increment 1.
 ///
 /// **A never-minted row may be re-declared once, and P6 item 6 spent that allowance.** The rule's
@@ -135,9 +137,10 @@ nonisolated enum MeshRoutedCanonicalStore: String, CaseIterable, Equatable, Send
 /// ``destinations`` from `.fullRosterAtCreation` to `.singleRecipient` in place (the column's own
 /// doc had promised the flip since increment 1). **It is now spent:** the heart row is frozen for
 /// real, and the next semantics change to it is a `…heart.v2` token registered beside it. The v2
-/// route was weighed at the time and is not actually cheaper — `token(forCanonicalStore:)` breaks
-/// its tie on the lowest token, which sorts `…heart.v1` ahead of `…heart.v2`, so that path needs a
-/// resolver change as well as a row.
+/// route was weighed at the time and is not actually cheaper: a sender mints under its own row's
+/// token (``MeshRoutedTypeRegistry/increment1Rows(_:)``, since plan step A0.5.2; a lowest-token
+/// resolver before it, which sorted `…heart.v1` ahead of `…heart.v2`), so that path needs the
+/// sender re-pointed as well as a row.
 ///
 /// **Unit caveat for the cap** — the one thing to get right when narrowing a row.
 /// ``maxItemByteCount`` is compared against `MeshRoutedManifest.size`, which is the complete sealed
@@ -184,8 +187,9 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
     /// When items of this type stop mattering.
     let expiry: MeshRoutedExpiryRule
 
-    /// Where P6's dispatch will write this type's plaintext. Declared; no reader today.
-    let canonicalStore: MeshRoutedCanonicalStore
+    /// How long this type's projected content lives on a destination. The projection reads it to
+    /// decide whether an item's session liveness applies; the store is the registered handler's.
+    let contentScope: MeshRoutedContentScope
 
     /// Whether an item of this type needs a FOREGROUND pass before it can be called delivered.
     ///
@@ -205,7 +209,7 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
     ///   - relayRetention: Who may hold and forward the item.
     ///   - finalAck: What makes it final at a destination.
     ///   - expiry: The expiry rule.
-    ///   - canonicalStore: The store the delivery projection writes (P5 item 13 for photos; P6 for the other two rows).
+    ///   - contentScope: How long the type's projected content lives on a destination.
     init(
         token: String,
         maxItemByteCount: UInt64,
@@ -213,7 +217,7 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
         relayRetention: MeshRoutedRelayRetention,
         finalAck: MeshRoutedAckStage,
         expiry: MeshRoutedExpiryRule,
-        canonicalStore: MeshRoutedCanonicalStore
+        contentScope: MeshRoutedContentScope
     ) {
         self.token = token
         self.maxItemByteCount = maxItemByteCount
@@ -221,7 +225,7 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
         self.relayRetention = relayRetention
         self.finalAck = finalAck
         self.expiry = expiry
-        self.canonicalStore = canonicalStore
+        self.contentScope = contentScope
     }
 }
 
@@ -258,9 +262,10 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 /// **Every column has a shipping reader since P5 item 13.** `MeshRoutedManifest.signed(…)` gained
 /// its first shipping caller — the routed sender door behind `addPhoto` — so
 /// ``MeshRoutedTypeEntry/maxItemByteCount``, ``MeshRoutedTypeEntry/destinations`` and
-/// ``MeshRoutedTypeEntry/expiry`` are now read at a real mint, and
-/// ``MeshRoutedTypeEntry/canonicalStore`` is the dispatch key the delivery projection switches on
-/// (`.friendPhotoWall` is the worked example; the other two are P6's).
+/// ``MeshRoutedTypeEntry/expiry`` are now read at a real mint. Since plan step A0.5.2 the
+/// delivery projection reads ``MeshRoutedTypeEntry/contentScope`` (a `.session` row's items carry
+/// the engine's session liveness) and looks the token's registered projection handler up: a row
+/// names no store, and no `switch` over rows exists.
 ///
 /// **The per-type cap has a RECEIVER since P6 item 3** (D-11.4). The photo row no longer sits at the
 /// shared wire bound: it is ``MeshRoutedItemSealFormat/maxResidentBlobByteCount``, the formula in the
@@ -275,11 +280,12 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 /// open — it is now *defined as* the photo row's formula rather than restating a number, so the two
 /// ends the earlier note promised to move together are one expression.
 ///
-/// Shipping code names exactly one value, ``increment1(_:)``, constructs a registry in exactly one
-/// file, reads a routed type off the namespace only where these rows are built, and branches on no
-/// routed type token anywhere — three source-scan walls in `MeshRoutedStoreIsolationTests` are what
-/// keep that true. A fixture registry is a test-only affordance, reached through the manager's one
-/// `@testable` seam.
+/// Shipping code names exactly one value, ``increment1(_:)`` — and its rows by name,
+/// ``increment1Rows(_:)``, for the tokens the manager's built-in handlers register under and its
+/// senders mint under — constructs a registry in exactly one file, reads a routed type off the
+/// namespace only where these rows are built, and branches on no routed type token anywhere — three
+/// source-scan walls in `MeshRoutedStoreIsolationTests` are what keep that true. A fixture registry
+/// is a test-only affordance, reached through the manager's one `@testable` seam.
 nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
 
     /// The most rows one registry holds. The SAME number as ``MeshRoutedAckStageTable/maxRows``,
@@ -311,18 +317,34 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
         self.entries = resolved
     }
 
-    /// Plan §11's three registered types, each column defined AS the constant or decision already
-    /// shipped — so registering them changes no behaviour at any door — and each row's token read off
-    /// the routed types it is handed: this module spells no routed type of its own.
+    /// Plan §11's three registered types, as the one registry shipping code names: exactly the rows
+    /// ``increment1Rows(_:)`` declares, in its order, so registering them changes no behaviour at any
+    /// door.
+    ///
+    /// - Parameter routedTypes: The routed types of the namespace the caller holds.
+    /// - Returns: The registry of the photo, temporary-message and heart rows under their tokens.
+    static func increment1(_ routedTypes: ProximityNamespace.RoutedTypes) -> MeshRoutedTypeRegistry {
+        MeshRoutedTypeRegistry(entries: increment1Rows(routedTypes).rows)
+    }
+
+    /// Plan §11's three registered types as named rows — the engine's resident rows (plan step
+    /// A0.5.2) — each column defined AS the constant or decision already shipped, and each row's token
+    /// read off the routed types it is handed: this module spells no routed type of its own.
+    ///
+    /// ``increment1(_:)`` builds the registry from exactly these rows. `MeshNetworkManager` also
+    /// holds them by name, for the two per-row reads the registry cannot answer: the token each of its
+    /// built-in projection handlers registers under, and the token each of its three senders mints
+    /// under — behind its `isRoutedTypeRegistered(_:)`, so a build whose registry lost a row mints
+    /// nothing for it.
     ///
     /// ``ProximityNamespace/RoutedTypes/control`` is deliberately absent: plan §11 names an
     /// `immediate` stage but neither §11 nor §12 routes a control item, and registering a token
     /// nothing mints would open a door with no handler behind it.
     ///
     /// - Parameter routedTypes: The routed types of the namespace the caller holds.
-    /// - Returns: The registry of the photo, temporary-message and heart rows under their tokens.
-    static func increment1(_ routedTypes: ProximityNamespace.RoutedTypes) -> MeshRoutedTypeRegistry {
-        MeshRoutedTypeRegistry(entries: [
+    /// - Returns: The photo, temporary-message and heart rows under their tokens.
+    static func increment1Rows(_ routedTypes: ProximityNamespace.RoutedTypes) -> MeshRoutedResidentRows {
+        MeshRoutedResidentRows(
             // The photo row is the FIRST narrowed cap (P6 item 3, D-11.4), and it is narrowed to a
             // formula rather than a number: `MeshRoutedItemSealFormat.maxResidentBlobByteCount` is
             // `PrivateMediaStore.maxIncomingPhotoBytes` (the photo wall's PLAINTEXT bound) plus
@@ -330,14 +352,14 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
             // the widest CIPHERTEXT a routed photo can measure. Defined as that constant, not as a copy
             // of it, so the manifest door's check and the projection's resident-blob guard are the same
             // number and cannot drift; see the unit caveat on `MeshRoutedTypeEntry`.
-            MeshRoutedTypeEntry(
+            photo: MeshRoutedTypeEntry(
                 token: routedTypes.photo,
                 maxItemByteCount: UInt64(MeshRoutedItemSealFormat.maxResidentBlobByteCount),
                 destinations: .fullRosterAtCreation,
                 relayRetention: .originRetainsUntilDeparture,
                 finalAck: .durableRecipientStorage,
                 expiry: .meshHardDeadlinePlusGrace,
-                canonicalStore: .friendPhotoWall
+                contentScope: .persistent
             ),
             // The text row's cap is the SECOND narrowed one (P6 item 4), and narrowed the same way:
             // `MeshRoutedTextBody.maxSealedBlobByteCount` is the sanitized maximum's own byte bound
@@ -345,32 +367,32 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
             // and a grapheme cluster is unbounded in bytes) plus this body family's framed header
             // allowance plus the seal's overhead — 9 065 B. Defined as that constant, never as a copy,
             // so the mint's own refusal and the manifest door's `sizeExceedsTypeCap` are one number.
-            // `canonicalStore` and `maxItemByteCount` are the two columns the freezing rule leaves
+            // `contentScope` and `maxItemByteCount` are the two columns the freezing rule leaves
             // editable in place, so this needs no amendment to it.
-            MeshRoutedTypeEntry(
+            tempMessage: MeshRoutedTypeEntry(
                 token: routedTypes.tempMessage,
                 maxItemByteCount: UInt64(MeshRoutedTextBody.maxSealedBlobByteCount),
                 destinations: .fullRosterAtCreation,
                 relayRetention: .originRetainsUntilDeparture,
                 finalAck: .durableRecipientStorage,
                 expiry: .meshHardDeadlinePlusGrace,
-                canonicalStore: .sessionTranscript
+                contentScope: .session
             ),
             // The heart row's cap is the THIRD narrowed one (P6 item 6), and its formula has a **zero**
             // payload term: a heart body is header-only, so the widest ciphertext it can measure is
             // this family's framed header allowance plus the seal's overhead. `destinations` is
             // `.singleRecipient` since item 6 — the one re-declaration the freezing rule above allows a
             // never-minted row, and it is spent.
-            MeshRoutedTypeEntry(
+            heart: MeshRoutedTypeEntry(
                 token: routedTypes.heart,
                 maxItemByteCount: UInt64(MeshRoutedHeartBody.maxSealedBlobByteCount),
                 destinations: .singleRecipient,
                 relayRetention: .originRetainsUntilDeparture,
                 finalAck: .foregroundDecryptAndLedgerCommit,
                 expiry: .meshHardDeadlinePlusGrace,
-                canonicalStore: .heartLedger
+                contentScope: .persistent
             )
-        ])
+        )
     }
 
     /// Every token this registry accepts — the verifier's `acceptedTypeTokens` (D13/D-6.9), from the
@@ -385,25 +407,6 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
         entries[token]
     }
 
-    /// The token an ORIGIN mints under to reach one canonical store — the registry read a sender
-    /// needs, and the reason `MeshNetworkManager` names no token spelling of its own (P5 item 13).
-    ///
-    /// The wall `noShippingCodeBranchesOnARoutedTypeToken` permits a routed type to be read off the
-    /// namespace's routed types only where these rows are built from them, and it is right to: a
-    /// sender that read `routedTypes.photo` at its mint would be a second per-type source, free to
-    /// drift from the row that decides what the RECEIVER does with the bytes. Asking the registry
-    /// keeps one source for both directions, and gives P6's text and heart callers the same
-    /// three-line shape.
-    ///
-    /// Deterministic when a store has more than one row — which increment 1 does not have — by
-    /// taking the lowest token, so two builds cannot mint the same content under different tokens.
-    ///
-    /// - Parameter store: The canonical store the item is destined for.
-    /// - Returns: the token, or nil when no row names that store.
-    func token(forCanonicalStore store: MeshRoutedCanonicalStore) -> String? {
-        entries.values.filter { $0.canonicalStore == store }.map(\.token).min()
-    }
-
     /// The final-ack column, projected into item 4's door parameter
     /// (`MeshRoutedStore.committingDelivery(item:recipient:stages:evidence:now:)`, D-4.7).
     ///
@@ -413,4 +416,29 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
             MeshRoutedAckStageRow(typeToken: $0.token, finalAck: $0.finalAck)
         })
     }
+}
+
+// MARK: - MeshRoutedResidentRows
+
+/// The engine's resident routed rows by name — the photo, temporary-message and heart rows
+/// ``MeshRoutedTypeRegistry/increment1Rows(_:)`` declares (plan step A0.5.2).
+///
+/// The registry is keyed by token and answers "is this token known, and under which policy"; these
+/// say which token is the photo row's, the text row's and the heart row's, which is what a sender
+/// needs to mint and a built-in projection handler needs to register. A value, never a second
+/// registry: `MeshNetworkManager` still admits, resolves and forwards by its registry alone, and asks
+/// it whether a row is registered before it mints under that row's token. Each row names its own
+/// token, so a registry holding a second row shaped like the photo row does not change which token
+/// the photo sender mints under or which row the photo handler projects.
+nonisolated struct MeshRoutedResidentRows: Equatable, Sendable {
+    /// The routed photo row.
+    let photo: MeshRoutedTypeEntry
+    /// The routed temporary-message row.
+    let tempMessage: MeshRoutedTypeEntry
+    /// The routed heart row, whose final ack is the ledger judgement.
+    let heart: MeshRoutedTypeEntry
+
+    /// The three rows in their declaration order — photo, temporary message, heart — which is the
+    /// order ``MeshRoutedTypeRegistry/increment1(_:)`` registers them in.
+    var rows: [MeshRoutedTypeEntry] { [photo, tempMessage, heart] }
 }

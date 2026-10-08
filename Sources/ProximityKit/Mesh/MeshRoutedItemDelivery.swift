@@ -60,7 +60,12 @@ nonisolated enum MeshRoutedDeliveryError: Error, Equatable, Sendable {
 /// hand-off runs at any later access-gate edge — a lock/unlock cycle, a re-entry pass, a subsequent
 /// mesh — and at each of those a live-mesh-keyed counter would hand one origin a fresh budget for
 /// items it had already queued.
-nonisolated struct MeshRoutedOriginQuotaKey: Hashable, Sendable {
+///
+/// Public since plan step A0.5.2, as the type of ``MeshRoutedDelivery/quotaKey``, so a projection
+/// handler keys its own per-origin budget by it; only the engine builds one, and its two fields stay
+/// internal. The contract is its equality: two items share a key exactly when they share the signed
+/// mesh and the signed origin.
+public nonisolated struct MeshRoutedOriginQuotaKey: Hashable, Sendable {
     /// The mesh the item was minted in — inside the origin's signature.
     let meshID: UUID
     /// The item's author.
@@ -88,68 +93,46 @@ nonisolated struct MeshRoutedOriginQuotaKey: Hashable, Sendable {
 /// predicate.
 nonisolated enum MeshRoutedItemDelivery {
 
-    /// Opens one routed photo item and returns its body.
+    /// Opens one routed item as `Body` and returns its body — the one generic opener every
+    /// projection handler's body is opened through (plan step A0.5.2, which folded the photo and text
+    /// doors into it).
+    ///
+    /// The plaintext comes from ``openPlaintext(_:manifest:identity:mayDecryptRoutedContent:)``,
+    /// whose first line is the decrypt guard; the body is decoded by its own
+    /// ``MeshRoutedBody/init(decoding:)``; and its ``MeshRoutedBody/routedItemID`` must be the item id
+    /// the origin signed. The id guard holds for every family because every family's id is a key:
+    /// the friend-photo surface keys and dedups on the photo id, so a body carrying another sender's
+    /// photo id would land in that row's dedup contest, and `SessionMessageStore` dedups on the
+    /// message id and deliberately never forgets a dropped one, so a body carrying another member's
+    /// message id would consume that id's dedup slot for the session.
     ///
     /// - Parameters:
+    ///   - bodyType: The body family to decode — the handler's ``MeshRoutedProjectionHandler/Body``.
     ///   - blob: The reassembled ciphertext, already re-hashed against `manifest.contentHash` by
     ///     the store door that produced it.
     ///   - manifest: The origin's signed manifest — the binding, the wraps and the type token.
     ///   - identity: This device's identity, for the wrap's key agreement.
     ///   - mayDecryptRoutedContent: `MeshNetworkManager.mayDecryptRoutedContent`, passed in under
     ///     that exact spelling and guarded on as the first line of
-    ///     ``openPlaintext(_:manifest:identity:mayDecryptRoutedContent:)``, the one choke point both
-    ///     body families reach the ciphertext through. Never defaulted.
+    ///     ``openPlaintext(_:manifest:identity:mayDecryptRoutedContent:)``, the one choke point every
+    ///     body family reaches the ciphertext through. Never defaulted.
     /// - Returns: the decoded body.
     /// - Throws: ``MeshRoutedDeliveryError``, ``MeshRoutedKeyWrapError`` or
-    ///   ``MeshRoutedItemSealError``. Never a trap.
+    ///   ``MeshRoutedItemSealError``, or whatever the body's decode refuses. Never a trap.
     @MainActor
-    static func openPhotoBody(
-        _ blob: Data,
+    static func openBody<Body: MeshRoutedBody>(
+        _ bodyType: Body.Type,
+        blob: Data,
         manifest: MeshRoutedManifest,
         identity: IdentityService,
         mayDecryptRoutedContent: Bool
-    ) throws -> MeshRoutedPhotoBody {
+    ) throws -> Body {
         let plaintext = try openPlaintext(
             blob, manifest: manifest, identity: identity,
             mayDecryptRoutedContent: mayDecryptRoutedContent
         )
-        let body = try MeshRoutedPhotoBody(decoding: plaintext)
-        guard body.header.id == manifest.itemID else {
-            throw MeshRoutedDeliveryError.bodyIdentityMismatch
-        }
-        return body
-    }
-
-    /// Opens one routed text item and returns its body (P6 item 4).
-    ///
-    /// The id guard is copied from the photo door, not omitted, because text's id **is** a key:
-    /// `SessionMessageStore` dedups on it and deliberately never forgets a dropped id, so a body
-    /// carrying another member's message id would consume that id's dedup slot for the session.
-    ///
-    /// - Parameters:
-    ///   - blob: The reassembled ciphertext, already re-hashed against `manifest.contentHash` by
-    ///     the store door that produced it.
-    ///   - manifest: The origin's signed manifest — the binding, the wraps and the type token.
-    ///   - identity: This device's identity, for the wrap's key agreement.
-    ///   - mayDecryptRoutedContent: `MeshNetworkManager.mayDecryptRoutedContent`, passed in under
-    ///     that exact spelling and guarded on inside ``openPlaintext(_:manifest:identity:mayDecryptRoutedContent:)``.
-    ///     Never defaulted.
-    /// - Returns: the decoded body.
-    /// - Throws: ``MeshRoutedDeliveryError``, ``MeshRoutedKeyWrapError`` or
-    ///   ``MeshRoutedItemSealError``. Never a trap.
-    @MainActor
-    static func openTextBody(
-        _ blob: Data,
-        manifest: MeshRoutedManifest,
-        identity: IdentityService,
-        mayDecryptRoutedContent: Bool
-    ) throws -> MeshRoutedTextBody {
-        let plaintext = try openPlaintext(
-            blob, manifest: manifest, identity: identity,
-            mayDecryptRoutedContent: mayDecryptRoutedContent
-        )
-        let body = try MeshRoutedTextBody(decoding: plaintext)
-        guard body.header.id == manifest.itemID else {
+        let body = try bodyType.init(decoding: plaintext)
+        guard body.routedItemID == manifest.itemID else {
             throw MeshRoutedDeliveryError.bodyIdentityMismatch
         }
         return body
@@ -157,7 +140,8 @@ nonisolated enum MeshRoutedItemDelivery {
 
     /// Opens one routed heart item and returns its body (P6 item 6).
     ///
-    /// The id guard is copied from the photo door for the strongest of the three reasons: a heart's
+    /// The id guard is the one ``openBody(_:blob:manifest:identity:mayDecryptRoutedContent:)``
+    /// applies to every projected family, held here for the strongest of the three reasons: a heart's
     /// body id **is** the gift id `ProximityHeartLedger` dedups on and `MeshRoutedHeartAck` proves,
     /// so a body carrying another member's gift id would offer the ledger a judgement about someone
     /// else's heart under this origin's signature. It is the enforcement half of
@@ -209,8 +193,10 @@ nonisolated enum MeshRoutedItemDelivery {
     /// Every step is authenticated before the next runs: the wrap opens only for this device's
     /// fingerprint and its own agreement key, and the blob's authenticated data binds the mesh, the
     /// item, the origin and the routed type token, so a blob lifted into another triple fails its
-    /// tag even if its wrap travels with it. The body's own id guard is the CALLER's, because it is
-    /// the one step that differs per family.
+    /// tag even if its wrap travels with it. The body's decode and its id guard are the CALLER's,
+    /// because they are the steps that differ per family: the generic
+    /// ``openBody(_:blob:manifest:identity:mayDecryptRoutedContent:)`` applies both through
+    /// ``MeshRoutedBody``, and the heart door applies its own.
     ///
     /// - Parameters:
     ///   - blob: The reassembled ciphertext.
@@ -253,9 +239,9 @@ nonisolated enum MeshRoutedItemDelivery {
 
 // MARK: - MeshRoutedProjectionVerdict
 
-/// What a canonical-store arm made of one routed item's plaintext — and therefore whether the item
-/// still owes the projection pass anything (P6 item 4; item 5's distinction, arriving early for the
-/// cases item 4 creates).
+/// What a projection handler made of one routed item — and therefore whether the item still owes
+/// the projection pass anything (P6 item 4; item 5's distinction, arriving early for the cases item
+/// 4 creates).
 ///
 /// The projection's retry list is `MeshRoutedIndex.itemsAwaitingLocalProjection`, ordered by
 /// `MeshRoutedItemKey` — i.e. by origin fingerprint, a position an attacker chooses — and the
@@ -271,7 +257,13 @@ nonisolated enum MeshRoutedItemDelivery {
 /// origin-signed bytes; a blocked or removed origin is the block list and the admission ledger,
 /// both durable; a spent quota and an already-held id re-derive to the same answer; and a session
 /// that ended re-derives as ended for as long as it stays ended.
-nonisolated enum MeshRoutedProjectionVerdict: String, Equatable, Sendable {
+///
+/// Public since plan step A0.5.2, as the answer of a ``MeshRoutedProjectionHandler``'s two methods.
+/// The contract a handler is held to is the paragraph above: it answers ``refusedForGood`` only for
+/// a refusal that re-derives from the bytes plus durable local state, because the engine marks that
+/// answer FINAL in a memory-only set, and ``refusedForNow`` keeps the item, its custody and its
+/// place in the retry list. Frozen English raw values, never displayed.
+public nonisolated enum MeshRoutedProjectionVerdict: String, Equatable, Sendable {
 
     /// The canonical store was told. Frozen English token, never displayed.
     case handedOn
@@ -298,8 +290,13 @@ nonisolated enum MeshRoutedProjectionVerdict: String, Equatable, Sendable {
 /// reversible — `startSearching()` un-ends a session the five-minute give-up door ended — so
 /// marking it would lose a message from a transcript that was never cleared.
 ///
+/// Public since plan step A0.5.2, as ``MeshRoutedDelivery/sessionLiveness``: the engine computes it
+/// for every item of a row whose content scope is `.session` — from the item's signed mesh, the
+/// transcript generation the item was first offered in, and whether the session is live — and a
+/// handler switches on it rather than computing a liveness of its own.
+///
 /// Frozen English tokens; they name audit lines, never user copy.
-nonisolated enum MeshTranscriptLiveness: String, Equatable, Sendable {
+public nonisolated enum MeshTranscriptLiveness: String, Equatable, Sendable {
 
     /// This mesh, this generation, and the session has not ended.
     case live

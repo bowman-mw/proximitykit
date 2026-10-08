@@ -143,8 +143,9 @@ public nonisolated enum MeshRoutedItemBodyFormat {
 ///
 /// **``id`` MUST equal the manifest's item id, and the delivery door enforces it.** The seal binds
 /// `binding.itemID` — the MANIFEST's id — and deliberately not this field, so an origin picks the
-/// body's id freely inside an otherwise fully authenticated blob. `MeshRoutedItemDelivery.openPhotoBody`
-/// closes that with `guard body.header.id == manifest.itemID`, throwing
+/// body's id freely inside an otherwise fully authenticated blob. `MeshRoutedItemDelivery.openBody`
+/// closes that with `guard body.routedItemID == manifest.itemID` (``MeshRoutedPhotoBody/routedItemID``
+/// is this field), throwing
 /// ``MeshRoutedDeliveryError/bodyIdentityMismatch``, and cell `aBodyWhoseIDIsNotTheItemIDIsRefused`
 /// is the claim. The equality is therefore a fact about what a receiver will accept, not only an
 /// obligation on the mint. The consequence, stated so the guard cannot be dropped: the friend-photo
@@ -185,12 +186,19 @@ nonisolated struct MeshRoutedPhotoHeader: Codable, Equatable, Sendable {
 /// The framing is frozen — see ``MeshRoutedItemBodyFormat``. The image is carried RAW and runs to
 /// the end of the body, which is why no second length prefix exists and why a JPEG is never
 /// inflated by a third.
-nonisolated struct MeshRoutedPhotoBody: Equatable, Sendable {
+///
+/// A ``MeshRoutedBody`` (plan step A0.5.2), so the engine's one generic opener decodes it for the
+/// photo row's projection handler.
+nonisolated struct MeshRoutedPhotoBody: Equatable, Sendable, MeshRoutedBody {
 
     /// The metadata half.
     let header: MeshRoutedPhotoHeader
     /// The resized JPEG, exactly as `resizedForFriendSharing()` produced it.
     let imageData: Data
+
+    /// The routed item id this body claims: its header's id, which must equal the id the origin
+    /// signed.
+    var routedItemID: UUID { header.id }
 
     /// Builds a routed photo body from its two halves.
     init(header: MeshRoutedPhotoHeader, imageData: Data) {
@@ -254,7 +262,8 @@ nonisolated struct MeshRoutedPhotoBody: Equatable, Sendable {
 /// ``MeshRoutedPhotoHeader`` tells a P6 body type to copy or to say why its id is no key. Text's id
 /// *is* a key: `SessionMessageStore` dedups on it (`seenIDs`, which deliberately never forgets a
 /// dropped id), so a body carrying another member's message id would consume that id's dedup slot.
-/// `MeshRoutedItemDelivery.openTextBody` closes it with `MeshRoutedDeliveryError.bodyIdentityMismatch`.
+/// `MeshRoutedItemDelivery.openBody` closes it with `MeshRoutedDeliveryError.bodyIdentityMismatch`,
+/// reading this field as ``MeshRoutedTextBody/routedItemID``.
 ///
 /// **``senderName`` is a display CLAIM, exactly as the photo header's is** — and that is a decision,
 /// not an oversight. The identity is bound elsewhere and more strongly: the author is
@@ -298,7 +307,10 @@ nonisolated struct MeshRoutedTextHeader: Codable, Equatable, Sendable {
 /// RAW and running to the end of the body, which is why no second length prefix exists. A `String`
 /// inside one `Codable` blob would be escaped and re-normalised by `JSONEncoder`, so the same
 /// message would not produce the same bytes on every build.
-nonisolated struct MeshRoutedTextBody: Equatable, Sendable {
+///
+/// A ``MeshRoutedBody`` (plan step A0.5.2), so the engine's one generic opener decodes it for the
+/// temporary-message row's projection handler.
+nonisolated struct MeshRoutedTextBody: Equatable, Sendable, MeshRoutedBody {
 
     /// The widest message this device will put on the wire, as a formula rather than a literal:
     /// sixteen bytes per `Character` of `SessionMessageStore.maxTextLength`.
@@ -365,6 +377,10 @@ nonisolated struct MeshRoutedTextBody: Equatable, Sendable {
     let header: MeshRoutedTextHeader
     /// The message, already sanitized and byte-bounded by the sender.
     let text: String
+
+    /// The routed item id this body claims: its header's id, which must equal the id the origin
+    /// signed.
+    var routedItemID: UUID { header.id }
 
     /// Builds a routed text body from its two halves.
     init(header: MeshRoutedTextHeader, text: String) {
@@ -539,7 +555,9 @@ nonisolated struct MeshRoutedHeartHeader: Codable, Equatable, Sendable {
 /// remainder is the image and a message's is the text, so both read to the end of the plaintext; a
 /// heart's remainder is nothing, and bytes an authenticated blob carries but nobody reads are a
 /// malleability seam inside it.
-nonisolated struct MeshRoutedHeartBody: Equatable, Sendable {
+///
+/// A ``MeshRoutedBody`` (plan step A0.5.2), like its two siblings.
+nonisolated struct MeshRoutedHeartBody: Equatable, Sendable, MeshRoutedBody {
 
     /// The widest display name a routed heart header will carry, in bytes.
     ///
@@ -591,6 +609,10 @@ nonisolated struct MeshRoutedHeartBody: Equatable, Sendable {
 
     /// The metadata half, which is the whole body.
     let header: MeshRoutedHeartHeader
+
+    /// The routed item id this body claims: its header's id — the gift id — which must equal the id
+    /// the origin signed.
+    var routedItemID: UUID { header.id }
 
     /// Builds a routed heart body.
     init(header: MeshRoutedHeartHeader) {
