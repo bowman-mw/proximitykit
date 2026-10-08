@@ -7,11 +7,12 @@
 // slot commits, a slot leaves, the search stops, the session ends.
 //
 // The facts stay the engine's. Which commit forms a session (the first commit after a session
-// ended), whether a session has ended (`isSessionLive` going false) and what the engine itself does at
-// each moment (the roster's review promotion, the chat transcript's clear, the session heart's reset,
-// the moderation, friend-state and activity legs of a commit) are decided and run at the engine's
-// call sites; the observer is told the moment and, for a commit, whether it formed the session. It
-// receives facts, never commands, and is asked for nothing back.
+// ended) and whether a session has ended (`isSessionLive` going false) are decided at the engine's
+// call sites, and what the engine itself still does at each moment is run there: at a commit, its one
+// leg, the chat transcript's clear when the commit forms the session; at the ending, the roster's
+// review promotion, the transcript's clear and the session heart's reset. Every other leg of a commit
+// is the host's, run by its observer. The observer is told the moment and, for a commit, whether it
+// formed the session. It receives facts, never commands, and is asked for nothing back.
 //
 // One observer, not a list: a host composes its features behind one object, and that object's fan-out
 // is where the order between features is written, so the order a host's features see a moment in is

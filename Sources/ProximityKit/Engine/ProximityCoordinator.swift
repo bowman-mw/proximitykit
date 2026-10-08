@@ -1852,16 +1852,6 @@ extension ProximityCoordinator {
             guard let capabilities else { return host.assumedForLegacyPeers.contains(token) }
             return capabilities.contains(token)
         }
-
-        /// A feature's capability gate: the token form of `supports(_:in:)`, for the capability's
-        /// token.
-        ///
-        /// - Parameters:
-        ///   - capability: A Fernlet capability.
-        ///   - host: The host's capability tokens (`family.vocabulary.capabilities`).
-        public func supports(_ capability: ProximityCapability, in host: ProximityNamespace.Capabilities) -> Bool {
-            supports(capability.rawValue, in: host)
-        }
     }
 
     public typealias RangingMode = ProximityRangingMode

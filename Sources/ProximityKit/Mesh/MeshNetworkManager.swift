@@ -143,9 +143,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `@ObservationIgnored`, so a view reading a computed form would never re-render on the unlock
     /// that opens it. Refreshed at every change of those inputs (``refreshHeldPhotosCanBeShown()``).
     public private(set) var heldPhotosCanBeShown = false
-    /// Phase 6 (Group Activities): the state + host-authoritative roster/token brain. Rides this friend
-    /// mesh (no new radio); constructed + wired in `init`. Memory + a device-local sidecar (NEVER synced).
-    public let activities: ProximityActivityManager
     /// Device-local hearts ledger (received-heart records + the 5-minute per-friend rate limit),
     /// SHARED with the presence path (TF b19 item 5). In-session hearts ride the live mesh channel
     /// instead of the fragile on-demand presence connect, but they record through the SAME ledger so
@@ -707,13 +704,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
         }
         self.identity = id
-        // Per-HOST root like the photo wall below: `FernletStore.resetAll` calls
-        // `meshNetworkManager.activities.clearAll()`, which removes this sidecar.
-        self.activities = ProximityActivityManager(
-            store: store,
-            identity: id,
-            fileURL: ProximityActivityManager.fileURL(in: store.proximitySupportDirectory)
-        )
         // Per-HOST root, not a process-wide constant — see `ProximityHost.proximitySupportDirectory`
         // for why the wall's index cannot be shared across concurrently-live managers.
         let cacheURL = store.proximitySupportDirectory
@@ -740,15 +730,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         self.photoWallPreferences = preferencesStore.load() ?? FriendPhotoWallPreferences()
         loadPhotoCorpora(now: Date())
         setupMeshSession()
-        registerActivityHandlers()
-        // Phase 6: give the activity manager the two mesh seams it needs — a sealed/unsealed send to a
-        // verified fingerprint's committed slot, and the list of committed peers advertising `.activities`.
-        activities.send = { [weak self] type, payload, fingerprint, sealed in
-            await self?.sendActivityEnvelope(type, payload, toFingerprint: fingerprint, sealed: sealed)
-        }
-        activities.committedActivityPeerFingerprints = { [weak self] in
-            self?.committedActivityPeerFingerprints() ?? []
-        }
         registerBuiltInProjectionHandlers()
         registerBuiltInLedgerJudge()
     }
@@ -788,71 +769,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         prunePhotoWallPreferences()
         loadHeldPhotoIndex(now: now)
         reconcileHeldPhotosIfReady(now: now)
-    }
-
-    /// Phase 6: Group Activities ride the friend mesh as registered feature payloads. The dispatch
-    /// default's committed-slot gate has already run; the remaining guard mirrors `.clothingCatalog`
-    /// (a transport-VERIFIED, unblocked sender) — NOT the vault-trust gate the friend-state/moderation
-    /// handlers use. Activities are ad-hoc, in-session interactions; authorization is carried by the
-    /// host-signed, invitee-key-bound `ActivityJoinToken`, not by prior vault friendship (kickoff:
-    /// "authorization is independent of the shared handshake"). `.activityJoinRequest` is UNSEALED
-    /// (identity-only, host re-validates against the verified slot); the other four are sealed.
-    private func registerActivityHandlers() {
-        registerPayloadHandler(for: .activityOffer) { [weak self] _, plaintext, peer in
-            guard let self, let peer else { return }
-            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
-            guard let payload = try? JSONDecoder().decode(ActivityOfferPayload.self, from: plaintext),
-                  payload.isWellFormed else { return }   // R5: format+version validated at entry
-            self.activities.receiveOffer(payload, fromFingerprint: peer.fingerprint,
-                                         verifiedHostSigningPublicKey: peer.signingPublicKey)
-        }
-        registerPayloadHandler(for: .activityJoinRequest) { [weak self] _, plaintext, peer in
-            guard let self, let peer else { return }
-            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
-            guard let payload = try? JSONDecoder().decode(ActivityJoinRequestPayload.self, from: plaintext),
-                  payload.isWellFormed else { return }   // R5: rejects empty keys too
-            self.activities.receiveJoinRequest(payload,
-                                               verifiedFingerprint: peer.fingerprint,
-                                               verifiedSigningPublicKey: peer.signingPublicKey,
-                                               verifiedKeyAgreementPublicKey: peer.keyAgreementPublicKey)
-        }
-        registerPayloadHandler(for: .activityJoinGrant) { [weak self] _, plaintext, peer in
-            guard let self, let peer else { return }
-            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
-            guard let payload = try? JSONDecoder().decode(ActivityJoinGrantPayload.self, from: plaintext),
-                  payload.isWellFormed else { return }   // R5: format+version validated at entry
-            self.activities.receiveGrant(payload, fromFingerprint: peer.fingerprint)
-        }
-        registerPayloadHandler(for: .activityRosterSnapshot) { [weak self] _, plaintext, peer in
-            guard let self, let peer else { return }
-            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
-            guard let payload = try? JSONDecoder().decode(ActivityRosterSnapshotPayload.self, from: plaintext),
-                  payload.isWellFormed else { return }
-            self.activities.receiveSnapshot(payload.snapshot)
-        }
-        registerPayloadHandler(for: .activitySync) { [weak self] _, plaintext, peer in
-            guard let self, let peer else { return }
-            guard !self.store.isBlockedFingerprint(peer.fingerprint) else { return }
-            guard let payload = try? JSONDecoder().decode(ActivitySyncPayload.self, from: plaintext),
-                  payload.isWellFormed else { return }   // R5: format+version validated at entry
-            self.activities.receiveSync(payload, fromFingerprint: peer.fingerprint)
-        }
-    }
-
-    /// Fingerprints of currently-committed slots that advertise the `.activities` capability — the
-    /// activity manager's "who can I offer/gossip to right now" seam.
-    private func committedActivityPeerFingerprints() -> [String] {
-        slots.compactMap { slot in
-            guard let fingerprint = slot.fingerprint, slot.supports(.activities, in: namespace.family.vocabulary.capabilities) else { return nil }
-            return fingerprint
-        }
-    }
-
-    /// Seal + sign + transmit an activity payload to a verified fingerprint's committed slot. Nothing is
-    /// sent if that peer no longer has a committed slot (they left the session).
-    private func sendActivityEnvelope(_ type: PayloadType, _ payload: any Encodable, toFingerprint fingerprint: String, sealed: Bool) async {
-        guard let slot = slots.first(where: { $0.fingerprint == fingerprint }) else { return }
-        await sendFeatureEnvelope(type.rawValue, encodable: payload, via: slot, sealed: sealed)
     }
 
     // MARK: - In-session hearts (TF b19 item 5; on the routed store since P6 item 6)
@@ -3594,20 +3510,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The feature handlers, keyed by the payload token each was registered for.
     @ObservationIgnored private var registeredPayloadHandlers: [String: MeshPayloadHandler] = [:]
 
-    /// Registration seam for feature payloads carried on the friend mesh: a feature convenience that
-    /// registers a Fernlet `PayloadType` case's token, `type.rawValue`, through the token door
-    /// ``registerPayloadHandler(forToken:handler:)``, whose contract it keeps. Dispatch
-    /// order: the core mesh switch runs first (by role, from the host's mesh messages), so a
-    /// registration can never shadow mesh-control handling; the registry is consulted only for
-    /// tokens the switch leaves unhandled; unregistered known tokens keep today's silent drop.
-    public func registerPayloadHandler(for type: PayloadType, handler: @escaping MeshPayloadHandler) {
-        registerPayloadHandler(forToken: type.rawValue, handler: handler)
-    }
-
-    /// The live payload registry's token door: `handler` receives every frame whose payload token
-    /// is `token` once the mesh's own dispatch has left it, replacing any handler registered for
-    /// that token before (the last registration wins; the typed convenience above shares this one
-    /// registry).
+    /// The live payload registry's token door, the registry's one registration: `handler` receives
+    /// every frame whose payload token is `token` once the mesh's own dispatch has left it, replacing
+    /// any handler registered for that token before (the last registration wins).
     ///
     /// The contract a host's feature relies on, which is the payload door's order and not a policy
     /// of this function:
@@ -14505,13 +14410,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///    formation it closes the previous post-session shop window and drops its catalogs; it offers
     ///    this device's clothing catalog once per slot, pairwise sealed and capability-gated, with a
     ///    `clothingCatalogRequest` for the peer's, so the exchange does not depend on which side
-    ///    commits first (spec: "Catalog delivery must not assume commit symmetry"); and it hands this
+    ///    commits first (spec: "Catalog delivery must not assume commit symmetry"); it hands this
     ///    peer, when it advertises each, this device's own signed moderation reports and its fuzzy
-    ///    friend state, each to a vault-trusted friend only.
-    /// 3. **The engine's own legs**, in their order: the transcript's clear on a formation, then the
-    ///    activities offer. The clear follows the observer's legs: each of those is a memory-only write
-    ///    or a task spawned to run after this hook returns, so none reads the transcript before it is
-    ///    cleared.
+    ///    friend state, each to a vault-trusted friend only; and, last, when the peer advertises
+    ///    activities, it offers the activities this device hosts with a roster version digest.
+    /// 3. **The engine's own leg**: the transcript's clear on a formation. It follows the observer's
+    ///    legs: each of those writes its own feature's state or spawns a task that runs after this hook
+    ///    returns, so none reads the transcript before it is cleared.
     ///
     /// Internal seam so unit tests can drive a slot commit without a live handshake; its spelling
     /// (named for the shop's hook) is one of the engine names the package's rename pass settles.
@@ -14525,11 +14430,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // Phase 5: a NEW session forms with an empty transcript. Messages already cleared at the
             // prior session end; this is belt-and-braces and covers the transient-drop → re-commit case.
             clearSessionTranscript()
-        }
-        // Phase 6: offer any activities we host to this committed peer + exchange a roster version digest
-        // so the highest verified snapshot converges. The manager sends via its wired `send` closure.
-        if peerIdentity.supports(.activities, in: namespace.family.vocabulary.capabilities) {
-            activities.onPeerCommitted(fingerprint: peerIdentity.fingerprint)
         }
     }
 
