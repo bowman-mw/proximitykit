@@ -695,8 +695,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         self.store = store
         let namespace = store.proximityNamespace
         self.namespace = namespace
-        self.hostRoutedTypeRegistry = MeshRoutedTypeRegistry.increment1(namespace.family.vocabulary.routedTypes)
+        let hostRoutedTypeRegistry = MeshRoutedTypeRegistry.increment1(namespace.family.vocabulary.routedTypes)
+        self.hostRoutedTypeRegistry = hostRoutedTypeRegistry
         self.residentRoutedRows = MeshRoutedTypeRegistry.increment1Rows(namespace.family.vocabulary.routedTypes)
+        self.routedResidentBlobBound = Int(clamping: hostRoutedTypeRegistry.maxItemByteCount)
         self.transport = transport ?? NetworkMeshSession(namespace: namespace)
         let id = identity ?? store.makeProximityIdentity()
         self.identityIsOfNamespace = ProximityNamespaceGate.checkIdentity(
@@ -6183,6 +6185,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// and read through ``routedTypes`` unless a test narrowed or widened it.
     @ObservationIgnored private let hostRoutedTypeRegistry: MeshRoutedTypeRegistry
 
+    /// The largest routed blob this device seals, opens or keeps resident, in bytes: the host
+    /// registry's widest row (``MeshRoutedTypeRegistry/maxItemByteCount``), clamped into an `Int`
+    /// once, in `init` (plan step A0.5.4).
+    ///
+    /// One number at three sites — the mint's seal, the delivery door's open (the engine hands it to
+    /// each registered box beside the decrypt predicate) and the projection's resident-blob guard —
+    /// so the seal refuses exactly what the open and the guard would (D-13.19). Taken from
+    /// ``hostRoutedTypeRegistry`` and never through ``routedTypes``: `routedTypeRegistryForTesting`
+    /// narrows or widens every door that resolves a token and moves no bound. An `Int`, compared with
+    /// no subtraction, so a host whose rows are narrower than the seal's overhead, or that registered
+    /// none (0), refuses every seal and every open instead of trapping. 10 551 337 for Fernlet's rows.
+    @ObservationIgnored private let routedResidentBlobBound: Int
+
     /// The engine's resident routed rows by name, built once in `init` from the same routed types as
     /// ``hostRoutedTypeRegistry`` (plan step A0.5.2, S9).
     ///
@@ -7032,10 +7047,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// The compared number is the origin-signed ``MeshRoutedManifest/size``: the complete sealed
     /// **ciphertext** blob, marker and tag included. The row's ``MeshRoutedTypeEntry/maxItemByteCount``
-    /// is a ciphertext cap for the same reason, which is why the photo row is defined as the seal
-    /// format's resident bound rather than as the photo wall's plaintext bound — the two differ by
-    /// the framing, and comparing a ciphertext size against a plaintext bound would refuse items
-    /// that are perfectly in bounds.
+    /// is a ciphertext cap for the same reason, which is why the photo row is the photo wall's
+    /// plaintext bound plus the body's framed header allowance plus the seal's overhead, never the
+    /// plaintext bound alone — the two differ by the framing, and comparing a ciphertext size against
+    /// a plaintext bound would refuse items that are perfectly in bounds. Among Fernlet's rows it is
+    /// the widest, so it is also ``routedResidentBlobBound``, the number the resident-blob guard reads.
     ///
     /// Runs **after** the verifier, so it is a statement about what the origin signed rather than
     /// about what a relay changed, and **before** the destination/hand-off gate, so a custodian's
@@ -7992,7 +8008,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             meshID: meshID, itemID: target.contentID, originFingerprint: identity.localFingerprint
         )
         let blob = try MeshRoutedItemSealer.seal(
-            body, contentKey: contentKey, binding: binding, typeToken: typeToken, in: namespace.family.purposes
+            body, contentKey: contentKey, binding: binding, typeToken: typeToken,
+            maxBlobByteCount: routedResidentBlobBound, in: namespace.family.purposes
         )
         let manifest = try MeshRoutedManifest.signed(
             meshID: meshID, target: target, typeToken: typeToken,
@@ -9077,10 +9094,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         routedJudges[token] = RoutedJudge(                            // R3: bounded by the registry's rows
             isReadyToJudge: { judge.isReadyToJudge },
             admits: { judge.admits($0) },
-            openThenJudge: { blob, manifest, identity, mayDecryptRoutedContent, delivery in
+            openThenJudge: { blob, manifest, identity, maxBlobByteCount, mayDecryptRoutedContent, delivery in
                 let body = try MeshRoutedItemDelivery.openBody(
                     J.Body.self, blob: blob, manifest: manifest, identity: identity,
-                    mayDecryptRoutedContent: mayDecryptRoutedContent
+                    maxBlobByteCount: maxBlobByteCount, mayDecryptRoutedContent: mayDecryptRoutedContent
                 )
                 return judge.judgeRoutedItem(body, delivery: delivery())
             }
@@ -9181,7 +9198,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard let blob = routedProjectionBlob(key: key, manifest: manifest) else { return .none }
         let judgement: MeshRoutedJudgement
         do {
-            judgement = try judge.openThenJudge(blob, manifest, identity, mayDecryptRoutedContent) {
+            judgement = try judge.openThenJudge(
+                blob, manifest, identity, routedResidentBlobBound, mayDecryptRoutedContent
+            ) {
                 self.ledgerJudgementDelivery(key: key, manifest: manifest, author: author)
             }
         } catch {
@@ -9292,13 +9311,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let isReadyToJudge: () -> Bool
         /// The judge's ``MeshRoutedLedgerJudge/admits(_:)``.
         let admits: (_ author: MeshRoutedAuthor) -> MeshRoutedAdmission
-        /// The engine's one generic open with the judge's `Body`, then the delivery the engine
-        /// builds once the open has succeeded, then the judge's
-        /// ``MeshRoutedLedgerJudge/judgeRoutedItem(_:delivery:)``. Throws only what the open throws:
-        /// the delivery and the judgement never throw.
+        /// The engine's one generic open with the judge's `Body`, under the resident bound the engine
+        /// hands it (plan step A0.5.4), then the delivery the engine builds once the open has
+        /// succeeded, then the judge's ``MeshRoutedLedgerJudge/judgeRoutedItem(_:delivery:)``.
+        /// Throws only what the open throws: the delivery and the judgement never throw.
         let openThenJudge: (
             _ blob: Data, _ manifest: MeshRoutedManifest, _ identity: IdentityService,
-            _ mayDecryptRoutedContent: Bool, _ delivery: () -> MeshRoutedDelivery
+            _ maxBlobByteCount: Int, _ mayDecryptRoutedContent: Bool, _ delivery: () -> MeshRoutedDelivery
         ) throws -> MeshRoutedJudgement
     }
 
@@ -9440,10 +9459,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         routedProjectors[token] = RoutedProjector(                    // R3: bounded by the registry's rows
             isProjectable: { handler.isProjectable },
             verdictBeforeOpen: { handler.verdictBeforeOpen($0) },
-            openThenProject: { blob, manifest, delivery, identity, mayDecryptRoutedContent in
+            openThenProject: { blob, manifest, delivery, identity, maxBlobByteCount, mayDecryptRoutedContent in
                 let body = try MeshRoutedItemDelivery.openBody(
                     H.Body.self, blob: blob, manifest: manifest, identity: identity,
-                    mayDecryptRoutedContent: mayDecryptRoutedContent
+                    maxBlobByteCount: maxBlobByteCount, mayDecryptRoutedContent: mayDecryptRoutedContent
                 )
                 return handler.projectRoutedItem(body, delivery: delivery)
             }
@@ -9536,7 +9555,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard case .resolved(let author) = routedProjectionAuthor(for: manifest) else {
             return .refusedForGood
         }
-        guard manifest.size <= UInt64(MeshRoutedItemSealFormat.maxResidentBlobByteCount) else {
+        guard manifest.size <= UInt64(routedResidentBlobBound) else {
             ProximityAudit.log(
                 "mesh.routedProjection.blobTooLarge", context: ["size": String(manifest.size)]
             )
@@ -9620,7 +9639,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         )
         if let verdict = projector.verdictBeforeOpen(delivery) { return verdict }
         do {
-            return try projector.openThenProject(blob, manifest, delivery, identity, mayDecryptRoutedContent)
+            return try projector.openThenProject(
+                blob, manifest, delivery, identity, routedResidentBlobBound, mayDecryptRoutedContent
+            )
         } catch {
             ProximityAudit.log(
                 "mesh.routedProjection.openFailed",
@@ -9643,12 +9664,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let isProjectable: () -> Bool
         /// The handler's ``MeshRoutedProjectionHandler/verdictBeforeOpen(_:)``.
         let verdictBeforeOpen: (_ delivery: MeshRoutedDelivery) -> MeshRoutedProjectionVerdict?
-        /// The engine's one generic open with the handler's `Body`, then the handler's
+        /// The engine's one generic open with the handler's `Body`, under the resident bound the
+        /// engine hands it (plan step A0.5.4), then the handler's
         /// ``MeshRoutedProjectionHandler/projectRoutedItem(_:delivery:)``. Throws only what the open
         /// throws: the canonical write never throws.
         let openThenProject: (
             _ blob: Data, _ manifest: MeshRoutedManifest, _ delivery: MeshRoutedDelivery,
-            _ identity: IdentityService, _ mayDecryptRoutedContent: Bool
+            _ identity: IdentityService, _ maxBlobByteCount: Int, _ mayDecryptRoutedContent: Bool
         ) throws -> MeshRoutedProjectionVerdict
     }
 
@@ -10793,8 +10815,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Consultation sites: **two, both real since P5 item 13** — this device's own outer guard in
     /// `projectRoutedItemIfPermitted(key:manifest:)`, and the parameter the routed delivery door
     /// guards on as its first line, which the projection hands over through
-    /// `MeshRoutedItemDelivery.openBody(_:blob:manifest:identity:mayDecryptRoutedContent:)` (plan step
-    /// A0.5.2), so the two halves of one fact are stated at both ends. The source wall
+    /// `MeshRoutedItemDelivery.openBody(_:blob:manifest:identity:maxBlobByteCount:mayDecryptRoutedContent:)`
+    /// (plan step A0.5.2), so the two halves of one fact are stated at both ends. The source wall
     /// (`everyRoutedPlaintextSeamNamesItsPredicate`) pins the unwrap and the item open to that one
     /// file and requires it to hold a `guard` on this spelling, not a mention.
     ///
@@ -16232,6 +16254,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// unregistered type, or widen both nodes' and a fourth type flows end to end with no consumer
     /// edited. An instance property, never a global (Power of 10 R6).
     @ObservationIgnored var routedTypeRegistryForTesting: MeshRoutedTypeRegistry?
+
+    /// The resident bound this manager holds — its host registry's widest routed row, clamped into
+    /// an `Int` once at `init` (plan step A0.5.4) — so a cell can read the number its seal, its open
+    /// and its resident-blob guard share, which no test could otherwise see, and show that a
+    /// ``routedTypeRegistryForTesting`` narrowing or widening the doors leaves it where it was.
+    /// `internal` for `@testable` unit tests only.
+    var routedResidentBlobBoundForTesting: Int { routedResidentBlobBound }
 
     /// The radio this manager is driving, so a test can assert WHICH one it selected — and, when it
     /// injected a fake, read back what the manager asked the radio to do.

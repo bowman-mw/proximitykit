@@ -1815,9 +1815,10 @@ from one source and cannot drift, which is the failure item 4's forward-compat n
   photo row's, written as a **formula** rather than a literal:
   `PrivateMediaStore.maxIncomingPhotoBytes` (the payload's *plaintext* bound, widened from `private`
   in the same commit rather than restated) + ``MeshRoutedItemBodyFormat/maxFramedHeaderByteCount`` +
-  ``MeshRoutedItemSealFormat/overheadByteCount``, which is exactly
-  ``MeshRoutedItemSealFormat/maxResidentBlobByteCount`` — so the door's cap and the delivery
-  projection's resident-blob guard are one number and cannot drift. The unit caveat is the whole
+  ``MeshRoutedItemSealFormat/overheadByteCount``. It is the widest row, and since plan step A0.5.4
+  the widest row (``MeshRoutedTypeRegistry/maxItemByteCount``) is the one bound the manager holds from
+  its host's registry at `init` for its seal, its open and the delivery projection's resident-blob
+  guard — so the door's cap and that guard are one number and cannot drift. The unit caveat is the whole
   reason for the formula: `manifest.size` is the complete sealed *ciphertext* blob, while a store's
   byte and pixel bounds are *plaintext* bounds enforced at reassembly. **What the row bounds is the
   origin-signed manifest at the manifest door, not the bytes resident for an item:** a *parked*
@@ -2452,14 +2453,19 @@ bytes (`FMRI1`) in the clear — the `FMA2` / `FMGP2` / `FMGM2` idiom — so a f
 apart without a key and an unmarked blob is refused **by name** rather than joining the silent-drop
 pile; it is not in the authenticated data, because a routed blob is hash-committed by a signed
 manifest and a flipped marker fails `contentHash` at assembly before any key is unwrapped. The seal
-bound and the open bound are **one derived number** (`maxPlaintextByteCount = maxResidentBlobByteCount
-− overheadByteCount`): deriving the write bound from the 256 MiB wire cap while the open refused at
-the photo bound would let an origin mint an item every recipient custodies, receipts and then
-declines to open — and the photo stage is final on durable *ciphertext*, so that receipt is already
-minted when the open refuses. Since **P6 item 3** that resident bound is itself a formula —
+bound and the open bound are **one number**: the seal refuses a plaintext whose length plus
+`overheadByteCount` exceeds the `maxBlobByteCount` it is handed, and the open refuses a blob above the
+same value. Deriving the write bound from the 256 MiB wire cap while the open refused at the photo
+bound would let an origin mint an item every recipient custodies, receipts and then declines to
+open — and the photo stage is final on durable *ciphertext*, so that receipt is already minted when
+the open refuses. Since **P6 item 3** that resident bound has been a formula —
 `PrivateMediaStore.maxIncomingPhotoBytes` + ``MeshRoutedItemBodyFormat/maxFramedHeaderByteCount`` +
-`overheadByteCount` — and is the photo row's registry cap verbatim, so the seam bound, the registry
-cap and the projection's guard are one expression rather than three numbers that agree today.
+`overheadByteCount`, the photo row's registry cap — and since plan step A0.5.4 the sealer states no
+bound of its own: the manager holds its host registry's widest row
+(``MeshRoutedTypeRegistry/maxItemByteCount``, 10 551 337 bytes for Fernlet's rows) once, at `init`,
+hands it to both ends and reads it at the projection's guard, so the seam bound, the registry cap and
+the projection's guard are one value rather than three numbers that agree today, and the sealer no
+longer imports `PrivateMediaStore`. A test's fixture registry moves no bound.
 The sealer is pure — no actor, clock, I/O or identity — which is what keeps it
 outside every locked-device wall: the predicate is consulted by the delivery door that calls it.
 

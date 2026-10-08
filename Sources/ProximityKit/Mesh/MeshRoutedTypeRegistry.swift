@@ -16,8 +16,13 @@
 // outlived a build would be a second source of truth), no clock, no store, no gate vocabulary
 // (`MeshRoutedAccessGate`'s predicates are item 10's, and a type's declared column is not a gate),
 // no dispatch and no relay-hop plumbing behind the reserved increment-2 value.
+//
+// The one `PrivateMediaStore` import came with the photo row's formula (plan step A0.5.4, from the
+// seal file; it leaves with the photo row) and reaches a single Int — `maxIncomingPhotoBytes`, the
+// row's payload term — never the store type, its key provider or a byte of its data.
 
 import Foundation
+import PrivateMediaStore
 
 // MARK: - MeshRoutedDestinationSemantics
 
@@ -151,9 +156,10 @@ public nonisolated enum MeshRoutedContentScope: String, CaseIterable, Equatable,
 /// **formula**, never a literal — the payload's plaintext bound, plus
 /// ``MeshRoutedItemBodyFormat/maxFramedHeaderByteCount``, plus
 /// ``MeshRoutedItemSealFormat/overheadByteCount``. P6 item 3's photo row is the worked example: it
-/// is defined as ``MeshRoutedItemSealFormat/maxResidentBlobByteCount``, which is exactly that sum
-/// over `PrivateMediaStore.maxIncomingPhotoBytes`, so the manifest door's per-type check and the
-/// delivery projection's resident-blob guard are one number by construction. A row that narrows
+/// is exactly that sum over `PrivateMediaStore.maxIncomingPhotoBytes`, and as the widest row it is
+/// the registry's ``MeshRoutedTypeRegistry/maxItemByteCount`` — the one bound the manager holds for
+/// its seal, its open and the delivery projection's resident-blob guard (plan step A0.5.4) — so the
+/// manifest door's per-type check and that guard are one number by construction. A row that narrows
 /// below what its own sender can seal would have that sender mint items every receiver refuses.
 ///
 /// **What the cap bounds, precisely: the origin-signed manifest at the manifest door — never the
@@ -268,17 +274,20 @@ nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 /// names no store, and no `switch` over rows exists.
 ///
 /// **The per-type cap has a RECEIVER since P6 item 3** (D-11.4). The photo row no longer sits at the
-/// shared wire bound: it is ``MeshRoutedItemSealFormat/maxResidentBlobByteCount``, the formula in the
-/// unit caveat above, which makes the manifest door's check reachable for the first time — an
-/// over-cap manifest is refused as ``MeshRoutedManifestRejection/sizeExceedsTypeCap`` at
-/// `MeshNetworkManager.ingestRoutedManifest`, charged to the envelope sender like every pre-store
-/// refusal, and its parked chunk bytes are **kept** (``MeshRoutedParkedDrop`` answers nil, because a
-/// cap is a number one build chose and a later build may loosen it). The mint's own
-/// ``MeshRoutedManifestMintError/sizeExceedsTypeCap`` became reachable in the same commit. The
-/// remaining column ahead of a discriminating test is ``MeshRoutedTypeEntry/expiry``, which still
-/// has one case (D-11.22). ``MeshRoutedItemSealFormat`` stays as the seam that bounds a seal and an
-/// open — it is now *defined as* the photo row's formula rather than restating a number, so the two
-/// ends the earlier note promised to move together are one expression.
+/// shared wire bound: it is the formula in the unit caveat above, which makes the manifest door's
+/// check reachable for the first time — an over-cap manifest is refused as
+/// ``MeshRoutedManifestRejection/sizeExceedsTypeCap`` at `MeshNetworkManager.ingestRoutedManifest`,
+/// charged to the envelope sender like every pre-store refusal, and its parked chunk bytes are
+/// **kept** (``MeshRoutedParkedDrop`` answers nil, because a cap is a number one build chose and a
+/// later build may loosen it). The mint's own ``MeshRoutedManifestMintError/sizeExceedsTypeCap``
+/// became reachable in the same commit. The remaining column ahead of a discriminating test is
+/// ``MeshRoutedTypeEntry/expiry``, which still has one case (D-11.22).
+///
+/// **The bound a seal and an open take is the widest row** (plan step A0.5.4). The sealer states no
+/// bound of its own: ``maxItemByteCount``, the widest accepted row, is the one number, which
+/// `MeshNetworkManager` clamps from its host registry once, at `init`, and passes to the seal and
+/// the open and reads at the projection's resident-blob guard — so the two ends the earlier note
+/// promised to move together are one value, and the photo row's formula lives only in its row.
 ///
 /// Shipping code names exactly one value, ``increment1(_:)`` — and its rows by name,
 /// ``increment1Rows(_:)``, for the tokens the manager's built-in handlers register under and its
@@ -297,10 +306,22 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
     /// The resolved rows, keyed by the frozen token.
     private let entries: [String: MeshRoutedTypeEntry]
 
+    /// The widest ciphertext cap among the rows this registry accepted, in bytes, or 0 when it
+    /// accepted none — the one resident bound (plan step A0.5.4).
+    ///
+    /// Stored, and set once in ``init(entries:)`` from the ACCEPTED rows, so a dropped row widens
+    /// nothing. `MeshNetworkManager` clamps its host registry's value into an `Int` once, at its
+    /// `init`, then passes it to the seal at the mint and to the open at the delivery door, and reads
+    /// it at the projection's resident-blob guard — never a test's fixture registry's, so a narrowed
+    /// or widened fixture moves no bound. For Fernlet's rows it is the photo row's cap, 10 551 337
+    /// bytes. A registry with no row answers 0, which refuses every seal and every open: fail-closed.
+    let maxItemByteCount: UInt64
+
     /// Builds a registry from declarations, first row winning for a repeated token.
     ///
     /// Three registerability predicates, all fail-closed: a dropped row's token answers nil at every
     /// door, which refuses it rather than admitting it under a policy this build does not implement.
+    /// The widest accepted row's cap becomes ``maxItemByteCount``.
     ///
     /// - Parameter entries: The declarations, at most ``maxEntries``.
     init(entries: [MeshRoutedTypeEntry]) {
@@ -315,6 +336,8 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
             resolved[entry.token] = entry
         }
         self.entries = resolved
+        // R2: bounded by the accepted rows, at most `maxEntries`.
+        self.maxItemByteCount = resolved.values.map { $0.maxItemByteCount }.max() ?? 0
     }
 
     /// Plan §11's three registered types, as the one registry shipping code names: exactly the rows
@@ -346,15 +369,21 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
     static func increment1Rows(_ routedTypes: ProximityNamespace.RoutedTypes) -> MeshRoutedResidentRows {
         MeshRoutedResidentRows(
             // The photo row is the FIRST narrowed cap (P6 item 3, D-11.4), and it is narrowed to a
-            // formula rather than a number: `MeshRoutedItemSealFormat.maxResidentBlobByteCount` is
-            // `PrivateMediaStore.maxIncomingPhotoBytes` (the photo wall's PLAINTEXT bound) plus
-            // `MeshRoutedItemBodyFormat.maxFramedHeaderByteCount` plus the seal's own overhead — i.e.
-            // the widest CIPHERTEXT a routed photo can measure. Defined as that constant, not as a copy
-            // of it, so the manifest door's check and the projection's resident-blob guard are the same
-            // number and cannot drift; see the unit caveat on `MeshRoutedTypeEntry`.
+            // formula rather than a number: `PrivateMediaStore.maxIncomingPhotoBytes` (the photo
+            // wall's PLAINTEXT bound) plus `MeshRoutedItemBodyFormat.maxFramedHeaderByteCount` plus the
+            // seal's own overhead — i.e. the widest CIPHERTEXT a routed photo can measure, 10 551 337 B.
+            // Each term is read from the type that owns it, never copied. The formula was the seal
+            // file's resident bound until plan step A0.5.4 moved it here: the bound is now the
+            // registry's widest row, which this row is, so the manifest door's check and the
+            // projection's resident-blob guard are the same number and cannot drift; see the unit
+            // caveat on `MeshRoutedTypeEntry`.
             photo: MeshRoutedTypeEntry(
                 token: routedTypes.photo,
-                maxItemByteCount: UInt64(MeshRoutedItemSealFormat.maxResidentBlobByteCount),
+                maxItemByteCount: UInt64(
+                    PrivateMediaStore.maxIncomingPhotoBytes
+                        + MeshRoutedItemBodyFormat.maxFramedHeaderByteCount
+                        + MeshRoutedItemSealFormat.overheadByteCount
+                ),
                 destinations: .fullRosterAtCreation,
                 relayRetention: .originRetainsUntilDeparture,
                 finalAck: .durableRecipientStorage,

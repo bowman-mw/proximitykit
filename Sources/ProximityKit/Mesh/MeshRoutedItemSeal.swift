@@ -16,34 +16,37 @@
 // precedes the hash and the freeze holds verbatim.
 //
 // Not here: any key agreement (item 1's wrapper owns the private-key half), any store, clock,
-// actor, envelope or identity. The sealer is a pure function of the bytes handed to it, which is
-// what keeps it outside every locked-device gate wall — the predicate is consulted by the delivery
-// door that CALLS this, never by the primitive. The one `PrivateMediaStore` import is P6 item 3's
-// and reaches a single Int — `maxIncomingPhotoBytes`, the payload bound the resident-blob formula
-// is built from — never the store type, its key provider or a byte of its data.
+// actor, envelope or identity — and no size bound of its own. The sealer is a pure function of the
+// bytes and the bound handed to it, which is what keeps it outside every locked-device gate wall —
+// the predicate is consulted by the delivery door that CALLS this, never by the primitive. Since
+// plan step A0.5.4 the largest blob is the caller's `maxBlobByteCount`: the manager's resident
+// bound, its host registry's widest routed row, held once at its `init`. So this file states no
+// feature's payload size and imports no `PrivateMediaStore`; the photo row's formula lives with the
+// row, in `MeshRoutedTypeRegistry.swift`.
 
 import CryptoKit
 import Foundation
-import PrivateMediaStore
 
 // MARK: - MeshRoutedItemSealFormat
 
-/// The routed item blob's fixed widths and bounds.
+/// The routed item blob's fixed widths.
 ///
 /// The layout is `marker(5) ‖ nonce(12) ‖ ciphertext(N) ‖ tag(16)`, so a sealed blob is always
 /// `overheadByteCount + N` bytes and that total is what ``MeshRoutedManifest/size`` claims and
 /// ``MeshRoutedContentDigest/contentHash(of:in:)`` measures.
 ///
-/// **One number bounds both ends** (D-13.19). ``maxPlaintextByteCount`` is *derived* from
-/// ``maxResidentBlobByteCount``, so the seal refuses exactly what the open would refuse. Deriving
-/// the write bound from the 256 MiB wire cap instead would let an origin mint an item every
-/// recipient custodies, receipts and then refuses to open — and because the photo stage is final on
-/// durable **ciphertext**, that receipt is already minted when the open refuses, so the origin
-/// would read `delivered` for an item no wall can ever hold.
+/// **One number bounds both ends** (D-13.19), and since plan step A0.5.4 it is the caller's, not
+/// this type's: the seal refuses a plaintext whose length plus ``overheadByteCount`` exceeds the
+/// `maxBlobByteCount` it is handed, and the open refuses a blob above the same value, so the seal
+/// refuses exactly what the open would refuse. `MeshNetworkManager` hands both ends — and its
+/// projection's resident-blob guard reads — one value: its host registry's widest routed row, held
+/// once at its `init`. Deriving the write bound from the 256 MiB wire cap instead would let an
+/// origin mint an item every recipient custodies, receipts and then refuses to open — and because
+/// the photo stage is final on durable **ciphertext**, that receipt is already minted when the open
+/// refuses, so the origin would read `delivered` for an item no wall can ever hold.
 ///
 /// Public for ``overheadByteCount`` alone, the term a host's routed row adds to its body's bound to
-/// state the row's ciphertext cap; the marker, the widths and the two seal bounds stay the
-/// sealer's own.
+/// state the row's ciphertext cap; the marker and the widths stay the sealer's own.
 public nonisolated enum MeshRoutedItemSealFormat {
 
     /// The cleartext format tag every routed blob begins with: ASCII `FMRI1`.
@@ -71,41 +74,9 @@ public nonisolated enum MeshRoutedItemSealFormat {
     ///
     /// The contract: every sealed blob is exactly its plaintext's length plus this, so a routed
     /// type's ciphertext cap is its body's widest plaintext plus this number, written as that sum
-    /// rather than a literal. Frozen with the blob layout.
+    /// rather than a literal, and the seal takes a plaintext exactly when its length plus this is
+    /// within the caller's `maxBlobByteCount`. Frozen with the blob layout.
     public static let overheadByteCount = markerByteCount + nonceByteCount + tagByteCount
-
-    /// The largest blob this device will produce or open, the number both seal bounds derive from,
-    /// **and** the photo row's registry cap — one number, stated as a FORMULA rather than a literal
-    /// (P6 item 3, D-11.4):
-    ///
-    /// ```
-    /// maxResidentBlobByteCount
-    ///   = PrivateMediaStore.maxIncomingPhotoBytes            // the PLAINTEXT payload bound
-    ///   + MeshRoutedItemBodyFormat.maxFramedHeaderByteCount  // the body's framed header allowance
-    ///   + overheadByteCount                                  // marker + nonce + tag
-    /// ```
-    ///
-    /// Every term is read from the type that owns it, so nothing here restates the 10 MB the photo
-    /// wall enforces (that bound was `private` and restated until P6 item 3 widened it) and nothing
-    /// can drift from it. The formula is what makes the number honest in both directions: the
-    /// **plaintext** bound is a payload bound (the photo wall's), the **ciphertext** cap is what a
-    /// seal of that payload can measure, and the two differ by exactly the framing this file and
-    /// ``MeshRoutedItemBodyFormat`` add.
-    ///
-    /// **Seam bound and registry cap are now the same value, deliberately.**
-    /// `MeshRoutedTypeRegistry.increment1(_:)`'s photo row is defined as this constant, so the manifest
-    /// door's per-type check and the projection's resident-blob guard cannot disagree. Narrowing
-    /// only one of them would re-create the mint-it/never-open-it asymmetry D-13.19 closes: the
-    /// photo stage is final on durable **ciphertext**, so a receipt is already minted by the time an
-    /// open refuses. A type whose payload is smaller (P6's text and hearts) narrows its own row
-    /// below this; nothing narrows below it here, because this is the widest registered payload.
-    static let maxResidentBlobByteCount = PrivateMediaStore.maxIncomingPhotoBytes
-        + MeshRoutedItemBodyFormat.maxFramedHeaderByteCount
-        + overheadByteCount
-
-    /// The largest plaintext ``MeshRoutedItemSealer/seal(_:contentKey:binding:typeToken:in:)`` will
-    /// take: `maxResidentBlobByteCount − overheadByteCount`. Derived, never written twice.
-    static let maxPlaintextByteCount = maxResidentBlobByteCount - overheadByteCount
 }
 
 // MARK: - MeshRoutedItemSealError
@@ -120,8 +91,9 @@ public nonisolated enum MeshRoutedItemSealFormat {
 public nonisolated enum MeshRoutedItemSealError: Error, Equatable, Sendable {
     /// The plaintext is empty. A routed item with no payload is a manifest, not an item.
     case emptyPlaintext
-    /// The plaintext is larger than ``MeshRoutedItemSealFormat/maxPlaintextByteCount`` — refused at
-    /// the MINT, so no recipient ever receipts an item it could not open (D-13.19).
+    /// The plaintext would seal to a blob larger than the caller's `maxBlobByteCount` — its length
+    /// plus ``MeshRoutedItemSealFormat/overheadByteCount`` exceeds the bound — refused at the MINT,
+    /// so no recipient ever receipts an item it could not open (D-13.19).
     case plaintextTooLarge(byteCount: Int)
     /// The content key is not 32 bytes.
     case invalidContentKey
@@ -134,7 +106,7 @@ public nonisolated enum MeshRoutedItemSealError: Error, Equatable, Sendable {
     /// ``MeshRoutedPhotoBody/init(decoding:)`` rather than propagated, so one frozen vocabulary
     /// covers the whole framing and no raw `DecodingError` reaches a routed audit line.
     case malformed
-    /// The blob is larger than ``MeshRoutedItemSealFormat/maxResidentBlobByteCount``. Refused
+    /// The blob is larger than the caller's `maxBlobByteCount`, the resident bound. Refused
     /// **before** any plaintext is allocated.
     case blobTooLargeToOpen(byteCount: Int)
     /// The AEAD refused — a wrong key, a moved blob, or tampered bytes. One token for all three on
@@ -180,22 +152,26 @@ nonisolated enum MeshRoutedItemSealer {
 
     /// Seals one routed item's plaintext under its own content key.
     ///
-    /// Order is fixed: non-empty, then the plaintext bound — the **same number** the open
-    /// enforces — then the key width, then the primitive. The nonce is minted inside, per item,
-    /// never injected and never derived: a 256-bit single-use content key separates nothing further
-    /// than the authenticated data already does.
+    /// Order is fixed: non-empty, then the bound — the blob this plaintext would seal to, against
+    /// `maxBlobByteCount`, the **same number** the open enforces — then the key width, then the
+    /// primitive. The nonce is minted inside, per item, never injected and never derived: a 256-bit
+    /// single-use content key separates nothing further than the authenticated data already does.
     ///
-    /// - Parameter purposes: The caller's namespace labels, whose `aead.meshRoutedItemV1` fronts the
-    ///   authenticated data (plan step A0.2.6), with no default.
+    /// - Parameters:
+    ///   - maxBlobByteCount: The largest blob the caller will produce: `MeshNetworkManager`'s
+    ///     resident bound, its host registry's widest routed row (plan step A0.5.4), with no default.
+    ///   - purposes: The caller's namespace labels, whose `aead.meshRoutedItemV1` fronts the
+    ///     authenticated data (plan step A0.2.6), with no default.
     /// - Returns: `marker ‖ nonce ‖ ciphertext ‖ tag` — the complete blob a manifest measures.
     static func seal(
         _ plaintext: Data,
         contentKey: Data,
         binding: MeshRoutedWrapBinding,
         typeToken: String,
+        maxBlobByteCount: Int,
         in purposes: ProximityNamespace.Purposes
     ) throws -> Data {
-        let key = try validatedPlaintext(plaintext, contentKey: contentKey)
+        let key = try validatedPlaintext(plaintext, contentKey: contentKey, maxBlobByteCount: maxBlobByteCount)
         let aad = additionalData(binding: binding, typeToken: typeToken, in: purposes)
         let sealedBox = try AES.GCM.seal(plaintext, using: key, authenticating: aad)
         // AAD: purposes.aead.meshRoutedItemV1 ‖ binding ‖ typeToken.
@@ -210,16 +186,20 @@ nonisolated enum MeshRoutedItemSealer {
     /// allocated), then the primitive. Every AEAD refusal collapses to
     /// ``MeshRoutedItemSealError/openFailed``.
     ///
-    /// - Parameter purposes: The caller's namespace labels, whose `aead.meshRoutedItemV1` fronts the
-    ///   authenticated data (plan step A0.2.6), with no default.
+    /// - Parameters:
+    ///   - maxBlobByteCount: The largest blob the caller will open — the resident bound, the same
+    ///     value it seals under (plan step A0.5.4), with no default.
+    ///   - purposes: The caller's namespace labels, whose `aead.meshRoutedItemV1` fronts the
+    ///     authenticated data (plan step A0.2.6), with no default.
     static func open(
         _ blob: Data,
         contentKey: Data,
         binding: MeshRoutedWrapBinding,
         typeToken: String,
+        maxBlobByteCount: Int,
         in purposes: ProximityNamespace.Purposes
     ) throws -> Data {
-        try validateBlobShape(blob)
+        try validateBlobShape(blob, maxBlobByteCount: maxBlobByteCount)
         let key = SymmetricKey(data: contentKey)
         let aad = additionalData(binding: binding, typeToken: typeToken, in: purposes)
         do {
@@ -253,9 +233,17 @@ nonisolated enum MeshRoutedItemSealer {
 
     /// The seal's guard chain, returning the key it validated (the `MeshChunker.validated(…)`
     /// idiom — one place, so no door into the mint skips it).
-    private static func validatedPlaintext(_ plaintext: Data, contentKey: Data) throws -> SymmetricKey {
+    ///
+    /// The bound is compared as the blob the plaintext would seal to, `plaintext.count +
+    /// overheadByteCount`, against `maxBlobByteCount`, never as the plaintext against the bound less
+    /// the overhead: no subtraction, so a bound below the overhead — a host that registered no
+    /// routed row holds 0 — refuses every plaintext rather than reaching a negative or trapping
+    /// bound (plan step A0.5.4).
+    private static func validatedPlaintext(
+        _ plaintext: Data, contentKey: Data, maxBlobByteCount: Int
+    ) throws -> SymmetricKey {
         guard !plaintext.isEmpty else { throw MeshRoutedItemSealError.emptyPlaintext }
-        guard plaintext.count <= MeshRoutedItemSealFormat.maxPlaintextByteCount else {
+        guard plaintext.count + MeshRoutedItemSealFormat.overheadByteCount <= maxBlobByteCount else {
             throw MeshRoutedItemSealError.plaintextTooLarge(byteCount: plaintext.count)
         }
         guard contentKey.count == MeshRoutedManifestFormat.contentKeyByteCount else {
@@ -265,15 +253,16 @@ nonisolated enum MeshRoutedItemSealer {
     }
 
     /// The open's shape chain: format tag, then the widths, in that order — the marker first so a
-    /// foreign or retired blob is named rather than reported as a generic malformation.
-    private static func validateBlobShape(_ blob: Data) throws {
+    /// foreign or retired blob is named rather than reported as a generic malformation, the
+    /// caller's `maxBlobByteCount` last (a bound of 0, a host with no routed row, refuses every blob).
+    private static func validateBlobShape(_ blob: Data, maxBlobByteCount: Int) throws {
         guard blob.starts(with: MeshRoutedItemSealFormat.marker) else {
             throw MeshRoutedItemSealError.retiredOrForeignFormat
         }
         guard blob.count > MeshRoutedItemSealFormat.overheadByteCount else {
             throw MeshRoutedItemSealError.malformed
         }
-        guard blob.count <= MeshRoutedItemSealFormat.maxResidentBlobByteCount else {
+        guard blob.count <= maxBlobByteCount else {
             throw MeshRoutedItemSealError.blobTooLargeToOpen(byteCount: blob.count)
         }
     }

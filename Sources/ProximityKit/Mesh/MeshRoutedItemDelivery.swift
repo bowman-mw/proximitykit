@@ -97,8 +97,9 @@ nonisolated enum MeshRoutedItemDelivery {
     /// projection handler's and every ledger judge's body is opened through (plan step A0.5.2 folded
     /// the photo and text doors into it, and A0.5.3 the heart's).
     ///
-    /// The plaintext comes from ``openPlaintext(_:manifest:identity:mayDecryptRoutedContent:)``,
-    /// whose first line is the decrypt guard; the body is decoded by its own
+    /// The plaintext comes from
+    /// ``openPlaintext(_:manifest:identity:maxBlobByteCount:mayDecryptRoutedContent:)``, whose first
+    /// line is the decrypt guard; the body is decoded by its own
     /// ``MeshRoutedBody/init(decoding:)``; and its ``MeshRoutedBody/routedItemID`` must be the item id
     /// the origin signed. The id guard holds for every family because every family's id is a key:
     /// the friend-photo surface keys and dedups on the photo id, so a body carrying another sender's
@@ -118,12 +119,15 @@ nonisolated enum MeshRoutedItemDelivery {
     ///     the store door that produced it.
     ///   - manifest: The origin's signed manifest — the binding, the wraps and the type token.
     ///   - identity: This device's identity, for the wrap's key agreement.
+    ///   - maxBlobByteCount: The largest blob the open takes: `MeshNetworkManager`'s resident bound,
+    ///     its host registry's widest routed row held once at its `init` — the number its mint seals
+    ///     under (plan step A0.5.4). Never defaulted.
     ///   - mayDecryptRoutedContent: `MeshNetworkManager.mayDecryptRoutedContent`, passed in under
     ///     that exact spelling and guarded on as the first line of
-    ///     ``openPlaintext(_:manifest:identity:mayDecryptRoutedContent:)``, the one choke point every
-    ///     body family reaches the ciphertext through. Never defaulted. A judge row's stronger
-    ///     predicate (`mayCommitRoutedHeartLedgerJudgement`) is the manager's and is consulted before
-    ///     this door is reached — a decrypt is not a ledger judgement.
+    ///     ``openPlaintext(_:manifest:identity:maxBlobByteCount:mayDecryptRoutedContent:)``, the one
+    ///     choke point every body family reaches the ciphertext through. Never defaulted. A judge
+    ///     row's stronger predicate (`mayCommitRoutedHeartLedgerJudgement`) is the manager's and is
+    ///     consulted before this door is reached — a decrypt is not a ledger judgement.
     /// - Returns: the decoded body.
     /// - Throws: ``MeshRoutedDeliveryError``, ``MeshRoutedKeyWrapError`` or
     ///   ``MeshRoutedItemSealError``, or whatever the body's decode refuses. Never a trap.
@@ -133,10 +137,11 @@ nonisolated enum MeshRoutedItemDelivery {
         blob: Data,
         manifest: MeshRoutedManifest,
         identity: IdentityService,
+        maxBlobByteCount: Int,
         mayDecryptRoutedContent: Bool
     ) throws -> Body {
         let plaintext = try openPlaintext(
-            blob, manifest: manifest, identity: identity,
+            blob, manifest: manifest, identity: identity, maxBlobByteCount: maxBlobByteCount,
             mayDecryptRoutedContent: mayDecryptRoutedContent
         )
         let body = try bodyType.init(decoding: plaintext)
@@ -163,15 +168,17 @@ nonisolated enum MeshRoutedItemDelivery {
     /// item, the origin and the routed type token, so a blob lifted into another triple fails its
     /// tag even if its wrap travels with it. The body's decode and its id guard are the CALLER's,
     /// because they are the steps that differ per family: the generic
-    /// ``openBody(_:blob:manifest:identity:mayDecryptRoutedContent:)`` applies both through
-    /// ``MeshRoutedBody``, for all three families since plan step A0.5.3 retired the heart's own
-    /// door.
+    /// ``openBody(_:blob:manifest:identity:maxBlobByteCount:mayDecryptRoutedContent:)`` applies both
+    /// through ``MeshRoutedBody``, for all three families since plan step A0.5.3 retired the heart's
+    /// own door.
     ///
     /// - Parameters:
     ///   - blob: The reassembled ciphertext.
     ///   - manifest: The origin's signed manifest.
     ///   - identity: This device's identity. Since ProximityKit plan step A0.2.6 the wrap opens and
     ///     the blob is authenticated under its namespace's `purposes`, the labels it was minted under.
+    ///   - maxBlobByteCount: The manager's resident bound, the largest blob the item open takes
+    ///     (plan step A0.5.4).
     ///   - mayDecryptRoutedContent: `MeshNetworkManager.mayDecryptRoutedContent`, the first guard.
     /// - Returns: the sealed item's plaintext, un-decoded.
     /// - Throws: ``MeshRoutedDeliveryError/notPermitted``, ``MeshRoutedDeliveryError/notAddressedToMe``,
@@ -181,6 +188,7 @@ nonisolated enum MeshRoutedItemDelivery {
         _ blob: Data,
         manifest: MeshRoutedManifest,
         identity: IdentityService,
+        maxBlobByteCount: Int,
         mayDecryptRoutedContent: Bool
     ) throws -> Data {
         guard mayDecryptRoutedContent else { throw MeshRoutedDeliveryError.notPermitted }
@@ -201,7 +209,8 @@ nonisolated enum MeshRoutedItemDelivery {
             in: identity.purposes
         )
         return try MeshRoutedItemSealer.open(
-            blob, contentKey: contentKey, binding: binding, typeToken: manifest.typeToken, in: identity.purposes
+            blob, contentKey: contentKey, binding: binding, typeToken: manifest.typeToken,
+            maxBlobByteCount: maxBlobByteCount, in: identity.purposes
         )
     }
 }
