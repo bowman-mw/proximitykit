@@ -40,10 +40,17 @@ import Foundation
 /// unescaped slashes and dates as seconds since 1970 — the three options that make one header value
 /// produce one byte string on every device and in every Foundation build. Changing any of them is a
 /// wire decision and moves the body framing golden's pinned vector, never a formatting preference.
-nonisolated enum MeshRoutedItemBodyFormat {
+///
+/// Public — the prefix width and the two coder factories — so a host's routed body frames and
+/// unframes itself in exactly these bytes: `u64BE(headerJSON.count) ‖ headerJSON ‖ payload`, the
+/// prefix written by ``CanonicalByteWriter/appendLengthPrefixed(_:)``, the payload running raw to the
+/// end of the plaintext. A body that refuses a shape throws ``MeshRoutedItemSealError/malformed``, so
+/// the routed audit lines carry one frozen vocabulary. The per-family header allowances stay with
+/// the bodies they size.
+public nonisolated enum MeshRoutedItemBodyFormat {
 
-    /// Width of the header's big-endian length prefix — `CanonicalByteWriter`'s own u64.
-    static let headerLengthPrefixByteCount = 8
+    /// Width of the header's big-endian length prefix — `CanonicalByteWriter`'s own u64. Frozen at 8.
+    public static let headerLengthPrefixByteCount = 8
 
     /// What the header JSON is allowed inside a routed type's ciphertext cap — 64 KiB.
     ///
@@ -104,16 +111,22 @@ nonisolated enum MeshRoutedItemBodyFormat {
     /// ``maxTextHeaderJSONByteCount``. Derived, never written twice.
     static let maxFramedTextHeaderByteCount = headerLengthPrefixByteCount + maxTextHeaderJSONByteCount
 
-    /// The frozen header encoder.
-    static func headerEncoder() -> JSONEncoder {
+    /// The frozen header encoder: sorted keys, unescaped slashes, dates as seconds since 1970. A fresh
+    /// encoder per call, so a caller's change to one cannot reach another.
+    ///
+    /// - Returns: An encoder producing the header's frozen bytes.
+    public static func headerEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         encoder.dateEncodingStrategy = .secondsSince1970
         return encoder
     }
 
-    /// The frozen header decoder — the exact inverse of ``headerEncoder()``.
-    static func headerDecoder() -> JSONDecoder {
+    /// The frozen header decoder — the exact inverse of ``headerEncoder()``: dates as seconds since
+    /// 1970, unknown keys ignored. A fresh decoder per call.
+    ///
+    /// - Returns: A decoder for the header's frozen bytes.
+    public static func headerDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
         return decoder

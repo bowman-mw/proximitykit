@@ -41,7 +41,10 @@ extension ProximityHost {
 ///
 /// Public, with ``peerDisplayName(_:in:)``, as settled mechanism: every peer-supplied name a host's
 /// feature shows or records passes the one coercion the namespace's soundness rule judges. The
-/// sanitizer under it stays internal.
+/// sanitizer under it, ``sanitized(_:maxLength:)``, is public too, for a peer-supplied string that
+/// must not take the floor when nothing displayable is left: the mesh manager's descriptor and
+/// incoming-photo coercions sanitize a mesh name that way, under the peer-name cap, then hold it to
+/// ``MeshNetworkManager/maxMeshNameLength``.
 public nonisolated enum ProximityDisplayName {
 
     /// Coerces a (possibly untrusted, e.g. wire-received) name into a safe shape WITHOUT throwing: drops
@@ -52,11 +55,16 @@ public nonisolated enum ProximityDisplayName {
     /// `ItemNameModeration.sanitizedName(raw, maxLength:)`'s, which traps on a negative one. The cap
     /// arrives here from a host's namespace, so the guard keeps a malformed one from trapping.
     ///
+    /// The contract a host relies on: the result carries no control, zero-width or
+    /// bidirectional-override scalar and no leading or repeated whitespace (the cut at `maxLength` can
+    /// end on one space), keeps at most `maxLength` `Character`s, may be empty (no floor is applied
+    /// here), and the function throws and traps on nothing, whatever the input.
+    ///
     /// - Parameters:
     ///   - raw: The name as received or typed.
     ///   - maxLength: The most characters (`Character`s) the result keeps.
     /// - Returns: The sanitized name; empty when nothing displayable is left.
-    static func sanitized(_ raw: String, maxLength: Int) -> String {
+    public static func sanitized(_ raw: String, maxLength: Int) -> String {
         guard maxLength > 0 else { return "" }
         // Order is load-bearing, and the three legs are not interchangeable:
         //  1. Invisible scalars are dropped OUTRIGHT, never turned into a space. They render as

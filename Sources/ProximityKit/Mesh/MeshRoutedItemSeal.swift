@@ -40,7 +40,11 @@ import PrivateMediaStore
 /// recipient custodies, receipts and then refuses to open — and because the photo stage is final on
 /// durable **ciphertext**, that receipt is already minted when the open refuses, so the origin
 /// would read `delivered` for an item no wall can ever hold.
-nonisolated enum MeshRoutedItemSealFormat {
+///
+/// Public for ``overheadByteCount`` alone, the term a host's routed row adds to its body's bound to
+/// state the row's ciphertext cap; the marker, the widths and the two seal bounds stay the
+/// sealer's own.
+public nonisolated enum MeshRoutedItemSealFormat {
 
     /// The cleartext format tag every routed blob begins with: ASCII `FMRI1`.
     ///
@@ -64,7 +68,11 @@ nonisolated enum MeshRoutedItemSealFormat {
 
     /// What a seal adds to its plaintext: marker + nonce + tag = 33 bytes. Named because item 9's
     /// byte caps count the **blob**, not the payload.
-    static let overheadByteCount = markerByteCount + nonceByteCount + tagByteCount
+    ///
+    /// The contract: every sealed blob is exactly its plaintext's length plus this, so a routed
+    /// type's ciphertext cap is its body's widest plaintext plus this number, written as that sum
+    /// rather than a literal. Frozen with the blob layout.
+    public static let overheadByteCount = markerByteCount + nonceByteCount + tagByteCount
 
     /// The largest blob this device will produce or open, the number both seal bounds derive from,
     /// **and** the photo row's registry cap — one number, stated as a FORMULA rather than a literal
@@ -104,7 +112,12 @@ nonisolated enum MeshRoutedItemSealFormat {
 
 /// Why a routed item could not be sealed or opened. Not `LocalizedError`; frozen English
 /// diagnostics, never user copy (the ``MeshRoutedKeyWrapError`` idiom).
-nonisolated enum MeshRoutedItemSealError: Error, Equatable, Sendable {
+///
+/// Public so a host's routed body throws the engine's own refusal: a body whose framing does not
+/// parse throws ``malformed``, never a raw `DecodingError`, so `String(describing:)` of the error in
+/// the routed open-failure audit lines stays one frozen vocabulary whoever defined the body. The
+/// cases are frozen tokens; none is ever shown.
+public nonisolated enum MeshRoutedItemSealError: Error, Equatable, Sendable {
     /// The plaintext is empty. A routed item with no payload is a manifest, not an item.
     case emptyPlaintext
     /// The plaintext is larger than ``MeshRoutedItemSealFormat/maxPlaintextByteCount`` — refused at

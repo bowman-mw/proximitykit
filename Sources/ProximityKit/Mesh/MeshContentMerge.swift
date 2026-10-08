@@ -94,7 +94,13 @@ public nonisolated struct MeshContentKey: Hashable, Sendable {
 /// ``mergeTiebreak`` exists so that even the pathological case — two copies of one item that the
 /// instant and the sender cannot separate — resolves the same way at every member, which is what
 /// keeps the union commutative.
-nonisolated protocol MeshMergeableContent: Equatable, Sendable {
+///
+/// Public so a host's content kind conforms and unions in a ``MeshContentSet``. The contract a
+/// conformer owes: `contentID` and `senderFingerprint` are the author's id and the
+/// transport-verified author, never a wire claim; `orderingInstant` and `mergeTiebreak` are pure
+/// functions of the item's own values (no clock, no arrival order), so every member orders two
+/// copies alike; `setCapacity` is the live surface's own cap. Owed that, the set's union laws hold.
+public nonisolated protocol MeshMergeableContent: Equatable, Sendable {
 
     /// The id this item's author minted. One half of ``mergeKey``, which is what the union
     /// actually keys on: two items with equal ids are the same item only if their AUTHORS agree.
@@ -123,7 +129,8 @@ extension MeshMergeableContent {
     ///
     /// Derived rather than stored, and not overridable by a conformer — the two halves are already
     /// required members of the protocol, so every kind gets the same rule and none can weaken it.
-    nonisolated var mergeKey: MeshContentKey {
+    /// Public as the key a holder of merged items keys its own side tables on.
+    public nonisolated var mergeKey: MeshContentKey {
         MeshContentKey(senderFingerprint: senderFingerprint, contentID: contentID)
     }
 }
@@ -135,11 +142,19 @@ extension MeshMergeableContent {
 /// `(orderingInstant, senderFingerprint, contentID, mergeTiebreak)`, ascending. The first three are
 /// plan §10.3's stated transcript order verbatim; the fourth can only ever break a tie the first
 /// three could not, which for distinct ids never happens.
-nonisolated enum MeshContentOrder {
+///
+/// Public as the order a ``MeshContentSet`` keeps, dedupes and caps by, so a host's view over a set
+/// sorts the way the union does.
+public nonisolated enum MeshContentOrder {
 
     /// Whether `lhs` sorts before `rhs`. A strict total order: irreflexive, transitive, and total
     /// over any two items that are not equal in all four keys.
-    static func precedes<Item: MeshMergeableContent>(_ lhs: Item, _ rhs: Item) -> Bool {
+    ///
+    /// - Parameters:
+    ///   - lhs: One item.
+    ///   - rhs: Another item of the same kind.
+    /// - Returns: whether `lhs` sorts strictly before `rhs`.
+    public static func precedes<Item: MeshMergeableContent>(_ lhs: Item, _ rhs: Item) -> Bool {
         if lhs.orderingInstant != rhs.orderingInstant {
             return lhs.orderingInstant < rhs.orderingInstant
         }
@@ -181,7 +196,13 @@ nonisolated enum MeshContentOrder {
 /// full set is the one shape where the inner merge could drop the copy the outer would have kept.
 /// Named here rather than papered over — P5's routed store is where a per-item first-seen becomes
 /// authoritative, and that is where it should be closed.
-nonisolated struct MeshContentSet<Item: MeshMergeableContent>: Equatable, Sendable {
+///
+/// Public, with the members a holder of merged content needs, so a host's content kind unions in
+/// the engine's set rather than a copy of it. The contract is §10.3's union laws: ``merging(_:)`` is
+/// commutative, associative and idempotent, at the cap as well as below it, for every item whose
+/// copies agree on their ordering keys; every value is normalized (one item per ``MeshContentKey``,
+/// the ``MeshContentOrder``-least copy winning, oldest-first, the newest `Item.setCapacity` kept).
+public nonisolated struct MeshContentSet<Item: MeshMergeableContent>: Equatable, Sendable {
 
     /// Defensive bound on one normalization pass. Inputs are already-normalized sets, so a union of
     /// two is at most `2 × setCapacity`; four times that is slack, not a policy.
@@ -189,16 +210,16 @@ nonisolated struct MeshContentSet<Item: MeshMergeableContent>: Equatable, Sendab
 
     private let ordered: [Item]
 
-    /// A set holding nothing.
-    static var empty: MeshContentSet<Item> { MeshContentSet([]) }
+    /// A set holding nothing — the identity of ``merging(_:)``.
+    public static var empty: MeshContentSet<Item> { MeshContentSet([]) }
 
     /// Builds a set, normalizing the input (dedup by id, sort, cap).
     init(_ items: [Item]) {
         ordered = Self.normalized(items)
     }
 
-    /// The items, oldest-first in the set's total order.
-    var all: [Item] { ordered }
+    /// The items, oldest-first in the set's total order, at most `Item.setCapacity` of them.
+    public var all: [Item] { ordered }
 
     /// How many items the set holds.
     var count: Int { ordered.count }
@@ -218,7 +239,7 @@ nonisolated struct MeshContentSet<Item: MeshMergeableContent>: Equatable, Sendab
 
     /// The identities the set holds — one per item, author included. The key a holder of the items
     /// keys its own side tables on.
-    var mergeKeys: Set<MeshContentKey> { Set(ordered.map(\.mergeKey)) }
+    public var mergeKeys: Set<MeshContentKey> { Set(ordered.map(\.mergeKey)) }
 
     /// Whether the set already holds `id`, from **any** author.
     func contains(_ id: UUID) -> Bool { ordered.contains { $0.contentID == id } }
@@ -227,14 +248,20 @@ nonisolated struct MeshContentSet<Item: MeshMergeableContent>: Equatable, Sendab
     func contains(_ key: MeshContentKey) -> Bool { ordered.contains { $0.mergeKey == key } }
 
     /// The set with `item` added. An existing copy of the same ``MeshContentKey`` that sorts
-    /// earlier wins.
-    func inserting(_ item: Item) -> MeshContentSet<Item> {
+    /// earlier wins, and at the cap the oldest item in the total order leaves (which may be `item`).
+    ///
+    /// - Parameter item: The item to add.
+    /// - Returns: The normalized set holding it, or holding the copy that beat it.
+    public func inserting(_ item: Item) -> MeshContentSet<Item> {
         MeshContentSet(ordered + [item])
     }
 
     /// The union of two sets — the merge plan §10.3 runs on every reconnect. Commutative,
     /// associative and idempotent, at the cap as well as below it.
-    func merging(_ other: MeshContentSet<Item>) -> MeshContentSet<Item> {
+    ///
+    /// - Parameter other: The set to union with.
+    /// - Returns: The normalized union.
+    public func merging(_ other: MeshContentSet<Item>) -> MeshContentSet<Item> {
         MeshContentSet(ordered + other.ordered)
     }
 

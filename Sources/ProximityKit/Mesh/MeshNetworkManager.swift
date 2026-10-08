@@ -599,12 +599,24 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     private static let maxRecordedRemovals = 64
     /// R3 cap on gossiped mesh membership: every `.meshDescriptor` merge is attacker-chosen input
     /// that is displayed, counted, and re-gossiped to every slot (amplification).
-    private static let maxMeshMembers = 16
+    ///
+    /// Public so a host's feature bounds a peer-supplied member list by the engine's own number
+    /// rather than a copy that could drift. The contract: a peer's descriptor listing more than 16
+    /// members is dropped, the descriptor coercion keeps at most the first 16, and a descriptor merge
+    /// appends no member past the 16th.
+    public static let maxMeshMembers = 16
     /// R3/R5 cap on a peer-supplied mesh name before it is adopted or displayed.
-    private static let maxMeshNameLength = 40
+    ///
+    /// Public for the same reason as ``maxMeshMembers``. The contract: a mesh name a peer supplied
+    /// keeps at most 40 `Character`s once sanitized, the cap the descriptor coercion applies before a
+    /// name is adopted, merged or shown.
+    public static let maxMeshNameLength = 40
     /// R3 cap on the session roster: one entry per distinct committed fingerprint, but a peer that
     /// regenerates its identity and re-commits would otherwise add one per commit.
-    private static let maxSessionRosterEntries = 32
+    ///
+    /// Public so a host's feature that keeps one row per session participant bounds it by the
+    /// engine's own number: ``sessionRoster`` never holds more than 32 entries.
+    public static let maxSessionRosterEntries = 32
     /// R3 cap on the observed pending-admission queue (wire input, rendered by the UI).
     private static let maxPendingAdmissionRequests = 8
     /// R3 cap on `outstandingAdmissionRequestBySlot`: at most one entry per slot, so it can never
@@ -956,7 +968,32 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// reachable (also delivered now), and only then a routed custodied heart — because a
     /// custodied heart is strictly worse than a delivered one in the one case the presence path was
     /// best at. This answers the third question truthfully; it does not decide the order.
+    ///
+    /// **The answer is the engine's.** This is ``isAddressableRoutedRecipient(_:)``, asked verbatim:
+    /// the addressability rule belongs to the routed origination door, and this is the heart's name
+    /// for it, so the button's query and the mint cannot disagree.
     public func canSendSessionHeart(toFingerprint fingerprint: String) -> Bool {
+        isAddressableRoutedRecipient(fingerprint)
+    }
+
+    /// Whether this device could address a routed item to `fingerprint` alone right now: the
+    /// addressing half of ``originateRoutedItem(body:typeToken:itemID:audience:now:)``'s answer for a
+    /// ``MeshRoutedAudience/recipient(_:)`` audience, public so a host's single-recipient feature asks
+    /// the engine's rule instead of restating it.
+    ///
+    /// The contract: true exactly when `fingerprint` is not this device's own, the current membership
+    /// ledger's derived roster holds it, and the mint's key lookup resolves one verified X25519 key
+    /// for it — a live handshake-verified key or a verified durable key advertisement, the two never
+    /// disagreeing and the member never marked conflicted. No live slot is required. It says nothing
+    /// about the routed type's row, the store's room or whether the member's build accepts the type.
+    ///
+    /// It writes what the key lookup writes, on every call: one `mesh.routedShare.keyMismatch` or
+    /// `mesh.routedShare.destinationNotAddressable` line for a roster member it refuses on those
+    /// grounds, and nothing for this device or for a fingerprint the roster does not hold.
+    ///
+    /// - Parameter fingerprint: The member's fingerprint.
+    /// - Returns: whether a single-recipient mint could address that member now.
+    public func isAddressableRoutedRecipient(_ fingerprint: String) -> Bool {
         guard fingerprint != identity.localFingerprint,
               membershipVerifier?.roster.contains(fingerprint: fingerprint) == true else {
             return false
@@ -3499,7 +3536,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// what it failed to send. No sentence is composed here: a `String` written inside the package
     /// renders in English in every language, which is the live defect of the `meshError` seam this
     /// refusal used to ride.
-    private func noteRoutedShareRefusal(_ refusal: MeshRoutedShareRefusal, error: (any Error)?) {
+    ///
+    /// Public so a host's feature that originates routed items reports a refusal through the one
+    /// surface the app already shows. The contract: `refusal` becomes ``routedShareRefusal``'s value,
+    /// replacing whatever it held, and exactly one `mesh.routedShare.refused` line is written with
+    /// `reason` set to the refusal's frozen token and, when `error` is non-nil, `error` set to
+    /// `String(describing:)` of it. Nothing else moves.
+    ///
+    /// - Parameters:
+    ///   - refusal: The frozen refusal token to publish.
+    ///   - error: The underlying error, for the audit line only; never shown.
+    public func noteRoutedShareRefusal(_ refusal: MeshRoutedShareRefusal, error: (any Error)?) {
         routedShareRefusal = refusal
         var context = ["reason": refusal.rawValue]
         if let error { context["error"] = String(describing: error) }
@@ -3633,14 +3680,45 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The feature handlers, keyed by the payload token each was registered for.
     @ObservationIgnored private var registeredPayloadHandlers: [String: MeshPayloadHandler] = [:]
 
-    /// Registration seam for feature payloads carried on the friend mesh (shop registers in
-    /// Phase 3, temp messages in Phase 5): a feature convenience that registers the case's token,
-    /// `type.rawValue`, in the token-keyed registry. Dispatch order: the core mesh switch runs first
-    /// (by role, from the host's mesh messages), so a registration can never shadow mesh-control
-    /// handling; the registry is consulted only for tokens the switch leaves unhandled; unregistered
-    /// known tokens keep today's silent drop.
+    /// Registration seam for feature payloads carried on the friend mesh: a feature convenience that
+    /// registers a Fernlet `PayloadType` case's token, `type.rawValue`, through the token door
+    /// ``registerPayloadHandler(forToken:handler:)``, whose contract it keeps. Dispatch
+    /// order: the core mesh switch runs first (by role, from the host's mesh messages), so a
+    /// registration can never shadow mesh-control handling; the registry is consulted only for
+    /// tokens the switch leaves unhandled; unregistered known tokens keep today's silent drop.
     public func registerPayloadHandler(for type: PayloadType, handler: @escaping MeshPayloadHandler) {
-        registeredPayloadHandlers[type.rawValue] = handler
+        registerPayloadHandler(forToken: type.rawValue, handler: handler)
+    }
+
+    /// The live payload registry's token door: `handler` receives every frame whose payload token
+    /// is `token` once the mesh's own dispatch has left it, replacing any handler registered for
+    /// that token before (the last registration wins; the typed convenience above shares this one
+    /// registry).
+    ///
+    /// The contract a host's feature relies on, which is the payload door's order and not a policy
+    /// of this function:
+    /// - **A token outside the host's `payloads.known` never reaches a handler**: the coordinator
+    ///   parks it, and the payload door drops it again.
+    /// - **The core mesh switch runs first**, by role, from the host's mesh messages: a handler
+    ///   registered for a mesh message's token is never called, so no registration can shadow or
+    ///   double-handle a mesh frame.
+    /// - **The registry is asked only for a token the switch leaves**: a known token that names no
+    ///   mesh role (a feature's), and the state change the mesh opens only inside closed-mode
+    ///   metadata.
+    /// - **Committed slots only**: a frame on a slot this device has not committed, or through a
+    ///   coordinator it does not seat, is dropped before any handler runs, with one
+    ///   `mesh.registryPayload.droppedUncommittedSlot` line for the uncommitted slot.
+    /// - **An unregistered known token keeps the silent drop**: no line, and nothing moves.
+    ///
+    /// The handler runs on the main actor, synchronously, inside the payload door, with the verified
+    /// envelope, the decrypted plaintext and the identity the frame was credited to (nil when the
+    /// coordinator credited none).
+    ///
+    /// - Parameters:
+    ///   - token: The payload token, verbatim (a Fernlet feature passes its `PayloadType` raw value).
+    ///   - handler: The feature's inbound handler.
+    public func registerPayloadHandler(forToken token: String, handler: @escaping MeshPayloadHandler) {
+        registeredPayloadHandlers[token] = handler
     }
 
     // MARK: - ProximityPayloadHandling
@@ -6095,6 +6173,22 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         routedTypeRegistryForTesting ?? hostRoutedTypeRegistry
     }
 
+    /// Whether this device's routed type registry has a row for `token`: the question a sender asks
+    /// before it mints, so a type with no row mints nothing.
+    ///
+    /// The contract: the answer is ``routedTypes``' own — the registry the manifest verifier, the
+    /// ack-stage projection and the forwarding gates read, a test's narrowed or widened registry
+    /// included — so a sender that asks first never mints under a token every other door of this
+    /// device refuses. It is not asked by
+    /// ``originateRoutedItem(body:typeToken:itemID:audience:now:)``, whose manifest mint does not
+    /// enforce acceptance: asking is the caller's half of "no row, no mint".
+    ///
+    /// - Parameter token: A routed type token, verbatim.
+    /// - Returns: whether the registry holds a row for it.
+    public func isRoutedTypeRegistered(_ token: String) -> Bool {
+        routedTypes.entry(for: token) != nil
+    }
+
     /// How many routed content ids one AUTHOR may occupy in this session's replay window (P5 item
     /// 12), in ``routedTypes``' own testing-override idiom.
     ///
@@ -7555,8 +7649,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Mints one routed item from this device's own bytes, stages it into this device's own store,
     /// and tells the committed slots it exists.
     ///
-    /// The **generic** sender door: photos are its one caller today, and P6's text and heart callers
-    /// are three lines each. It re-uses the two store doors the ingest path uses, so item 9's caps
+    /// The **generic** sender door, and public so a host's feature originates through it: the photo,
+    /// text and heart senders are three lines each — frame a body, ask the registry for the token,
+    /// call this. It re-uses the two store doors the ingest path uses, so item 9's caps
     /// and item 12's bookkeeping apply to an origin's own item exactly as they do to an inbound one;
     /// it runs **no verifier** on its own mint (the origin is not receiving and there is no envelope
     /// sender); and it never calls `finishLocalRungs` — `commitLocalCustody` skips own items by name
@@ -7569,6 +7664,28 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// with a ledger at its first commit, so "the pairwise phase" is no longer an instance of this)
     /// — a **staged** key, or a named **refusal** for a mint that was attempted and failed.
     ///
+    /// **The contract a caller relies on:**
+    /// - `.skipped(.noDestinations)`: no mesh or no membership ledger yet, a derived roster of this
+    ///   device alone, or a ``MeshRoutedAudience/recipient(_:)`` the roster does not hold.
+    /// - The audience is checked against the type's registered `destinations` column, and the
+    ///   destination set is never taken from `body`: a ``MeshRoutedAudience/fullRoster`` audience for
+    ///   a `.singleRecipient` row, or a recipient for any other row or an unregistered token, is
+    ///   `.refused(.mintFailed)` with one `mesh.routedShare.destinationSemanticsMismatch` line; a
+    ///   recipient that is this device is the same refusal under `mesh.routedShare.recipientIsSelf`.
+    /// - A destination with no verified key is `.refused(.destinationNotAddressable)`, and two
+    ///   verified keys that disagree (or a member marked conflicted) `.refused(.keyMismatch)`; the
+    ///   seal's refusal is `.refused(.sealFailed)`, any other mint failure `.refused(.mintFailed)`
+    ///   with one `mesh.routedShare.mintFailed` line, and the store's `.refused(.storeRefused)` (one
+    ///   `mesh.routedShare.storeRefused` line, and at a capacity cap item 9's `.storeFull` hold on
+    ///   ``routedDeliveryHold``) or `.refused(.storeUnavailable)`.
+    /// - `.staged(key, chunkCount:)`: the whole item is in this device's routed store and was pushed
+    ///   once to each committed active slot.
+    /// - It does not ask whether `typeToken` is registered — a full-roster audience mints under any
+    ///   token, and every receiver refuses one it does not register — so a caller asks
+    ///   ``isRoutedTypeRegistered(_:)`` first and mints nothing when the answer is no.
+    /// - It is synchronous, and it never sets ``routedShareRefusal``: a caller that wants a refusal
+    ///   shown passes it to ``noteRoutedShareRefusal(_:error:)``.
+    ///
     /// - Parameters:
     ///   - body: The framed plaintext — for photos, ``MeshRoutedPhotoBody/encoded()``.
     ///   - typeToken: The registered routed type token.
@@ -7577,9 +7694,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///     type's registered `destinations` column (P6 item 6).
     ///   - now: The injected instant; the manifest's `createdAt`.
     /// - Returns: what the door did.
-    private func originateRoutedItem(
+    public func originateRoutedItem(
         body: Data, typeToken: String, itemID: UUID,
-        audience: RoutedOriginationAudience, now: Date
+        audience: MeshRoutedAudience, now: Date
     ) -> MeshRoutedOriginationOutcome {
         guard let mesh = currentMesh, let roster = membershipVerifier?.roster,
               let hardDeadline = routedHardDeadline else { return .skipped(.noDestinations) }
@@ -7609,22 +7726,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
             return .refused(.mintFailed)
         }
-    }
-
-    /// Who one origination is for, stated by the CALLER and checked against the type's registered
-    /// `destinations` column (P6 item 6).
-    ///
-    /// **The mint must never take its destination from the body.** A body is the origin's own
-    /// bytes, so a destination set derived from it would let an origin address anyone it named —
-    /// which for a single-recipient type means minting a heart "to" someone the roster does not put
-    /// in reach. So the audience is an argument, resolved against `membershipVerifier?.roster`, and
-    /// the body is encoded in a separate step nothing downstream reads.
-    private enum RoutedOriginationAudience: Equatable {
-        /// Every member of the derived roster at creation, minus this device — the
-        /// `.fullRosterAtCreation` column, which photos and text pass.
-        case fullRoster
-        /// One named member — the `.singleRecipient` column, which hearts pass.
-        case recipient(String)
     }
 
     /// What the capture step produced: a target, or the whole door's answer.
@@ -7663,7 +7764,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   - typeToken: The registered token, for the registry lookup and the audit line.
     /// - Returns: the captured target, or the door's answer.
     private func originationTarget(
-        itemID: UUID, audience: RoutedOriginationAudience,
+        itemID: UUID, audience: MeshRoutedAudience,
         roster: MeshDerivedRoster, typeToken: String
     ) -> RoutedOriginationCapture {
         let declared = routedTypes.entry(for: typeToken)?.destinations
@@ -14506,10 +14607,30 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// The same send for a feature's payload, under the token its caller passes: Fernlet's
-    /// `PayloadType` raw value, spelled at each feature call site, so the lines that name it are the
-    /// feature lines that leave with the manager's feature parts (plan step A0.5). The mesh's own frames
-    /// never come through here: they are sent by role, through ``sendEnvelope(_:encodable:via:sealed:)``.
-    private func sendFeatureEnvelope(_ token: String, encodable: some Encodable, via slot: PeerSlot, sealed: Bool = false) async {
+    /// `PayloadType` raw value, spelled at each feature call site. The mesh's own frames never come
+    /// through here: they are sent by role, through ``sendEnvelope(_:encodable:via:sealed:)``.
+    ///
+    /// Public so a host's feature sends its own payload to one seat. The contract, which is the
+    /// mesh's one signing door and not a policy of this function:
+    /// - The payload is JSON-encoded and signed under `token`, which is also the summary title, by
+    ///   this device's identity; it goes out reliably on `slot`'s channel to `slot`'s peer. `slot` is
+    ///   the value the caller holds, so a seat captured at commit is sent to as captured: nothing
+    ///   re-reads the live slot list.
+    /// - `sealed` seals the payload to the slot's handshake-verified X25519 key, in the wire2 format
+    ///   when the peer advertised the host's wire2 token (or the host assumes it for a peer that
+    ///   listed no capabilities) and the legacy one otherwise. A sealed send to a slot with no
+    ///   verified key sends nothing, and a sealed request is never downgraded to an unsealed send.
+    /// - A slot this device has not committed (`fingerprint == nil`) receives no display name: the
+    ///   sender name is empty and a payload carrying names is sent with them withheld.
+    /// - Best effort, with no result: every failing stage past the key check (encode, seal, sign,
+    ///   envelope encode, transport) writes one `mesh.sendEnvelope.failed` line naming `token`.
+    ///
+    /// - Parameters:
+    ///   - token: The payload token the envelope is signed and titled under.
+    ///   - encodable: The payload.
+    ///   - slot: The seat to send to.
+    ///   - sealed: Whether to seal the payload to the seat's verified key-agreement key.
+    public func sendFeatureEnvelope(_ token: String, encodable: some Encodable, via slot: PeerSlot, sealed: Bool = false) async {
         _ = await sendEnvelopeReportingResult(token, encodable: encodable, via: slot, sealed: sealed)
     }
 

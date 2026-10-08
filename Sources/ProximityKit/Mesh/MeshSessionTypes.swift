@@ -113,10 +113,16 @@ public struct PeerSlot: Identifiable {
     /// for a legacy peer with no advertised capabilities, whether the host takes every such peer to
     /// support it (`assumedForLegacyPeers`).
     ///
+    /// Public so a host's feature gates a send to a seat by the capability token it names. The
+    /// contract: the answer reads the capabilities the peer advertised in the identity introduction
+    /// its seat was committed with; a seat holding none — a peer that advertised nothing, or a seat
+    /// not yet committed — answers by the host's `assumedForLegacyPeers`.
+    ///
     /// - Parameters:
     ///   - token: A capability token.
     ///   - host: The host's capability tokens (`family.vocabulary.capabilities`).
-    func supports(_ token: String, in host: ProximityNamespace.Capabilities) -> Bool {
+    /// - Returns: whether the seat's peer supports `token`.
+    public func supports(_ token: String, in host: ProximityNamespace.Capabilities) -> Bool {
         guard let peerCapabilities else { return host.assumedForLegacyPeers.contains(token) }
         return peerCapabilities.contains(token)
     }

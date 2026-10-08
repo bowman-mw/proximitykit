@@ -58,9 +58,16 @@ nonisolated enum MeshRoutedIndexSchema {
 /// Three of the five are **reused constants, never restated**: restating 256 MiB here would be the
 /// duplication `MeshRoutedManifestFormat.maxContentByteCount` explicitly forbids ("nothing else
 /// defines 256 MiB"), and restating the roster cap would let two numbers drift.
-nonisolated enum MeshRoutedStoreFormat {
+///
+/// Public for ``maxItems`` alone; the other caps stay the store's own.
+public nonisolated enum MeshRoutedStoreFormat {
     /// Most logical items the store holds at once (plan §9). Parked, manifest-less items count.
-    static let maxItems = 1024
+    ///
+    /// Public so a host's feature bounds a memory-only table it keeps beside the routed store (a
+    /// per-origin quota map, say) by the store's own number rather than a copy that could drift. The
+    /// contract: the store holds at most this many items at once, parked ones included, and the cap
+    /// is enforced by refusal, never by clamping.
+    public static let maxItems = 1024
 
     /// The store's whole content budget. **Deliberately the same constant** as one item's ceiling:
     /// ``MeshRoutedManifestFormat/maxContentByteCount``'s own documentation says "Item 9 reuses this
@@ -119,7 +126,11 @@ nonisolated enum MeshRoutedIndexDecodingError: Error, Equatable, Sendable {
 /// member can mint a manifest or a chunk reusing another origin's id under its own key and have it
 /// verify. Both halves are inside every signed transcript, so keying on the pair needs no wire
 /// change.
-nonisolated struct MeshRoutedItemKey: Hashable, Codable, Sendable {
+///
+/// Public as the payload of ``MeshRoutedOriginationOutcome/staged(_:chunkCount:)``: a host's feature
+/// holds, compares and hashes the key of an item it originated, and reads neither half — its
+/// members stay the store's.
+public nonisolated struct MeshRoutedItemKey: Hashable, Codable, Sendable {
     /// The author of the item — the only signer of its manifest and chunks.
     let originFingerprint: String
     /// The item id: `MeshRoutedManifest.itemID` and `MeshDeliveryTarget.contentID`.

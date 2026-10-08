@@ -52,16 +52,31 @@ import FernletDomainModel
 
 /// Append-only binary writer for canonical signing bytes. The format is positional and
 /// length-prefixed: the field order in the `canonicalBytes(for:)` functions below IS the schema.
-nonisolated struct CanonicalByteWriter {
-    private(set) var bytes = Data()
+///
+/// Public so a host's feature writes its own signing input and its routed body framing in the
+/// engine's encodings, never a copy that could drift. The contract: append-only and positional (no
+/// key names, no locale, no number formatting), every integer big-endian, every variable-width field
+/// length-prefixed by a `UInt64`, every optional led by one presence byte; every encoding it writes
+/// is already frozen by the engine's goldens, so none of them ever changes.
+public nonisolated struct CanonicalByteWriter {
+    /// The bytes appended so far, in append order.
+    public private(set) var bytes = Data()
 
-    mutating func appendByte(_ value: UInt8) {
+    /// An empty writer.
+    public init() {}
+
+    /// One raw byte (a bool, an enum discriminant or a presence flag).
+    ///
+    /// - Parameter value: The byte.
+    public mutating func appendByte(_ value: UInt8) {
         bytes.append(value)
     }
 
     /// 8-byte big-endian. Endianness is pinned by `bigEndian`, so the on-wire bytes are identical
     /// regardless of host byte order.
-    mutating func appendUInt64(_ value: UInt64) {
+    ///
+    /// - Parameter value: The integer.
+    public mutating func appendUInt64(_ value: UInt64) {
         // Pure-Swift shift-out (R9: no pointer seam). Byte-identical to the previous
         // `withUnsafeBytes(of: value.bigEndian)`: most-significant byte first.
         for shift in stride(from: 56, through: 0, by: -8) {
@@ -70,23 +85,31 @@ nonisolated struct CanonicalByteWriter {
     }
 
     /// 8-byte big-endian two's-complement.
-    mutating func appendInt64(_ value: Int64) {
+    ///
+    /// - Parameter value: The integer.
+    public mutating func appendInt64(_ value: Int64) {
         appendUInt64(UInt64(bitPattern: value))
     }
 
     /// UInt64 big-endian length prefix followed by the raw bytes.
-    mutating func appendLengthPrefixed(_ data: Data) {
+    ///
+    /// - Parameter data: The bytes.
+    public mutating func appendLengthPrefixed(_ data: Data) {
         appendUInt64(UInt64(data.count))
         bytes.append(data)
     }
 
     /// Length-prefixed UTF-8.
-    mutating func appendString(_ string: String) {
+    ///
+    /// - Parameter string: The string, written as its UTF-8 bytes.
+    public mutating func appendString(_ string: String) {
         appendLengthPrefixed(Data(string.utf8))
     }
 
     /// 16 raw bytes in network order (no length prefix — a UUID is always 16 bytes).
-    mutating func appendUUID(_ uuid: UUID) {
+    ///
+    /// - Parameter uuid: The UUID.
+    public mutating func appendUUID(_ uuid: UUID) {
         // Same 16 network-order bytes as the previous `withUnsafeBytes(of: uuid.uuid)`, spelled
         // without a pointer seam (R9). `uuid.uuid` is a 16-tuple in network order by definition.
         let raw = uuid.uuid
@@ -96,9 +119,12 @@ nonisolated struct CanonicalByteWriter {
         ])
     }
 
-    /// Whole seconds since the Unix epoch, floored. Saturating: an out-of-range or non-finite value
-    /// (only reachable from a hostile decoded envelope) clamps instead of trapping.
-    mutating func appendDate(_ date: Date) {
+    /// Whole seconds since the Unix epoch, floored, as an 8-byte big-endian `Int64`. Saturating: an
+    /// out-of-range or non-finite value (only reachable from a hostile decoded envelope) clamps
+    /// instead of trapping.
+    ///
+    /// - Parameter date: The instant.
+    public mutating func appendDate(_ date: Date) {
         let seconds = date.timeIntervalSince1970.rounded(.down)
         let clamped: Int64
         if !seconds.isFinite {
@@ -113,7 +139,10 @@ nonisolated struct CanonicalByteWriter {
         appendInt64(clamped)
     }
 
-    mutating func appendOptional(_ date: Date?) {
+    /// An optional instant: presence byte `1` then ``appendDate(_:)``'s eight bytes, or a lone `0`.
+    ///
+    /// - Parameter date: The instant, or nil.
+    public mutating func appendOptional(_ date: Date?) {
         if let date {
             appendByte(1)
             appendDate(date)
@@ -122,7 +151,10 @@ nonisolated struct CanonicalByteWriter {
         }
     }
 
-    mutating func appendOptional(_ string: String?) {
+    /// An optional string: presence byte `1` then ``appendString(_:)``'s bytes, or a lone `0`.
+    ///
+    /// - Parameter string: The string, or nil.
+    public mutating func appendOptional(_ string: String?) {
         if let string {
             appendByte(1)
             appendString(string)
