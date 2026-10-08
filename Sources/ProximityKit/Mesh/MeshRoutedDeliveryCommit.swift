@@ -233,8 +233,8 @@ nonisolated extension MeshRoutedStore {
         }
         guard record.isCustodied else { return .custodyNotCommitted }
         guard stage == .foregroundDecryptAndLedgerCommit else { return nil }
-        guard case .heartLedgerCommit(let ack) = evidence() else { return .ledgerJudgementMissing }
-        guard ack.giftID == item.itemID else { return .evidenceForAnotherItem }
+        guard case .ledgerCommit(let commit) = evidence() else { return .ledgerJudgementMissing }
+        guard commit.itemID == item.itemID else { return .evidenceForAnotherItem }
         return nil
     }
 

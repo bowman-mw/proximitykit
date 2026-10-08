@@ -758,6 +758,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             self?.committedActivityPeerFingerprints() ?? []
         }
         registerBuiltInProjectionHandlers()
+        registerBuiltInLedgerJudge()
     }
 
     /// Ends every long-running task the manager owns if it is released without `stopSearching()`
@@ -4227,6 +4228,14 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// it holds each handler strongly, which is why the built-ins hold the manager `unowned`.
     @ObservationIgnored private var routedProjectors: [String: RoutedProjector] = [:]
 
+    /// The registered ledger judges, keyed by routed type token, each in the box
+    /// ``registerRoutedLedgerJudge(_:forToken:)`` built for it (plan step A0.5.3, S10).
+    ///
+    /// Bounded by the registry's rows, as the projector map is: a registration is refused for a
+    /// token with no row. Held for the manager's lifetime and never cleared, and it holds each judge
+    /// strongly, which is why the built-in heart judge holds the manager `unowned`.
+    @ObservationIgnored private var routedJudges: [String: RoutedJudge] = [:]
+
     /// The routed type tokens this build can actually hand to a canonical store right now: the
     /// tokens of the registry's rows whose registered projection handler says it is projectable,
     /// asked of the registry and the handlers rather than typed (D-13.31, plan step A0.5.2).
@@ -4234,10 +4243,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// **Two rows, and the heart's is deliberately NOT one of them** — P6 item 6 refused to add it,
     /// and the refusal is the design rather than an omission: no handler is registered for the
     /// heart row, and ``registerRoutedProjectionHandler(_:forToken:)`` refuses one for any judge row.
-    /// A heart's plaintext pass **is** its ack ceremony (`routedAckEvidence` →
-    /// `heartLedgerJudgement`, reached through `commitLocalDelivery`), and that door writes no rung
-    /// and returns evidence, so a projection handler for it could not produce the
-    /// `MeshRoutedHeartAck` the ack needs. Projecting the token would break twice: every heart would
+    /// A heart's plaintext pass **is** its ack ceremony (`routedAckEvidence` → `ledgerJudgement`
+    /// and the heart row's ledger judge, reached through `commitLocalDelivery`), and that door
+    /// writes no rung and returns evidence, so a projection handler for it could not produce the
+    /// ledger commit the ack needs. Projecting the token would break twice: every heart would
     /// reach the dispatch's early return, be logged `noDispatchArm` and **permanently occupy job 5's
     /// 16-slot allowance** — R-19's starvation, reintroduced by the edit meant to honour R-19 — and,
     /// because job 5's list does not shrink as work is done (unlike job 4's, which is keyed on the
@@ -6177,10 +6186,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The engine's resident routed rows by name, built once in `init` from the same routed types as
     /// ``hostRoutedTypeRegistry`` (plan step A0.5.2, S9).
     ///
-    /// Read for exactly two things: the token each built-in projection handler registers under, and
-    /// the token each of the three senders mints under — always behind ``isRoutedTypeRegistered(_:)``,
-    /// so a test's narrowed registry still refuses the mint. Never a second registry: no door admits,
-    /// resolves or forwards by it.
+    /// Read for exactly two things: the token each built-in projection handler and the built-in
+    /// ledger judge registers under (plan step A0.5.3 added the judge), and the token each of the
+    /// three senders mints under — always behind ``isRoutedTypeRegistered(_:)``, so a test's narrowed
+    /// registry still refuses the mint. Never a second registry: no door admits, resolves or
+    /// forwards by it.
     @ObservationIgnored private let residentRoutedRows: MeshRoutedResidentRows
 
     /// The routed type registry this device admits, resolves and forwards by (P5 item 11, plan §11).
@@ -8336,8 +8346,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Hoisted out of the predicate: the three device-wide reads a heart's answer turns on are
         // the same for every item on the list, and the list is bounded by the store's item cap
         // (1024), so reading them per item would ask the settings store and the ledger a thousand
-        // times per pass for one answer (item 5 review).
-        let judgement = routedHeartJudgementReadiness()
+        // times per pass for one answer (item 5 review). One read per registered judge, keyed by its
+        // token since plan step A0.5.3 — one for Fernlet. R2: bounded by the registry's rows.
+        let judgement = routedJudges.mapValues { routedHeartJudgementReadiness($0) }
         var finishable: [MeshRoutedItemRef] = []
         var hearts = 0
         // R2: bounded by the store's item cap.
@@ -8370,10 +8381,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameters:
     ///   - ref: The item, from the list the pass already read.
     ///   - index: The same index — never a second load.
-    ///   - judgement: The pass's one read of the heart stage's device-wide preconditions.
+    ///   - judgement: The pass's one read of the heart stage's device-wide preconditions, per
+    ///     registered judge's token (plan step A0.5.3). A judge row no judge is registered for has no
+    ///     entry, and its items wait as an absent heart ledger's did.
     /// - Returns: what to do with it.
     private func ackableNow(
-        _ ref: MeshRoutedItemRef, in index: MeshRoutedIndex, judgement: Bool
+        _ ref: MeshRoutedItemRef, in index: MeshRoutedIndex, judgement: [String: Bool]
     ) -> RoutedAckability {
         guard let record = index.record(for: ref.key), let manifest = record.manifest else {
             return .unfinishable
@@ -8389,7 +8402,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // invariants over: a blocked origin's sixteen hearts are refused for good, and counting them
         // as "waiting" would leave the number climbing for a session that will never move it.
         guard !routedHeartRefusedKeys.contains(ref.key) else { return .unfinishable }
-        guard judgement else { return .heartDeferred }
+        guard judgement[manifest.typeToken] == true else { return .heartDeferred }
         return record.isComplete ? .finishable : .heartDeferred
     }
 
@@ -8574,10 +8587,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Job 4c — says whether the heart stage is evaluable right now, and counts what is waiting.
     ///
     /// **A counter, and it stays one** (the doc said "until P6" until the item 6 fix review, which
-    /// was then false). P6 item 6 did not move the ceremony here: the unwrap → ledger commit →
-    /// ``MeshRoutedAckEvidence/heartLedgerCommit`` runs at `commitLocalDelivery`, the ONE ack door,
-    /// so this site judges nothing and only names what the pass could not judge. The count it is
-    /// handed excludes hearts already marked FINAL in ``routedHeartRefusedKeys`` — see
+    /// was then false). P6 item 6 did not move the ceremony here: the unwrap → the judge's ledger
+    /// commit → ``MeshRoutedAckEvidence/ledgerCommit(_:)`` runs at `commitLocalDelivery`, the ONE
+    /// ack door, so this site judges nothing and only names what the pass could not judge. The
+    /// count it is handed excludes hearts already marked FINAL in ``routedHeartRefusedKeys`` — see
     /// ``ackableNow(_:in:judgement:)`` — so "pending" means pending, not "refused for good".
     ///
     /// - Parameter count: How many unstamped heart-stage items the retry list named.
@@ -9035,6 +9048,46 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     // MARK: Routed heart ceremony (P6 item 6, plan §12, D-4.16/D-10.12)
 
+    /// Registers the ledger judge for one routed type: from here on the ack ceremony of an item of
+    /// `token` asks `judge` (plan step A0.5.3, S10).
+    ///
+    /// The contract. Answers `false` and stores nothing when `token` has no row in this device's
+    /// routed type registry, or when its row is not a judge row — one whose final ack is the
+    /// foreground decrypt and ledger commit, the one stage whose evidence the store cannot read for
+    /// itself — so a refused registration leaves the row's items unjudged for good, and the caller
+    /// checks the answer (which is why it is not `@discardableResult`). Answers `true` once the
+    /// judge is held: strongly, for the manager's lifetime, and replacing any judge registered for
+    /// the token before. Register before the first re-entry pass can run: until a judge row has a
+    /// judge, its items are counted as pending and never judged.
+    ///
+    /// The judge is kept in a box built here over `J.Body` — its readiness, its admission, and an
+    /// open-then-judge step that runs the engine's one generic opener with `J.Body` and then the
+    /// judge's commit — so the ceremony never opens an existential judge, inside the ack door's
+    /// `@autoclosure` or anywhere else.
+    ///
+    /// - Parameters:
+    ///   - judge: The routed type's ledger judge.
+    ///   - token: The routed type token it judges, verbatim.
+    /// - Returns: whether the judge was registered.
+    public func registerRoutedLedgerJudge<J: MeshRoutedLedgerJudge>(
+        _ judge: J, forToken token: String
+    ) -> Bool {
+        guard let entry = routedTypes.entry(for: token) else { return false }
+        guard entry.requiresForegroundDecryptBeforeFinal else { return false }
+        routedJudges[token] = RoutedJudge(                            // R3: bounded by the registry's rows
+            isReadyToJudge: { judge.isReadyToJudge },
+            admits: { judge.admits($0) },
+            openThenJudge: { blob, manifest, identity, mayDecryptRoutedContent, delivery in
+                let body = try MeshRoutedItemDelivery.openBody(
+                    J.Body.self, blob: blob, manifest: manifest, identity: identity,
+                    mayDecryptRoutedContent: mayDecryptRoutedContent
+                )
+                return judge.judgeRoutedItem(body, delivery: delivery())
+            }
+        )
+        return true
+    }
+
     /// What this device can offer the ack commit as evidence for one item's stage.
     ///
     /// `.none` for every stage the store reads for itself — and for an **already-stamped** record of
@@ -9042,6 +9095,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// (its own file header says so): with `deliveredAt` written, the durable ack IS the satisfied
     /// precondition, and re-running the ceremony would re-stream the blob and re-ask the ledger on
     /// every pass. The guard mirrors the store's own condition exactly, so the two cannot drift.
+    /// Then the judge registered for the row's token is looked up (plan step A0.5.3): a judge row
+    /// with none answers `.none`, the answer an absent heart ledger gave before.
     ///
     /// Reached through `committingDelivery`'s `@autoclosure`, so it does not run at all for a
     /// delivery that door refuses (fix review P2-3) — the guard here is the second belt, kept
@@ -9056,28 +9111,42 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ) -> MeshRoutedAckEvidence {
         guard let entry = routedTypes.entry(for: manifest.typeToken),
               entry.requiresForegroundDecryptBeforeFinal,
-              routedIndexForReading(reason: .rung)?.record(for: key)?.deliveredAt == nil
+              routedIndexForReading(reason: .rung)?.record(for: key)?.deliveredAt == nil,
+              let judge = routedJudges[manifest.typeToken]
         else { return .none }
-        return heartLedgerJudgement(for: key, manifest: manifest)
+        return ledgerJudgement(for: key, manifest: manifest, judge: judge)
     }
 
-    /// Whether the heart stage's **device-wide** preconditions hold right now — one read, shared by
-    /// the enumeration filter and the ceremony.
+    /// Whether the heart stage's **device-wide** preconditions hold right now for one judge's row —
+    /// one read, shared by the enumeration filter (once per pass) and the ceremony.
     ///
-    /// Three legs, and all three are reversible, which is why the filter that consults this is a
-    /// filter and not a mark: the access gate can open, the app can return to the foreground, the
-    /// user can turn nearby hearts back on, and the ledger can finish loading.
-    private func routedHeartJudgementReadiness() -> Bool {
-        mayCommitRoutedHeartLedgerJudgement && store.allowNearbyHearts
-            && heartLedger?.isLoaded == true
+    /// The stage's own predicate first, then the judge's own legs (plan step A0.5.3), short-circuiting
+    /// as the one conjunction always did. Three legs for the heart judge, and all three are
+    /// reversible, which is why the filter that consults this is a filter and not a mark: the access
+    /// gate can open, the app can return to the foreground, the user can turn nearby hearts back on,
+    /// and the ledger can finish loading.
+    ///
+    /// - Parameter judge: The judge registered for the row.
+    /// - Returns: whether the row's items may be judged right now.
+    private func routedHeartJudgementReadiness(_ judge: RoutedJudge) -> Bool {
+        mayCommitRoutedHeartLedgerJudgement && judge.isReadyToJudge()
     }
 
-    /// The heart stage's judgement: unwrap, re-apply the heart gates, ask the ONE ledger door, and
-    /// carry its proof as evidence (P6 item 6).
+    /// The ledger stage's judgement over the row's registered judge: re-apply the gates, open the
+    /// item as the judge's body, ask the judge, and mint the evidence from its answer (P6 item 6's
+    /// heart ceremony, generic over a ``MeshRoutedLedgerJudge`` since plan step A0.5.3).
     ///
     /// Behind ``mayCommitRoutedHeartLedgerJudgement`` and nothing weaker — the only routed stage
     /// whose own source demands a live foreground session, because a ledger judgement is a durable
     /// act on the user's own closeness state rather than a receipt about ciphertext.
+    ///
+    /// **The order is the contract, and it is the engine's**: readiness; the ledger-resolved author
+    /// with its block and removal legs; the judge's admission, before any byte is read; the blob;
+    /// the engine's open; the delivery, whose `seenAt` is read from the routed index only after the
+    /// open, as it always was; the judgement. What a judgement feeds — for hearts the ledger's
+    /// commit and the closeness hook above the ack's own guard (the fix review's P2-1) — is the
+    /// judge's, in that order, and never the engine's. The evidence is the engine's alone: it mints
+    /// `.ledgerCommit`, bound to THIS item, from a `.committed` answer and from nothing else.
     ///
     /// **RETRYABLE vs FINAL, leg by leg.** Retryable (no mark, custody kept, the item stays
     /// enumerable and heals for free): the predicate closed (a lock, a background, a duress
@@ -9085,9 +9154,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// so a blip really does defer a heart), hearts turned off, a ledger that is not loaded, a
     /// store that could not produce the blob, and the ledger's own five-minute **cooldown** — which
     /// answers "not yet" rather than "no": the gift is refused, nothing is stored, `commitProof`
-    /// therefore answers nil, the stage reports `.ledgerJudgementMissing` and the same gift is
-    /// accepted inside five minutes. FINAL (marked in ``routedHeartRefusedKeys``): a removed or
-    /// locally **blocked** origin, a sender who is not a vault friend, and a malformed body.
+    /// therefore answers nil, the judge answers `.notYet`, the stage reports
+    /// `.ledgerJudgementMissing` and the same gift is accepted inside five minutes. FINAL (marked in
+    /// ``routedHeartRefusedKeys``): a removed or locally **blocked** origin, a sender the judge does
+    /// not admit (for hearts, one who is not a vault friend), and a malformed body.
     ///
     /// **Not-a-friend is FINAL, and the two-session reality is the argument.** A mesh heart needs
     /// mutual trust-vault rows, and a row appears when `pendingFriendReview` completes — which
@@ -9100,64 +9170,76 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// - Parameters:
     ///   - key: The item.
     ///   - manifest: The origin's signed manifest.
-    /// - Returns: `.heartLedgerCommit` when the ledger judged this gift exactly once and stands
-    ///   behind it, `.none` otherwise.
-    private func heartLedgerJudgement(
-        for key: MeshRoutedItemKey, manifest: MeshRoutedManifest
+    ///   - judge: The judge registered for the item's row.
+    /// - Returns: `.ledgerCommit` when the judge's ledger judged this item and stands behind it,
+    ///   `.none` otherwise.
+    private func ledgerJudgement(
+        for key: MeshRoutedItemKey, manifest: MeshRoutedManifest, judge: RoutedJudge
     ) -> MeshRoutedAckEvidence {
-        guard routedHeartJudgementReadiness(), let ledger = heartLedger else { return .none }
-        guard let author = eligibleHeartAuthor(key, manifest) else { return .none }
+        guard routedHeartJudgementReadiness(judge) else { return .none }
+        guard let author = eligibleHeartAuthor(key, manifest, judge: judge) else { return .none }
         guard let blob = routedProjectionBlob(key: key, manifest: manifest) else { return .none }
-        guard let body = openedRoutedHeartBody(blob, manifest: manifest) else {
+        let judgement: MeshRoutedJudgement
+        do {
+            judgement = try judge.openThenJudge(blob, manifest, identity, mayDecryptRoutedContent) {
+                self.ledgerJudgementDelivery(key: key, manifest: manifest, author: author)
+            }
+        } catch {
+            ProximityAudit.log(
+                "mesh.routedHeart.openFailed",
+                context: ["type": manifest.typeToken, "error": String(describing: error)]
+            )
             return refusedHeart(key, reason: "malformed")
         }
-        let merged = MeshMergedHeart(
-            giftID: manifest.itemID,
-            senderFingerprint: author.fingerprint,
-            senderDisplayName: ProximityDisplayName.peerDisplayName(body.header.senderName, in: namespace),
-            firstSeenAt: routedIndexForReading(reason: .rung)?
-                .record(for: key)?.firstSeenAt ?? manifest.createdAt
-        )
-        let outcome = MeshHeartCommit.commit([merged], into: ledger)
-        // Closeness is fed on FIRST ACCEPTANCE only, never on every ack mint. `commitProof` answers
-        // non-nil for an already-stored gift, so a pass that re-reaches this ceremony (the store
-        // answered `.unavailable` after the row was written, say) re-mints the ack — and the hook
-        // behind this is `closenessLedger.recordHeartReceived`, which is not idempotent.
-        //
-        // **Above the ack guard, and that is the fix review's P2-1.** `recordReceivedHeart` answers
-        // true for an applied-but-UNPERSISTED mutation while `commitProof(for:)` answers nil for
-        // exactly that state (`ProximityHeartLedger`'s own docs on both), so a dirty sidecar makes
-        // this gift accepted and the ack nil in the same pass. Fed below the guard, the feed is not
-        // deferred to the flush — it is lost for good, because the re-judgement that follows finds
-        // the gift already stored and puts it in `refusedGiftIDs`, where `receivedGiftIDs.contains`
-        // is false forever. The R1 gate still holds: a second judgement of the same gift is a
-        // refusal, not a receipt, so this cannot double-feed.
-        if outcome.receivedGiftIDs.contains(manifest.itemID) {
-            onHeartReceived?(author.fingerprint)
-        }
-        guard let ack = MeshRoutedHeartAck(
-            outcome: outcome, giftID: manifest.itemID, ledger: ledger
-        ) else {
+        guard judgement == .committed else {
             ProximityAudit.log("mesh.routedHeart.noJudgement")
             return .none
         }
-        onHeartJudgedForTesting?(ack)
-        return .heartLedgerCommit(ack)
+        return .ledgerCommit(MeshRoutedLedgerCommit(itemID: manifest.itemID))
     }
 
-    /// The heart's author, when the ledger resolves it AND the trust vault and both block lists
-    /// admit it — with the FINAL legs marked so they leave job 4's list (P6 item 6).
+    /// The delivery a ledger judge is handed for one opened item, built only once the open has
+    /// succeeded (plan step A0.5.3).
+    ///
+    /// `seenAt` is the routed index's `firstSeenAt` for the item, or the manifest's `createdAt` when
+    /// the index cannot say — the instant the heart ledger's merged row has always carried — and the
+    /// index is read here, after the open, exactly where the ceremony always read it (a suppressed
+    /// read logs its own line). A `.session` row's delivery carries the engine's
+    /// ``transcriptLiveness(for:)``, as a projection's does; any other row's — the heart's — none.
+    ///
+    /// - Parameters:
+    ///   - key: The item.
+    ///   - manifest: The origin's signed manifest.
+    ///   - author: The origin, as the admission ledger resolved it and the judge admitted it.
+    /// - Returns: the delivery.
+    private func ledgerJudgementDelivery(
+        key: MeshRoutedItemKey, manifest: MeshRoutedManifest, author: MeshRoutedAuthor
+    ) -> MeshRoutedDelivery {
+        let scope = routedTypes.entry(for: manifest.typeToken)?.contentScope
+        return MeshRoutedDelivery(
+            manifest: manifest,
+            author: author,
+            seenAt: routedIndexForReading(reason: .rung)?
+                .record(for: key)?.firstSeenAt ?? manifest.createdAt,
+            sessionLiveness: scope == .session ? transcriptLiveness(for: manifest) : nil
+        )
+    }
+
+    /// The heart's author, when the ledger resolves it AND the row's judge admits it — with the
+    /// FINAL legs marked so they leave job 4's list (P6 item 6; the judge's admission since plan
+    /// step A0.5.3, where the trust vault was asked here).
     ///
     /// `routedProjectionAuthor` already applies three of the gates before any unwrap — ledger
     /// resolution over `admissions − removals` (D-13.33), the removal set, and the fingerprint
-    /// block list — so this adds the trust-vault leg and the mark, and never a second block check.
+    /// block list — so this adds the judge's admission (for hearts, the trust-vault leg, refused as
+    /// `notAFriend`) and the mark, and never a second block check.
     ///
     /// Inherited residual, unchanged and named: `ModerationBanStore.isPeerBanned` is still not
     /// consulted on the routed path (only `isBlockedFingerprint`), where `MeshContentGates.folding`
     /// folds both. The same gap item 4 names; it is not closed here.
     private func eligibleHeartAuthor(
-        _ key: MeshRoutedItemKey, _ manifest: MeshRoutedManifest
-    ) -> MeshRosterMember? {
+        _ key: MeshRoutedItemKey, _ manifest: MeshRoutedManifest, judge: RoutedJudge
+    ) -> MeshRoutedAuthor? {
         let resolved = routedProjectionAuthor(for: manifest)
         switch resolved {
         case .notYet:
@@ -9165,15 +9247,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         case .refusedForGood:
             _ = refusedHeart(key, reason: "originRefused")
             return nil
-        case .resolved(let author):
-            guard store.isTrustedUnblockedPeer(
-                signingPublicKey: author.signingPublicKey,
-                fingerprint: author.fingerprint
-            ) else {
-                _ = refusedHeart(key, reason: "notAFriend")
+        case .resolved(let member):
+            let author = MeshRoutedAuthor(
+                fingerprint: member.fingerprint, signingPublicKey: member.signingPublicKey
+            )
+            switch judge.admits(author) {
+            case .admitted:
+                return author
+            case .refusedForGood(let reason):
+                _ = refusedHeart(key, reason: reason)
                 return nil
             }
-            return author
         }
     }
 
@@ -9196,22 +9280,132 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return .none
     }
 
-    /// The one plaintext seam's heart caller: the predicate is passed in by name and the refusal is
-    /// named in an audit line rather than swallowed.
-    private func openedRoutedHeartBody(
-        _ blob: Data, manifest: MeshRoutedManifest
-    ) -> MeshRoutedHeartBody? {
-        do {
-            return try MeshRoutedItemDelivery.openHeartBody(
-                blob, manifest: manifest, identity: identity,
-                mayDecryptRoutedContent: mayDecryptRoutedContent
+    /// One registered ledger judge, type-erased at registration over its `Body` (plan step A0.5.3;
+    /// the design's fallback for opening an existential judge inside the ack door's `@autoclosure`):
+    /// the ceremony calls these three closures and never names the judge's type.
+    ///
+    /// Each closure holds its judge strongly, as the judge map holds the box for the manager's
+    /// lifetime; none holds the manager, so a box can never keep the manager alive.
+    private struct RoutedJudge {
+        /// The judge's ``MeshRoutedLedgerJudge/isReadyToJudge``, read once per pass and once per
+        /// ceremony.
+        let isReadyToJudge: () -> Bool
+        /// The judge's ``MeshRoutedLedgerJudge/admits(_:)``.
+        let admits: (_ author: MeshRoutedAuthor) -> MeshRoutedAdmission
+        /// The engine's one generic open with the judge's `Body`, then the delivery the engine
+        /// builds once the open has succeeded, then the judge's
+        /// ``MeshRoutedLedgerJudge/judgeRoutedItem(_:delivery:)``. Throws only what the open throws:
+        /// the delivery and the judgement never throw.
+        let openThenJudge: (
+            _ blob: Data, _ manifest: MeshRoutedManifest, _ identity: IdentityService,
+            _ mayDecryptRoutedContent: Bool, _ delivery: () -> MeshRoutedDelivery
+        ) throws -> MeshRoutedJudgement
+    }
+
+    /// Registers the built-in ledger judge as the init's last step, after the built-in projection
+    /// handlers (plan step A0.5.3): the heart row's, under its resident row's token.
+    ///
+    /// The answer is bound to a constant and then asserted, never `assert(register…)`: a Release
+    /// build does not evaluate an `assert`'s condition, so the registration would vanish with it. A
+    /// refusal is unreachable in a shipping build — the heart row is this manager's own resident row
+    /// and a judge row, and no test registry exists yet while the manager is being built — and the
+    /// routed heart suites pin that hearts are judged.
+    private func registerBuiltInLedgerJudge() {
+        let heartRegistered = registerRoutedLedgerJudge(
+            BuiltInHeartJudge(manager: self), forToken: residentRoutedRows.heart.token
+        )
+        assert(heartRegistered, "the heart row's built-in ledger judge was refused")
+    }
+
+    /// The heart row's ledger judge while hearts are the engine's (plan step A0.5.3): the hearts
+    /// setting and the ledger's load as its readiness, the trust vault as its admission, and the
+    /// heart ledger's commit as its judgement, each as the ceremony ran it.
+    ///
+    /// Holds its manager `unowned`: the manager owns it through its judge map, so it never outlives
+    /// the manager and must not keep it alive.
+    private final class BuiltInHeartJudge: MeshRoutedLedgerJudge {
+
+        /// The routed heart body this row decodes to.
+        typealias Body = MeshRoutedHeartBody
+
+        /// The manager whose host, heart ledger and hooks this reads.
+        unowned let manager: MeshNetworkManager
+
+        /// Builds the judge over the manager that registers and owns it.
+        ///
+        /// - Parameter manager: The manager.
+        init(manager: MeshNetworkManager) {
+            self.manager = manager
+        }
+
+        /// The heart stage's two legs beyond the engine's predicate: nearby hearts are on, and the
+        /// heart ledger has finished loading. Both reversible, so neither is ever a mark.
+        var isReadyToJudge: Bool {
+            manager.store.allowNearbyHearts && manager.heartLedger?.isLoaded == true
+        }
+
+        /// The trust-vault leg: the heart's sender must be a trusted, unblocked vault friend,
+        /// asked with the admission ledger's signing key. FINAL when not, under the frozen reason
+        /// `notAFriend` — the ceremony's doc carries the two-session argument.
+        ///
+        /// - Parameter author: The origin, as the admission ledger resolved it.
+        /// - Returns: `admitted`, or the FINAL `notAFriend` refusal.
+        func admits(_ author: MeshRoutedAuthor) -> MeshRoutedAdmission {
+            guard manager.store.isTrustedUnblockedPeer(
+                signingPublicKey: author.signingPublicKey,
+                fingerprint: author.fingerprint
+            ) else {
+                return .refusedForGood(reason: "notAFriend")
+            }
+            return .admitted
+        }
+
+        /// The heart ledger's judgement of one opened gift: the ONE ledger door, the closeness feed
+        /// on first acceptance above the ack's own guard, and the per-gift test seam where the ack
+        /// is built.
+        ///
+        /// - Parameters:
+        ///   - body: The opened heart body.
+        ///   - delivery: The gift's signed facts, the ledger's author and the engine's `seenAt`.
+        /// - Returns: `committed` when the ledger judged this gift exactly once and stands behind
+        ///   it, `notYet` otherwise.
+        func judgeRoutedItem(
+            _ body: MeshRoutedHeartBody, delivery: MeshRoutedDelivery
+        ) -> MeshRoutedJudgement {
+            // Unreachable without a ledger: the engine asked `isReadyToJudge` first, in this ceremony.
+            guard let ledger = manager.heartLedger else { return .notYet }
+            let merged = MeshMergedHeart(
+                giftID: delivery.itemID,
+                senderFingerprint: delivery.author.fingerprint,
+                senderDisplayName: ProximityDisplayName.peerDisplayName(
+                    body.header.senderName, in: manager.namespace
+                ),
+                firstSeenAt: delivery.seenAt
             )
-        } catch {
-            ProximityAudit.log(
-                "mesh.routedHeart.openFailed",
-                context: ["type": manifest.typeToken, "error": String(describing: error)]
-            )
-            return nil
+            let outcome = MeshHeartCommit.commit([merged], into: ledger)
+            // Closeness is fed on FIRST ACCEPTANCE only, never on every ack mint. `commitProof` answers
+            // non-nil for an already-stored gift, so a pass that re-reaches this ceremony (the store
+            // answered `.unavailable` after the row was written, say) re-mints the ack — and the hook
+            // behind this is `closenessLedger.recordHeartReceived`, which is not idempotent.
+            //
+            // **Above the ack guard, and that is the fix review's P2-1.** `recordReceivedHeart` answers
+            // true for an applied-but-UNPERSISTED mutation while `commitProof(for:)` answers nil for
+            // exactly that state (`ProximityHeartLedger`'s own docs on both), so a dirty sidecar makes
+            // this gift accepted and the ack nil in the same pass. Fed below the guard, the feed is not
+            // deferred to the flush — it is lost for good, because the re-judgement that follows finds
+            // the gift already stored and puts it in `refusedGiftIDs`, where `receivedGiftIDs.contains`
+            // is false forever. The R1 gate still holds: a second judgement of the same gift is a
+            // refusal, not a receipt, so this cannot double-feed.
+            if outcome.receivedGiftIDs.contains(delivery.itemID) {
+                manager.onHeartReceived?(delivery.author.fingerprint)
+            }
+            guard let ack = MeshRoutedHeartAck(
+                outcome: outcome, giftID: delivery.itemID, ledger: ledger
+            ) else {
+                return .notYet
+            }
+            manager.onHeartJudgedForTesting?(ack)
+            return .committed
         }
     }
 
@@ -9458,8 +9652,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         ) throws -> MeshRoutedProjectionVerdict
     }
 
-    /// Registers the two built-in projection handlers as the init's last step (plan step A0.5.2):
-    /// the photo row's and the temporary-message row's, each under its resident row's token.
+    /// Registers the two built-in projection handlers at the end of the init, just before the
+    /// built-in ledger judge (plan step A0.5.2): the photo row's and the temporary-message row's,
+    /// each under its resident row's token.
     ///
     /// Each answer is bound to a constant and then asserted, never `assert(register…)`: a Release
     /// build does not evaluate an `assert`'s condition, so the registration would vanish with it. A

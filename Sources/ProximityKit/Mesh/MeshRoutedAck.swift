@@ -158,9 +158,14 @@ nonisolated struct MeshRoutedAckStageTable: Equatable, Sendable {
 
 // MARK: - MeshRoutedHeartAck
 
-/// A routed heart's ledger judgement, as EVIDENCE — derived from `MeshHeartCommitOutcome` plus the
+/// A routed heart's ledger judgement, as PROOF — derived from `MeshHeartCommitOutcome` plus the
 /// ledger's own ``MeshHeartLedgerProof``, never a re-implementation of its dedup, cooldown or
 /// retention rules.
+///
+/// The heart row's ledger judge answers ``MeshRoutedJudgement/committed`` only when this value can
+/// be built for the gift it was handed, and the engine mints the stage's evidence,
+/// ``MeshRoutedAckEvidence/ledgerCommit(_:)``, from that answer alone — so no evidence exists for a
+/// gift the ledger does not stand behind (plan step A0.5.3; before it, this value WAS the evidence).
 ///
 /// Two facts to carry rather than re-derive. **Pruning is not a regression**: a delivered gift may
 /// fall out of the ledger's 32-item / 48-hour window later, and only the FIRST mint consults the
@@ -224,6 +229,22 @@ nonisolated struct MeshRoutedHeartAck: Equatable, Sendable {
     }
 }
 
+// MARK: - MeshRoutedLedgerCommit
+
+/// The engine's record that a routed ledger judge committed ONE item — the payload of
+/// ``MeshRoutedAckEvidence/ledgerCommit(_:)`` (plan step A0.5.3, S10).
+///
+/// Minted only by the mesh manager's ledger ceremony, from a judge's
+/// ``MeshRoutedJudgement/committed`` answer, and bound to the item that judge was handed. It carries
+/// the item id and nothing else: whether a durable proof stands behind the item is the judge's to
+/// settle before it answers, and what the stage check needs is which item the answer was about.
+/// Internal, with no public initializer, so no module but ProximityKit can build evidence — for this
+/// item or for another.
+nonisolated struct MeshRoutedLedgerCommit: Equatable, Sendable {
+    /// The routed item the judge committed: the manifest's signed item id.
+    let itemID: UUID
+}
+
 // MARK: - MeshRoutedAckEvidence
 
 /// What a caller offers the ack commit as proof for the item's stage.
@@ -235,8 +256,11 @@ nonisolated enum MeshRoutedAckEvidence: Equatable, Sendable {
     /// ``MeshRoutedAckStage/durableRecipientStorage`` and ``MeshRoutedAckStage/immediate`` need
     /// none — their evidence is durable state the store reads for itself.
     case none
-    /// ``MeshRoutedAckStage/foregroundDecryptAndLedgerCommit``'s only accepted form.
-    case heartLedgerCommit(MeshRoutedHeartAck)
+    /// ``MeshRoutedAckStage/foregroundDecryptAndLedgerCommit``'s only accepted form: the engine's
+    /// record that the ledger judge registered for the item's row committed it, minted from the
+    /// judge's answer and never by the judge (plan step A0.5.3; `heartLedgerCommit`, carrying the
+    /// heart ack itself, before it). The stage check refuses one that names another item.
+    case ledgerCommit(MeshRoutedLedgerCommit)
 }
 
 // MARK: - MeshRoutedAckShortfall
