@@ -3,7 +3,6 @@ import Observation
 import UIKit
 import CryptoKit
 import FernletDomainModel
-import FernletFoundation
 import PrivateMediaStore
 
 // MARK: - Supporting types
@@ -143,103 +142,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `@ObservationIgnored`, so a view reading a computed form would never re-render on the unlock
     /// that opens it. Refreshed at every change of those inputs (``refreshHeldPhotosCanBeShown()``).
     public private(set) var heldPhotosCanBeShown = false
-    /// Device-local hearts ledger (received-heart records + the 5-minute per-friend rate limit),
-    /// SHARED with the presence path (TF b19 item 5). In-session hearts ride the live mesh channel
-    /// instead of the fragile on-demand presence connect, but they record through the SAME ledger so
-    /// cooldown + dedup state stay consistent across both transports. Set by the app; `nil` in tests
-    /// that don't exercise hearts (send/receive then no-op).
-    @ObservationIgnored public var heartLedger: ProximityHeartLedger?
-    /// Fired with the friend's fingerprint when an in-session heart is SENT / RECEIVED over the mesh,
-    /// so the app feeds the closeness signal — wired to the SAME closeness hooks the presence path
-    /// uses, so both transports converge (TF b19 item 5).
-    @ObservationIgnored public var onHeartSent: ((String) -> Void)?
-    @ObservationIgnored public var onHeartReceived: ((String) -> Void)?
-    /// Test seam: fires with the ORIGINATION OUTCOME whenever an in-session heart is minted — the
-    /// last statement before the outcome is consumed, so a unit test can assert what the mint said
-    /// without reaching into the store (mirrors the chat's `onTextSendForTesting`, and renamed from
-    /// `onSessionHeartSendForTesting` so the retired spelling can be pinned at zero: there is no
-    /// slot on the routed path, so a seam that fired with a slot id could not be re-aimed in place).
-    @ObservationIgnored var onHeartSendForTesting: ((MeshRoutedOriginationOutcome) -> Void)?
-
-    /// Test seam: fires with the ACK whenever a heart's ledger judgement mints evidence (P6 item 6).
-    ///
-    /// It exists because the exactly-once claim has a trap: `MeshHeartCommit.commit` is a batch
-    /// door, the ceremony hands it a one-element batch, and so `MeshHeartCommitOutcome.judgements`
-    /// and `MeshRoutedHeartAck.judgementsForGift` coincide at every shipping call site — an
-    /// invariant written against the batch counter would be green for an accident of this call site
-    /// forever (`MeshRoutedHeartAck` forbids `outcome.judgements == 1` by name for the same reason).
-    /// Counting this seam's firings PER GIFT witnesses the per-gift field, and it is a witness the
-    /// heart ledger's own id-dedup cannot supply: a ledger asked twice answers "already held" and
-    /// looks identical to a ledger asked once.
-    @ObservationIgnored var onHeartJudgedForTesting: ((MeshRoutedHeartAck) -> Void)?
-    @ObservationIgnored private var sessionHeartStateClearTask: Task<Void, Never>?
-    /// Fingerprints with a session heart between the tap and the stage.
-    ///
-    /// Kept as a **fence** after P6 item 6 made the mint synchronous: the window it closes is empty
-    /// today, and it is what keeps it closed if an `await` is ever reintroduced between the cooldown
-    /// check and the stage. Deleting a fence whose absence is invisible is the change class this
-    /// codebase refuses — and `sessionEndClearsAStrandedInFlightHeartClaim` still holds it to its
-    /// lifetime.
-    @ObservationIgnored private var sessionHeartSendsInFlight: Set<String> = []
     /// A photo was exchanged with this friend in the current session (feeds the closeness photo signal).
     @ObservationIgnored public var onFriendPhotoSession: ((String) -> Void)?
-    /// Why an in-session heart was not sent — a **frozen English token**, never copy (P6 item 6).
-    ///
-    /// The case this replaced, `failed(message: String)`, composed six sentences inside ProximityKit
-    /// and handed them to a SwiftUI `Text` in the app: English in every language, and invisible to
-    /// both halves of `LocalizationBoundaryTests` — `everyPackageLocalizedStringPassesModuleBundle`
-    /// scans `String(localized:)` call sites and `packageDisplayLiteralsPassModuleBundle` scans
-    /// display-literal call heads and held `LocalizedStringKey` members, and a bare `String`
-    /// associated value matches neither. Exactly the D-13.15 defect, in a seam D-13.15 did not
-    /// reach. `App/Fernlet/SessionHeartStatusCopy.swift` is the fork, and its exhaustive
-    /// `CaseIterable` sweep makes a new case a build error until it has a sentence.
-    ///
-    /// `rawValue`s are audit vocabulary (`mesh.routedHeart.sendFailed`), so they are frozen.
-    public enum SessionHeartFailure: String, CaseIterable, Equatable, Sendable {
-        /// `store.allowNearbyHearts` is off — the send-side half of the opt-out.
-        case heartsOff
-        /// The heart ledger could not be read, so the cooldown could not be checked. Distinct from
-        /// ``cooldown`` on purpose: nothing was sent, and the cooldown sentence would be a lie.
-        case ledgerUnavailable
-        /// A heart went to this friend inside the last five minutes.
-        case cooldown
-        /// A heart to this friend is already between the tap and the stage.
-        case alreadySending
-        /// The derived roster at capture no longer holds this friend — they left, or were removed.
-        case recipientLeft
-        /// No verified X25519 key for this friend is known to this device yet.
-        case notReachableYet
-        /// Two verified sources disagree about this friend's key, or the set marked them conflicted.
-        case identityUnconfirmed
-        /// The body would not frame, the registry named no token, the seal refused, or the mint's
-        /// own guard chain refused the shape.
-        case couldNotSend
-        /// The routed store could not say what it holds: deferred protected data, a refused seal,
-        /// or a corrupt index. Reached from `.refused(.storeUnavailable)`, and its sentence says the
-        /// storage could not be reached — the two docs were swapped until the item 6 fix review.
-        case storageUnreachable
-        /// The routed store refused the manifest or a chunk — it is holding all it can. Reached from
-        /// `.refused(.storeRefused)`, and its sentence says so.
-        case holdingAllItCan
-    }
-
-    /// In-session heart send feedback (TF b19 item 5; rewritten for the routed store, P6 item 6).
-    ///
-    /// The routed mint is fully SYNCHRONOUS, so `.sending` is not reachable on the mesh path any
-    /// more and the case is gone with it. The presence fallback has its own state
-    /// (`PresenceManager.heartSendState`, a different type on a different object) and keeps its
-    /// `.connecting` / `.verifying`, so the app's "a send is in flight" question is now
-    /// **presence-only** — which is correct rather than a loss: there is no window on this path for
-    /// it to describe.
-    ///
-    /// Observable so the in-session heart affordance surfaces state instead of failing silently.
-    /// Memory-only, auto-clearing back to `.idle`.
-    public enum SessionHeartState: Equatable, Sendable {
-        case idle
-        case sent(recipientName: String)
-        case failed(SessionHeartFailure, recipientName: String)
-    }
-    public private(set) var sessionHeartState: SessionHeartState = .idle
     public var isSearching = false
 
     /// Whether the admission doors are open — the ONE flag ``holdCommittedLinks()`` closes, and the
@@ -721,7 +625,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         loadPhotoCorpora(now: Date())
         setupMeshSession()
         registerBuiltInProjectionHandlers()
-        registerBuiltInLedgerJudge()
     }
 
     /// Ends every long-running task the manager owns if it is released without `stopSearching()`
@@ -734,7 +637,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         rotationDebounceTask?.cancel()
         beaconTimer?.cancel()
         rotationSyncTask?.cancel()
-        sessionHeartStateClearTask?.cancel()
     }
 
     /// The init's two photo loads: the wall first, then the pending corpus, then the reconcile that
@@ -761,36 +663,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         reconcileHeldPhotosIfReady(now: now)
     }
 
-    // MARK: - In-session hearts (TF b19 item 5; on the routed store since P6 item 6)
-
-    /// Whether a heart can ride the MESH to this friend right now — and since P6 item 6 that means
-    /// "are they a member this device can address", not "are they linked".
-    ///
-    /// The live-slot requirement went with the legacy transport. A heart to an admitted member with
-    /// no live slot is now sealed, wrapped, staged and custodied until a link forms or the origin
-    /// departs and hands custody on, which is the whole point of the routed store.
-    ///
-    /// **What that costs, named rather than hidden.** Capabilities arrive with a slot (the host's
-    /// capability list, ``localCapabilitiesProvider``, lists `.hearts` only while `allowNearbyHearts` is on),
-    /// `MeshSessionRosterEntry` carries none and is memory-only, and item 1's key advertisement
-    /// carries a key rather than a capability — so for a member with no live slot this device knows
-    /// neither their build nor their opt-out. The heart may therefore be staged for a peer that will
-    /// refuse it (hearts off) or never judge it (a build with no heart arm), and the sender sees
-    /// "Sent" and spends five minutes of cooldown. The real fix is a capability bit on the
-    /// key-advertisement family, which is a wire decision and is P9's / the owner's.
-    ///
-    /// **It is not the app's whole ordering.** `DisposableCameraView` prefers a live `.hearts` slot
-    /// (delivered now, capability known), then the presence path while the friend is presence-
-    /// reachable (also delivered now), and only then a routed custodied heart — because a
-    /// custodied heart is strictly worse than a delivered one in the one case the presence path was
-    /// best at. This answers the third question truthfully; it does not decide the order.
-    ///
-    /// **The answer is the engine's.** This is ``isAddressableRoutedRecipient(_:)``, asked verbatim:
-    /// the addressability rule belongs to the routed origination door, and this is the heart's name
-    /// for it, so the button's query and the mint cannot disagree.
-    public func canSendSessionHeart(toFingerprint fingerprint: String) -> Bool {
-        isAddressableRoutedRecipient(fingerprint)
-    }
+    // MARK: - Routed addressability (plan step A0.5.1, S6)
 
     /// Whether this device could address a routed item to `fingerprint` alone right now: the
     /// addressing half of ``originateRoutedItem(body:typeToken:itemID:audience:now:)``'s answer for a
@@ -816,184 +689,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
         if case .resolved = routedDestinationKeys(for: [fingerprint]) { return true }
         return false
-    }
-
-    /// Whether a friend holds a LIVE committed slot advertising the `hearts` capability right now —
-    /// the question `canSendSessionHeart(toFingerprint:)` used to answer, kept as its own seam
-    /// (P6 item 6).
-    ///
-    /// It is no longer the send gate: the routed path does not need a link. It is the **ordering**
-    /// question the app asks first, because a live `.hearts` slot is the one case where a mesh heart
-    /// is both deliverable now and known to be acceptable to the far end's build and opt-out — the
-    /// two facts capabilities carry and neither the session roster nor the key advertisement does.
-    ///
-    /// - Parameter fingerprint: The friend.
-    /// - Returns: whether a linked, hearts-capable slot faces them.
-    public func hasLiveHeartSlot(forFingerprint fingerprint: String) -> Bool {
-        slots.contains { $0.fingerprint == fingerprint && $0.supports(.hearts, in: namespace.family.vocabulary.capabilities) }
-    }
-
-    /// Sends one in-session heart over the ROUTED store (P6 item 6, plan §12).
-    ///
-    /// Every gate the legacy sealed send had is kept, in the same order: the `allowNearbyHearts`
-    /// opt-out, the active-record-only check, the shared `heartLedger`'s five-minute per-friend
-    /// cooldown, and the fingerprint-keyed in-flight claim. Two things are new and one is gone.
-    ///
-    /// **New, and a bug fix:** the ledger's loaded-ness is now its own refusal.
-    /// `canSendHeart(to:)` is fail-closed and answers false for an UNLOADED ledger as well as for a
-    /// live cooldown, and the cooldown sentence is a lie there — nothing was sent.
-    /// `DisposableCameraView` already distinguished the two for its accessibility label; the send
-    /// did not. Since the item 6 fix review an **absent** ledger is refused the same way, rather
-    /// than optional-chained past into a send with no cooldown (P3-5).
-    ///
-    /// **New:** the delivery is the three lines every routed sender uses — take its resident row's
-    /// token and ask the registry whether that row is registered, frame a body, call the one
-    /// origination door — with the audience stated as a single recipient, which is what the heart
-    /// row's `.singleRecipient` column means.
-    ///
-    /// **Gone:** the live-slot lookup, and with it `.sending`. The mint is fully synchronous, so
-    /// `.sending` was never an observable state on this path; the presence fallback keeps its own.
-    ///
-    /// One `UUID` is minted and used three times — the routed item id, the body header's id and the
-    /// gift id — because for ``ProximityNamespace/RoutedTypes/heart`` those are one value by frozen contract.
-    public func sendSessionHeart(to friend: ProximityTrustedPeerRecord) {
-        guard store.allowNearbyHearts else { return failSessionHeart(.heartsOff, friend) }
-        // Active record only — never send to a blocked or revoked (unfriended) peer. Silent: the
-        // affordance is not drawn for such a record at all, so reaching here is a caller bug.
-        guard friend.blockedAt == nil, friend.revokedAt == nil else { return }
-        // Both ledger gates are fail-CLOSED on a nil ledger since the item 6 fix review (P3-5).
-        // `heartLedger?.isLoaded != false` and `?? true` both passed a manager with no ledger wired,
-        // so it staged a heart with no cooldown at all — and this function's own doc claims every
-        // gate the legacy sealed send had is kept. Production always wires one (`init`), so this is
-        // not a live defect; it is the guard that makes the doc true and that fails safely if a
-        // future entry point forgets.
-        guard let heartLedger, heartLedger.isLoaded else {
-            return failSessionHeart(.ledgerUnavailable, friend)
-        }
-        guard heartLedger.canSendHeart(to: friend.fingerprint) else {
-            return failSessionHeart(.cooldown, friend)
-        }
-        // The in-flight claim, kept as a FENCE. The window it closes is empty while the mint is
-        // synchronous — everything from here to the stage is one main-actor turn with no suspension
-        // — and it is kept because the absence of a fence is invisible: it is what keeps the window
-        // closed if an `await` is ever reintroduced between the cooldown check and the stage.
-        guard sessionHeartSendsInFlight.insert(friend.fingerprint).inserted else {
-            return failSessionHeart(.alreadySending, friend)
-        }
-        defer { sessionHeartSendsInFlight.remove(friend.fingerprint) }
-        let giftID = UUID()
-        let typeToken = residentRoutedRows.heart.token
-        guard isRoutedTypeRegistered(typeToken),
-              let body = framedSessionHeartBody(giftID: giftID, typeToken: typeToken) else {
-            return failSessionHeart(.couldNotSend, friend)
-        }
-        let outcome = originateRoutedItem(
-            body: body, typeToken: typeToken, itemID: giftID,
-            audience: .recipient(friend.fingerprint), now: Date()
-        )
-        onHeartSendForTesting?(outcome)
-        consumeSessionHeart(outcome, friend)
-    }
-
-    /// The heart's framed plaintext, or nil when its own encode failed.
-    ///
-    /// The display name is bounded at the mint as well as on the wire: the heart row's cap is
-    /// arithmetic over `MeshRoutedHeartBody.maxSenderNameUTF8ByteCount`, so an unbounded local name
-    /// could push the header past its allowance and fail the sender's own row.
-    ///
-    /// `typeToken` is passed IN rather than spelled here, and it is not a style choice:
-    /// `noShippingCodeBranchesOnARoutedTypeToken` forbids the token type's qualified constants
-    /// anywhere in this file — **including inside an audit context**, which is where the first draft
-    /// of this function put one and where the wall caught it — so the caller's resident-row token
-    /// (`residentRoutedRows.heart.token`, asked of the registry first) is the only spelling the
-    /// manager may hold.
-    private func framedSessionHeartBody(giftID: UUID, typeToken: String) -> Data? {
-        let header = MeshRoutedHeartHeader(
-            id: giftID,
-            sentAtDayKey: FernletDate.dayKey(for: Date()),
-            senderName: MeshRoutedHeartBody.bounded(senderName: displayName)
-        )
-        do {
-            return try MeshRoutedHeartBody(header: header).encoded()
-        } catch {
-            ProximityAudit.log(
-                "mesh.routedShare.mintFailed",
-                context: ["type": typeToken, "error": String(describing: error)]
-            )
-            return nil
-        }
-    }
-
-    /// **Consume-on-stage** (§5d): `.staged` arms the cooldown, feeds closeness and says "Sent".
-    ///
-    /// The legacy path consumed on the wire write because the wire write was the only durable
-    /// moment it had. The routed store's stage is durable-before-acknowledged: a `.staged` outcome
-    /// means the sealed item is on disk under a signed manifest and will be pushed, drained or
-    /// custody-transferred until it is delivered or expires. That is "sent" in every sense the
-    /// cooldown protects — the cooldown exists to stop a second *gift* being minted, and a second
-    /// tap inside the window would mint one the recipient's ledger dedups by id. The UI has never
-    /// claimed receipt ("Sent … some good vibes") and still does not.
-    ///
-    /// Two honest costs ride with it:
-    ///
-    /// 1. **`.staged` is not delivered**, and for a heart the gap is wide: a recipient who never
-    ///    foregrounds before the mesh ends never judges it, and it expires at
-    ///    `hardDeadline + 20 min` as `custodied(by: self)` (D-4.5). Nothing here lies; nothing here
-    ///    tells the sender either, and no delivery surface is built for it.
-    /// 2. **A refusal at the recipient does not refund the cooldown.** Hearts-off at the far end
-    ///    refuses FINAL, five minutes after this ledger armed. That is already the accepted shape
-    ///    for a mid-session opt-out, and a refund would need a wire message the routed path
-    ///    deliberately lacks.
-    ///
-    /// Exhaustive over both `MeshRoutedShareSkip` and `MeshRoutedShareRefusal`, so item 1's next
-    /// refusal case is a build error here as well as in the app's copy fork.
-    private func consumeSessionHeart(
-        _ outcome: MeshRoutedOriginationOutcome, _ friend: ProximityTrustedPeerRecord
-    ) {
-        switch outcome {
-        case .staged:
-            heartLedger?.recordHeartSent(to: friend.fingerprint)
-            onHeartSent?(friend.fingerprint)
-            sessionHeartState = .sent(recipientName: friend.displayName)
-            scheduleSessionHeartStateClear()
-        case .skipped(.noDestinations):
-            failSessionHeart(.recipientLeft, friend)
-        case .refused(.destinationNotAddressable):
-            failSessionHeart(.notReachableYet, friend)
-        case .refused(.keyMismatch):
-            failSessionHeart(.identityUnconfirmed, friend)
-        case .refused(.sealFailed), .refused(.mintFailed):
-            failSessionHeart(.couldNotSend, friend)
-        case .refused(.storeRefused):
-            failSessionHeart(.holdingAllItCan, friend)
-        case .refused(.storeUnavailable):
-            failSessionHeart(.storageUnreachable, friend)
-        }
-    }
-
-    /// Publishes one frozen failure cause and schedules its clear. **No sentence is composed here**
-    /// — a `String` written inside the package renders English in every language, which is the live
-    /// defect D-13.15 closed for the share refusal and which this seam carried until P6 item 6.
-    private func failSessionHeart(
-        _ cause: SessionHeartFailure, _ friend: ProximityTrustedPeerRecord
-    ) {
-        sessionHeartState = .failed(cause, recipientName: friend.displayName)
-        ProximityAudit.log("mesh.routedHeart.sendFailed", context: ["reason": cause.rawValue])
-        scheduleSessionHeartStateClear()
-    }
-
-    private func scheduleSessionHeartStateClear() {
-        sessionHeartStateClearTask?.cancel()
-        // host-pin: timer — stored handle, synchronous main-actor body; a task-lifetime pin would cycle (HP2)
-        sessionHeartStateClearTask = Task { [weak self] in
-            // Cancelled: a newer heart state replaced this one, so leave it alone (R7).
-            do {
-                try await Task.sleep(for: .seconds(3))
-            } catch {
-                return
-            }
-            self?.sessionHeartState = .idle
-        }
     }
 
     // MARK: - Proximity-join state
@@ -4027,7 +3722,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Bounded by the registry's rows, as the projector map is: a registration is refused for a
     /// token with no row. Held for the manager's lifetime and never cleared, and it holds each judge
-    /// strongly, which is why the built-in heart judge holds the manager `unowned`.
+    /// strongly, which is why a judge must not hold the manager strongly (FernletSocial's heart judge,
+    /// since plan step A0.5.10, holds its hearts, which hold the mesh weakly).
     @ObservationIgnored private var routedJudges: [String: RoutedJudge] = [:]
 
     /// The routed type tokens this build can actually hand to a canonical store right now: the
@@ -5994,12 +5690,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The engine's resident routed rows by name, built once in `init` from the same routed types as
     /// ``hostRoutedTypeRegistry`` (plan step A0.5.2, S9).
     ///
-    /// Read for exactly two things: the token the built-in projection handler and the built-in
-    /// ledger judge register under (plan step A0.5.3 added the judge), and the token each of the
-    /// two senders mints under — always behind ``isRoutedTypeRegistered(_:)``, so a test's narrowed
-    /// registry still refuses the mint. Never a second registry: no door admits, resolves or
-    /// forwards by it. The temporary-message row, its handler and its sender left with chat at plan
-    /// step A0.5.9: FernletSocial registers the handler and mints under the host's row.
+    /// Read for exactly two things: the token the built-in photo projection handler registers
+    /// under, and the token the photo sender mints under — always behind
+    /// ``isRoutedTypeRegistered(_:)``, so a test's narrowed registry still refuses the mint. Never a
+    /// second registry: no door admits, resolves or forwards by it. The temporary-message row, its
+    /// handler and its sender left with chat at plan step A0.5.9, and the heart row, its ledger judge
+    /// and its sender with the session hearts at plan step A0.5.10: FernletSocial registers the
+    /// handler and the judge and mints under the host's rows.
     @ObservationIgnored private let residentRoutedRows: MeshRoutedResidentRows
 
     /// The routed type registry this device admits, resolves and forwards by (P5 item 11, plan §11).
@@ -9115,113 +8812,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         ) throws -> MeshRoutedJudgement
     }
 
-    /// Registers the built-in ledger judge as the init's last step, after the built-in projection
-    /// handlers (plan step A0.5.3): the heart row's, under its resident row's token.
-    ///
-    /// The answer is bound to a constant and then asserted, never `assert(register…)`: a Release
-    /// build does not evaluate an `assert`'s condition, so the registration would vanish with it. A
-    /// refusal is unreachable in a shipping build — the heart row is this manager's own resident row
-    /// and a judge row, and no test registry exists yet while the manager is being built — and the
-    /// routed heart suites pin that hearts are judged.
-    private func registerBuiltInLedgerJudge() {
-        let heartRegistered = registerRoutedLedgerJudge(
-            BuiltInHeartJudge(manager: self), forToken: residentRoutedRows.heart.token
-        )
-        assert(heartRegistered, "the heart row's built-in ledger judge was refused")
-    }
-
-    /// The heart row's ledger judge while hearts are the engine's (plan step A0.5.3): the hearts
-    /// setting and the ledger's load as its readiness, the trust vault as its admission, and the
-    /// heart ledger's commit as its judgement, each as the ceremony ran it.
-    ///
-    /// Holds its manager `unowned`: the manager owns it through its judge map, so it never outlives
-    /// the manager and must not keep it alive.
-    private final class BuiltInHeartJudge: MeshRoutedLedgerJudge {
-
-        /// The routed heart body this row decodes to.
-        typealias Body = MeshRoutedHeartBody
-
-        /// The manager whose host, heart ledger and hooks this reads.
-        unowned let manager: MeshNetworkManager
-
-        /// Builds the judge over the manager that registers and owns it.
-        ///
-        /// - Parameter manager: The manager.
-        init(manager: MeshNetworkManager) {
-            self.manager = manager
-        }
-
-        /// The heart stage's two legs beyond the engine's predicate: nearby hearts are on, and the
-        /// heart ledger has finished loading. Both reversible, so neither is ever a mark.
-        var isReadyToJudge: Bool {
-            manager.store.allowNearbyHearts && manager.heartLedger?.isLoaded == true
-        }
-
-        /// The trust-vault leg: the heart's sender must be a trusted, unblocked vault friend,
-        /// asked with the admission ledger's signing key. FINAL when not, under the frozen reason
-        /// `notAFriend` — the ceremony's doc carries the two-session argument.
-        ///
-        /// - Parameter author: The origin, as the admission ledger resolved it.
-        /// - Returns: `admitted`, or the FINAL `notAFriend` refusal.
-        func admits(_ author: MeshRoutedAuthor) -> MeshRoutedAdmission {
-            guard manager.store.isTrustedUnblockedPeer(
-                signingPublicKey: author.signingPublicKey,
-                fingerprint: author.fingerprint
-            ) else {
-                return .refusedForGood(reason: "notAFriend")
-            }
-            return .admitted
-        }
-
-        /// The heart ledger's judgement of one opened gift: the ONE ledger door, the closeness feed
-        /// on first acceptance above the ack's own guard, and the per-gift test seam where the ack
-        /// is built.
-        ///
-        /// - Parameters:
-        ///   - body: The opened heart body.
-        ///   - delivery: The gift's signed facts, the ledger's author and the engine's `seenAt`.
-        /// - Returns: `committed` when the ledger judged this gift exactly once and stands behind
-        ///   it, `notYet` otherwise.
-        func judgeRoutedItem(
-            _ body: MeshRoutedHeartBody, delivery: MeshRoutedDelivery
-        ) -> MeshRoutedJudgement {
-            // Unreachable without a ledger: the engine asked `isReadyToJudge` first, in this ceremony.
-            guard let ledger = manager.heartLedger else { return .notYet }
-            let merged = MeshMergedHeart(
-                giftID: delivery.itemID,
-                senderFingerprint: delivery.author.fingerprint,
-                senderDisplayName: ProximityDisplayName.peerDisplayName(
-                    body.header.senderName, in: manager.namespace
-                ),
-                firstSeenAt: delivery.seenAt
-            )
-            let outcome = MeshHeartCommit.commit([merged], into: ledger)
-            // Closeness is fed on FIRST ACCEPTANCE only, never on every ack mint. `commitProof` answers
-            // non-nil for an already-stored gift, so a pass that re-reaches this ceremony (the store
-            // answered `.unavailable` after the row was written, say) re-mints the ack — and the hook
-            // behind this is `closenessLedger.recordHeartReceived`, which is not idempotent.
-            //
-            // **Above the ack guard, and that is the fix review's P2-1.** `recordReceivedHeart` answers
-            // true for an applied-but-UNPERSISTED mutation while `commitProof(for:)` answers nil for
-            // exactly that state (`ProximityHeartLedger`'s own docs on both), so a dirty sidecar makes
-            // this gift accepted and the ack nil in the same pass. Fed below the guard, the feed is not
-            // deferred to the flush — it is lost for good, because the re-judgement that follows finds
-            // the gift already stored and puts it in `refusedGiftIDs`, where `receivedGiftIDs.contains`
-            // is false forever. The R1 gate still holds: a second judgement of the same gift is a
-            // refusal, not a receipt, so this cannot double-feed.
-            if outcome.receivedGiftIDs.contains(delivery.itemID) {
-                manager.onHeartReceived?(delivery.author.fingerprint)
-            }
-            guard let ack = MeshRoutedHeartAck(
-                outcome: outcome, giftID: delivery.itemID, ledger: ledger
-            ) else {
-                return .notYet
-            }
-            manager.onHeartJudgedForTesting?(ack)
-            return .committed
-        }
-    }
-
     // MARK: Routed delivery projection (P5 item 13, plan §11, §12)
 
     /// Registers the projection handler for one routed type: from here on an item of `token` that
@@ -9468,10 +9058,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         ) throws -> MeshRoutedProjectionVerdict
     }
 
-    /// Registers the built-in projection handler at the end of the init, just before the built-in
-    /// ledger judge (plan step A0.5.2): the photo row's, under its resident row's token. The
-    /// temporary-message row's handler left with chat at plan step A0.5.9 and is registered by the
-    /// host (FernletSocial's mesh composition, under its own row's token).
+    /// Registers the built-in projection handler as the init's last step (plan step A0.5.2): the
+    /// photo row's, under its resident row's token. The temporary-message row's handler left with
+    /// chat at plan step A0.5.9, and the heart row's ledger judge, which this manager registered just
+    /// after it, with the session hearts at plan step A0.5.10; the host registers both (FernletSocial's
+    /// mesh composition, each under its own row's token).
     ///
     /// The answer is bound to a constant and then asserted, never `assert(register…)`: a Release
     /// build does not evaluate an `assert`'s condition, so the registration would vanish with it. A
@@ -14215,8 +13806,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// 4. the session observer's ending (S15): Fernlet's opens the clothing shop's one-hour
     ///    post-session window over the catalogs it holds (Phase 3a), then drops the chat transcript
     ///    (Phase 5: messages VANISH — where the shop KEEPS catalogs through a 1-hour window, the
-    ///    transcript is dropped immediately, nothing to retain, nothing to sync);
-    /// 5. the in-session heart's feedback and its in-flight claims go too.
+    ///    transcript is dropped immediately, nothing to retain, nothing to sync), and, last, drops the
+    ///    in-session heart's feedback and its in-flight claims (plan step A0.5.10: this manager reset
+    ///    them itself, after the observer, until the session hearts left it).
     ///
     /// Idempotent and cheap: a site that finds the session still live does nothing, and a later
     /// teardown that finds it still ended re-runs legs that have nothing left to move.
@@ -14233,15 +13825,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         hasFormedSession = false
         advanceTranscriptGeneration()
         sessionObserver?.meshSessionDidEnd(MeshSessionEnd())
-        // TF b19 item 5: drop any lingering in-session heart feedback so a "Sent"/failure line
-        // can't outlive the session that produced it (there is no "Sending…" state on this path any
-        // more — P6 item 6 made the mint synchronous).
-        sessionHeartStateClearTask?.cancel()
-        sessionHeartStateClearTask = nil
-        sessionHeartState = .idle
-        // The slots these claims named are gone; a stale claim would refuse the first heart of the
-        // NEXT session (the deliver task's own `defer` never runs if its slot died mid-flight).
-        sessionHeartSendsInFlight.removeAll()
     }
 
     // MARK: - The session-content generation (Phase 5) and the privacy wipe
@@ -16031,23 +15614,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// can be asserted against the shipping set rather than against a copy of it (P6 item 6).
     /// `internal` for `@testable` unit tests only.
     var projectableRoutedTypeTokensForTesting: Set<String> { projectableRoutedTypeTokens }
-
-    /// Takes the in-flight heart claim for one fingerprint and leaves it held, so a cell can assert
-    /// the SESSION-END clear rather than a `defer` that has already run (P6 item 6).
-    ///
-    /// The claim's own window is empty now that the mint is synchronous, which is exactly why the
-    /// clear needs its own seam: no production sequence can strand a claim any more, and the
-    /// `clearAll` that releases a stranded one would otherwise be untestable. `internal` for
-    /// `@testable` unit tests only.
-    func claimSessionHeartForTesting(_ fingerprint: String) {
-        sessionHeartSendsInFlight.insert(fingerprint)
-    }
-
-    /// Whether the in-flight heart claim for one fingerprint is held. `internal` for `@testable`
-    /// unit tests only.
-    func holdsSessionHeartClaimForTesting(_ fingerprint: String) -> Bool {
-        sessionHeartSendsInFlight.contains(fingerprint)
-    }
 
     /// Runs one pass of the observation loop's check — seat what committed, sweep what ended,
     /// re-seat returning members — exactly as a coordinator-state change drives it on a live radio.

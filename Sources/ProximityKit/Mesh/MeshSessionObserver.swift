@@ -12,10 +12,11 @@
 // call sites, and what the engine itself still does at each moment is run there: at a forming commit,
 // at the ending and at a privacy wipe's start, it advances its session-content generation, the fact a
 // routed `.session` row's liveness reads, before it tells the observer; at the ending it also runs the
-// roster's review promotion before and the session heart's reset after. Every other leg is the
-// host's, run by its observer: since plan step A0.5.9 the chat transcript's clear is one of them, at
-// all three of those moments. The observer is told the moment and, for a commit, whether it formed
-// the session. It receives facts, never commands, and is asked for nothing back.
+// roster's review promotion before. Every other leg is the host's, run by its observer: since plan
+// step A0.5.9 the chat transcript's clear is one of them, at all three of those moments, and since
+// plan step A0.5.10 the session heart's reset, which the engine ran after the observer until then, is
+// the ending's last. The observer is told the moment and, for a commit, whether it formed the
+// session. It receives facts, never commands, and is asked for nothing back.
 //
 // One observer, not a list: a host composes its features behind one object, and that object's fan-out
 // is where the order between features is written, so the order a host's features see a moment in is
@@ -47,7 +48,7 @@ import Foundation
 /// - ``meshSearchDidStop()`` when the search stops, before the radio is stood down;
 /// - ``meshSessionDidEnd(_:)`` at the session-end moment (``MeshNetworkManager/isSessionLive`` false
 ///   on a teardown or slot-loss path, each time such a path runs), after the engine's review
-///   promotion and its generation advance, and before its heart reset;
+///   promotion and its generation advance, as the ending's last step;
 /// - ``meshPrivacyWipeDidBegin()`` when the host's delete-all funnel begins
 ///   (``MeshNetworkManager/beginPrivacyWipe()``), after the engine raised its projection refusal,
 ///   wrote its line and advanced its generation.

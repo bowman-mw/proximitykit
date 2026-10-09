@@ -10,43 +10,20 @@ import FernletDomainModel
 ///
 /// Mirrors the existing `ProximityTrustPolicy` / `WorkoutSyncContext` host-protocol
 /// pattern. Surface is exactly what `MeshNetworkManager` + `ProximityRecipeShareManager`
-/// consume: display name, trusted peers, and the block/fingerprint checks — and six requirements
-/// the extension below will never give a default, because each is the host's identity, custody or
-/// rule, not the mechanism's: the host's protocol identity, ``proximityNamespace``, its install
-/// binding, ``proximityInstallBinding``, its trust records, ``proximityTrustStore``, the session
-/// trust policy every connection's coordinator consults, ``makeProximityTrustPolicy()``, the
-/// device identity a manager holds, ``makeProximityIdentity()``, and the routed types its features
-/// carry, ``meshRoutedTypeEntries``.
+/// consume: display name and the block/fingerprint checks — and five requirements the extension
+/// below will never give a default, because each is the host's identity, custody or rule, not the
+/// mechanism's: the host's protocol identity, ``proximityNamespace``, its install binding,
+/// ``proximityInstallBinding``, the session trust policy every connection's coordinator consults,
+/// ``makeProximityTrustPolicy()``, the device identity a manager holds, ``makeProximityIdentity()``,
+/// and the routed types its features carry, ``meshRoutedTypeEntries``. The requirements only a host's
+/// social features read — its trusted-peer records, its durable trust store and the in-person hearts
+/// opt-in — left this protocol for FernletSocial's `FernletSocialHost`, which refines it, at plan step
+/// A0.5.10, once no code in this module read them.
 @MainActor
 public protocol ProximityHost: AnyObject {
     var proximityDisplayName: String { get }
-    /// Every trusted-peer record the host keeps (kept, removed, blocked and reported alike), in the
-    /// host's persisted type: the managers read a friend's record from them where a feature needs one
-    /// (FernletSocial's presence for its tags, a heart connection's sealing key and a heart sender's
-    /// filed name; the mesh for its vouch list). The same records ``proximityTrustStore`` answers
-    /// from: Fernlet's app and every test double answer their vault's.
-    var trustedProximityPeers: [ProximityTrustedPeerRecord] { get }
-    /// The host's durable trust records, asked the two questions this module puts to them outside a
-    /// session: whether a signing key is a remembered, unrevoked peer, and whether it is blocked
-    /// (``ProximityTrustStore`` says where each manager asks).
-    ///
-    /// **No default, like ``trustedProximityPeers``.** Which peers a device remembers is the host's
-    /// record, not the mechanism's, so ProximityKit keeps none of its own: a host that supplies none
-    /// fails to compile. Fernlet's app answers its `ProximityTrustVault` (the `FernletConnections`
-    /// module) in `ProximityHostAdapter.swift`, and every test double answers its own vault. The
-    /// managers read it at each question, so an answer always reflects the records as they are then.
-    var proximityTrustStore: any ProximityTrustStore { get }
     func isBlockedFingerprint(_ fingerprint: String) -> Bool
     func blockProximityPeer(signingPublicKey: Data)
-    /// The in-person hearts opt-in (mesh redesign Phase 4b), the one hearts setting a host answers.
-    /// FernletSocial's `PresenceManager` consults it on the send side (block an outbound heart) and the
-    /// receive side (drop an inbound heart), and ``MeshNetworkManager``'s session hearts do too until
-    /// the mesh's feature parts leave at plan step A0.5 (the send, the routed heart's ledger judgement
-    /// and the hearts capability it advertises). Presence VISIBILITY is a separate setting, so
-    /// hearts-off + presence-on means a friend still sees you nearby but a heart to you is silently
-    /// dropped. The away-delivery opt-in is no host requirement: the managers that read it take a
-    /// provider of their own (`heartsAwayEnabledProvider`).
-    var allowNearbyHearts: Bool { get }
     /// Root directory for the proximity subsystem's on-disk sidecars — the friend photo-wall index
     /// (`MeshPhotoCache.sealed`, GCM-sealed under the friend-wall media key; a legacy plaintext
     /// `MeshPhotoCache.json` is read once, resealed, and deleted by `PrivateMediaStore.loadIndex()`)
@@ -109,8 +86,8 @@ public protocol ProximityHost: AnyObject {
     /// removes it.
     ///
     /// **Deliberately no default.** The extension below hands a host that carries no value of its
-    /// own the in-person hearts setting, the sidecar root and the two storage scopes; it hands out no
-    /// namespace, and never will. ProximityKit holds no namespace instance
+    /// own the sidecar root and the two storage scopes; it hands out no namespace, and never will.
+    /// ProximityKit holds no namespace instance
     /// and keeps no global, so a host that supplies none gets a compile error, never another app's
     /// identity. Fernlet's app supplies `ProximityNamespace.fernlet` (the `FernletConnections` module)
     /// in `ProximityHostAdapter.swift`, as twelve of the test target's seventeen doubles do; the other
@@ -256,9 +233,6 @@ public extension ProximityHost {
             installBinding: proximityInstallBinding
         )
     }
-    /// Default for hosts that predate the hearts opt-out (e.g. test doubles). The app's
-    /// `FernletStore` overrides this with the live setting.
-    var allowNearbyHearts: Bool { true }
     /// The production sidecar home, and the default for hosts that don't redirect it (test doubles
     /// that never touch the wall): the host namespace's `installation.storage.defaultDirectory` (plan
     /// step A0.2.8; for Fernlet `Application Support/Fernlet`, unchanged). The app's `FernletStore`

@@ -157,9 +157,10 @@ public nonisolated enum MeshRoutedContentScope: String, CaseIterable, Equatable,
 /// doc had promised the flip since increment 1). **It is now spent:** the heart row is frozen for
 /// real, and the next semantics change to it is a `…heart.v2` token registered beside it. The v2
 /// route was weighed at the time and is not actually cheaper: a sender mints under its own row's
-/// token (``MeshRoutedTypeRegistry/increment1Rows(_:)``, since plan step A0.5.2; a lowest-token
-/// resolver before it, which sorted `…heart.v1` ahead of `…heart.v2`), so that path needs the
-/// sender re-pointed as well as a row.
+/// token (its row by name: ``MeshRoutedTypeRegistry/increment1Rows(_:)``'s since plan step A0.5.2,
+/// and for the heart the host's, FernletSocial's `FernletRoutedTypes`, since plan step A0.5.10; a
+/// lowest-token resolver before it, which sorted `…heart.v1` ahead of `…heart.v2`), so that path
+/// needs the sender re-pointed as well as a row.
 ///
 /// **Unit caveat for the cap** — the one thing to get right when narrowing a row.
 /// ``maxItemByteCount`` is compared against `MeshRoutedManifest.size`, which is the complete sealed
@@ -310,7 +311,7 @@ public nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 ///
 /// Shipping code names exactly one value, ``increment1(_:hostEntries:)`` — the engine's resident rows
 /// and its host's (plan step A0.5.9) — and the resident rows by name, ``increment1Rows(_:)``, for the
-/// tokens the manager's built-in handler and judge register under and its senders mint under; it
+/// token the manager's built-in photo handler registers under and its photo sender mints under; it
 /// constructs a registry in exactly one file, reads a routed type off the namespace only where rows
 /// are built (here, and in a host's own rows: FernletSocial's `FernletRoutedTypes.swift`), and
 /// branches on no routed type token anywhere — three source-scan walls in
@@ -384,25 +385,25 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
         MeshRoutedTypeRegistry(entries: increment1Rows(routedTypes).rows + hostEntries)
     }
 
-    /// The engine's resident rows by name (plan step A0.5.2): the photo and heart rows, which stay
-    /// the engine's until their features leave it (plan steps A0.5.11 and A0.5.10), each column
-    /// defined AS the constant or decision already shipped, and each row's token read off the routed
-    /// types it is handed: this module spells no routed type of its own. The temporary-message row
-    /// left with chat at plan step A0.5.9 and is the host's now (FernletSocial's
-    /// `FernletRoutedTypes`).
+    /// The engine's resident rows by name (plan step A0.5.2): the photo row, which stays the engine's
+    /// until the photo feature leaves it (plan step A0.5.11), each column defined AS the constant or
+    /// decision already shipped, and its token read off the routed types it is handed: this module
+    /// spells no routed type of its own. The temporary-message row left with chat at plan step A0.5.9
+    /// and the heart row with the session hearts at plan step A0.5.10; both are the host's now
+    /// (FernletSocial's `FernletRoutedTypes`).
     ///
     /// ``increment1(_:hostEntries:)`` builds the registry from these rows and the host's.
     /// `MeshNetworkManager` also holds them by name, for the two per-row reads the registry cannot
-    /// answer: the token its built-in projection handler and its built-in ledger judge register
-    /// under, and the token each of its two senders mints under — behind its
-    /// `isRoutedTypeRegistered(_:)`, so a build whose registry lost a row mints nothing for it.
+    /// answer: the token its built-in projection handler registers under, and the token its photo
+    /// sender mints under — behind its `isRoutedTypeRegistered(_:)`, so a build whose registry lost a
+    /// row mints nothing for it.
     ///
     /// ``ProximityNamespace/RoutedTypes/control`` is deliberately absent: plan §11 names an
     /// `immediate` stage but neither §11 nor §12 routes a control item, and registering a token
     /// nothing mints would open a door with no handler behind it.
     ///
     /// - Parameter routedTypes: The routed types of the namespace the caller holds.
-    /// - Returns: The photo and heart rows under their tokens.
+    /// - Returns: The photo row under its token.
     static func increment1Rows(_ routedTypes: ProximityNamespace.RoutedTypes) -> MeshRoutedResidentRows {
         MeshRoutedResidentRows(
             // The photo row is the FIRST narrowed cap (P6 item 3, D-11.4), and it is narrowed to a
@@ -424,20 +425,6 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
                 destinations: .fullRosterAtCreation,
                 relayRetention: .originRetainsUntilDeparture,
                 finalAck: .durableRecipientStorage,
-                expiry: .meshHardDeadlinePlusGrace,
-                contentScope: .persistent
-            ),
-            // The heart row's cap is the THIRD narrowed one (P6 item 6), and its formula has a **zero**
-            // payload term: a heart body is header-only, so the widest ciphertext it can measure is
-            // this family's framed header allowance plus the seal's overhead. `destinations` is
-            // `.singleRecipient` since item 6 — the one re-declaration the freezing rule above allows a
-            // never-minted row, and it is spent.
-            heart: MeshRoutedTypeEntry(
-                token: routedTypes.heart,
-                maxItemByteCount: UInt64(MeshRoutedHeartBody.maxSealedBlobByteCount),
-                destinations: .singleRecipient,
-                relayRetention: .originRetainsUntilDeparture,
-                finalAck: .foregroundDecryptAndLedgerCommit,
                 expiry: .meshHardDeadlinePlusGrace,
                 contentScope: .persistent
             )
@@ -469,24 +456,22 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
 
 // MARK: - MeshRoutedResidentRows
 
-/// The engine's resident routed rows by name — the photo and heart rows
+/// The engine's resident routed rows by name — the photo row
 /// ``MeshRoutedTypeRegistry/increment1Rows(_:)`` declares (plan step A0.5.2; the temporary-message
-/// row left for the host's rows at plan step A0.5.9).
+/// row left for the host's rows at plan step A0.5.9, the heart row at plan step A0.5.10).
 ///
-/// The registry is keyed by token and answers "is this token known, and under which policy"; these
-/// say which token is the photo row's and which the heart row's, which is what a sender needs to mint
-/// and a built-in handler or judge needs to register. A value, never a second registry:
-/// `MeshNetworkManager` still admits, resolves and forwards by its registry alone, and asks it whether
-/// a row is registered before it mints under that row's token. Each row names its own token, so a
-/// registry holding a second row shaped like the photo row does not change which token the photo
-/// sender mints under or which row the photo handler projects.
+/// The registry is keyed by token and answers "is this token known, and under which policy"; this
+/// says which token is the photo row's, which is what its sender needs to mint and its built-in
+/// handler needs to register. A value, never a second registry: `MeshNetworkManager` still admits,
+/// resolves and forwards by its registry alone, and asks it whether a row is registered before it
+/// mints under that row's token. The row names its own token, so a registry holding a second row
+/// shaped like the photo row does not change which token the photo sender mints under or which row
+/// the photo handler projects.
 nonisolated struct MeshRoutedResidentRows: Equatable, Sendable {
     /// The routed photo row.
     let photo: MeshRoutedTypeEntry
-    /// The routed heart row, whose final ack is the ledger judgement.
-    let heart: MeshRoutedTypeEntry
 
-    /// The two rows in their declaration order — photo, heart — which is the order
+    /// The resident rows in their declaration order — the photo row alone — which is the order
     /// ``MeshRoutedTypeRegistry/increment1(_:hostEntries:)`` registers them in, before the host's.
-    var rows: [MeshRoutedTypeEntry] { [photo, heart] }
+    var rows: [MeshRoutedTypeEntry] { [photo] }
 }

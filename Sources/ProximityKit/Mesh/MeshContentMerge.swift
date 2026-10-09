@@ -9,16 +9,17 @@
 // (``MeshContentKey``, ``MeshMergeableContent``, ``MeshContentOrder``, ``MeshContentSet``, public with
 // their union laws since plan step A0.5.1), for the three content kinds a partition can split. The
 // kinds themselves left with their features (plan step A0.5.9 moved the photo and message kinds and
-// the ledger that holds all three to FernletSocial's `MeshContentLedger.swift` with chat):
+// the ledger that holds all three to FernletSocial's `MeshContentLedger.swift` with chat, and plan step
+// A0.5.10 the heart kind with the heart ledger):
 //
 //   * **Photos** — union by `(author, manifest ID)`, hash-validated on reassembly, then the existing
 //     review flow.
 //   * **Texts** — union by `(author, message ID)`; the visible transcript is re-derived in total
 //     order `(claimedSentAt clamped to ±10 min of first-seen, senderFingerprint, messageID)`.
 //   * **Hearts** — union by `(author, gift ID)`; the final receipt is still only the foreground
-//     decrypt + ``ProximityHeartLedger`` commit, which is why receipt state is deliberately NOT a
-//     field here. ``MeshMergedHeart`` stays in this file for one commit, beside the heart ledger and
-//     its commit, until plan step A0.5.10 moves all three to FernletSocial.
+//     decrypt + heart ledger commit, which is why receipt state is deliberately NOT a field of the
+//     kind. The merged heart left for FernletSocial's `HeartSharing/MeshMergedHeart.swift` at plan
+//     step A0.5.10, with the heart ledger and its commit.
 //
 // **The author is part of the identity for all three, and that is the P6 item 4 fix-review change**
 // (finding P1-1; see ``MeshContentKey``). Only the TEXT set has a shipping call site today
@@ -286,50 +287,5 @@ public nonisolated struct MeshContentSet<Item: MeshMergeableContent>: Equatable,
         }
         let sorted = winnerByKey.values.sorted(by: MeshContentOrder.precedes)
         return Array(sorted.suffix(Item.setCapacity))
-    }
-}
-
-// MARK: - MeshMergedHeart
-
-/// One heart as the merge sees it — and deliberately **without** a receipt field.
-///
-/// §10.3: the final receipt is still only the foreground decrypt + ``ProximityHeartLedger`` commit.
-/// A peer's "received" is that peer's receipt, not this member's, so merging one in would be a
-/// receipt this device never issued. Receipt state is therefore local and derived
-/// (FernletSocial's `MeshContentLedger.heartReceipt(_:committed:)`), never merged.
-///
-/// Public, with its members, for plan step A0.5.9 alone: FernletSocial's content ledger holds a set of
-/// these beside its photos and messages, while the heart ledger, its commit (`MeshHeartCommit`) and
-/// the engine's heart judgement that builds one stay in ProximityKit until plan step A0.5.10 moves the
-/// type to FernletSocial with them. The contract is the one ``MeshMergeableContent`` states: an item's
-/// identity is its gift id and its transport-verified sender, its order the receiver's first-seen
-/// instant.
-public nonisolated struct MeshMergedHeart: MeshMergeableContent {
-
-    /// The most hearts one member keeps: the heart ledger's own retention cap.
-    public static let setCapacity = ProximityHeartLedger.maxStoredHearts
-
-    /// The gift id the union keys on — the wire payload's id, stable across a duplicate delivery.
-    public let giftID: UUID
-    /// The transport-verified sender.
-    public let senderFingerprint: String
-    /// The sender's display name, already sanitized at the wire boundary.
-    public let senderDisplayName: String
-    /// The receiving member's clock when this heart first entered its view.
-    public let firstSeenAt: Date
-
-    /// The gift id, the half of the union's key the author minted.
-    public var contentID: UUID { giftID }
-    /// The receiver's first-seen instant: a heart carries no claimed instant of its own.
-    public var orderingInstant: Date { firstSeenAt }
-    /// The sender's display name, the last resort between two copies of one gift.
-    public var mergeTiebreak: String { senderDisplayName }
-
-    /// Builds a merged-heart projection. `firstSeenAt` must come from the receiver's clock.
-    public init(giftID: UUID, senderFingerprint: String, senderDisplayName: String, firstSeenAt: Date) {
-        self.giftID = giftID
-        self.senderFingerprint = senderFingerprint
-        self.senderDisplayName = senderDisplayName
-        self.firstSeenAt = firstSeenAt
     }
 }

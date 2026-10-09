@@ -126,15 +126,6 @@ public struct PeerSlot: Identifiable {
         guard let peerCapabilities else { return host.assumedForLegacyPeers.contains(token) }
         return peerCapabilities.contains(token)
     }
-
-    /// A feature's capability gate: the token form of `supports(_:in:)`, for the capability's token.
-    ///
-    /// - Parameters:
-    ///   - capability: A Fernlet capability.
-    ///   - host: The host's capability tokens (`family.vocabulary.capabilities`).
-    func supports(_ capability: ProximityCapability, in host: ProximityNamespace.Capabilities) -> Bool {
-        supports(capability.rawValue, in: host)
-    }
 }
 
 /// In-memory symmetric group key for the current mesh session, tagged with its rotation epoch.
