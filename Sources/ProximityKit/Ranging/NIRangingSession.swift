@@ -1,29 +1,29 @@
+#if os(iOS)
 import Foundation
 import NearbyInteraction
 import Combine
 
 // MARK: - NIRangingSession
 
-/// The production ``RangingProvider``: NearbyInteraction UWB distance measurement between two
-/// devices that have exchanged discovery tokens.
+/// The NearbyInteraction ``RangingProvider``: UWB distance measurement between two devices that have
+/// exchanged discovery tokens, the provider a host on iOS hands each connection from
+/// ``ProximityHost/makeProximityRangingProvider()`` (Fernlet's app does, a new one per connection).
+///
+/// **Compiled on iOS only** (the whole file is `#if os(iOS)`, plan step A0.6.3). NearbyInteraction's
+/// module ships in the macOS SDK, but every type it declares is unavailable there, so a host on macOS
+/// answers ``NoopRangingProvider``. A host that answers this one declares
+/// `NSNearbyInteractionUsageDescription`.
 ///
 /// Owns one `NISession` at a time, archiving/unarchiving discovery tokens as `Data` so they can
 /// ride the signed identity intro. Publishes distances on `distance` and lifecycle on `state`;
-/// unsupported hardware immediately reports `.fallback(rssiOnly: true)` so
-/// ``ProximityCoordinator`` degrades to manual commit. Delegate callbacks arrive nonisolated and
-/// extract Sendable values (or transfer the session via `nonisolated(unsafe)`, kept alive to
-/// close the address-reuse window) before hopping to the main actor; suspension re-runs the last
-/// configuration when it ends. `@MainActor`: all session state lives on the main actor.
+/// unsupported hardware (an iPad has no UWB) immediately reports `.fallback(rssiOnly: true)` so
+/// ``ProximityCoordinator`` degrades to manual commit, observably as ``NoopRangingProvider`` does.
+/// Throws the protocol-level ``RangingError``. Delegate callbacks arrive nonisolated and extract
+/// Sendable values (or transfer the session via `nonisolated(unsafe)`, kept alive to close the
+/// address-reuse window) before hopping to the main actor; suspension re-runs the last configuration
+/// when it ends. `@MainActor`: all session state lives on the main actor.
 @MainActor
 public final class NIRangingSession: NSObject, RangingProvider {
-
-    /// Reasons a ranging session cannot start or produce a token: no UWB hardware, the local
-    /// discovery token never populated, or the peer's token bytes failed to unarchive.
-    public enum RangingError: Error {
-        case hardwareUnsupported
-        case tokenUnavailable
-        case invalidPeerToken
-    }
 
     public let isHardwareSupported: Bool
 
@@ -145,3 +145,4 @@ extension NIRangingSession: NISessionDelegate {
         }
     }
 }
+#endif

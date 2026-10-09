@@ -7,7 +7,7 @@ Fernlet's self-contained peer-to-peer subsystem: signed identity, QUIC + UWB ses
 ProximityKit is the "meet in person" half of Fernlet's social layer. Nothing here talks to a
 server (`FernletSocial`'s heart dead-drop does, through a transport its app injects); everything
 moves over local radios (Network.framework/QUIC over Bonjour for data, NearbyInteraction/UWB for
-distance) between two phones
+distance where the host's provider has it) between two phones
 that are physically together. The design center is a privacy stance the rest of the app depends
 on: identities are per-device Ed25519/X25519 key pairs (``IdentityService``), every wire transfer
 travels in a signed ``FernletIdentityEnvelope`` that is verified — signature, expiry, recipient,
@@ -105,7 +105,9 @@ gets a ``ProximityCoordinator``, the
 per-connection engine that exchanges signed identity introductions (carrying the UWB discovery
 token, advertised capability tokens, and optionally the host's prekey bundle,
 ``ProximityPrekeyBundle``, which the coordinator carries without reading), starts ranging
-through a ``RangingProvider`` (``NIRangingSession`` in production), and gates the commit on
+through a ``RangingProvider`` its host builds for that connection
+(``ProximityHost/makeProximityRangingProvider()``: ``NIRangingSession`` on iOS,
+``NoopRangingProvider`` without ranging), and gates the commit on
 physical closeness: a 15 cm / 0.8 s UWB dwell measured by ``ProximityCommitDetector``, a manual
 confirm on non-UWB hardware, or the QR verification ceremony (``ProximityVerifyQR``) which
 upgrades a manual commit to ceremony grade. That gate is the consent ceremony for a **first
@@ -615,7 +617,8 @@ refusals and its derivation.
 protocol extension, as are the display name, `isBlockedFingerprint(_:)`,
 `blockProximityPeer(signingPublicKey:)`, the name an unnamed device goes by,
 ``ProximityHost/proximityFallbackDisplayName``, the per-connection trust policy,
-``ProximityHost/makeProximityTrustPolicy()``, the identity a manager builds when it is handed none,
+``ProximityHost/makeProximityTrustPolicy()``, the per-connection ranging provider,
+``ProximityHost/makeProximityRangingProvider()``, the identity a manager builds when it is handed none,
 ``ProximityHost/makeProximityIdentity()``, and the routed-type rows the mesh registers,
 ``ProximityHost/meshRoutedTypeEntries``. Both are among those it will never default, because each is
 the host's identity, custody, rule or platform fact (`ProximityHost.swift`'s header names them), so a
@@ -1390,8 +1393,13 @@ Release build the environment-reading half is compiled out entirely.
 
 ### Ranging
 
+Each connection's provider is its host's (``ProximityHost/makeProximityRangingProvider()``, no default):
+``NIRangingSession``, compiled on iOS only, or ``NoopRangingProvider`` on a host without ranging.
+
 - ``RangingProvider``
 - ``NIRangingSession``
+- ``NoopRangingProvider``
+- ``RangingError``
 - ``RangingDistance``
 - ``RangingState``
 

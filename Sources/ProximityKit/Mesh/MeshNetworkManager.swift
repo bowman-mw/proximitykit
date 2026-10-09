@@ -10841,8 +10841,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// What ``handleChannelReady`` does with a freshly connected channel.
     ///
     /// Extracted from the guard chain so the seat decision is reachable from a unit test: what
-    /// follows it in production is a live `ProximityCoordinator` over a real `NIRangingSession`,
-    /// which a unit test must not build, and the decision is the half that has been wrong.
+    /// follows it in production is a live `ProximityCoordinator` over the ranging provider its host
+    /// builds (`NIRangingSession` on Fernlet's iOS host), which a unit test must not build, and the
+    /// decision is the half that has been wrong.
     enum ChannelAdmission: Equatable {
         /// Seat the peer: build the coordinator and append a slot.
         case seat
@@ -10892,7 +10893,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let coordinator = ProximityCoordinator(
             identity: identity,
             transport: channel,
-            ranging: NIRangingSession(),
+            ranging: store.makeProximityRangingProvider(),
             payloadHandler: self,
             trustPolicy: trustPolicy,
             replayCache: replayCache,

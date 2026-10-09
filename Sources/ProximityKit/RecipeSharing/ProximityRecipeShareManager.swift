@@ -737,9 +737,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// What ``handleChannelReady`` does with a freshly connected channel.
     ///
     /// Extracted from the guard chain so the decision is reachable from a unit test: what follows
-    /// it in production is a live `ProximityCoordinator` over a real `NIRangingSession`, which a
-    /// unit test must not build, and the decision is the half that was wrong. Mirrors
-    /// `MeshNetworkManager.ChannelAdmission`.
+    /// it in production is a live `ProximityCoordinator` over the ranging provider its host builds
+    /// (`NIRangingSession` on Fernlet's iOS host), which a unit test must not build, and the decision
+    /// is the half that was wrong. Mirrors `MeshNetworkManager.ChannelAdmission`.
     enum ChannelAdmission: Equatable {
         /// Open the pairing: build the coordinator and record the connection.
         case admit
@@ -784,7 +784,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         let coordinator = ProximityCoordinator(
             identity: identity,
             transport: channel,
-            ranging: NIRangingSession(),
+            ranging: store.makeProximityRangingProvider(),
             payloadHandler: self,
             trustPolicy: trustPolicy,
             replayCache: replayCache,

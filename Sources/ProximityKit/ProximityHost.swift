@@ -14,7 +14,8 @@ import FernletDomainModel
 /// below will never give a default, because each is the host's identity, custody, rule or platform
 /// fact, not the mechanism's: the host's protocol identity, ``proximityNamespace``, its install
 /// binding, ``proximityInstallBinding``, the session trust policy every connection's coordinator
-/// consults, ``makeProximityTrustPolicy()``, the device identity a manager holds,
+/// consults, ``makeProximityTrustPolicy()``, the ranging provider each connection's coordinator
+/// measures distance with, ``makeProximityRangingProvider()``, the device identity a manager holds,
 /// ``makeProximityIdentity()``, the routed types its features carry, ``meshRoutedTypeEntries``, and
 /// the name this device goes by when its user set none, ``proximityFallbackDisplayName``. The
 /// requirements only a host's social features read — its trusted-peer records, its durable trust
@@ -160,6 +161,28 @@ public protocol ProximityHost: AnyObject {
     /// the store's `ProximityTrustVault`) in `ProximityHostAdapter.swift`, and every test double
     /// answers the same over its own vault.
     func makeProximityTrustPolicy() -> any ProximityTrustPolicy
+
+    /// A fresh ranging provider for one connection: the ``RangingProvider`` that ``MeshNetworkManager``
+    /// (per slot), ``ProximityRecipeShareManager`` (per pairing) and a host's presence (FernletSocial's
+    /// `PresenceManager`, per heart connection) each build that connection's ``ProximityCoordinator``
+    /// over, calling this once per connection at their channel-ready doors. The coordinator owns the
+    /// provider and stops it when the connection ends; the test seams that build a coordinator take a
+    /// provider of their own.
+    ///
+    /// **No default, because whether a connection ranges is the host's product and platform
+    /// decision**, so ProximityKit ships no platform answer: a host that supplies none fails to
+    /// compile. On iOS a host answers `NIRangingSession()` (iOS only), which needs
+    /// `NSNearbyInteractionUsageDescription` in the host's Info.plist and degrades to the manual commit
+    /// on hardware without UWB; Fernlet's app does, in `ProximityHostAdapter.swift`. A host on macOS,
+    /// where NearbyInteraction's types are unavailable, or one that wants no ranging, answers
+    /// ``NoopRangingProvider``, and every session then commits by hand or by the QR ceremony. The test
+    /// target's doubles that state none answer `NoopRangingProvider()` through one test-only extension
+    /// the app's conformance cannot see.
+    ///
+    /// **A new value per call; reading it starts nothing.** A provider's `stop()` ends its own ranging
+    /// (`NIRangingSession` invalidates its `NISession`), so one instance handed to two connections
+    /// would let one session's end stop the other's ranging.
+    func makeProximityRangingProvider() -> any RangingProvider
 
     /// A fresh device identity for a manager that was handed none: the identity
     /// ``MeshNetworkManager``, ``ProximityRecipeShareManager`` and FernletSocial's `PresenceManager`
