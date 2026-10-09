@@ -10,18 +10,39 @@ import FernletDomainModel
 ///
 /// Mirrors the existing `ProximityTrustPolicy` / `WorkoutSyncContext` host-protocol
 /// pattern. Surface is exactly what `MeshNetworkManager` + `ProximityRecipeShareManager`
-/// consume: display name and the block/fingerprint checks — and five requirements the extension
-/// below will never give a default, because each is the host's identity, custody or rule, not the
-/// mechanism's: the host's protocol identity, ``proximityNamespace``, its install binding,
-/// ``proximityInstallBinding``, the session trust policy every connection's coordinator consults,
-/// ``makeProximityTrustPolicy()``, the device identity a manager holds, ``makeProximityIdentity()``,
-/// and the routed types its features carry, ``meshRoutedTypeEntries``. The requirements only a host's
-/// social features read — its trusted-peer records, its durable trust store, the in-person hearts
-/// opt-in and the heart-eligibility predicate over them — are FernletSocial's `FernletSocialHost`'s,
-/// a refinement of this protocol: no code in this module reads them.
+/// consume: display name and the block/fingerprint checks — and the requirements the extension
+/// below will never give a default, because each is the host's identity, custody, rule or platform
+/// fact, not the mechanism's: the host's protocol identity, ``proximityNamespace``, its install
+/// binding, ``proximityInstallBinding``, the session trust policy every connection's coordinator
+/// consults, ``makeProximityTrustPolicy()``, the device identity a manager holds,
+/// ``makeProximityIdentity()``, the routed types its features carry, ``meshRoutedTypeEntries``, and
+/// the name this device goes by when its user set none, ``proximityFallbackDisplayName``. The
+/// requirements only a host's social features read — its trusted-peer records, its durable trust
+/// store, the in-person hearts opt-in and the heart-eligibility predicate over them — are
+/// FernletSocial's `FernletSocialHost`'s, a refinement of this protocol: no code in this module reads
+/// them.
 @MainActor
 public protocol ProximityHost: AnyObject {
     var proximityDisplayName: String { get }
+
+    /// The name this device goes by on the radios when its user set none: what
+    /// ``resolvedProximityDisplayName`` falls back to when ``proximityDisplayName``, trimmed of spaces
+    /// and tabs, leaves nothing.
+    ///
+    /// **No default, because what a device is called is a platform fact**, and ProximityKit reads
+    /// none: a host that supplies none fails to compile. The name goes on the air before any identity
+    /// is verified (the recipe radio's unauthenticated TXT `name`), so it must never identify the
+    /// person. On iPhone and iPad, `UIDevice.current.name` is the generic model name ("iPhone") for an
+    /// app without the user-assigned-device-name entitlement, and Fernlet's app answers it in
+    /// `ProximityHostAdapter.swift`. On a Mac every system source of the device's name is the user's
+    /// own Computer Name, so a Mac host answers a generic word of its own. The test target's doubles
+    /// that state none answer `"Test device"` through one test-only extension the app's conformance
+    /// cannot see.
+    ///
+    /// Read on every resolution and never cached, and only when the user's own name trims to nothing.
+    /// A token, never localized: it is the bytes peers receive.
+    var proximityFallbackDisplayName: String { get }
+
     func isBlockedFingerprint(_ fingerprint: String) -> Bool
     func blockProximityPeer(signingPublicKey: Data)
     /// Root directory for the proximity subsystem's on-disk files: this module's two sealed mesh

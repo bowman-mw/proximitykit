@@ -10737,9 +10737,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   * `advertisedFingerprint` reads `discoveryInfo["fp"]`, but `currentDiscoveryInfo()` has
     ///     never published an `"fp"` key on this radio — so it is always nil and the fallback to
     ///     `displayName` always ran;
-    ///   * `displayName` is `UIDevice.current.name`, which iOS 16+ reports as the generic
-    ///     "iPhone" unless the app holds `com.apple.developer.device-information.
-    ///     user-assigned-device-name` (Fernlet.entitlements does not request it);
+    ///   * `displayName` is the host's fallback name, Fernlet's `UIDevice.current.name`, which
+    ///     iOS 16+ reports as the generic "iPhone" unless the app holds
+    ///     `com.apple.developer.device-information.user-assigned-device-name` (Fernlet.entitlements
+    ///     does not request it);
     ///   * `localFingerprint` is 16 lowercase hex chars, so its first character is at most "f" —
     ///     always less than "i". `localFingerprint > "iPhone"` was therefore false on BOTH sides,
     ///     every time, and the transport's `invite` was unreachable from either call site.

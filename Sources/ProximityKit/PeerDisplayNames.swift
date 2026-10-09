@@ -2,7 +2,7 @@
 // ProximityKit
 //
 // The two shared display-name coercions of the proximity subsystem: the LOCAL name a radio
-// advertises (host preference → device-name fallback), and the wire-boundary coercion every
+// advertises (host preference → the host's fallback name), and the wire-boundary coercion every
 // PEER-supplied name passes through before it is shown or persisted, under the cap and floor of the
 // host's peer-name policy (`ProximityNamespace.PeerNames`). Previously duplicated across the mesh /
 // recipe-share / presence managers and their consumers.
@@ -10,20 +10,22 @@
 // Deliberately NOT adopted by the app-side FernletStore.shopDisplayName or FernletSocial's
 // HeartDropService name paths — those variants differ on purpose.
 
-import UIKit
+import Foundation
 
 extension ProximityHost {
-    /// The local display name a proximity radio advertises: `proximityDisplayName` trimmed of
-    /// whitespace, falling back to the device name when the user hasn't set one. The single home
-    /// of the three previously identical private `displayName` vars in `MeshNetworkManager`,
-    /// `ProximityRecipeShareManager`, and `PresenceManager`.
+    /// The local display name a proximity radio advertises: `proximityDisplayName` trimmed of spaces
+    /// and tabs (`CharacterSet.whitespaces`, never a line break), or, when that leaves nothing, the
+    /// host's ``proximityFallbackDisplayName`` exactly as the host states it, untrimmed. The fallback
+    /// is read only then, on every resolution, never cached. The single home of the three previously
+    /// identical private `displayName` vars in `MeshNetworkManager`, `ProximityRecipeShareManager`,
+    /// and `PresenceManager`.
     ///
     /// Public because the UI has to be able to SAY the resolved name: the Friends surfaces show it
     /// as the "You appear as" placeholder/hint so an unset name doesn't silently broadcast "iPhone".
     /// Re-deriving that fallback app-side would be a second copy of the wire's rule.
     public var resolvedProximityDisplayName: String {
         let name = proximityDisplayName.trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? UIDevice.current.name : name
+        return name.isEmpty ? proximityFallbackDisplayName : name
     }
 }
 

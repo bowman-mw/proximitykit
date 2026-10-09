@@ -95,8 +95,8 @@ Activity; ``ProximityForegroundAnchoring`` survives as the seam a future widget 
 one tests inject through, and the once-per-launch orphan reaper is untouched — it is now the only
 code that names the attributes type, which is why that type outlives its requester.
 All three resolve the display name they advertise the same way
-(host preference, device name as fallback), and the peer-supplied names that reach chat, hearts,
-vouches, and the keep-as-friend rows pass one sanitize-or-floor coercion
+(host preference, else the host's fallback name, Fernlet's device name), and the peer-supplied
+names that reach chat, hearts, vouches, and the keep-as-friend rows pass one sanitize-or-floor coercion
 (``ProximityDisplayName/peerDisplayName(_:in:)``, public so a host's features use the same one, over
 this module's own copy of the generic sanitizer, under the cap and floor of the host's peer-name
 policy: Fernlet's 24 characters and "A friend"); both live in `PeerDisplayNames.swift`, the single
@@ -611,15 +611,16 @@ error and its audit line, over namespaces built from literals, and the pair-secr
 refusals and its derivation.
 
 **How a host supplies it.** ``ProximityHost/proximityNamespace`` and
-``ProximityHost/proximityInstallBinding`` are two of the eight ``ProximityHost`` requirements with no
-default in the protocol extension (the others are the display name, `isBlockedFingerprint(_:)`,
-`blockProximityPeer(signingPublicKey:)`, the per-connection trust policy,
+``ProximityHost/proximityInstallBinding`` are ``ProximityHost`` requirements with no default in the
+protocol extension, as are the display name, `isBlockedFingerprint(_:)`,
+`blockProximityPeer(signingPublicKey:)`, the name an unnamed device goes by,
+``ProximityHost/proximityFallbackDisplayName``, the per-connection trust policy,
 ``ProximityHost/makeProximityTrustPolicy()``, the identity a manager builds when it is handed none,
 ``ProximityHost/makeProximityIdentity()``, and the routed-type rows the mesh registers,
-``ProximityHost/meshRoutedTypeEntries``), and two of the five it will never default, because each is
-the host's identity, custody or rule (the trust policy, the identity and the routed rows are the
-others), so a host that leaves either out fails to compile instead of running under another app's
-identity or binding. The identity is the host's custody: a host that keeps keys beside
+``ProximityHost/meshRoutedTypeEntries``. Both are among those it will never default, because each is
+the host's identity, custody, rule or platform fact (`ProximityHost.swift`'s header names them), so a
+host that leaves either out fails to compile instead of running under another app's identity or
+binding. The identity is the host's custody: a host that keeps keys beside
 the device identity answers one carrying its ``IdentityProvisioningParticipant`` (Fernlet's app answers
 its own factory's, which carries its sealed-backup escrow key), and this module never guesses one. The
 extension's three defaults are the sidecar root (`installation.storage.defaultDirectory`, built from
