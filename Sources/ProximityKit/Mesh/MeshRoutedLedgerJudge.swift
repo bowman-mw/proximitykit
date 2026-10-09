@@ -57,7 +57,7 @@ import Foundation
 /// ``MeshRoutedJudgement/committed`` only when its own durable proof stands behind THIS item, and it
 /// feeds any non-idempotent side effect of the commit on the item's first acceptance, above its own
 /// proof guard, so a proof that is not ready yet loses nothing. A judge is registered before the
-/// first re-entry pass can run — in practice while its manager is being built — and the manager
+/// first re-entry pass can run — in practice right after its host builds the manager — and the manager
 /// holds it strongly for its own lifetime, so a judge that needs the manager holds it `unowned` or
 /// `weak`.
 ///

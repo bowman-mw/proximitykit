@@ -5,9 +5,9 @@
 // the host's, its namespace's `family.vocabulary.mesh` (`ProximityNamespace.MeshMessages`), and this
 // file is the one place a role meets its token, both ways: `token(in:)` for every frame the mesh
 // manager signs, `role(for:in:)` for every token its dispatch door receives. The features riding the
-// mesh are not here: their payloads keep Fernlet's `PayloadType` tokens until they leave ProximityKit
-// with the mesh manager's feature parts (plan step A0.5), and the manager hands those to its handler
-// registry by token.
+// mesh are not here: their payload tokens are their host's (for Fernlet, `PayloadType` cases in
+// FernletSocial's features), each registered on the manager's payload door, which keeps its handler
+// by token.
 
 import Foundation
 

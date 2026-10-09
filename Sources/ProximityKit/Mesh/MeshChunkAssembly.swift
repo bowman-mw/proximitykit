@@ -284,7 +284,7 @@ nonisolated struct MeshChunkAssembly: Equatable, Sendable {
     ///
     /// The only way to a blob is this function returning ``MeshChunkCompletion/complete(blob:)``,
     /// and it returns the assembly's bytes unchanged when they do not match — the
-    /// `MeshPhotoReassembly.admitting(_:reassembled:into:)` rule. A gap is
+    /// `MeshPhotoReassembly.admitting(_:reassembled:into:)` rule (FernletSocial's). A gap is
     /// ``MeshChunkCompletion/incomplete(received:expected:)``, never a partial blob.
     ///
     /// - Important: `manifest` must be one ``MeshRoutedManifestVerifier/verify(_:)`` has already

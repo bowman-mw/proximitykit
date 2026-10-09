@@ -213,10 +213,10 @@ nonisolated func canonicalUTF8Ordered(_ lhs: String, _ rhs: String) -> Bool {
 // inventory digest ("what content I am carrying, and for whom") from the membership one ("what
 // records I hold"); and the drain answer ("we are in sync") from the routed inventory digest ("here is
 // everything I hold"), or a stale quiescence bit could close a merge window that should still be
-// open. No feature's tag is left here: the moderation report row's tag and its bytes left for
-// FernletSocial's `FeatureCanonicalBytes.swift` with the report relay (plan step A0.5.7), and the
-// activity feature's three (the descriptor its params hash is taken over, the join token and the
-// roster snapshot) with the activity manager and its payloads (plan step A0.5.8).
+// open. No feature's tag is here: the moderation report row's tag and its bytes are FernletSocial's
+// (`FeatureCanonicalBytes.swift`, beside the report relay), and so are the activity feature's three
+// (the descriptor its params hash is taken over, the join token and the roster snapshot), beside
+// the activity manager and its payloads.
 
 // MARK: - Identity envelope
 

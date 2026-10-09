@@ -20,7 +20,7 @@ import Foundation
 /// in or send a payload, and the heart-eligibility check,
 /// `FernletSocialHost.isTrustedUnblockedPeer(signingPublicKey:fingerprint:)`, before a heart from or to
 /// a peer is recorded, in person (`PresenceManager`) or routed (the session hearts' ledger judge). No
-/// code in this module asks it since plan step A0.5.10, when those requirements left ``ProximityHost``.
+/// code in this module asks it, and ``ProximityHost`` has no requirement that hands one over.
 /// A ``ProximityTrustPolicy`` is a different thing: the rule one session's coordinator
 /// consults while its connection runs, which for a friend session trusts every peer; the store
 /// answers what the device remembers, whichever session is running.

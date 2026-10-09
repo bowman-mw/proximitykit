@@ -6,12 +6,12 @@
 // store.
 //
 // Three body families share this framing (item 4 added the second, item 6 the third), and all three
-// are the host's now: `MeshRoutedTextBody` for the session transcript left for FernletSocial with chat
-// at plan step A0.5.9 (`Messaging/MeshRoutedTextBody.swift` there, its header allowance an extension of
-// ``MeshRoutedItemBodyFormat``), `MeshRoutedHeartBody` for the heart ledger with the session hearts at
-// plan step A0.5.10 (`HeartSharing/MeshRoutedHeartBody.swift` there), and `MeshRoutedPhotoBody` for the
-// friend-photo wall with the photos at plan step A0.5.11 (`Mesh/MeshRoutedPhotoBody.swift` there, its
-// two header allowances the body's own constants). They share the frozen framing constants
+// are the host's, for Fernlet FernletSocial's: `MeshRoutedTextBody` for the session transcript
+// (`Messaging/MeshRoutedTextBody.swift`, its header allowance an extension of
+// ``MeshRoutedItemBodyFormat``), `MeshRoutedHeartBody` for the heart ledger
+// (`HeartSharing/MeshRoutedHeartBody.swift`), and `MeshRoutedPhotoBody` for the friend-photo wall
+// (`Mesh/MeshRoutedPhotoBody.swift`, its two header allowances the body's own constants). They
+// share the frozen framing constants
 // deliberately — one wire shape, one place a coder option can move — and each states its own payload
 // bound and its own header allowance, because a cap is only a cap when it is sized for the body it
 // bounds. The heart's payload bound is **zero**: its body is its header.
@@ -43,9 +43,8 @@ import Foundation
 /// unframes itself in exactly these bytes: `u64BE(headerJSON.count) ‖ headerJSON ‖ payload`, the
 /// prefix written by ``CanonicalByteWriter/appendLengthPrefixed(_:)``, the payload running raw to the
 /// end of the plaintext. A body that refuses a shape throws ``MeshRoutedItemSealError/malformed``, so
-/// the routed audit lines carry one frozen vocabulary. The per-family header allowances stay with
-/// the bodies they size — every family's is its host's since the photo body's left with the photos
-/// (plan step A0.5.11).
+/// the routed audit lines carry one frozen vocabulary. The per-family header allowances are the
+/// bodies' own, each sized for the body it bounds, and so its host's.
 public nonisolated enum MeshRoutedItemBodyFormat {
 
     /// Width of the header's big-endian length prefix — `CanonicalByteWriter`'s own u64. Frozen at 8.

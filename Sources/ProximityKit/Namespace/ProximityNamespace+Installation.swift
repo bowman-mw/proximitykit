@@ -172,12 +172,11 @@ nonisolated extension ProximityNamespace {
     ///
     /// Presentation, which is why it is the installation's and not the family's: two apps of one
     /// family may show a peer's name differently. ProximityKit applies it wherever a peer's name
-    /// enters (an envelope's sender, a roster or descriptor row, a vouch, a chat or heart sender, the
-    /// name display) but the activity manager, which until plan step A0.5 moves activities out with
-    /// the mesh manager's feature parts still sanitizes a joining peer's name, and the name it sends,
-    /// under `ItemNameModeration`'s fixed 24-character cap with no floor; and it caps the name the
-    /// recipe radio advertises at
-    /// ``maxLength`` too. ``ProximityNamespace/soundness`` holds the cap to at most 63 characters and
+    /// enters it (an envelope's sender, a roster row, the name display), and its public coercion,
+    /// ``ProximityDisplayName/peerDisplayName(_:in:)``, applies it for the host's features (for
+    /// Fernlet, FernletSocial's vouch list, chat, session hearts and photos, and presence); and it
+    /// caps the name the recipe radio advertises at ``maxLength`` too. ``ProximityNamespace/soundness``
+    /// holds the cap to at most 63 characters and
     /// at least the identifiers the name display hides in a name cut to it (a key fingerprint's 16
     /// characters and the family's mesh instance-name prefix), and the floor to a name the sanitizer
     /// leaves exactly as it is, so moderating a floored name again gives the floor back, and the floor

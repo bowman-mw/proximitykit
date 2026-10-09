@@ -22,8 +22,7 @@
 // plan step A0.5.4 the largest blob is the caller's `maxBlobByteCount`: the manager's resident
 // bound, its host registry's widest routed row, held once at its `init`. So this file states no
 // feature's payload size and imports no `PrivateMediaStore`; the photo row's formula lives with the
-// row, in its host's rows (Fernlet's: FernletSocial's `FernletRoutedTypes.swift`, since plan step
-// A0.5.11; ProximityKit's registry file from A0.5.4).
+// row, in its host's rows (Fernlet's: FernletSocial's `FernletRoutedTypes.swift`).
 
 import CryptoKit
 import Foundation

@@ -16,8 +16,9 @@
 //
 // Not here: the engine's token-keyed lookup and the box a handler is stored in
 // (`MeshNetworkManager.registerRoutedProjectionHandler(_:forToken:)`), the one generic opener
-// (`MeshRoutedItemDelivery.openBody`), and the verdict and liveness vocabularies, which stay beside
-// the delivery door they were born at.
+// (`MeshRoutedItemDelivery.openBody`), the verdict and liveness vocabularies, which stay beside
+// the delivery door they were born at, and the ledger judge (`MeshRoutedLedgerJudge.swift`), which
+// is handed this file's body, author and delivery too.
 
 import Foundation
 
@@ -73,7 +74,7 @@ public nonisolated protocol MeshRoutedBody: Sendable {
 /// nothing but its own audit line. ``projectRoutedItem(_:delivery:)`` is called at most once per
 /// item per pass, never re-entrantly, and only after the mutation predicate held. Neither computes a
 /// session liveness of its own: the delivery carries the engine's. A handler is registered before
-/// the first re-entry pass can run — in practice while its manager is being built — and the manager
+/// the first re-entry pass can run — in practice right after its host builds the manager — and the manager
 /// holds it strongly for its own lifetime, so a handler that needs the manager holds it `unowned` or
 /// `weak`.
 ///
@@ -114,7 +115,8 @@ public nonisolated protocol MeshRoutedBody: Sendable {
 /// Never a claim the body makes: a routed body carries no identity, so the fingerprint and the
 /// signing key come from the manifest's signed origin and the ledger's admission for it — the set
 /// that admitted the item, admissions minus removals — with this device's block list already
-/// applied. Public as a field of ``MeshRoutedDelivery``; only the engine builds one.
+/// applied. Public as a field of ``MeshRoutedDelivery`` and as the argument of a ledger judge's
+/// ``MeshRoutedLedgerJudge/admits(_:)``; only the engine builds one.
 public nonisolated struct MeshRoutedAuthor: Equatable, Sendable {
     /// The origin's fingerprint, as the manifest signed it.
     public let fingerprint: String
@@ -124,12 +126,14 @@ public nonisolated struct MeshRoutedAuthor: Equatable, Sendable {
 
 // MARK: - MeshRoutedDelivery
 
-/// One routed item as the engine hands it to a projection handler: the facts the origin signed and
-/// the engine's resolution of them, never plaintext (plan step A0.5.2, S9).
+/// One routed item as the engine hands it to a projection handler or a ledger judge: the facts the
+/// origin signed and the engine's resolution of them, never plaintext (plan step A0.5.2, S9).
 ///
-/// Built only by the engine, after its guard chain and before the handler's
-/// ``MeshRoutedProjectionHandler/verdictBeforeOpen(_:)``; the same value then reaches
-/// ``MeshRoutedProjectionHandler/projectRoutedItem(_:delivery:)``. Every field is either inside the
+/// Built only by the engine. A handler's is built after the guard chain and before its
+/// ``MeshRoutedProjectionHandler/verdictBeforeOpen(_:)``, and the same value then reaches
+/// ``MeshRoutedProjectionHandler/projectRoutedItem(_:delivery:)``; a judge's is built once the open
+/// has succeeded and reaches ``MeshRoutedLedgerJudge/judgeRoutedItem(_:delivery:)``. Every field is
+/// either inside the
 /// origin's signature (the type token, the item, the mesh and the origin) or a fact this device
 /// derived once for the item: the ledger's author, the instant it first saw the item, the per-origin
 /// budget key, and — for a `.session` row only — whether the item may still enter the session this
@@ -146,7 +150,9 @@ public nonisolated struct MeshRoutedDelivery: Sendable {
     /// The admission ledger's resolution of the origin.
     public let author: MeshRoutedAuthor
     /// When this device first saw the item: the index's `firstSeenAt` on the re-entry pass, the
-    /// delivery door's own instant when the item has just become complete. Never a handler's clock.
+    /// delivery door's own instant when the item has just become complete, and for a ledger judge
+    /// the index's `firstSeenAt`, or the manifest's `createdAt` when the index cannot say. Never a
+    /// handler's or a judge's clock.
     public let seenAt: Date
     /// The per-`(mesh, origin)` budget key the item is counted against: the item's own signed mesh,
     /// never the live one.

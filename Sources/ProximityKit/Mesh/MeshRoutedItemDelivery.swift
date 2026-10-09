@@ -94,8 +94,8 @@ public nonisolated struct MeshRoutedOriginQuotaKey: Hashable, Sendable {
 nonisolated enum MeshRoutedItemDelivery {
 
     /// Opens one routed item as `Body` and returns its body — the one generic opener every
-    /// projection handler's and every ledger judge's body is opened through (plan step A0.5.2 folded
-    /// the photo and text doors into it, and A0.5.3 the heart's).
+    /// projection handler's and every ledger judge's body is opened through (plan steps A0.5.2 and
+    /// A0.5.3).
     ///
     /// The plaintext comes from
     /// ``openPlaintext(_:manifest:identity:maxBlobByteCount:mayDecryptRoutedContent:)``, whose first
@@ -103,11 +103,12 @@ nonisolated enum MeshRoutedItemDelivery {
     /// ``MeshRoutedBody/init(decoding:)``; and its ``MeshRoutedBody/routedItemID`` must be the item id
     /// the origin signed. The id guard holds for every family because every family's id is a key:
     /// the friend-photo surface keys and dedups on the photo id, so a body carrying another sender's
-    /// photo id would land in that row's dedup contest, and `SessionMessageStore` dedups on the
-    /// message id and deliberately never forgets a dropped one, so a body carrying another member's
-    /// message id would consume that id's dedup slot for the session. For a heart it holds for the
-    /// strongest of the three reasons: a heart's body id **is** the gift id `ProximityHeartLedger`
-    /// dedups on and `MeshRoutedHeartAck` proves, so a body carrying another member's gift id would
+    /// photo id would land in that row's dedup contest, and FernletSocial's `SessionMessageStore`
+    /// dedups on the message id and deliberately never forgets a dropped one, so a body carrying
+    /// another member's message id would consume that id's dedup slot for the session. For a heart it
+    /// holds for the strongest of the three reasons: a heart's body id **is** the gift id
+    /// FernletSocial's `ProximityHeartLedger` dedups on and its `MeshRoutedHeartAck` proves, so a body
+    /// carrying another member's gift id would
     /// offer the ledger a judgement about someone else's heart under this origin's signature — the
     /// enforcement half of ``ProximityNamespace/RoutedTypes/heart``'s frozen `itemID == giftID`
     /// contract.
@@ -169,8 +170,7 @@ nonisolated enum MeshRoutedItemDelivery {
     /// tag even if its wrap travels with it. The body's decode and its id guard are the CALLER's,
     /// because they are the steps that differ per family: the generic
     /// ``openBody(_:blob:manifest:identity:maxBlobByteCount:mayDecryptRoutedContent:)`` applies both
-    /// through ``MeshRoutedBody``, for all three families since plan step A0.5.3 retired the heart's
-    /// own door.
+    /// through ``MeshRoutedBody``, for all three families since plan step A0.5.3.
     ///
     /// - Parameters:
     ///   - blob: The reassembled ciphertext.

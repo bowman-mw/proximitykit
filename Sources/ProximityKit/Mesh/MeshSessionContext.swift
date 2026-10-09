@@ -176,7 +176,8 @@ nonisolated struct MeshSessionLocalTermination: Codable, Equatable, Sendable {
 ///   after a process death the session resumes by reconnecting and rotating (plan §8.3), and
 ///   content never depends on the control key (invariant 3). That doc guard is load-bearing
 ///   precisely because THIS type broke the "ProximityKit persists nothing" rule beside it.
-/// - **No message content.** The live transcript (`SessionMessageStore`) stays memory-only; the
+/// - **No message content.** The live transcript (its host's: Fernlet's is FernletSocial's
+///   `SessionMessageStore`) stays memory-only; the
 ///   durable half of a session is membership, not conversation.
 /// - **No display copy.** Every string here is a frozen token or a fingerprint.
 ///

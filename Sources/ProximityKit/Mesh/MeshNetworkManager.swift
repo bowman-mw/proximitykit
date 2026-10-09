@@ -6,13 +6,24 @@ import FernletDomainModel
 
 // MARK: - MeshNetworkManager
 
-/// The friend-mesh session manager — the largest orchestrator in the subsystem. Runs the
-/// `fernlet-friend` radio, forms UWB dwell-committed sessions (a mesh is **founded at the first
-/// commit**: descriptor, membership ledger, founder admission, ceiling and state machine, on both
-/// halves of a pair — see ``foundMesh(_:now:)`` and ``yieldsNewbornMesh(_:to:from:)``),
-/// and hosts every feature that rides the mesh: disposable-camera photos, the clothing shop,
-/// live-session chat, in-session hearts, moderation relay, fuzzy friend state, Group Activities,
-/// the QR verification ceremony, and the post-session keep-as-friend review.
+/// The friend-mesh session manager — the routed mesh engine, and the largest orchestrator in the
+/// subsystem. Runs the `fernlet-friend` radio, forms UWB dwell-committed sessions (a mesh is
+/// **founded at the first commit**: descriptor, membership ledger, founder admission, ceiling and
+/// state machine, on both halves of a pair — see ``foundMesh(_:now:)`` and
+/// ``yieldsNewbornMesh(_:to:from:)``), runs the QR verification ceremony and the session roster the
+/// post-session keep-as-friend review is built from, and carries the payloads and routed items of
+/// the features its host plugs in. The features are the host's — for Fernlet, FernletSocial's mesh
+/// composition (`FernletMeshFeatures`: the session photos and their review, the clothing shop,
+/// live-session chat, in-session hearts, the moderation relay, fuzzy friend state and Group
+/// Activities) — and so are the routed rows they ride (``ProximityHost/meshRoutedTypeEntries``). A
+/// feature plugs in through the engine's seams: the payload token door
+/// (``registerPayloadHandler(forToken:handler:)``) and the captured-slot send
+/// (``sendFeatureEnvelope(_:encodable:via:sealed:)``), the routed origination door
+/// (``originateRoutedItem(body:typeToken:itemID:audience:now:)``), one projection handler or ledger
+/// judge per routed row (``registerRoutedProjectionHandler(_:forToken:)``,
+/// ``registerRoutedLedgerJudge(_:forToken:)``), the capability-list provider
+/// (``localCapabilitiesProvider``), the vouch-list exchange (``vouchListExchange``) and the session
+/// observer (``sessionObserver``).
 ///
 /// Structure: one shared radio — held through `MeshTransportSession`; `NetworkMeshSession` since
 /// the MC→QUIC cutover, and the only radio in the tree since the deletion round — feeds per-peer
@@ -22,7 +33,7 @@ import FernletDomainModel
 /// capped (3 active + 2 lightweight, ranked by
 /// stable UWB distance with hysteresis-guarded overflow eviction) and a symmetric `sid`
 /// comparison picks the single inviter of a mutually-discovered pair. Core mesh-control payloads
-/// are handled in the dispatch switch; feature payloads go through the Phase-1 registry, whose
+/// are handled in the dispatch switch; feature payloads go through the payload registry, whose
 /// committed-slot gate (`slot.fingerprint != nil`) is the security boundary — the coordinator
 /// dispatches with a merely-pending identity and no state gate.
 ///
@@ -30,25 +41,21 @@ import FernletDomainModel
 /// which fires on every Social-tab entry); the SESSION-END moment — ``isSessionLive`` going false,
 /// which since P6 item 2 means the **mesh** ending (End Session, a termination or completed
 /// departure, the five-minute discovery timeout with no peer, or slot loss while no mesh is held)
-/// and never a link blip — promotes the roster AND the session's unreviewed photos into
-/// `pendingFriendReview`, opens the clothing-shop window, and clears the chat transcript. Session
-/// photos are never on the wall before the person chooses (2026-09-30): each one — taken here or
-/// received — is HELD in the sealed pending corpus (`PendingSessionPhotoStore`) from the moment it
-/// exists, the ending moves it in memory only, a relaunch rebuilds the review from that corpus, and
-/// only the answer copies kept photos to the wall. `isInSession` is the surface question, ``hasCommittedPeer``
-/// the "is there a peer right now" question, and ``isSessionLive`` the lifecycle one; all three are
-/// read and they are not interchangeable. Phase-3 group crypto: a lowest-fingerprint coordinator election, a 20 s beacon,
-/// and a 15-minute key rotation distribute the ``MeshGroupKey`` pairwise-wrapped to
-/// handshake-verified KA keys; closed-mode metadata and epoch ≥ 1 photos ride AES-GCM under it.
-/// Chosen photos persist metadata-only in the `PrivateMediaStore`-backed wall (bytes on disk,
-/// rehydrated on demand) with per-sender send/receive quotas; unchosen ones only in the pending
-/// corpus, whose answered tombstones (origin + item id) refuse a routed re-delivery before decrypt.
+/// and never a link blip — drains the session roster into the ending, advances the session-content
+/// generation and tells the session observer, whose host's features act on it (for Fernlet: the
+/// review promotion with the session's unreviewed photos, the clothing-shop window, the chat
+/// transcript's drop and the session hearts' reset). `isInSession` is the surface question,
+/// ``hasCommittedPeer`` the "is there a peer right now" question, and ``isSessionLive`` the
+/// lifecycle one; all three are read and they are not interchangeable. Phase-3 group crypto: a
+/// lowest-fingerprint coordinator election, a 20 s beacon, and a 15-minute key rotation distribute
+/// the ``MeshGroupKey`` pairwise-wrapped to handshake-verified KA keys; closed-mode metadata rides
+/// AES-GCM under it. A routed item rides under its own content key, wrapped per recipient.
 ///
-/// Capabilities (`localCapabilities()`) gate every optional feature per peer, including the 13+
-/// chat age gate — enforced at advertisement, send, AND receive. `wipeIdentityForDeleteAll` is
-/// this manager's leg of the delete-all seam, and `purgeHeldSessionPhotosForDeleteAll` the pending
-/// corpus's. Memory-only session state everywhere except the photo wall, the pending corpus, wall
-/// preferences, and the activity sidecar — none of it synced.
+/// Capabilities (`localCapabilities()`: the host's list, through its provider) tell a peer which
+/// of the host's optional features this device runs. `wipeIdentityForDeleteAll` and
+/// ``beginPrivacyWipe()`` are this manager's legs of the delete-all seam; the features' stores'
+/// legs are the host's. Memory-only session state everywhere except the sealed session context
+/// and the routed store — none of it synced.
 /// `@MainActor @Observable`; the app owns start/stop via tab/scene/lock gating.
 @MainActor
 @Observable
@@ -153,16 +160,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// values off it and checks the peer's introduction under its labels, the labels this manager
     /// signs this side's under; since A0.2.8 the storage scopes its host builds carry it too. Its
     /// family is what the membership verifiers and the ledger adoption keep, so the inventory digest
-    /// tags every record with its family's record kinds, and its routed types are the tokens of the
-    /// routed type registry's rows (``routedTypes``, built from them once at `init`). Every capability
+    /// tags every record with its family's record kinds, and its routed types are the tokens its
+    /// host's routed-type rows are registered under (the registry, ``routedTypes``, is built once at
+    /// `init` from the host's ``ProximityHost/meshRoutedTypeEntries``). Every capability
     /// gate here asks under its capabilities: the wire2 token this manager advertises and frames
     /// sealed sends for, and what a peer that lists no capabilities is taken to support. Its mesh
     /// messages are the tokens of this manager's own frames (``meshToken(_:)``): every engine send is
     /// signed under one, and the payload door resolves each received token to its
-    /// ``MeshPayloadRole`` by them. What this manager still spells itself, its features' payload
-    /// tokens (Fernlet's `PayloadType`, sent through ``sendFeatureEnvelope(_:encodable:via:sealed:)``
-    /// and registered by token), values and capability tokens and the photo stores' names, leaves
-    /// with its feature parts (plan step A0.5).
+    /// ``MeshPayloadRole`` by them. A feature's payload tokens are its host's, never this manager's:
+    /// a feature registers its handler by token (``registerPayloadHandler(forToken:handler:)``) and
+    /// sends under it (``sendFeatureEnvelope(_:encodable:via:sealed:)``), so this manager spells no
+    /// feature's token, value, capability or store name.
     /// `nonisolated`: inert `Sendable` value data.
     @ObservationIgnored nonisolated let namespace: ProximityNamespace
     /// The shared radio, held through ``MeshTransportSession`` so this manager never names one in
@@ -214,8 +222,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// not re-run them mid-session. Reset by `endSessionIfEnded()`.
     @ObservationIgnored private var hasFormedSession = false
     /// The host's session observer (plan step A0.5.6, S15): told each moment of a session's life its
-    /// features act on — a slot commit, a slot loss, a search stop, a session end — at the one site
-    /// where it happens, in today's order (``MeshSessionObserver`` states the contract).
+    /// features act on — a search's start and stop, a slot's commit and loss, the session's end and
+    /// this device's leaving it, a change of the mesh it counts against, a member's removal, a changed
+    /// access gate and a privacy wipe's start — at the one site where it happens
+    /// (``MeshSessionObserver`` states the contract and the order).
     ///
     /// **Weak**: the object that installs it owns it (for Fernlet, FernletSocial's mesh composition,
     /// which owns this manager too), so a manager whose observer is gone runs every moment with no
@@ -534,20 +544,23 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Observable (not `@ObservationIgnored`) because ``isSessionLive`` is what the app's review
     /// presentation guards on, and this is the one leg of it that no observable edge accompanies:
     /// every terminal ``sessionState`` carries `.stopParticipation`, which empties `slots`, and the
-    /// promotion hook writes `pendingFriendReview` — both observed. Cleared by `startSearching()`,
+    /// session observer's ending writes its host's review (for Fernlet, FernletSocial's photo
+    /// object's `pendingFriendReview`) — both observed. Cleared by `startSearching()`,
     /// so re-arming the radios over the same mesh un-ends it.
     private var sessionSearchGaveUp = false
 
     /// How long a session with **no committed peer** keeps searching before door 3 declares it over
     /// (P6 item 2 fix review, finding P2-1). One number, read by this manager's own clock and by
-    /// `ContentView.armDiscoveryTimeout()`, which arms the same interval for a fresh search.
+    /// the app's `armDiscoveryTimeout()` (its proximity run seams'), which arms the same interval
+    /// for a fresh search.
     public static let discoveryGiveUpInterval: TimeInterval = 5 * 60
 
     /// When door 3's clock, armed at the moment the last committed peer went away, comes due.
     ///
     /// **Armed in the manager, not in the tab** (the fix for review finding P2-1). The app's
-    /// `armDiscoveryTimeout()` fires only from `startFriendsDiscovery()` — tab entry or
-    /// scene-active — and bails on `isSearching`, so it is single-shot per visit: a pair that
+    /// `armDiscoveryTimeout()` fires only on the Friends discovery edge that starts or resumes a
+    /// search with no committed peer — tab entry or scene-active — so it is single-shot per
+    /// visit: a pair that
     /// blipped more than five minutes into a visit had **no** door 3 at all, and `isSessionLive`
     /// stayed true for the rest of the process unless the user bounced the Social tab. A session is
     /// manager state, not tab state, so the give-up clock lives here and the tab's arm stays only
@@ -918,13 +931,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// The roster half of the session-end moment (plan step A0.5.11): returns the live roster and
     /// empties it, for `endSessionIfEnded()` to hand to the session observer in
-    /// ``MeshSessionEnd/drainedRoster`` — the drain the review promotion's roster half ran before the
-    /// review left for the host (for Fernlet, FernletSocial's photo object merges the entries into its
-    /// pending review by fingerprint: last write wins, capped at ``maxSessionRosterEntries``, the
-    /// batch never dropped). The roster and its custody stay the engine's: a drained entry reaches the
-    /// host once, and a later ending drains only what committed after it.
+    /// ``MeshSessionEnd/drainedRoster`` — the roster half of the review promotion, whose merge is the
+    /// host's (for Fernlet, FernletSocial's photo object merges the entries into its pending review
+    /// by fingerprint: last write wins, capped at ``maxSessionRosterEntries``, the batch never
+    /// dropped). The roster and its custody are the engine's: a drained entry reaches the host once,
+    /// and a later ending drains only what committed after it.
     ///
-    /// An empty roster is answered empty and left unwritten, as the promotion left it.
+    /// An empty roster is answered empty and left unwritten.
     ///
     /// - Returns: The roster as it stood, in its own order; empty when it held nothing.
     private func drainSessionRoster() -> [MeshSessionRosterEntry] {
@@ -1575,7 +1588,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The policy's background row for a running continuation task is mesh `run`, discovery `stop`:
     /// a live process that must stop browsing and admitting **and keep its links** (invariant 5).
     /// `stopJoin()` funnels through `stopSearching()`, which cancels every slot coordinator, empties
-    /// `slots`, clears the group key and runs the three session-end hooks — a teardown, not a
+    /// `slots`, clears the group key and runs the session-end moment — a teardown, not a
     /// stand-down — so until this verb existed the seam refused that row aloud rather than doing
     /// the wrong thing quietly.
     ///
@@ -1593,7 +1606,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// What it deliberately leaves alone is the rest of `stopSearching()`'s list: the observation
     /// loop (committed slots need it), the slot-scoped bookkeeping a held link still reads, the
     /// committed slots and their coordinators, the epoch keyring and rotation timers, and the
-    /// session-end hooks.
+    /// session-end moment.
     ///
     /// **The clock pauses with the radios** (review finding F-1). A committed link lost DURING a
     /// hold used to arm `armSessionGiveUpClock(now:)` from the slot-loss doors, and five minutes
@@ -1663,10 +1676,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// only escape was End Session.
     ///
     /// It deliberately does **not** call ``startJoin()``, and that is the whole reason it exists:
-    /// `startJoin` empties `sessionPhotos` (into the pending review, since 2026-09-30),
-    /// `photosAddedThisSession`, `sessionQuotaMeshID` and `removedMemberFingerprints` and resets the
-    /// session state machine — so it would take this live session's photos out of its own Develop
-    /// review, hand back a free film quota, forget who was voted out, and **nil the
+    /// `startJoin` tells the session observer a session begins (for Fernlet, FernletSocial's photo
+    /// object moves the live photos into the pending review and resets the film's count and mesh
+    /// pin), empties `removedMemberFingerprints` and resets the session state machine — so it would
+    /// take this live session's photos out of its own Develop review, hand back a free film quota,
+    /// forget who was voted out, and **nil the
     /// session ceiling** on a mesh that can never re-found (``promoteToMesh()`` fires only on
     /// `currentMesh == nil`), leaving a session that can no longer expire. The mesh, the membership
     /// ledger, the ceiling, the advertisement set and the state machine are all kept exactly as they
@@ -1677,10 +1691,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// keyring, `localJoinedEpoch`, the rotation and beacon timers and the `epochLog`
     /// (`clearGroupKeyState()`). So the resumed session holds **no group key** until the heal's
     /// merge or the next rotation re-keys it — named here because the doc above enumerates
-    /// `startJoin`'s resets and this is the one loss the resume cannot avoid. What it no longer
-    /// loses is the ceremony: `stopSearching()`'s three session-end hooks are gated on
-    /// ``isSessionLive``, so standing the radios down over a live mesh no longer consumes the
-    /// friend batch, the shop window or the chat transcript (the P6 item 2 fix). Delivery is
+    /// `startJoin`'s resets and this is the one loss the resume cannot avoid. What it does not
+    /// lose is the ceremony: `stopSearching()`'s session-end moment is gated on ``isSessionLive``,
+    /// so standing the radios down over a live mesh ends nothing for the observer's host (for
+    /// Fernlet, nothing consumes the friend batch, the shop window or the chat transcript: the P6
+    /// item 2 fix). Delivery is
     /// unaffected either way — the routed path wraps per recipient off the key-advertisement set,
     /// which `stopSearching` does not clear.
     ///
@@ -4588,8 +4603,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// The shipping routed type registry: built once, in `init`, from the host's
-    /// ``ProximityHost/meshRoutedTypeEntries`` alone (plan step A0.5.11; beside the engine's resident
-    /// rows from plan step A0.5.9 until the last of them, the photo row, left with the photos), and
+    /// ``ProximityHost/meshRoutedTypeEntries`` alone (the engine registers no row of its own), and
     /// read through ``routedTypes`` unless a test narrowed or widened it.
     @ObservationIgnored private let hostRoutedTypeRegistry: MeshRoutedTypeRegistry
 
@@ -4659,9 +4673,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// per-peer frame budget on every flap is precisely what that budget exists to prevent.
     ///
     /// **The per-origin projection budgets are deliberately absent** (D-13.23a): the photo row's and
-    /// the text row's, each its handler's own since its feature left this manager (FernletSocial's
-    /// photo object and chat, plan steps A0.5.11 and A0.5.9), and no event reaches them at a mesh
-    /// change. Every one of this function's callers is a real "this device moved to another mesh" —
+    /// the text row's, each its handler's own (for Fernlet, FernletSocial's photo object's and
+    /// chat's), and no event reaches them at a mesh change. Every one of this function's callers is a
+    /// real "this device moved to another mesh" —
     /// `leaveMesh()`, a `prepareMembershipLedger` for a different mesh id, the grant-time bootstrap —
     /// and mesh A's items outlive that move (expiry is A's `hardDeadline + 20 min`, and the projection
     /// never compares the item's mesh to the live one). Clearing a budget here would therefore hand an
@@ -6195,8 +6209,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// - **A semantics mismatch** — the caller's audience is not the shape the registry row
     ///   declares — is `.refused(.mintFailed)` plus one audit line, and **no new
-    ///   `MeshRoutedShareRefusal` case**. It is unreachable from the two shipping callers (photos
-    ///   and text pass `.fullRoster`, hearts pass `.recipient`), so a new case would owe
+    ///   `MeshRoutedShareRefusal` case**. It is unreachable from the shipping senders (for Fernlet,
+    ///   FernletSocial's: photos and text pass `.fullRoster`, hearts `.recipient`), so a new case would owe
     ///   `RoutedShareRefusalCopy` two sentences, a catalog row and an `allCases` pin move for a
     ///   condition no user can reach. `mintFailed`'s own doc already covers "a shape the mint's
     ///   guard chain refused by name". This is also the ONLY fence for a `.fullRosterAtCreation`
@@ -6685,8 +6699,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///
     /// Incomplete items are skipped **without** a line: `committingDelivery` would answer
     /// `.unsatisfied` once per item per pass, which is noise for a state a peer's next chunk fixes.
-    /// Since item 5 they are skipped by ``ackableNow(_:in:)`` **before** the allowance is planned
-    /// rather than inside the loop, which is R-19's rule on this list: this list is ordered by
+    /// Since item 5 they are skipped by ``ackableNow(_:in:judgement:)`` **before** the allowance is
+    /// planned rather than inside the loop, which is R-19's rule on this list: this list is ordered by
     /// origin fingerprint, so sixteen items this pass cannot finish, sorted first by an origin that
     /// ground for the position, would hold the whole allowance and strand this device's own
     /// receipts. What the pass DOES attempt is chosen by
@@ -6799,7 +6813,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///   - index: The same index — never a second load.
     ///   - judgement: The pass's one read of the heart stage's device-wide preconditions, per
     ///     registered judge's token (plan step A0.5.3). A judge row no judge is registered for has no
-    ///     entry, and its items wait as an absent heart ledger's did.
+    ///     entry, and its items wait.
     /// - Returns: what to do with it.
     private func ackableNow(
         _ ref: MeshRoutedItemRef, in index: MeshRoutedIndex, judgement: [String: Bool]
@@ -7512,7 +7526,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// precondition, and re-running the ceremony would re-stream the blob and re-ask the ledger on
     /// every pass. The guard mirrors the store's own condition exactly, so the two cannot drift.
     /// Then the judge registered for the row's token is looked up (plan step A0.5.3): a judge row
-    /// with none answers `.none`, the answer an absent heart ledger gave before.
+    /// with none answers `.none`.
     ///
     /// Reached through `committingDelivery`'s `@autoclosure`, so it does not run at all for a
     /// delivery that door refuses (fix review P2-3) — the guard here is the second belt, kept
@@ -7645,16 +7659,16 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// The heart's author, when the ledger resolves it AND the row's judge admits it — with the
     /// FINAL legs marked so they leave job 4's list (P6 item 6; the judge's admission since plan
-    /// step A0.5.3, where the trust vault was asked here).
+    /// step A0.5.3).
     ///
     /// `routedProjectionAuthor` already applies three of the gates before any unwrap — ledger
     /// resolution over `admissions − removals` (D-13.33), the removal set, and the fingerprint
     /// block list — so this adds the judge's admission (for hearts, the trust-vault leg, refused as
     /// `notAFriend`) and the mark, and never a second block check.
     ///
-    /// Inherited residual, unchanged and named: `ModerationBanStore.isPeerBanned` is still not
-    /// consulted on the routed path (only `isBlockedFingerprint`), where `MeshContentGates.folding`
-    /// folds both. The same gap item 4 names; it is not closed here.
+    /// Inherited residual, unchanged and named: FernletSocial's `ModerationBanStore.isPeerBanned` is
+    /// not consulted on the routed path (only `isBlockedFingerprint`), where its
+    /// `MeshContentGates.folding` folds both. The same gap item 4 names; it is not closed here.
     private func eligibleHeartAuthor(
         _ key: MeshRoutedItemKey, _ manifest: MeshRoutedManifest, judge: RoutedJudge
     ) -> MeshRoutedAuthor? {
@@ -7871,8 +7885,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Hands one item to the projection handler registered for its token, and answers whether the
     /// item still owes the projection anything (P6 item 4; a token-keyed lookup of a registered
-    /// ``MeshRoutedProjectionHandler`` since plan step A0.5.2, where it was a `switch` over the
-    /// row's canonical store).
+    /// ``MeshRoutedProjectionHandler`` since plan step A0.5.2).
     ///
     /// The lookup is keyed on `manifest.typeToken` — a **lookup argument**, which
     /// `noShippingCodeBranchesOnARoutedTypeToken` permits and which matches none of its needles —
@@ -7881,8 +7894,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// predicate included) and after the blob read. The order inside is the engine's:
     ///
     /// 1. **A judge row, or a row no handler projects**, logs `mesh.routedProjection.noDispatchArm`
-    ///    and answers `refusedForNow` — the heart arm's answer before the lookup, and never the
-    ///    unknown row's FINAL one, because the row is registered and a handler may still be. For a
+    ///    and answers `refusedForNow` — never the unknown row's FINAL one, because the row is
+    ///    registered and a handler may still be. For a
     ///    judge row it is unreachable by construction since P6 item 6 — the re-entry pass never
     ///    enumerates its token and `finishLocalRungs` filters the live door's call by the same
     ///    derived fact — and kept fail-closed anyway.
@@ -12343,14 +12356,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///    session's review (Phase 2, "Session-end review is model-state, not view-events") — its photo
     ///    object merges the drained roster into the pending batch (last write wins, never a drop) and
     ///    moves the session's unreviewed photos into it, memory only, logged
-    ///    `mesh.session.photosPendingReview` (this manager ran both halves itself, before the epoch's
-    ///    end and the generation's advance, until the photos left it at plan step A0.5.11); then it
-    ///    opens the clothing shop's one-hour post-session window over the catalogs it holds (Phase
-    ///    3a), drops the chat transcript (Phase 5: messages VANISH — where the shop KEEPS catalogs
-    ///    through a 1-hour window, the transcript is dropped immediately, nothing to retain, nothing
-    ///    to sync), and, last, drops the in-session heart's feedback and its in-flight claims (plan
-    ///    step A0.5.10: this manager reset them itself, after the observer, until the session hearts
-    ///    left it).
+    ///    `mesh.session.photosPendingReview`; then it opens the clothing shop's one-hour
+    ///    post-session window over the catalogs it holds (Phase 3a), drops the chat transcript
+    ///    (Phase 5: messages VANISH — where the shop KEEPS catalogs through a 1-hour window, the
+    ///    transcript is dropped immediately, nothing to retain, nothing to sync), and, last, drops
+    ///    the in-session heart's feedback and its in-flight claims.
     ///
     /// Idempotent and cheap: a site that finds the session still live does nothing, and a later
     /// teardown that finds it still ended re-runs legs that have nothing left to move.
@@ -12382,9 +12392,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// review found it (`FernletStore.clearInboxesAndExports` cleared the transcript directly, so the
     /// generation did not move and the just-wiped messages could re-project). Advancing here, once
     /// per moment, is the difference between "the projection agrees with the drop" and "the
-    /// projection agrees with one of the drops". The advance precedes the drop (it followed the clear
-    /// until the transcript left this module): both run synchronously on the main actor at the same
-    /// site, with nothing between them that reads, logs or persists the transcript.
+    /// projection agrees with one of the drops". The advance precedes the drop: both run
+    /// synchronously on the main actor at the same site, with nothing between them that reads, logs
+    /// or persists the transcript.
     private func advanceTranscriptGeneration() {
         // R2/R3: a monotone counter bounded by the number of sessions one process holds; it names
         // a generation, it is never an index into anything.
@@ -12630,10 +12640,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// proximity identity keypairs + every row its host keeps beside them under the identity's
     /// service (Fernlet's backup-escrow rows), with its participant's in-memory key (this manager owns
     /// one of the three live `IdentityService` caches — presence and recipe share hold the others over
-    /// the same keychain rows). Breaks every trust relationship on purpose. The two photo stores'
-    /// in-memory media keys this used to drop next left with the stores at plan step A0.5.11 (for
-    /// Fernlet, FernletSocial's photo object's `invalidateEncryptionKeyCaches()`, which the host's funnel
-    /// calls right after this returns, so a throwing wipe here still skips them, as it always did).
+    /// the same keychain rows). Breaks every trust relationship on purpose. The photo stores'
+    /// in-memory media keys are the host's to drop (for Fernlet, FernletSocial's photo object's
+    /// `invalidateEncryptionKeyCaches()`, which the host's funnel calls right after this returns, so a
+    /// throwing wipe here skips them too).
     ///
     /// **The MC peer-identity archive leg RETIRED here on 2026-09-21** — decision D-4.4, the
     /// owner's, recorded in `Docs/Mesh-Migration-Loop-Ledger-Cutover-2026-09-21.md`. Until the

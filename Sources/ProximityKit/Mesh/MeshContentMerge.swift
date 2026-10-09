@@ -8,9 +8,8 @@
 // missing).* This file is that sentence as code: the generic union every content kind merges by
 // (``MeshContentKey``, ``MeshMergeableContent``, ``MeshContentOrder``, ``MeshContentSet``, public with
 // their union laws since plan step A0.5.1), for the three content kinds a partition can split. The
-// kinds themselves left with their features (plan step A0.5.9 moved the photo and message kinds and
-// the ledger that holds all three to FernletSocial's `MeshContentLedger.swift` with chat, and plan step
-// A0.5.10 the heart kind with the heart ledger):
+// kinds themselves are their features', FernletSocial's: the photo and message kinds and the ledger
+// that holds all three in `Mesh/MeshContentLedger.swift`, and the heart kind beside the heart ledger:
 //
 //   * **Photos** — union by `(author, manifest ID)`, hash-validated on reassembly, then the existing
 //     review flow.
@@ -18,14 +17,15 @@
 //     order `(claimedSentAt clamped to ±10 min of first-seen, senderFingerprint, messageID)`.
 //   * **Hearts** — union by `(author, gift ID)`; the final receipt is still only the foreground
 //     decrypt + heart ledger commit, which is why receipt state is deliberately NOT a field of the
-//     kind. The merged heart left for FernletSocial's `HeartSharing/MeshMergedHeart.swift` at plan
-//     step A0.5.10, with the heart ledger and its commit.
+//     kind. The merged heart is FernletSocial's `HeartSharing/MeshMergedHeart.swift`, beside the
+//     heart ledger and its commit.
 //
 // **The author is part of the identity for all three, and that is the P6 item 4 fix-review change**
-// (finding P1-1; see ``MeshContentKey``). Only the TEXT set has a shipping call site today
-// (`SessionMessageStore`), so only text's hazard was live — but the photo and heart sets are keyed
-// the same way for the same reason: the routed index's key is `(originFingerprint, itemID)` for
-// every family, a manifest publishes that id to the whole roster before delivery, and neither
+// (finding P1-1; see ``MeshContentKey``). Only the TEXT set has a shipping call site
+// (FernletSocial's `SessionMessageStore`), so only text's hazard was live — but the photo and heart
+// sets are keyed the same way for the same reason: the routed index's key is
+// `(originFingerprint, itemID)` for every family, a manifest publishes that id to the whole roster
+// before delivery, and neither
 // `MeshRoutedManifestVerifier` nor `MeshRoutedIndex` refuses a duplicate id from a second origin.
 // Closing it at the protocol means item 6's heart wiring and any future photo wiring inherit the
 // fix rather than re-deriving it. The key is LOCAL: no wire field, no golden, no persisted surface.
@@ -183,9 +183,9 @@ public nonisolated enum MeshContentOrder {
 /// origin's own choice and a manifest publishes it to the whole roster before delivery, so keying
 /// on it alone lets one admitted member spend another's dedup slot) — with the
 /// ``MeshContentOrder``-least copy winning, sorted by that same order oldest-first, and capped
-/// at `Item.setCapacity` keeping the **newest** k — which is what all three live surfaces do
-/// (`SessionMessageStore` drops oldest, the photo wall prefixes a newest-first list,
-/// `ProximityHeartLedger` suffixes its records).
+/// at `Item.setCapacity` keeping the **newest** k — which is what Fernlet's three live surfaces do
+/// (all FernletSocial's: `SessionMessageStore` drops oldest, the photo wall prefixes a newest-first
+/// list, `ProximityHeartLedger` suffixes its records).
 ///
 /// Deliberately **not** `Codable`: this is a merge-time projection, never a persisted surface. The
 /// sealed `MeshSessionContext` schema stays 2 because of it.

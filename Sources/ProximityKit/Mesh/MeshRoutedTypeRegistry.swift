@@ -18,10 +18,9 @@
 // no dispatch and no relay-hop plumbing behind the reserved increment-2 value.
 //
 // The rows are the host's (seam S16): `ProximityHost.meshRoutedTypeEntries`, for Fernlet FernletSocial's
-// `FernletRoutedTypes` — the temporary-message row since plan step A0.5.9, the heart row since A0.5.10
-// and the photo row, the last the engine built itself, since A0.5.11. So the row and its column values
+// `FernletRoutedTypes` (the temporary-message, heart and photo rows). So the row and its column values
 // are public: a host declares its rows through the entry's public initializer, and the registry that
-// resolves them stays the engine's. This file builds no row and reads no routed type of its own.
+// resolves them is the engine's. This file builds no row and reads no routed type of its own.
 
 import Foundation
 
@@ -110,7 +109,7 @@ public nonisolated enum MeshRoutedExpiryRule: String, CaseIterable, Equatable, S
 // MARK: - MeshRoutedContentScope
 
 /// How long a routed type's projected content lives on a destination — the row's content-scope
-/// column (plan step A0.5.2, which replaced the canonical-store column with it).
+/// column (plan step A0.5.2).
 ///
 /// The engine reads it for one thing. A `.session` row's items may enter only the session they were
 /// first offered in, so the projection computes ``MeshTranscriptLiveness`` for each of them and hands
@@ -131,8 +130,7 @@ public nonisolated enum MeshRoutedContentScope: String, CaseIterable, Equatable,
 
 /// One routed type's declaration — plan §11's five columns (size cap, destination semantics,
 /// relay-retention, final-ack condition, expiry) plus the two adjacent ones items 4 and 10 put on
-/// the same row: the foreground-decrypt requirement (derived) and the content scope (declared; the
-/// canonical-store column until plan step A0.5.2).
+/// the same row: the foreground-decrypt requirement (derived) and the content scope (declared).
 ///
 /// **The normative rule, and P6 is held to it:** once a token is registered, its ``finalAck`` and
 /// ``destinations`` are as frozen as the token itself. A ``finalAck`` disagreement between two builds
@@ -152,10 +150,8 @@ public nonisolated enum MeshRoutedContentScope: String, CaseIterable, Equatable,
 /// doc had promised the flip since increment 1). **It is now spent:** the heart row is frozen for
 /// real, and the next semantics change to it is a `…heart.v2` token registered beside it. The v2
 /// route was weighed at the time and is not actually cheaper: a sender mints under its own row's
-/// token (its row by name: the engine's resident rows' since plan step A0.5.2, and the host's,
-/// FernletSocial's `FernletRoutedTypes`, for the heart since plan step A0.5.10 and for every row since
-/// A0.5.11; a lowest-token resolver before it, which sorted `…heart.v1` ahead of `…heart.v2`), so that
-/// path needs the sender re-pointed as well as a row.
+/// token, its row by name (for Fernlet, FernletSocial's `FernletRoutedTypes`), so that path needs
+/// the sender re-pointed as well as a row.
 ///
 /// **Unit caveat for the cap** — the one thing to get right when narrowing a row.
 /// ``maxItemByteCount`` is compared against `MeshRoutedManifest.size`, which is the complete sealed
@@ -166,7 +162,7 @@ public nonisolated enum MeshRoutedContentScope: String, CaseIterable, Equatable,
 /// **formula**, never a literal — the payload's plaintext bound, plus the body family's framed
 /// header allowance (``MeshRoutedItemBodyFormat/headerLengthPrefixByteCount`` plus the family's own
 /// header bound), plus ``MeshRoutedItemSealFormat/overheadByteCount``. P6 item 3's photo row is the
-/// worked example (Fernlet's, in FernletSocial's `FernletRoutedTypes` since plan step A0.5.11): it is
+/// worked example (Fernlet's, in FernletSocial's `FernletRoutedTypes`): it is
 /// exactly that sum over `PrivateMediaStore.maxIncomingPhotoBytes`, and as the widest row it is the
 /// registry's ``MeshRoutedTypeRegistry/maxItemByteCount`` — the one bound the manager holds for its
 /// seal, its open and the delivery projection's resident-blob guard (plan step A0.5.4) — so the
@@ -183,8 +179,8 @@ public nonisolated enum MeshRoutedContentScope: String, CaseIterable, Equatable,
 ///
 /// **Public since plan step A0.5.9 (S16)**, with its columns and its memberwise initializer: a host
 /// declares the routed types its features carry as these rows (``ProximityHost/meshRoutedTypeEntries``),
-/// and every rule above binds a host's row exactly as it binds a resident one. The registry that
-/// accepts or drops a row, and every door that reads one, stay the engine's.
+/// and every rule above binds a host's row. The registry that accepts or drops a row, and every
+/// door that reads one, are the engine's.
 public nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 
     /// The frozen wire spelling this row declares for — the registry's key, from the host
@@ -302,13 +298,12 @@ public nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 /// **The bound a seal and an open take is the widest row** (plan step A0.5.4). The sealer states no
 /// bound of its own: ``maxItemByteCount``, the widest accepted row, is the one number, which
 /// `MeshNetworkManager` clamps from its host registry once, at `init`, and passes to the seal and
-/// the open and reads at the projection's resident-blob guard — so the two ends the earlier note
-/// promised to move together are one value, and the photo row's formula lives only in its row.
+/// the open and reads at the projection's resident-blob guard — so the seal's end and the open's
+/// are one value, and the photo row's formula lives only in its row.
 ///
 /// Shipping code constructs exactly one value, in exactly one file: `MeshNetworkManager`'s `init`
-/// builds `MeshRoutedTypeRegistry(entries:)` over its host's ``ProximityHost/meshRoutedTypeEntries``
-/// (plan step A0.5.11, when the engine's last resident row left with the photos, and with it the
-/// `increment1` builders), spelling the type in full. Shipping code names no other registry member,
+/// builds `MeshRoutedTypeRegistry(entries:)` over its host's ``ProximityHost/meshRoutedTypeEntries``,
+/// spelling the type in full. Shipping code names no other registry member,
 /// reads a routed type off the namespace only where a host's rows are built (FernletSocial's
 /// `FernletRoutedTypes.swift`) and in the namespace's own soundness rules, and branches on no routed
 /// type token anywhere — three source-scan walls in `MeshRoutedStoreIsolationTests` are what keep

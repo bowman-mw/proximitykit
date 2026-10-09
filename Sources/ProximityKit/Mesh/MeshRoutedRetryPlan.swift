@@ -16,8 +16,8 @@
 //
 // This file is the fix, and it is deliberately a **pure value type over keys**: it names no routed
 // type token, no registry, no store and no manifest, so it cannot acquire a per-type opinion (item
-// 6 supplies its heart predicate to the manager's `ackableNow(_:in:)` filter, never here). The
-// per-session state is `MeshRoutedRetryRotation`, memory-only and bounded by
+// 6 supplies its heart predicate to the manager's `ackableNow(_:in:judgement:)` filter, never
+// here). The per-session state is `MeshRoutedRetryRotation`, memory-only and bounded by
 // `MeshRoutedStoreFormat.maxItems` — see its doc for why memory-only is honest here.
 
 import Foundation

@@ -36,8 +36,9 @@ public nonisolated enum MeshRoutedCapability: String, CaseIterable, Equatable, S
     /// Unwrapping a routed item's content key and reading its plaintext.
     case decryptContent
 
-    /// Writing routed plaintext into a canonical store (`ProximityHeartLedger`, the friend-photo
-    /// wall, `SessionMessageStore`). Answered at the **same strength** as ``decryptContent``,
+    /// Writing routed plaintext into a canonical store (its host's: Fernlet's are FernletSocial's
+    /// `ProximityHeartLedger`, friend-photo wall and `SessionMessageStore`). Answered at the **same
+    /// strength** as ``decryptContent``,
     /// deliberately: a plaintext write is not a weaker act than a plaintext read.
     case mutateCanonicalStore
 }

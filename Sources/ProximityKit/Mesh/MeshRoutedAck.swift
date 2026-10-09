@@ -108,8 +108,8 @@ nonisolated struct MeshRoutedAckStageRow: Equatable, Sendable {
 /// rows — one per routed type, carrying the other four columns plan §11 makes a type declare — and
 /// builds this table from them. The table survives so item 4's door contract (D-4.7) and its pins
 /// keep asserting through the new source; a caller still hands a table to a door, and the registry
-/// is what decided what is in it. Its `increment1(_:)` shape, which no shipping code called, left
-/// for the test target at plan step A0.5.9 (S16), where it reads the registry the suites build.
+/// is what decided what is in it. Its `increment1(_:)` factory is the test target's (S16), which
+/// reads the registry the suites build; no shipping code has one.
 nonisolated struct MeshRoutedAckStageTable: Equatable, Sendable {
     /// Most rows a table holds. The routed type rows are a compile-time literal; this cap is
     /// what makes the build loop bounded (Power of 10 R2/R4) rather than a policy number.
@@ -174,8 +174,8 @@ nonisolated enum MeshRoutedAckEvidence: Equatable, Sendable {
     case none
     /// ``MeshRoutedAckStage/foregroundDecryptAndLedgerCommit``'s only accepted form: the engine's
     /// record that the ledger judge registered for the item's row committed it, minted from the
-    /// judge's answer and never by the judge (plan step A0.5.3; `heartLedgerCommit`, carrying the
-    /// heart ack itself, before it). The stage check refuses one that names another item.
+    /// judge's answer and never by the judge (plan step A0.5.3). The stage check refuses one that
+    /// names another item.
     case ledgerCommit(MeshRoutedLedgerCommit)
 }
 

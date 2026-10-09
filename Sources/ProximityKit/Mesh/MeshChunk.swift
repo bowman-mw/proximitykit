@@ -109,7 +109,8 @@ nonisolated enum MeshChunkFormat {
 /// would be the same 32 bytes, so a chunk hash could be replayed as a content hash. Each digest
 /// therefore carries its own `Hash` purpose as a length-prefixed prefix, exactly as
 /// `canonicalInventoryDigestBytes` does — the post-standardization house rule
-/// (`MeshPhotoReassembly`'s bare SHA-256 is the pre-standardization form and is not the model).
+/// (FernletSocial's `MeshPhotoReassembly`, a bare SHA-256, is the pre-standardization form and is
+/// not the model).
 ///
 /// **Whose labels.** Since ProximityKit plan step A0.2.6 every function here takes its domain from
 /// the caller's `in purposes:` — the host namespace's `purposes.hash.<field>`, with no default —

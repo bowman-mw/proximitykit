@@ -16,29 +16,32 @@ import FernletDomainModel
 /// ``proximityInstallBinding``, the session trust policy every connection's coordinator consults,
 /// ``makeProximityTrustPolicy()``, the device identity a manager holds, ``makeProximityIdentity()``,
 /// and the routed types its features carry, ``meshRoutedTypeEntries``. The requirements only a host's
-/// social features read — its trusted-peer records, its durable trust store and the in-person hearts
-/// opt-in — left this protocol for FernletSocial's `FernletSocialHost`, which refines it, at plan step
-/// A0.5.10, once no code in this module read them.
+/// social features read — its trusted-peer records, its durable trust store, the in-person hearts
+/// opt-in and the heart-eligibility predicate over them — are FernletSocial's `FernletSocialHost`'s,
+/// a refinement of this protocol: no code in this module reads them.
 @MainActor
 public protocol ProximityHost: AnyObject {
     var proximityDisplayName: String { get }
     func isBlockedFingerprint(_ fingerprint: String) -> Bool
     func blockProximityPeer(signingPublicKey: Data)
-    /// Root directory for the proximity subsystem's on-disk sidecars — the friend photo-wall index
-    /// (`MeshPhotoCache.sealed`, GCM-sealed under the friend-wall media key; a legacy plaintext
-    /// `MeshPhotoCache.json` is read once, resealed, and deleted by `PrivateMediaStore.loadIndex()`)
-    /// and its preferences (`MeshPhotoWallPreferences.json`), and the
-    /// heart-drop set the app hangs off the same root (`HeartLedger.json` plus the three sealed
-    /// sidecars named by FernletSocial's `HeartDropStorageScope`).
+    /// Root directory for the proximity subsystem's on-disk files: this module's two sealed mesh
+    /// stores, through the default ``meshSessionStorage`` and ``meshRoutedStorage`` built from it, and
+    /// the files a host's mesh features keep on the same root — for Fernlet, FernletSocial's session
+    /// photos' friend photo-wall index (`MeshPhotoCache.sealed`, GCM-sealed under the friend-wall media
+    /// key; a legacy plaintext `MeshPhotoCache.json` is read once, resealed, and deleted by
+    /// `PrivateMediaStore.loadIndex()`), its preferences (`MeshPhotoWallPreferences.json`) and the
+    /// pending session-photo corpus (`PendingSessionPhotos/`), the activity ledger
+    /// (`ActivityLedger.json`), and the heart set (`HeartLedger.json` plus the three sealed sidecars
+    /// named by FernletSocial's `HeartDropStorageScope`).
     ///
-    /// Comes through the HOST rather than being a constant inside `MeshNetworkManager` because it is
-    /// shared *mutable on-disk state*: `deletePhoto` and an answer's keep re-save the whole wall
-    /// index, every hold and answer rewrites the pending session-photo index beside it
-    /// (`PendingSessionPhotos/`, 2026-09-30), and every manager loads both at init. With one process-wide path, a manager built
-    /// in one test reads (and overwrites) the wall of every other live one — and under the test
-    /// runner, where XCTest and Swift Testing suites run in parallel in ONE process, that is a live
-    /// cross-suite race. Routing it through the host means every `MeshNetworkManager(store:)` site
-    /// inherits its store's isolation for free. Same reasoning as
+    /// Comes through the HOST rather than being a constant because it is shared *mutable on-disk
+    /// state*: a photo's delete and an answer's keep re-save the whole wall index, every hold and
+    /// answer rewrites the pending session-photo index beside it (2026-09-30), and every session-photo
+    /// object loads both at init. With one process-wide path, a store built in one test reads (and
+    /// overwrites) the wall of every other live one — and under the test runner, where XCTest and
+    /// Swift Testing suites run in parallel in ONE process, that is a live cross-suite race. Routing it
+    /// through the host means every manager and composition built over a store inherits its isolation
+    /// for free. Same reasoning as
     /// `FernletStore.photoDocumentsDirectory`, for the corpus on the other side of the media-key split.
     ///
     /// The heart-drop sidecars share this root but need a second half the wall does not: they are
@@ -74,16 +77,16 @@ public protocol ProximityHost: AnyObject {
     /// wire, keychain and disk formats identify the app it runs in, as the one ``ProximityNamespace``
     /// the host builds at its composition root. The radios, their postures and ``PeerNameDisplay`` read
     /// the radios' presentation strings off it too. It also carries the payload vocabulary, which this
-    /// module reads off it as well: the envelope, the coordinator, the managers, the inventory digest,
-    /// the routed type registry and the mesh engine's own frames; the mesh features' payload and
-    /// capability tokens are still Fernlet's cases until plan steps A0.5 and A0.7 move them.
-    /// Some such strings stay outside it until a later step: the feature labels this module reads from
-    /// FernletCrypto's registry (the activities' and the moderation report's, until A0.5); the heart
-    /// dead-drop's keychain service and the moderation ban store's are FernletSocial's, which also names
-    /// presence's epoch-tag prefix, and the sealed-backup escrow's labels are its app's.
-    /// `ProximityNamespaceBoundaryTests` allowlists each feature-label read, each literal that spells
-    /// `fernlet` and each line that still names one of Fernlet's domain types, with the step that
-    /// removes it.
+    /// module reads off it as well: the envelope, the coordinator, the managers, the inventory digest
+    /// and the mesh engine's own frames; the routed-type rows a host supplies are keyed by its routed
+    /// types. A host's features' payload and capability tokens are the host's own (Fernlet's
+    /// FernletSocial features spell `PayloadType` and `ProximityCapability` raw values through this
+    /// module's token doors), and so are its feature labels: this module reads none from
+    /// FernletCrypto's registry. The heart dead-drop's keychain service and the moderation ban store's
+    /// are FernletSocial's, which also names presence's epoch-tag prefix and the activities' and the
+    /// moderation report's signature labels, and the sealed-backup escrow's labels are its app's.
+    /// `ProximityNamespaceBoundaryTests` allowlists each literal that spells `fernlet` and each line
+    /// that still names one of Fernlet's domain types, with the step that removes it.
     ///
     /// **Deliberately no default.** The extension below hands a host that carries no value of its
     /// own the sidecar root and the two storage scopes; it hands out no namespace, and never will.
@@ -98,7 +101,8 @@ public protocol ProximityHost: AnyObject {
     /// Read once, at construction: ``MeshNetworkManager`` and ``ProximityRecipeShareManager`` here,
     /// and FernletSocial's `PresenceManager`, each keep their own copy, build the radio they own by
     /// default from it and check against it the identity they own (``makeProximityIdentity()``'s when
-    /// they are handed none), so no later read reaches back to the host. The extension below also
+    /// they are handed none), so no later read reaches back to the host; FernletSocial's mesh features
+    /// read the copy their composition's host holder keeps the same way. The extension below also
     /// builds this host's default sidecar root and both storage scopes from it, and every scope
     /// carries it to the store that reads its names.
     var proximityNamespace: ProximityNamespace { get }
@@ -159,8 +163,8 @@ public protocol ProximityHost: AnyObject {
     /// another namespace makes it audit `<area>.identity.namespaceMismatch` and start no radio.
     func makeProximityIdentity() -> IdentityService
 
-    /// The host's routed-type rows: the routed types its own features mint and project, beyond the
-    /// engine's resident rows (plan step A0.5.9, seam S16).
+    /// The host's routed-type rows: every routed type its features mint, project or judge. The engine
+    /// declares none of its own.
     ///
     /// **No default, like ``proximityNamespace``.** Which routed types a host's features carry, and
     /// each one's cap, destination semantics, retention, final acknowledgement, expiry and content
@@ -168,15 +172,16 @@ public protocol ProximityHost: AnyObject {
     /// fails to compile. Each row's token is read off the host's own namespace's routed types, so a
     /// host never registers another app's spelling.
     ///
-    /// Read once, by ``MeshNetworkManager``'s initializer, which builds its routed type registry from
-    /// its resident rows first and these after them: a token's first row wins, so a host row never
-    /// displaces a resident one; at most sixteen rows are read; and a row the engine cannot register
-    /// (a relay retention it does not implement, a cap outside the wire bound) is dropped, its token
-    /// then refused at every door. Every door that admits, resolves, acknowledges or forwards an item
-    /// reads that registry, and a projection handler registers only under one of its rows. Fernlet's
-    /// app answers FernletSocial's `FernletRoutedTypes.entries` over its namespace's routed types (the
-    /// temporary-message row today) in `ProximityHostAdapter.swift`; the test target's doubles answer
-    /// the same through one test-only extension the app's conformance cannot see.
+    /// Read once, by ``MeshNetworkManager``'s initializer, which builds its one routed type registry
+    /// from these rows alone: a token's first row wins; at most sixteen rows are read; and a row the
+    /// engine cannot register (a relay retention it does not implement, a cap outside the wire bound)
+    /// is dropped, its token then refused at every door. The widest accepted row's cap is the one
+    /// resident bound the engine's seal, open and projection guard share. Every door that admits,
+    /// resolves, acknowledges or forwards an item reads that registry, and a projection handler or a
+    /// ledger judge registers only under one of its rows. Fernlet's app answers FernletSocial's
+    /// `FernletRoutedTypes.entries` over its namespace's routed types (the temporary-message, heart and
+    /// photo rows) in `ProximityHostAdapter.swift`; the test target's doubles answer the same through
+    /// one test-only extension the app's conformance cannot see.
     var meshRoutedTypeEntries: [MeshRoutedTypeEntry] { get }
 }
 

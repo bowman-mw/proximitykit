@@ -7,11 +7,13 @@
 // labels, so none is a `StaticString` and none takes a role. ProximityKit reads every group here: the
 // identity envelope the payload rules (it seals and parks by them), the session coordinator the
 // session messages and the capabilities, the mesh and presence managers the wire2 token they
-// advertise (and the mesh frames by), the inventory digest the membership record kinds, the routed
-// type registry the routed types, and the mesh manager the mesh messages its engine signs and
-// dispatches its own frames under. The mesh features' payload and capability tokens are still
-// Fernlet's `PayloadType` and `ProximityCapability` cases until plan steps A0.5 and A0.7 move them,
-// and for Fernlet the two spellings are equal, which `ProximityVocabularyGoldenTests` holds.
+// advertise (and the mesh frames by), the inventory digest the membership record kinds, and the
+// mesh manager the mesh messages its engine signs and dispatches its own frames under; the routed
+// types it only holds to its soundness rules, because the routed type registry's rows are the
+// host's, registered under them. The payload and capability tokens of the features a host runs on
+// the mesh are the features' own (Fernlet's are FernletDomainModel's `PayloadType` and
+// `ProximityCapability` cases, which FernletSocial's features register and check by), and for
+// Fernlet the two spellings are equal, which `ProximityVocabularyGoldenTests` holds.
 
 import Foundation
 
@@ -218,12 +220,14 @@ nonisolated extension ProximityNamespace {
 
     // MARK: - RoutedTypes
 
-    /// The routed engine's type tokens: the three types it registers rows for, and one reserved.
+    /// The family's routed type tokens: the three types its hosts' features register rows for, and
+    /// one reserved.
     ///
     /// A type token is signed into every routed manifest and bound into the routed item seal's
-    /// authenticated data. These are the engine's three registered types plus the reserved one:
-    /// ProximityKit's routed type registry builds its three rows from them and reads them nowhere
-    /// else. They become host-registered rows when plan step A0.5 moves their features out.
+    /// authenticated data. ProximityKit holds them to its soundness rules and builds nothing from
+    /// them: the routed type registry's rows are the host's (``ProximityHost/meshRoutedTypeEntries``),
+    /// and Fernlet's, FernletSocial's `FernletRoutedTypes`, are built over these tokens. No row is
+    /// registered under the reserved one.
     public nonisolated struct RoutedTypes: Hashable, Sendable {
         /// A friend photo.
         public let photo: String

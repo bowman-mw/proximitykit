@@ -209,11 +209,10 @@ public final class IdentityService {
     /// unscoped signing oracle.
     ///
     /// **Transitional** (plan step A0.2.3). A namespace label signs through the
-    /// `ProximityCryptographicPurpose` overload below; this one stays for FernletCrypto's registry:
-    /// the activity join token's, roster snapshot's and moderation report's labels until plan step
-    /// A0.5 takes them out with the mesh manager's feature parts, the app's duress and probe purposes
-    /// until C1, and the tests that name them. Every core label's builder signs through the namespace
-    /// overload since step A0.2.5.
+    /// `ProximityCryptographicPurpose` overload below; this one stays for FernletCrypto's registry
+    /// until C1: FernletSocial's activity join token, roster snapshot and moderation report labels,
+    /// the app's duress and probe purposes, and the tests that name them. Every core label's builder
+    /// signs through the namespace overload since step A0.2.5.
     /// The purpose's type picks the overload. No deprecation attribute: warnings are errors.
     public func sign(_ data: Data, purpose: CryptographicPurpose) throws -> Data {
         guard let key = signingKey else { throw IdentityError.notProvisioned }
@@ -270,7 +269,7 @@ public final class IdentityService {
     ///
     /// **Transitional** (plan step A0.2.3), like the `CryptographicPurpose` `sign`: a namespace label
     /// verifies through the `ProximityCryptographicPurpose` overload below, and this one stays for
-    /// FernletCrypto's registry until the labels it serves move.
+    /// FernletCrypto's registry until C1, for the same callers.
     public nonisolated static func verify(
         _ signature: Data,
         of data: Data,
