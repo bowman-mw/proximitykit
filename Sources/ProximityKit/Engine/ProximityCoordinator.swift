@@ -1,7 +1,6 @@
 import Foundation
 import Combine
 import Observation
-import UIKit
 import FernletDomainModel
 
 /// Diagnostic sink for a ``ProximityCoordinator``'s session lifecycle: state transitions,

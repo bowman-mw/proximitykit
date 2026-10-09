@@ -39,7 +39,6 @@
 // The wire format remains the types' synthesized `Codable` conformance (unchanged).
 
 import Foundation
-import FernletCrypto
 import FernletDomainModel
 
 // WI-9: every declaration in this file is `nonisolated`. ProximityKit sets

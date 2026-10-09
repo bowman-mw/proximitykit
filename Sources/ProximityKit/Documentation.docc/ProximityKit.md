@@ -800,8 +800,8 @@ participant every identity the app builds carries, with the escrow's two feature
 dependencies to `FernletCrypto` and `FernletDomainModel`. What still ties this module to Fernlet
 leaves in these steps:
 
-- **A0.6** takes the mesh manager's last `UIKit` import, which nothing in it uses since the photo
-  capture's resize left with the session photos.
+- **A0.6** moves the Live Activity reaper, which only cleans up after Fernlet's own earlier builds, to
+  the app.
 - **A0.7 and C5** make the one-to-one radio a profile-driven pair session and add its coach profile.
   The recipe-share manager, its wire types and status copy, and the typed doors only it and Fernlet's
   features go through (the envelope's typed view of its token and the coordinator's typed send)

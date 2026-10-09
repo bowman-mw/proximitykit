@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import UIKit
 import FernletDomainModel
 
 /// One live recipe-share pairing: the peer, its channel + coordinator, and (once the handshake
