@@ -16,9 +16,9 @@
 // **The stage is never on the wire.** A `MeshRecipientReceipt` says only "delivered"; what that
 // meant is resolved on both sides from the manifest's ORIGIN-signed `typeToken`. A recipient has no
 // field in which to state a weaker rule. What keeps the resolution single is item 11's one registry
-// plus the source-scan wall asserting shipping code names only
-// ``MeshRoutedAckStageTable/increment1(_:)`` — said out loud here rather than claimed as a property
-// of the types.
+// plus the source-scan wall asserting shipping code names no `MeshRoutedAckStageTable` member at all
+// and builds the table only as the registry's projection — said out loud here rather than claimed as
+// a property of the types.
 //
 // What is deliberately NOT here: any store extension (so tier 1 can build a stage with no disk
 // root), any decryption or unwrap, any dispatch, and any acceptance decision about an unknown token
@@ -36,13 +36,15 @@ import Foundation
 /// in — so the only way two members can disagree about what "delivered" meant is by resolving the
 /// same token through two different tables. Item 4 does not close that by itself: the table is a
 /// door parameter, and what makes it ONE table is item 11's registry plus the source-scan wall
-/// asserting shipping code names only ``MeshRoutedAckStageTable/increment1(_:)``. That is said here
-/// rather than claimed as a guarantee this type carries.
+/// asserting shipping code names no `MeshRoutedAckStageTable` member and builds the table only as
+/// the registry's projection. That is said here rather than claimed as a guarantee this type carries.
 ///
 /// Deliberately **not** ordered and deliberately without a rank: a heart is not "further along"
 /// than a photo, and a max-merge over stages would be meaningless. The monotone ladder is
 /// `MeshDeliveryState`'s, unchanged.
-nonisolated enum MeshRoutedAckStage: String, CaseIterable, Equatable, Sendable {
+///
+/// Public as the final-ack column of a host's ``MeshRoutedTypeEntry`` (plan step A0.5.9, S16).
+public nonisolated enum MeshRoutedAckStage: String, CaseIterable, Equatable, Sendable {
     /// Final on a verified, known item — no content retention, no decrypt, no foreground.
     ///
     /// The ACK RECORD is still what must be durable (plan §3.6): nothing is acknowledged before the
@@ -97,16 +99,17 @@ nonisolated struct MeshRoutedAckStageRow: Equatable, Sendable {
 /// manifest verifier.
 ///
 /// Injected rather than global (`MeshRoutedStore.committingDelivery(item:recipient:stages:evidence:now:)`
-/// takes it) so policy stays item 11's. Shipping code names exactly one value, ``increment1(_:)``,
-/// and a source-scan wall in `MeshRoutedStoreIsolationTests` is what keeps that true — a fixture
-/// table is a test-only affordance.
+/// takes it) so policy stays item 11's. Shipping code names no value of this type at all: the one
+/// table a door is handed is the manager's registry's ``MeshRoutedTypeRegistry/ackStages``, and a
+/// source-scan wall in `MeshRoutedStoreIsolationTests` is what keeps that true — a fixture table is a
+/// test-only affordance.
 ///
 /// **Since P5 item 11 this type is a PROJECTION, not a source.** ``MeshRoutedTypeRegistry`` owns the
 /// rows — one per routed type, carrying the other four columns plan §11 makes a type declare — and
-/// ``increment1(_:)`` is `MeshRoutedTypeRegistry.increment1(_:)`'s `ackStages` over the same routed
-/// types. The table survives so item 4's door contract (D-4.7) and its pins keep asserting through
-/// the new source; a caller still hands a table to a door, and the registry is what decided what is
-/// in it.
+/// builds this table from them. The table survives so item 4's door contract (D-4.7) and its pins
+/// keep asserting through the new source; a caller still hands a table to a door, and the registry
+/// is what decided what is in it. Its `increment1(_:)` shape, which no shipping code called, left
+/// for the test target at plan step A0.5.9 (S16), where it reads the registry the suites build.
 nonisolated struct MeshRoutedAckStageTable: Equatable, Sendable {
     /// Most rows a table holds. The routed type rows are a compile-time literal; this cap is
     /// what makes the build loop bounded (Power of 10 R2/R4) rather than a policy number.
@@ -127,20 +130,6 @@ nonisolated struct MeshRoutedAckStageTable: Equatable, Sendable {
             resolved[row.typeToken] = row.finalAck
         }
         stages = resolved
-    }
-
-    /// Plan §11's three registered types, **projected from item 11's registry** — the rows live in
-    /// ``MeshRoutedTypeRegistry/increment1(_:)``, and this value is the `finalAck` column of them,
-    /// keyed by the tokens of the routed types it is handed.
-    ///
-    /// Derived rather than re-listed: the accepted-token set and the stage column come from one
-    /// source, so they cannot drift. Control is deliberately absent
-    /// (``ProximityNamespace/RoutedTypes/control``) because no row registers it.
-    ///
-    /// - Parameter routedTypes: The routed types of the namespace the caller holds.
-    /// - Returns: The three registered types' stages, keyed by their tokens in `routedTypes`.
-    static func increment1(_ routedTypes: ProximityNamespace.RoutedTypes) -> MeshRoutedAckStageTable {
-        MeshRoutedTypeRegistry.increment1(routedTypes).ackStages
     }
 
     /// Every token this table knows. Item 11 folds these rows into its registry and derives its

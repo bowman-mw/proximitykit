@@ -156,7 +156,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored public var onHeartReceived: ((String) -> Void)?
     /// Test seam: fires with the ORIGINATION OUTCOME whenever an in-session heart is minted — the
     /// last statement before the outcome is consumed, so a unit test can assert what the mint said
-    /// without reaching into the store (mirrors `onTextSendForTesting`, and renamed from
+    /// without reaching into the store (mirrors the chat's `onTextSendForTesting`, and renamed from
     /// `onSessionHeartSendForTesting` so the retired spelling can be pinned at zero: there is no
     /// slot on the routed path, so a seam that fired with a slot id could not be re-aimed in place).
     @ObservationIgnored var onHeartSendForTesting: ((MeshRoutedOriginationOutcome) -> Void)?
@@ -183,12 +183,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     @ObservationIgnored private var sessionHeartSendsInFlight: Set<String> = []
     /// A photo was exchanged with this friend in the current session (feeds the closeness photo signal).
     @ObservationIgnored public var onFriendPhotoSession: ((String) -> Void)?
-    /// The live-session temporary-message store (Phase 5): the current session's chat transcript.
-    /// Registered on the payload registry in `init`. Memory-only and deliberately NOT Codable — it can
-    /// never enter a snapshot. Cleared at EVERY session-end path (the same last-committed-slot-gone
-    /// moment that promotes `pendingFriendReview` / opens the shop window) and on the next session
-    /// formation. Unlike the shop's 1-hour window, messages do NOT outlive the session — they vanish.
-    public let sessionMessages = SessionMessageStore()
     /// Why an in-session heart was not sent — a **frozen English token**, never copy (P6 item 6).
     ///
     /// The case this replaced, `failed(message: String)`, composed six sentences inside ProximityKit
@@ -446,8 +440,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `!isSessionLive` condition the review promotion keys on — so a link blip no longer ends the
     /// formation, and the heal that follows it is not a new one). The session-formation fact (plan
     /// step A0.5.6): `noteSlotCommittedForShop` reads it into ``MeshSlotCommit/formsSession`` and
-    /// sets it, so the formation legs — the session observer's (the clothing shop's new session) and
-    /// the engine's own (the chat transcript's clear) — run exactly once per formation; later commits,
+    /// sets it, so the formation legs — the engine's own (the session-content generation's advance)
+    /// and the session observer's (the clothing shop's new session, the chat transcript's clear) — run
+    /// exactly once per formation; later commits,
     /// ``announcePromotedMesh()``'s committed loop, and a re-handshake of the only committed slot must
     /// not re-run them mid-session. Reset by `endSessionIfEnded()`.
     @ObservationIgnored private var hasFormedSession = false
@@ -461,13 +456,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// inside the initializer that builds the manager — so no commit, ending or radio start runs
     /// without it.
     @ObservationIgnored public weak var sessionObserver: (any MeshSessionObserver)?
-    /// Test seam: fires ONCE per `sendTempMessage(_:)` call with what the send decided (P6 item 4).
-    ///
-    /// Re-aimed from the retired per-slot fan-out, which fired once per addressed slot with that
-    /// slot's id: there are no per-slot sends any more — the mint stages one item and
-    /// `pushOriginatedItem` offers it — so the observable fact is the outcome, not a slot list. The
-    /// name changed with the meaning so the retirement wall can pin the old one at zero.
-    @ObservationIgnored var onTextSendForTesting: ((MeshTextSendOutcome) -> Void)?
     @ObservationIgnored private(set) var removedMemberFingerprints: Set<String> = []
     /// The one peer the user asked to remove through the pairwise shortcut of
     /// ``proposeRemoval(of:)``: refused by the session roster from the tap until the session is torn
@@ -685,7 +673,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         self.store = store
         let namespace = store.proximityNamespace
         self.namespace = namespace
-        let hostRoutedTypeRegistry = MeshRoutedTypeRegistry.increment1(namespace.family.vocabulary.routedTypes)
+        let hostRoutedTypeRegistry = MeshRoutedTypeRegistry.increment1(
+            namespace.family.vocabulary.routedTypes, hostEntries: store.meshRoutedTypeEntries
+        )
         self.hostRoutedTypeRegistry = hostRoutedTypeRegistry
         self.residentRoutedRows = MeshRoutedTypeRegistry.increment1Rows(namespace.family.vocabulary.routedTypes)
         self.routedResidentBlobBound = Int(clamping: hostRoutedTypeRegistry.maxItemByteCount)
@@ -1085,8 +1075,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// the same verdict (the `wallclock-deadlines-vs-mainactor-starvation` lesson).
     @ObservationIgnored private var sessionGiveUpTask: Task<Void, Never>?
 
-    /// Which transcript this device is showing — a monotone counter bumped at **every** clear
-    /// (P6 item 2 fix review, finding P2-3; P6 item 4's projection reads it).
+    /// Which transcript this device is showing — a monotone counter advanced at **every** moment the
+    /// session's content is dropped (P6 item 2 fix review, finding P2-3; P6 item 4's projection reads
+    /// it): a session's formation, its end and a privacy wipe's start, each in
+    /// ``advanceTranscriptGeneration()`` just before the session observer is told, whose host drops
+    /// the transcript it holds (for Fernlet, FernletSocial's chat, since plan step A0.5.9).
     ///
     /// ``isSessionLive`` is REVERSIBLE — `startSearching()` clears `sessionSearchGaveUp`, so a
     /// resumed pair un-ends a session door 3 had given up on — while the transcript clear that ran
@@ -4011,19 +4004,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// reaches disk, and the ciphertext it accounts for has its own row.
     @ObservationIgnored private var routedOriginPhotoQuota: [MeshRoutedOriginQuotaKey: Set<UUID>] = [:]
 
-    /// How many messages one origin may project into one mesh's transcript. See
-    /// ``allowIncomingRoutedText(_:from:)`` for why this replaced a per-second token bucket and for
-    /// everything else that bounds a hostile origin.
-    ///
-    /// Twenty times the photo cap (`maxPhotosPerSenderPerSession`, 10) because a conversation is not
-    /// a film roll: the ring the transcript shows is 500 rows and `maxSeenIDs` is 2000, so a cap
-    /// materially above 500 would be decoration.
-    static let maxTextMessagesPerSenderPerSession = 200
-
-    /// The incoming per-`(mesh, origin)` MESSAGE budget — the twin of ``routedOriginPhotoQuota``,
-    /// with the same keying, the same bounds and the same reason for both.
-    @ObservationIgnored private var routedOriginTextQuota: [MeshRoutedOriginQuotaKey: Set<UUID>] = [:]
-
     /// Which transcript generation each routed item was first offered to the projection in — the
     /// third leg of ``transcriptLiveness(for:)``, and the one the item's mesh cannot supply.
     ///
@@ -4071,12 +4051,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// Everything that spends a bounded per-pass allowance on projection work reads this, so an
     /// unfinishable type cannot occupy a slot forever (R-19).
     ///
-    /// **The text row is conditional on ``isChatAllowed``** — its built-in handler's
-    /// `isProjectable` — which is R-19's own rule applied to a device that cannot finish the type
-    /// rather than to a build that cannot: below the 13+ line every text item would refuse at its
-    /// handler's age gate, and sixteen of them sorted first would strand a photo behind them until
-    /// expiry — the index is ordered by origin fingerprint, so that position is an attacker's to
-    /// choose.
+    /// **The text row is conditional on its handler's `isProjectable`** — for Fernlet,
+    /// FernletSocial's chat's 13+ gate since plan step A0.5.9 — which is R-19's own rule applied to a
+    /// device that cannot finish the type rather than to a build that cannot: below the 13+ line every
+    /// text item would refuse at its handler's age gate, and sixteen of them sorted first would strand
+    /// a photo behind them until expiry — the index is ordered by origin fingerprint, so that position
+    /// is an attacker's to choose.
     private var projectableRoutedTypeTokens: Set<String> {
         // R2: bounded by the registry's rows (at most `MeshRoutedTypeRegistry.maxEntries`).
         routedTypes.tokens.filter { routedProjectors[$0]?.isProjectable() == true }
@@ -5993,7 +5973,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         MeshRoutedStore(scope: store.meshRoutedStorage)
     }
 
-    /// The shipping routed type registry: built once, in `init`, from ``namespace``'s routed types,
+    /// The shipping routed type registry: built once, in `init`, from ``namespace``'s routed types
+    /// (the resident rows) and the host's ``ProximityHost/meshRoutedTypeEntries`` (plan step A0.5.9),
     /// and read through ``routedTypes`` unless a test narrowed or widened it.
     @ObservationIgnored private let hostRoutedTypeRegistry: MeshRoutedTypeRegistry
 
@@ -6013,11 +5994,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The engine's resident routed rows by name, built once in `init` from the same routed types as
     /// ``hostRoutedTypeRegistry`` (plan step A0.5.2, S9).
     ///
-    /// Read for exactly two things: the token each built-in projection handler and the built-in
-    /// ledger judge registers under (plan step A0.5.3 added the judge), and the token each of the
-    /// three senders mints under — always behind ``isRoutedTypeRegistered(_:)``, so a test's narrowed
+    /// Read for exactly two things: the token the built-in projection handler and the built-in
+    /// ledger judge register under (plan step A0.5.3 added the judge), and the token each of the
+    /// two senders mints under — always behind ``isRoutedTypeRegistered(_:)``, so a test's narrowed
     /// registry still refuses the mint. Never a second registry: no door admits, resolves or
-    /// forwards by it.
+    /// forwards by it. The temporary-message row, its handler and its sender left with chat at plan
+    /// step A0.5.9: FernletSocial registers the handler and mints under the host's row.
     @ObservationIgnored private let residentRoutedRows: MeshRoutedResidentRows
 
     /// The routed type registry this device admits, resolves and forwards by (P5 item 11, plan §11).
@@ -6026,8 +6008,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// ack-stage projection, the re-entry stage branch and the four forwarding gates all resolve
     /// through this property, so a build cannot register a token at one door and refuse it at
     /// another. Its rows' tokens are the host's: the registry is built once, at `init`, from the
-    /// routed types of ``namespace`` (``hostRoutedTypeRegistry``), so this manager mints, accepts and
-    /// acknowledges its host's spellings and no other. `routedTypeRegistryForTesting` is the
+    /// routed types of ``namespace`` and the host's own rows (``hostRoutedTypeRegistry``), so this
+    /// manager mints, accepts and acknowledges its host's spellings and no other. `routedTypeRegistryForTesting` is the
     /// `@testable` seam that makes the build-narrowed doors — unreachable in one shipping build —
     /// reachable in a cell.
     private var routedTypes: MeshRoutedTypeRegistry {
@@ -9486,24 +9468,21 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         ) throws -> MeshRoutedProjectionVerdict
     }
 
-    /// Registers the two built-in projection handlers at the end of the init, just before the
-    /// built-in ledger judge (plan step A0.5.2): the photo row's and the temporary-message row's,
-    /// each under its resident row's token.
+    /// Registers the built-in projection handler at the end of the init, just before the built-in
+    /// ledger judge (plan step A0.5.2): the photo row's, under its resident row's token. The
+    /// temporary-message row's handler left with chat at plan step A0.5.9 and is registered by the
+    /// host (FernletSocial's mesh composition, under its own row's token).
     ///
-    /// Each answer is bound to a constant and then asserted, never `assert(register…)`: a Release
+    /// The answer is bound to a constant and then asserted, never `assert(register…)`: a Release
     /// build does not evaluate an `assert`'s condition, so the registration would vanish with it. A
-    /// refusal is unreachable in a shipping build — both rows are this manager's own resident rows,
-    /// neither is a judge row, and no test registry exists yet while the manager is being built —
-    /// and the routed suites pin that both rows project.
+    /// refusal is unreachable in a shipping build — the row is this manager's own resident row, it
+    /// is no judge row, and no test registry exists yet while the manager is being built — and the
+    /// routed suites pin that the row projects.
     private func registerBuiltInProjectionHandlers() {
         let photoRegistered = registerRoutedProjectionHandler(
             BuiltInPhotoProjection(manager: self), forToken: residentRoutedRows.photo.token
         )
         assert(photoRegistered, "the photo row's built-in projection handler was refused")
-        let textRegistered = registerRoutedProjectionHandler(
-            BuiltInTextProjection(manager: self), forToken: residentRoutedRows.tempMessage.token
-        )
-        assert(textRegistered, "the temporary-message row's built-in projection handler was refused")
     }
 
     /// The photo row's projection handler while photos are the engine's (plan step A0.5.2): the
@@ -9548,59 +9527,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         /// - Returns: the arm's verdict.
         func projectRoutedItem(
             _ body: MeshRoutedPhotoBody, delivery: MeshRoutedDelivery
-        ) -> MeshRoutedProjectionVerdict {
-            manager.routedCanonicalDispatch(body, delivery: delivery)
-        }
-    }
-
-    /// The temporary-message row's projection handler while chat is the engine's (plan step A0.5.2):
-    /// the 13+ age gate before the open, then the text arm, called as it is.
-    ///
-    /// Holds its manager `unowned`, for the photo handler's reason.
-    private final class BuiltInTextProjection: MeshRoutedProjectionHandler {
-
-        /// The routed text body this row decodes to.
-        typealias Body = MeshRoutedTextBody
-
-        /// The manager whose age gate and text arm this calls.
-        unowned let manager: MeshNetworkManager
-
-        /// Builds the handler over the manager that registers and owns it.
-        ///
-        /// - Parameter manager: The manager.
-        init(manager: MeshNetworkManager) {
-            self.manager = manager
-        }
-
-        /// Leg 4 of the 13+ gate: below the line the text row is not enumerated for projection at
-        /// all, so a gated device's text items never spend an allowance slot.
-        var isProjectable: Bool { manager.isChatAllowed }
-
-        /// Leg 3 of the 13+ gate — advertisement, send, projection, and leg 4 is ``isProjectable``.
-        /// Applied BEFORE the unwrap, so a device below the line decrypts nothing rather than
-        /// decrypting and discarding, and it is the ONE place an item's projection reads it: a second
-        /// check with nothing saying which is live is the shape the retired handler's block check
-        /// had. FINAL, because the gate is a durable product rule about this recipient and the
-        /// transcript it would have entered belongs to this session.
-        ///
-        /// - Parameter delivery: The item's signed facts.
-        /// - Returns: `refusedForGood` below the line, nil to open the item.
-        func verdictBeforeOpen(_ delivery: MeshRoutedDelivery) -> MeshRoutedProjectionVerdict? {
-            guard manager.isChatAllowed else {
-                ProximityAudit.log("mesh.routedProjection.transcriptAgeGated")
-                return .refusedForGood
-            }
-            return nil
-        }
-
-        /// The text arm: the engine's session liveness, the per-origin budget, then the transcript.
-        ///
-        /// - Parameters:
-        ///   - body: The opened text body.
-        ///   - delivery: The item's signed facts and its session liveness.
-        /// - Returns: the arm's verdict.
-        func projectRoutedItem(
-            _ body: MeshRoutedTextBody, delivery: MeshRoutedDelivery
         ) -> MeshRoutedProjectionVerdict {
             manager.routedCanonicalDispatch(body, delivery: delivery)
         }
@@ -9791,82 +9717,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    /// The canonical-store write for a routed TEXT item: the same effects the legacy `.tempMessage`
-    /// handler produced, reached through the same store function (P6 item 4, plan §12).
-    ///
-    /// Nothing here re-implements what `SessionMessageStore` already owns — dedup by id, the
-    /// sanitizer, the display-name moderation, the 500-row cap and §10.3's ordering all live there,
-    /// and the arm would be a second copy of each. What it adds is the two things the store cannot
-    /// know: whether this device's session is still the one the message belongs to (the engine's
-    /// ``MeshRoutedDelivery/sessionLiveness``, computed by ``transcriptLiveness(for:)`` for the text
-    /// row since plan step A0.5.2), and whether the origin has spent its per-mesh message budget.
-    ///
-    /// Two things are corrected rather than reproduced. The attribution's FINGERPRINT comes from
-    /// the origin's signed manifest resolved against `admissions − removals`, where the legacy
-    /// handler used the live transport identity — which is what makes a message from a member who
-    /// has since walked out of the room still attributable. And the block list is applied by
-    /// ``routedProjectionAuthor(for:)`` **before** the content key is unwrapped, where the legacy
-    /// handler checked it after decoding; the arm therefore adds no second block check, and must
-    /// not grow one.
-    ///
-    /// The one call site is the text row's built-in handler's `projectRoutedItem(_:delivery:)`, which
-    /// the engine calls only from ``dispatchRoutedPlaintext(_:entry:author:manifest:seenAt:)``, behind
-    /// ``mayMutateCanonicalStoreWithRoutedContent``; the pins in `MeshRoutedLockedDeviceTests` are what
-    /// make a second, ungated one a build failure. It reads the delivery the engine built (plan step
-    /// A0.5.2) where it read the manifest and the ledger's author, field for field.
-    ///
-    /// It takes **no clock**: `sentAt` is the origin's own claim and `seenAt` is a stored fact
-    /// about the item (the index's `firstSeenAt`, or the delivery pass's injected instant), carried
-    /// in the delivery rather than read here.
-    private func routedCanonicalDispatch(
-        _ body: MeshRoutedTextBody,
-        delivery: MeshRoutedDelivery
-    ) -> MeshRoutedProjectionVerdict {
-        // The engine computes the liveness for every `.session` row and the text row is one, so a
-        // nil is unreachable: it answers the retryable refusal rather than guess a FINAL one.
-        guard let liveness = delivery.sessionLiveness else { return .refusedForNow }
-        switch liveness {
-        case .live:
-            break
-        case .endedForGood:
-            ProximityAudit.log(
-                "mesh.routedProjection.transcriptSessionEnded",
-                context: ["type": delivery.typeToken, "mesh": delivery.meshID.uuidString]
-            )
-            return .refusedForGood
-        case .notLiveRightNow:
-            ProximityAudit.log("mesh.routedProjection.transcriptNotLiveYet")
-            return .refusedForNow
-        }
-        guard allowIncomingRoutedText(body.header.id, from: delivery.quotaKey) else {
-            return .refusedForGood
-        }
-        // Folded at the call site so the gate value cannot disagree with the seam it came from.
-        // `isBlockedFingerprint` ONLY: `ModerationBanStore.isPeerBanned` is not reachable from
-        // `ProximityHost`, so the routed path consults the block half and not the ban half —
-        // inherited from the photo arm, which has the same gap, and named rather than papered over.
-        // Closing it is a host-protocol widening, not an item-4 edit.
-        sessionMessages.refreshGates(chatAllowed: isChatAllowed) { [store] fingerprint in
-            store.isBlockedFingerprint(fingerprint)
-        }
-        let accepted = sessionMessages.receiveIncoming(
-            id: body.header.id,
-            senderFingerprint: delivery.author.fingerprint,
-            senderDisplayName: body.header.senderName,
-            text: body.text,
-            sentAt: body.header.sentAt,
-            seenAt: delivery.seenAt,
-            in: namespace
-        )
-        if accepted != .appended {
-            ProximityAudit.log(
-                "mesh.routedProjection.transcriptRefused",
-                context: ["reason": accepted.rawValue]
-            )
-        }
-        return .handedOn
-    }
-
     /// Whether a routed text item may enter the transcript this device is showing right now.
     ///
     /// Three legs, and each closes a different way of projecting into the wrong room:
@@ -9894,60 +9744,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         let offeredIn = routedItemTranscriptGeneration[MeshRoutedItemKey(manifest)]
         guard offeredIn == nil || offeredIn == transcriptGeneration else { return .endedForGood }
         return isSessionLive ? .live : .notLiveRightNow
-    }
-
-    /// The incoming per-origin MESSAGE budget, keyed on the ITEM's mesh (D-13.23) — the twin of
-    /// ``allowIncomingRoutedPhoto(_:from:)``, and the routed path's replacement for the retired
-    /// per-sender token bucket.
-    ///
-    /// **A policy act, stated plainly** (P6 item 4): a per-SECOND rate limit is replaced by a
-    /// per-session TOTAL. The bucket that went with the live transport (burst 5, refill 1/s) is
-    /// wrong twice over on a store-and-forward path — a single drain answer carries up to
-    /// `MeshRoutedDrainBounds.increment1.maxItems` (16) items, so a chatty pair's backlog reaching a
-    /// joining third device would have 11 legitimate messages dropped; and feeding it a *fixed*
-    /// per-item `firstSeenAt` makes `elapsed` zero forever, so the bucket would never refill. What
-    /// bounds the RATE now is the drain's own 16-item answer and its pacing, not a token count.
-    ///
-    /// Re-sends of an already-accepted id are free, exactly as the photo quota allows, so a
-    /// re-projection after a restart cannot cost a slot it already spent.
-    ///
-    /// Bounded on both axes: `MeshRoutedStoreFormat.maxItems` (1024) keys × this cap (200) ids, i.e.
-    /// at most 204 800 UUIDs if every possible origin in every possible mesh filled its budget.
-    /// What else bounds a hostile origin: the per-peer session frame budget
-    /// (`sessionFramesPerPeer` 1056, and a 9 065-byte item is one chunk), the store's item and byte
-    /// caps, the replay window, the 500-row transcript ring and `maxSeenIDs` (2000).
-    /// Internal rather than private so its three legs have a behavioural cell rather than only a
-    /// constants pin: making the body `return true` used to redden nothing (P6 item 4 fix review,
-    /// finding P2-4). **Not a door** — no caller outside this type. Since plan step A0.5.2 the text
-    /// arm calls the budget form with its delivery's key (``MeshRoutedDelivery/quotaKey``, the same
-    /// `(mesh, origin)` key this form takes from the manifest), and this form is the cells' spelling.
-    func allowIncomingRoutedText(_ messageID: UUID, from manifest: MeshRoutedManifest) -> Bool {
-        allowIncomingRoutedText(messageID, from: MeshRoutedOriginQuotaKey(manifest))
-    }
-
-    /// The per-origin message budget itself, counted against `budget`: the text arm's call, with
-    /// the key its delivery carries (plan step A0.5.2). See
-    /// ``allowIncomingRoutedText(_:from:)``'s manifest form for the policy and its bounds.
-    ///
-    /// - Parameters:
-    ///   - messageID: The message's id, as its body signed it.
-    ///   - budget: The item's `(mesh, origin)` budget key.
-    /// - Returns: whether the message may enter the transcript.
-    private func allowIncomingRoutedText(_ messageID: UUID, from budget: MeshRoutedOriginQuotaKey) -> Bool {
-        var accepted = routedOriginTextQuota[budget] ?? []
-        if accepted.contains(messageID) { return true }
-        guard accepted.count < Self.maxTextMessagesPerSenderPerSession else {
-            ProximityAudit.log("mesh.routedProjection.textQuotaSpent")
-            return false
-        }
-        guard routedOriginTextQuota[budget] != nil
-                || routedOriginTextQuota.count < MeshRoutedStoreFormat.maxItems else {
-            ProximityAudit.log("mesh.routedProjection.textQuotaMapFull")
-            return false
-        }
-        accepted.insert(messageID)
-        routedOriginTextQuota[budget] = accepted                      // R3: bounded map
-        return true
     }
 
     /// Records which transcript generation an item was FIRST offered to the projection in.
@@ -12344,38 +12140,6 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     public var heartDropBundleProvider: (() -> ProximityPrekeyBundle?)?
     public var onPeerPrekeyBundle: ((Data, ProximityPrekeyBundle) -> Void)?
 
-    /// Whether this device may take part in live-session chat at all — the 13+ age gate (see
-    /// `AgeAssuranceRecord`). Optional-and-nil means NOT allowed, as with the host's away-hearts consent:
-    /// a manager nobody wired stays silent rather than opening a messaging surface to a child.
-    ///
-    /// Enforced in FOUR places since P6 item 4, because any one alone is insufficient:
-    /// 1. the advertised capability list (``localCapabilitiesProvider``, whose host composer reads
-    ///    ``isChatAllowed`` since plan step A0.5.5) withholds `.messages` — now an **advertisement
-    ///    only**: it is a truthful statement that this device is above the line and will show a
-    ///    transcript, and nothing reads it to decide a destination any more, because a routed
-    ///    manifest binds wraps ≡ destinations and the roster carries no capabilities.
-    /// 2. `sendTempMessage(_:)` refuses by name (`MeshTextSendOutcome.ageGated`), so nothing leaves
-    ///    this device.
-    /// 3. the **projection** refuses before the unwrap, so a gated device decrypts nothing rather
-    ///    than decrypting and discarding — the leg the retired `.tempMessage` handler used to hold,
-    ///    and still necessary for the same reason: (1) is only an advertisement, and a peer on a
-    ///    modified build or with cached capabilities can still address us. Since plan step A0.5.2
-    ///    it is the text row's built-in projection handler's pre-open verdict.
-    /// 4. `projectableRoutedTypeTokens` leaves the text row out entirely while the gate is shut —
-    ///    its built-in handler's `isProjectable` reads this gate — so a gated device's text items
-    ///    never spend a projection allowance slot either (R-19 applied to a device that cannot
-    ///    finish a type rather than a build that cannot).
-    ///
-    /// Consequence, named for the owner rather than fixed here: a below-13 member of a mesh still
-    /// STORES and acknowledges the ciphertext of every message, because destinations are
-    /// `.fullRosterAtCreation`. Addressing only chat-capable members would need a subset delivery
-    /// target and capabilities on the roster, and the roster carries none.
-    @ObservationIgnored public var chatAllowedProvider: (() -> Bool)?
-
-    /// Resolved once per decision point so the four enforcement seams can never disagree. Public so
-    /// the in-session UI can withhold the chat affordance from the same value the transport enforces.
-    public var isChatAllowed: Bool { chatAllowedProvider?() == true }
-
     /// The host's capability list (plan step A0.5.5, S13): the whole ordered list of capability
     /// tokens this device advertises in its identity introduction, or nil for the engine's own,
     /// which is the host's wire2 framing token alone.
@@ -12577,8 +12341,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         clearGroupKeyState()
         // Teardown path (leaveSession/leaveMesh/stopJoin funnel through here): the last committed
         // slot is gone, so any unreviewed roster and any unreviewed session photos promote into the
-        // pending review batch, the session observer is told the session ended (Fernlet's opens the
-        // post-session shop window over any held catalogs, Phase 3a), and the transcript vanishes.
+        // pending review batch, the session-content generation advances, and the session observer is
+        // told the session ended (Fernlet's opens the post-session shop window over any held catalogs,
+        // Phase 3a, and drops the chat transcript).
         endSessionIfEnded()
     }
 
@@ -14028,8 +13793,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// key, so it never reaches `.connected` and never commits. (That is a stronger argument than
     /// "not barred or removed", which reads only THIS mesh's departures and removals and is empty
     /// for a mesh minted seconds ago.) The 13+ chat gate is untouched — it is applied at
-    /// advertisement, send, projection and enumeration off `chatAllowedProvider` (four legs since
-    /// P6 item 4) and never reads the mesh.
+    /// advertisement, send, projection and enumeration off the host chat's `chatAllowedProvider`
+    /// (four legs since P6 item 4; FernletSocial's `MeshSessionChat` since plan step A0.5.9) and never
+    /// reads the mesh.
     ///
     /// - Parameter request: The queued, sanitized request.
     /// - Returns: `true` when it may be granted without asking.
@@ -14405,32 +14171,36 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///    onSlotConnected's fingerprint transition) and a mid-session re-handshake of the sole committed
     ///    slot form nothing. This also covers the transient-drop case: last slot lost mid-outing ends a
     ///    session that holds no mesh; a re-commit lands here and forms the next one.
-    /// 2. **The session observer's commit** (S15), told that fact: the host's legs for a commit, in the
+    /// 2. **The engine's own leg on a formation**: the session-content generation advances
+    ///    (``advanceTranscriptGeneration()``), so nothing offered to the projection before this
+    ///    formation projects into the new session's content.
+    /// 3. **The session observer's commit** (S15), told that fact: the host's legs for a commit, in the
     ///    host's own order. Fernlet's (FernletSocial's mesh composition) feeds closeness first; on a
-    ///    formation it closes the previous post-session shop window and drops its catalogs; it offers
-    ///    this device's clothing catalog once per slot, pairwise sealed and capability-gated, with a
+    ///    formation it closes the previous post-session shop window and drops its catalogs, drops the
+    ///    chat transcript (Phase 5: a NEW session forms with an empty transcript, which also covers the
+    ///    transient-drop → re-commit case) and forgets the shop's send tracking; it offers this
+    ///    device's clothing catalog once per slot, pairwise sealed and capability-gated, with a
     ///    `clothingCatalogRequest` for the peer's, so the exchange does not depend on which side
     ///    commits first (spec: "Catalog delivery must not assume commit symmetry"); it hands this
     ///    peer, when it advertises each, this device's own signed moderation reports and its fuzzy
     ///    friend state, each to a vault-trusted friend only; and, last, when the peer advertises
     ///    activities, it offers the activities this device hosts with a roster version digest.
-    /// 3. **The engine's own leg**: the transcript's clear on a formation. It follows the observer's
-    ///    legs: each of those writes its own feature's state or spawns a task that runs after this hook
-    ///    returns, so none reads the transcript before it is cleared.
+    ///
+    /// The advance and the observer's transcript drop are synchronous and adjacent, on the main
+    /// actor, with nothing between them that reads, logs or persists the transcript, so no projection
+    /// pass can land between them (plan step A0.5.9).
     ///
     /// Internal seam so unit tests can drive a slot commit without a live handshake; its spelling
     /// (named for the shop's hook) is one of the engine names the package's rename pass settles.
     func noteSlotCommittedForShop(slot: PeerSlot, identity peerIdentity: ProximityCoordinator.PeerIdentity) {
         let formsSession = !hasFormedSession
         hasFormedSession = true
+        if formsSession {
+            advanceTranscriptGeneration()
+        }
         sessionObserver?.meshSlotDidCommit(
             MeshSlotCommit(slot: slot, peer: peerIdentity, formsSession: formsSession)
         )
-        if formsSession {
-            // Phase 5: a NEW session forms with an empty transcript. Messages already cleared at the
-            // prior session end; this is belt-and-braces and covers the transient-drop → re-commit case.
-            clearSessionTranscript()
-        }
     }
 
     /// The session-end moment, at the same last-committed-slot-gone sites that have always run the
@@ -14440,11 +14210,13 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// 1. the review promotion: the roster and the session's unreviewed photos move into
     ///    `pendingFriendReview` (``promoteSessionToPendingReviewIfSessionEnded()``);
     /// 2. the formed-session epoch ends: the NEXT slot commit is a new formation;
-    /// 3. the session observer's ending (S15): Fernlet's opens the clothing shop's one-hour post-session
-    ///    window over the catalogs it holds (Phase 3a);
-    /// 4. Phase 5: messages VANISH. Where the shop KEEPS catalogs through a 1-hour window, the
-    ///    transcript is dropped immediately — nothing to retain, nothing to sync — and with it the
-    ///    in-session heart's feedback and its in-flight claims.
+    /// 3. the session-content generation advances (``advanceTranscriptGeneration()``), so nothing
+    ///    offered to the projection in this session projects into its content again;
+    /// 4. the session observer's ending (S15): Fernlet's opens the clothing shop's one-hour
+    ///    post-session window over the catalogs it holds (Phase 3a), then drops the chat transcript
+    ///    (Phase 5: messages VANISH — where the shop KEEPS catalogs through a 1-hour window, the
+    ///    transcript is dropped immediately, nothing to retain, nothing to sync);
+    /// 5. the in-session heart's feedback and its in-flight claims go too.
     ///
     /// Idempotent and cheap: a site that finds the session still live does nothing, and a later
     /// teardown that finds it still ended re-runs legs that have nothing left to move.
@@ -14459,8 +14231,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         guard !isSessionLive else { return }
         promoteSessionToPendingReviewIfSessionEnded()
         hasFormedSession = false
+        advanceTranscriptGeneration()
         sessionObserver?.meshSessionDidEnd(MeshSessionEnd())
-        clearSessionTranscript()
         // TF b19 item 5: drop any lingering in-session heart feedback so a "Sent"/failure line
         // can't outlive the session that produced it (there is no "Sending…" state on this path any
         // more — P6 item 6 made the mint synchronous).
@@ -14472,145 +14244,47 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         sessionHeartSendsInFlight.removeAll()
     }
 
-    // MARK: - Temporary messages (Phase 5)
+    // MARK: - The session-content generation (Phase 5) and the privacy wipe
 
-    /// Send a live-session chat message to the room, as a **routed item** (P6 item 4, plan §12).
+    /// The ONE place the session-content generation advances, so it cannot move at one drop of the
+    /// transcript and not another (P6 item 2 fix review, finding P2-3; plan step A0.5.9).
     ///
-    /// The same three lines ``shareRoutedPhoto(itemID:addedAt:imageData:session:)`` uses: take the
-    /// temporary-message row's resident token and ask the registry whether that row is registered,
-    /// frame a ``MeshRoutedTextBody`` under the family's frozen framing, and hand it to
-    /// ``originateRoutedItem(body:typeToken:itemID:audience:now:)``, which
-    /// pushes it once to every committed slot and leaves the drain to carry it to everyone else.
-    /// The legacy per-slot sealed `.tempMessage` fan-out — and with it the `messages` capability
-    /// read, the live-slot requirement and the "no offline queue" rule — is **gone**: a message to
-    /// an admitted member who is not linked right now is sealed, wrapped and custodied until a link
-    /// forms, which is the whole point of the routed store.
-    ///
-    /// Three things the sanitizer and the sender do in order, and the order matters: sanitize (500
-    /// `Character`s), byte-bound for the wire (``MeshRoutedTextBody/boundedText(_:)``), then
-    /// re-check emptiness — because the byte bound can empty a message the Character cap admitted,
-    /// and minting an empty body would echo an empty row the user cannot dismiss.
-    ///
-    /// **The byte bound TRUNCATES rather than refuses, and it is audited when it bites** (P6 item 4
-    /// fix review, P3-4). "Never a surprise refusal for honest input" is bought with a silent edit:
-    /// the bounded text is what is minted *and* what the local echo shows, so sender and recipient
-    /// agree and the user sees the shortened row with no label. Only a draft whose whole allowance
-    /// is one grapheme cluster becomes `.empty`. The audit line is the honest half — a diagnostic,
-    /// never user copy, and never a second refusal path.
-    ///
-    /// **It RETURNS its outcome and publishes nothing.** `routedShareRefusal` is the photo path's
-    /// seam and is consumed by one `.alert` on `DisposableCameraView` — the very view the chat panel
-    /// is presented *over*, so a refusal published there would fire an alert on a covered presenter
-    /// — and every one of its sentences is photo-worded. The panel shows the non-staged outcomes
-    /// inline instead, at the top of the compose bar (i.e. directly ABOVE the text field, between it
-    /// and the transcript), and keeps the draft so "send again" is the retry.
-    ///
-    /// - Parameter rawText: What the user typed.
-    /// - Returns: what happened, including `.noDestinations` — which for text is **not** silent:
-    ///   the founding window (commit → found → grant → adopt) is a real second or two in which a
-    ///   roster of one has nobody to address, destinations are immutable at the mint, and there is
-    ///   no offline queue, so the item can never acquire one later.
-    public func sendTempMessage(_ rawText: String) -> MeshTextSendOutcome {
-        // The 13+ age gate. The compose bar is withheld below the line, so this is the defense-in-depth
-        // re-check at the point of use rather than the primary gate; the projection re-applies it.
-        guard isChatAllowed else {
-            ProximityAudit.log("mesh.routedShare.textBlockedAgeGated")
-            return noteTextSendOutcome(.ageGated)
-        }
-        let sanitized = SessionMessageStore.sanitize(rawText)
-        let text = MeshRoutedTextBody.boundedText(sanitized)
-        guard !text.isEmpty else { return noteTextSendOutcome(.empty) }
-        if text != sanitized {
-            ProximityAudit.log(
-                "mesh.routedShare.textByteBounded",
-                context: ["characters": String(sanitized.count),
-                          "bytes": String(sanitized.utf8.count)]
-            )
-        }
-        let id = UUID()
-        let now = Date()
-        let typeToken = residentRoutedRows.tempMessage.token
-        guard isRoutedTypeRegistered(typeToken) else {
-            return noteTextSendOutcome(.refused(.mintFailed))
-        }
-        let body: Data
-        do {
-            body = try MeshRoutedTextBody(
-                header: MeshRoutedTextHeader(
-                    id: id, sentAt: now,
-                    senderName: MeshRoutedTextBody.boundedSenderName(displayName)
-                ),
-                text: text
-            ).encoded()
-        } catch {
-            ProximityAudit.log(
-                "mesh.routedShare.textRefused",
-                context: ["reason": MeshRoutedShareRefusal.sealFailed.rawValue,
-                          "error": String(describing: error)]
-            )
-            return noteTextSendOutcome(.refused(.sealFailed))
-        }
-        switch originateRoutedItem(
-            body: body, typeToken: typeToken, itemID: id, audience: .fullRoster, now: now
-        ) {
-        case .staged:
-            sessionMessages.appendOutgoing(
-                id: id, senderFingerprint: identity.localFingerprint,
-                senderDisplayName: displayName, text: text, sentAt: now
-            )
-            return noteTextSendOutcome(.staged)
-        case .skipped:
-            return noteTextSendOutcome(.noDestinations)
-        case .refused(let refusal):
-            ProximityAudit.log(
-                "mesh.routedShare.textRefused", context: ["reason": refusal.rawValue]
-            )
-            return noteTextSendOutcome(.refused(refusal))
-        }
-    }
-
-    /// Fires the send seam and returns the outcome, so every `return` in ``sendTempMessage(_:)``
-    /// reports exactly once and none can forget to.
-    private func noteTextSendOutcome(_ outcome: MeshTextSendOutcome) -> MeshTextSendOutcome {
-        onTextSendForTesting?(outcome)
-        return outcome
-    }
-
-    /// The ONE place the transcript is dropped, so the generation cannot be bumped by one clear and
-    /// not another (P6 item 2 fix review, finding P2-3).
-    ///
-    /// **Three callers, all real:** session end (`endSessionIfEnded()`), the next
-    /// session's formation (``noteSlotCommittedForShop(slot:identity:)``), and the app's delete-all
-    /// funnel through ``beginPrivacyWipe()``. The third was a fourth, bypassing clear until P6 item
-    /// 4's fix review found it (`FernletStore.clearInboxesAndExports` called
-    /// `sessionMessages.clear()` directly, so the generation did not move and the just-wiped
-    /// messages could re-project). Bumping here rather than at each site is the difference between
-    /// "the projection agrees with the clear" and "the projection agrees with one of the clears".
-    private func clearSessionTranscript() {
-        sessionMessages.clear()
+    /// **Three callers, all real, each just before the session observer is told the moment**, whose
+    /// host drops the transcript it holds (for Fernlet, FernletSocial's chat): session end
+    /// (`endSessionIfEnded()`), the next session's formation
+    /// (``noteSlotCommittedForShop(slot:identity:)``), and the app's delete-all funnel through
+    /// ``beginPrivacyWipe()``. The third was a fourth, bypassing the funnel until P6 item 4's fix
+    /// review found it (`FernletStore.clearInboxesAndExports` cleared the transcript directly, so the
+    /// generation did not move and the just-wiped messages could re-project). Advancing here, once
+    /// per moment, is the difference between "the projection agrees with the drop" and "the
+    /// projection agrees with one of the drops". The advance precedes the drop (it followed the clear
+    /// until the transcript left this module): both run synchronously on the main actor at the same
+    /// site, with nothing between them that reads, logs or persists the transcript.
+    private func advanceTranscriptGeneration() {
         // R2/R3: a monotone counter bounded by the number of sessions one process holds; it names
         // a generation, it is never an index into anything.
         transcriptGeneration += 1
     }
 
-    /// The app's "delete everything" funnel has started: drop the live transcript through the ONE
-    /// clear funnel, and refuse every routed projection until ``endPrivacyWipe()`` (P6 item 4 fix
-    /// review, finding P2-1).
+    /// The app's "delete everything" funnel has started: refuse every routed projection until
+    /// ``endPrivacyWipe()``, advance the session-content generation, and tell the session observer,
+    /// whose host drops the live transcript (P6 item 4 fix review, finding P2-1; the observer's moment
+    /// since plan step A0.5.9).
     ///
     /// Called at the TOP of `FernletStore.deleteAllData(includingHealthKitSamples:)`, before its
     /// first suspension point, and paired with `endPrivacyWipe()` in a `defer` so no exit leaves the
     /// projection switched off for the process. See ``privacyWipeInProgress`` for why the window
     /// between the transcript clear and the ciphertext purge needed closing at all.
     ///
-    /// It is the transcript's clear, not the routed store's: the sealed store's own wipe
+    /// It is the transcript's drop, not the routed store's: the sealed store's own wipe
     /// (`MeshRoutedStore.wipeForDeleteAll`) stays where it is, later in the same funnel.
     ///
     /// **Counts, it does not set** (P6 item 4 fix review P3-2, taken in item 7): see
     /// ``privacyWipeDepth`` for the two overlapping funnels a `Bool` was fail-open under. The
-    /// transcript clear runs on **every** begin, including one past the cap — a nested funnel really
-    /// is asking for the live transcript to go, whatever the counter can represent — and a begin the
-    /// depth cannot hold is counted in ``privacyWipeOverflow`` rather than dropped, so its own end
-    /// still has something to pair with (P6 item 7 fix review, P3-7).
+    /// generation's advance and the observer's moment run on **every** begin, including one past the
+    /// cap — a nested funnel really is asking for the live transcript to go, whatever the counter can
+    /// represent — and a begin the depth cannot hold is counted in ``privacyWipeOverflow`` rather than
+    /// dropped, so its own end still has something to pair with (P6 item 7 fix review, P3-7).
     public func beginPrivacyWipe() {
         if privacyWipeDepth < Self.maxPrivacyWipeDepth {
             privacyWipeDepth += 1
@@ -14626,7 +14300,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             )
         }
         ProximityAudit.log("mesh.privacyWipe.began", context: ["depth": String(privacyWipeDepth)])
-        clearSessionTranscript()
+        advanceTranscriptGeneration()
+        sessionObserver?.meshPrivacyWipeDidBegin()
     }
 
     /// One delete-all funnel has finished (completely or not). The routed projection may run again
@@ -15915,8 +15590,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// A narrowed or widened routed type registry for one manager, or nil for the shipping value
-    /// ``MeshRoutedTypeRegistry/increment1(_:)`` over the host namespace's routed types, built once at
-    /// `init`. `internal` for `@testable` unit tests only.
+    /// ``MeshRoutedTypeRegistry/increment1(_:hostEntries:)`` over the host namespace's routed types
+    /// and the host's rows, built once at `init`. `internal` for `@testable` unit tests only.
     ///
     /// P5 item 11's four forwarding gates are *unreachable in one shipping build* — nothing carrying
     /// an unregistered token can be admitted, so no such record exists at rest. This seam is what

@@ -4,15 +4,18 @@
 // ProximityKit plan step A0.5.6 (seam S15): the session observer — the one object through which a
 // host hears the moments of a mesh session's life that its own features act on, each fired by the
 // engine at the one site where that moment happens, in the order the engine has always run it: a
-// slot commits, a slot leaves, the search stops, the session ends.
+// slot commits, a slot leaves, the search stops, the session ends, a privacy wipe begins (plan step
+// A0.5.9).
 //
 // The facts stay the engine's. Which commit forms a session (the first commit after a session
 // ended) and whether a session has ended (`isSessionLive` going false) are decided at the engine's
-// call sites, and what the engine itself still does at each moment is run there: at a commit, its one
-// leg, the chat transcript's clear when the commit forms the session; at the ending, the roster's
-// review promotion, the transcript's clear and the session heart's reset. Every other leg of a commit
-// is the host's, run by its observer. The observer is told the moment and, for a commit, whether it
-// formed the session. It receives facts, never commands, and is asked for nothing back.
+// call sites, and what the engine itself still does at each moment is run there: at a forming commit,
+// at the ending and at a privacy wipe's start, it advances its session-content generation, the fact a
+// routed `.session` row's liveness reads, before it tells the observer; at the ending it also runs the
+// roster's review promotion before and the session heart's reset after. Every other leg is the
+// host's, run by its observer: since plan step A0.5.9 the chat transcript's clear is one of them, at
+// all three of those moments. The observer is told the moment and, for a commit, whether it formed
+// the session. It receives facts, never commands, and is asked for nothing back.
 //
 // One observer, not a list: a host composes its features behind one object, and that object's fan-out
 // is where the order between features is written, so the order a host's features see a moment in is
@@ -26,7 +29,7 @@ import Foundation
 // MARK: - MeshSessionObserver
 
 /// A host's ear on the moments of a mesh session's life (plan step A0.5.6, S15): a slot commits, a slot
-/// leaves, the search stops, the session ends.
+/// leaves, the search stops, the session ends, a privacy wipe begins.
 ///
 /// Installed on ``MeshNetworkManager/sessionObserver``, which holds it **weakly**: the object that
 /// installs it owns it, and a manager whose observer is gone runs every moment with no host leg. Every
@@ -37,17 +40,21 @@ import Foundation
 /// moment's site, from one engine position, after the engine's own state for that moment is set and
 /// before the engine's own legs that follow it there:
 /// - ``meshSlotDidCommit(_:)`` from every slot commit, after the session roster recorded the peer and
-///   the engine decided whether this commit formed the session, before the founding;
+///   the engine decided whether this commit formed the session (and, when it did, advanced its
+///   session-content generation), before the founding;
 /// - ``meshSlotDidLeave(slotID:)`` when a slot is dropped, after it left the slot list and before the
 ///   session-end check its removal runs;
 /// - ``meshSearchDidStop()`` when the search stops, before the radio is stood down;
 /// - ``meshSessionDidEnd(_:)`` at the session-end moment (``MeshNetworkManager/isSessionLive`` false
 ///   on a teardown or slot-loss path, each time such a path runs), after the engine's review
-///   promotion and before its transcript clear and heart reset.
+///   promotion and its generation advance, and before its heart reset;
+/// - ``meshPrivacyWipeDidBegin()`` when the host's delete-all funnel begins
+///   (``MeshNetworkManager/beginPrivacyWipe()``), after the engine raised its projection refusal,
+///   wrote its line and advanced its generation.
 ///
 /// A conformer must not call back into the verb whose moment it is being told (the commit, the
-/// removal, the stop or the ending) and may spawn tasks of its own, which run after the moment's site
-/// returns. Main-actor, like the sites that call it; `AnyObject`, because the engine holds it weakly.
+/// removal, the stop, the ending or the wipe's begin) and may spawn tasks of its own, which run after
+/// the moment's site returns. Main-actor, like the sites that call it; `AnyObject`, because the engine holds it weakly.
 @MainActor public protocol MeshSessionObserver: AnyObject {
 
     /// A slot committed: its peer's handshake was verified and the peer was recorded in the session
@@ -83,6 +90,16 @@ import Foundation
     ///
     /// - Parameter end: The ending.
     func meshSessionDidEnd(_ end: MeshSessionEnd)
+
+    /// The host's privacy wipe began (plan step A0.5.9): its delete-all funnel called
+    /// ``MeshNetworkManager/beginPrivacyWipe()``, so every routed projection is refused until the
+    /// funnel's last end, and the session-content generation has moved, so nothing offered before
+    /// this moment projects into the session's content again. A conformer drops the session content
+    /// its features hold in memory: for Fernlet, the chat transcript.
+    ///
+    /// Called at every begin, a nested funnel's and one past the engine's depth cap included, so more
+    /// than once for overlapping funnels: a conformer's leg is idempotent.
+    func meshPrivacyWipeDidBegin()
 }
 
 /// The no-op defaults: a conformer implements only the moments it acts on.
@@ -105,6 +122,9 @@ public extension MeshSessionObserver {
     ///
     /// - Parameter end: The ending, ignored.
     func meshSessionDidEnd(_ end: MeshSessionEnd) {}
+
+    /// Does nothing.
+    func meshPrivacyWipeDidBegin() {}
 }
 
 // MARK: - MeshSlotCommit

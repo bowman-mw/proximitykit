@@ -10,12 +10,13 @@ import FernletDomainModel
 ///
 /// Mirrors the existing `ProximityTrustPolicy` / `WorkoutSyncContext` host-protocol
 /// pattern. Surface is exactly what `MeshNetworkManager` + `ProximityRecipeShareManager`
-/// consume: display name, trusted peers, and the block/fingerprint checks — and five requirements
+/// consume: display name, trusted peers, and the block/fingerprint checks — and six requirements
 /// the extension below will never give a default, because each is the host's identity, custody or
 /// rule, not the mechanism's: the host's protocol identity, ``proximityNamespace``, its install
 /// binding, ``proximityInstallBinding``, its trust records, ``proximityTrustStore``, the session
-/// trust policy every connection's coordinator consults, ``makeProximityTrustPolicy()``, and the
-/// device identity a manager holds, ``makeProximityIdentity()``.
+/// trust policy every connection's coordinator consults, ``makeProximityTrustPolicy()``, the
+/// device identity a manager holds, ``makeProximityIdentity()``, and the routed types its features
+/// carry, ``meshRoutedTypeEntries``.
 @MainActor
 public protocol ProximityHost: AnyObject {
     var proximityDisplayName: String { get }
@@ -180,6 +181,26 @@ public protocol ProximityHost: AnyObject {
     /// (``ProximityNamespaceGate/checkIdentity(_:isOf:event:)``) before anything else: an identity of
     /// another namespace makes it audit `<area>.identity.namespaceMismatch` and start no radio.
     func makeProximityIdentity() -> IdentityService
+
+    /// The host's routed-type rows: the routed types its own features mint and project, beyond the
+    /// engine's resident rows (plan step A0.5.9, seam S16).
+    ///
+    /// **No default, like ``proximityNamespace``.** Which routed types a host's features carry, and
+    /// each one's cap, destination semantics, retention, final acknowledgement, expiry and content
+    /// scope, is the host's declaration, so ProximityKit never guesses a row: a host that supplies none
+    /// fails to compile. Each row's token is read off the host's own namespace's routed types, so a
+    /// host never registers another app's spelling.
+    ///
+    /// Read once, by ``MeshNetworkManager``'s initializer, which builds its routed type registry from
+    /// its resident rows first and these after them: a token's first row wins, so a host row never
+    /// displaces a resident one; at most sixteen rows are read; and a row the engine cannot register
+    /// (a relay retention it does not implement, a cap outside the wire bound) is dropped, its token
+    /// then refused at every door. Every door that admits, resolves, acknowledges or forwards an item
+    /// reads that registry, and a projection handler registers only under one of its rows. Fernlet's
+    /// app answers FernletSocial's `FernletRoutedTypes.entries` over its namespace's routed types (the
+    /// temporary-message row today) in `ProximityHostAdapter.swift`; the test target's doubles answer
+    /// the same through one test-only extension the app's conformance cannot see.
+    var meshRoutedTypeEntries: [MeshRoutedTypeEntry] { get }
 }
 
 public extension ProximityHost {
