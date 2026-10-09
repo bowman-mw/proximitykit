@@ -17,18 +17,13 @@
 // (`MeshRoutedAccessGate`'s predicates are item 10's, and a type's declared column is not a gate),
 // no dispatch and no relay-hop plumbing behind the reserved increment-2 value.
 //
-// The rows come from two places since plan step A0.5.9 (seam S16): the engine's resident rows, built
-// here, and the host's own (`ProximityHost.meshRoutedTypeEntries`; for Fernlet, FernletSocial's
-// temporary-message row, which left with chat). So the row and its column values are public: a host
-// declares its rows through the entry's public initializer, and the registry that resolves them
-// stays the engine's.
-//
-// The one `PrivateMediaStore` import came with the photo row's formula (plan step A0.5.4, from the
-// seal file; it leaves with the photo row) and reaches a single Int — `maxIncomingPhotoBytes`, the
-// row's payload term — never the store type, its key provider or a byte of its data.
+// The rows are the host's (seam S16): `ProximityHost.meshRoutedTypeEntries`, for Fernlet FernletSocial's
+// `FernletRoutedTypes` — the temporary-message row since plan step A0.5.9, the heart row since A0.5.10
+// and the photo row, the last the engine built itself, since A0.5.11. So the row and its column values
+// are public: a host declares its rows through the entry's public initializer, and the registry that
+// resolves them stays the engine's. This file builds no row and reads no routed type of its own.
 
 import Foundation
-import PrivateMediaStore
 
 // MARK: - MeshRoutedDestinationSemantics
 
@@ -157,10 +152,10 @@ public nonisolated enum MeshRoutedContentScope: String, CaseIterable, Equatable,
 /// doc had promised the flip since increment 1). **It is now spent:** the heart row is frozen for
 /// real, and the next semantics change to it is a `…heart.v2` token registered beside it. The v2
 /// route was weighed at the time and is not actually cheaper: a sender mints under its own row's
-/// token (its row by name: ``MeshRoutedTypeRegistry/increment1Rows(_:)``'s since plan step A0.5.2,
-/// and for the heart the host's, FernletSocial's `FernletRoutedTypes`, since plan step A0.5.10; a
-/// lowest-token resolver before it, which sorted `…heart.v1` ahead of `…heart.v2`), so that path
-/// needs the sender re-pointed as well as a row.
+/// token (its row by name: the engine's resident rows' since plan step A0.5.2, and the host's,
+/// FernletSocial's `FernletRoutedTypes`, for the heart since plan step A0.5.10 and for every row since
+/// A0.5.11; a lowest-token resolver before it, which sorted `…heart.v1` ahead of `…heart.v2`), so that
+/// path needs the sender re-pointed as well as a row.
 ///
 /// **Unit caveat for the cap** — the one thing to get right when narrowing a row.
 /// ``maxItemByteCount`` is compared against `MeshRoutedManifest.size`, which is the complete sealed
@@ -168,12 +163,13 @@ public nonisolated enum MeshRoutedContentScope: String, CaseIterable, Equatable,
 /// **plaintext** bounds enforced at reassembly. Two bounds, both live, and they are not the same
 /// number: a ciphertext cap set to a plaintext bound refuses items that are perfectly in bounds,
 /// and one set above what the seal can produce is no cap at all. So a narrowed row is written as a
-/// **formula**, never a literal — the payload's plaintext bound, plus
-/// ``MeshRoutedItemBodyFormat/maxFramedHeaderByteCount``, plus
-/// ``MeshRoutedItemSealFormat/overheadByteCount``. P6 item 3's photo row is the worked example: it
-/// is exactly that sum over `PrivateMediaStore.maxIncomingPhotoBytes`, and as the widest row it is
-/// the registry's ``MeshRoutedTypeRegistry/maxItemByteCount`` — the one bound the manager holds for
-/// its seal, its open and the delivery projection's resident-blob guard (plan step A0.5.4) — so the
+/// **formula**, never a literal — the payload's plaintext bound, plus the body family's framed
+/// header allowance (``MeshRoutedItemBodyFormat/headerLengthPrefixByteCount`` plus the family's own
+/// header bound), plus ``MeshRoutedItemSealFormat/overheadByteCount``. P6 item 3's photo row is the
+/// worked example (Fernlet's, in FernletSocial's `FernletRoutedTypes` since plan step A0.5.11): it is
+/// exactly that sum over `PrivateMediaStore.maxIncomingPhotoBytes`, and as the widest row it is the
+/// registry's ``MeshRoutedTypeRegistry/maxItemByteCount`` — the one bound the manager holds for its
+/// seal, its open and the delivery projection's resident-blob guard (plan step A0.5.4) — so the
 /// manifest door's per-type check and that guard are one number by construction. A row that narrows
 /// below what its own sender can seal would have that sender mint items every receiver refuses.
 ///
@@ -286,7 +282,7 @@ public nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 /// target are byte-identical. No receiver reads it at all.
 ///
 /// **Every column has a shipping reader since P5 item 13.** `MeshRoutedManifest.signed(…)` gained
-/// its first shipping caller — the routed sender door behind `addPhoto` — so
+/// its first shipping caller — the routed sender door behind the photo capture — so
 /// ``MeshRoutedTypeEntry/maxItemByteCount``, ``MeshRoutedTypeEntry/destinations`` and
 /// ``MeshRoutedTypeEntry/expiry`` are now read at a real mint. Since plan step A0.5.2 the
 /// delivery projection reads ``MeshRoutedTypeEntry/contentScope`` (a `.session` row's items carry
@@ -309,14 +305,15 @@ public nonisolated struct MeshRoutedTypeEntry: Equatable, Sendable {
 /// the open and reads at the projection's resident-blob guard — so the two ends the earlier note
 /// promised to move together are one value, and the photo row's formula lives only in its row.
 ///
-/// Shipping code names exactly one value, ``increment1(_:hostEntries:)`` — the engine's resident rows
-/// and its host's (plan step A0.5.9) — and the resident rows by name, ``increment1Rows(_:)``, for the
-/// token the manager's built-in photo handler registers under and its photo sender mints under; it
-/// constructs a registry in exactly one file, reads a routed type off the namespace only where rows
-/// are built (here, and in a host's own rows: FernletSocial's `FernletRoutedTypes.swift`), and
-/// branches on no routed type token anywhere — three source-scan walls in
-/// `MeshRoutedStoreIsolationTests` are what keep that true. A fixture registry is a test-only
-/// affordance, reached through the manager's one `@testable` seam.
+/// Shipping code constructs exactly one value, in exactly one file: `MeshNetworkManager`'s `init`
+/// builds `MeshRoutedTypeRegistry(entries:)` over its host's ``ProximityHost/meshRoutedTypeEntries``
+/// (plan step A0.5.11, when the engine's last resident row left with the photos, and with it the
+/// `increment1` builders), spelling the type in full. Shipping code names no other registry member,
+/// reads a routed type off the namespace only where a host's rows are built (FernletSocial's
+/// `FernletRoutedTypes.swift`) and in the namespace's own soundness rules, and branches on no routed
+/// type token anywhere — three source-scan walls in `MeshRoutedStoreIsolationTests` are what keep
+/// that true. A fixture registry is a test-only affordance, reached through the manager's one
+/// `@testable` seam.
 nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
 
     /// The most rows one registry holds. The SAME number as ``MeshRoutedAckStageTable/maxRows``,
@@ -363,74 +360,6 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
         self.maxItemByteCount = resolved.values.map { $0.maxItemByteCount }.max() ?? 0
     }
 
-    /// Plan §11's registered types, as the one registry shipping code names: the engine's resident
-    /// rows (``increment1Rows(_:)``), in their order, then the host's (plan step A0.5.9, S16), through
-    /// ``init(entries:)``'s rules — a repeated token's first row wins, so a host row never displaces a
-    /// resident one; at most ``maxEntries`` rows are read; and a row the registerability predicates
-    /// refuse is dropped. For Fernlet's rows the registry is the one the engine built before the
-    /// temporary-message row left it: the host's row is that row, spelled as it was, and the registry
-    /// is token-keyed, so the rows' order reaches no door and no byte.
-    ///
-    /// `MeshNetworkManager`'s `init` is the one shipping caller, with its host's
-    /// ``ProximityHost/meshRoutedTypeEntries``. No default: a registry is never built without saying
-    /// which host rows it holds.
-    ///
-    /// - Parameters:
-    ///   - routedTypes: The routed types of the namespace the caller holds.
-    ///   - hostEntries: The host's own rows.
-    /// - Returns: The registry of the resident rows and the host's, under their tokens.
-    static func increment1(
-        _ routedTypes: ProximityNamespace.RoutedTypes, hostEntries: [MeshRoutedTypeEntry]
-    ) -> MeshRoutedTypeRegistry {
-        MeshRoutedTypeRegistry(entries: increment1Rows(routedTypes).rows + hostEntries)
-    }
-
-    /// The engine's resident rows by name (plan step A0.5.2): the photo row, which stays the engine's
-    /// until the photo feature leaves it (plan step A0.5.11), each column defined AS the constant or
-    /// decision already shipped, and its token read off the routed types it is handed: this module
-    /// spells no routed type of its own. The temporary-message row left with chat at plan step A0.5.9
-    /// and the heart row with the session hearts at plan step A0.5.10; both are the host's now
-    /// (FernletSocial's `FernletRoutedTypes`).
-    ///
-    /// ``increment1(_:hostEntries:)`` builds the registry from these rows and the host's.
-    /// `MeshNetworkManager` also holds them by name, for the two per-row reads the registry cannot
-    /// answer: the token its built-in projection handler registers under, and the token its photo
-    /// sender mints under — behind its `isRoutedTypeRegistered(_:)`, so a build whose registry lost a
-    /// row mints nothing for it.
-    ///
-    /// ``ProximityNamespace/RoutedTypes/control`` is deliberately absent: plan §11 names an
-    /// `immediate` stage but neither §11 nor §12 routes a control item, and registering a token
-    /// nothing mints would open a door with no handler behind it.
-    ///
-    /// - Parameter routedTypes: The routed types of the namespace the caller holds.
-    /// - Returns: The photo row under its token.
-    static func increment1Rows(_ routedTypes: ProximityNamespace.RoutedTypes) -> MeshRoutedResidentRows {
-        MeshRoutedResidentRows(
-            // The photo row is the FIRST narrowed cap (P6 item 3, D-11.4), and it is narrowed to a
-            // formula rather than a number: `PrivateMediaStore.maxIncomingPhotoBytes` (the photo
-            // wall's PLAINTEXT bound) plus `MeshRoutedItemBodyFormat.maxFramedHeaderByteCount` plus the
-            // seal's own overhead — i.e. the widest CIPHERTEXT a routed photo can measure, 10 551 337 B.
-            // Each term is read from the type that owns it, never copied. The formula was the seal
-            // file's resident bound until plan step A0.5.4 moved it here: the bound is now the
-            // registry's widest row, which this row is, so the manifest door's check and the
-            // projection's resident-blob guard are the same number and cannot drift; see the unit
-            // caveat on `MeshRoutedTypeEntry`.
-            photo: MeshRoutedTypeEntry(
-                token: routedTypes.photo,
-                maxItemByteCount: UInt64(
-                    PrivateMediaStore.maxIncomingPhotoBytes
-                        + MeshRoutedItemBodyFormat.maxFramedHeaderByteCount
-                        + MeshRoutedItemSealFormat.overheadByteCount
-                ),
-                destinations: .fullRosterAtCreation,
-                relayRetention: .originRetainsUntilDeparture,
-                finalAck: .durableRecipientStorage,
-                expiry: .meshHardDeadlinePlusGrace,
-                contentScope: .persistent
-            )
-        )
-    }
-
     /// Every token this registry accepts — the verifier's `acceptedTypeTokens` (D13/D-6.9), from the
     /// same rows the ack stages come from.
     var tokens: Set<String> { Set(entries.keys) }
@@ -452,26 +381,4 @@ nonisolated struct MeshRoutedTypeRegistry: Equatable, Sendable {
             MeshRoutedAckStageRow(typeToken: $0.token, finalAck: $0.finalAck)
         })
     }
-}
-
-// MARK: - MeshRoutedResidentRows
-
-/// The engine's resident routed rows by name — the photo row
-/// ``MeshRoutedTypeRegistry/increment1Rows(_:)`` declares (plan step A0.5.2; the temporary-message
-/// row left for the host's rows at plan step A0.5.9, the heart row at plan step A0.5.10).
-///
-/// The registry is keyed by token and answers "is this token known, and under which policy"; this
-/// says which token is the photo row's, which is what its sender needs to mint and its built-in
-/// handler needs to register. A value, never a second registry: `MeshNetworkManager` still admits,
-/// resolves and forwards by its registry alone, and asks it whether a row is registered before it
-/// mints under that row's token. The row names its own token, so a registry holding a second row
-/// shaped like the photo row does not change which token the photo sender mints under or which row
-/// the photo handler projects.
-nonisolated struct MeshRoutedResidentRows: Equatable, Sendable {
-    /// The routed photo row.
-    let photo: MeshRoutedTypeEntry
-
-    /// The resident rows in their declaration order — the photo row alone — which is the order
-    /// ``MeshRoutedTypeRegistry/increment1(_:hostEntries:)`` registers them in, before the host's.
-    var rows: [MeshRoutedTypeEntry] { [photo] }
 }

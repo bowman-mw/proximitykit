@@ -22,7 +22,8 @@
 // plan step A0.5.4 the largest blob is the caller's `maxBlobByteCount`: the manager's resident
 // bound, its host registry's widest routed row, held once at its `init`. So this file states no
 // feature's payload size and imports no `PrivateMediaStore`; the photo row's formula lives with the
-// row, in `MeshRoutedTypeRegistry.swift`.
+// row, in its host's rows (Fernlet's: FernletSocial's `FernletRoutedTypes.swift`, since plan step
+// A0.5.11; ProximityKit's registry file from A0.5.4).
 
 import CryptoKit
 import Foundation
@@ -102,9 +103,10 @@ public nonisolated enum MeshRoutedItemSealError: Error, Equatable, Sendable {
     case retiredOrForeignFormat
     /// The framing does not parse: a blob shorter than one byte of ciphertext under a full seal, a
     /// body whose header length prefix runs past the bytes that carry it, or an in-bounds header
-    /// slice that is not this family's JSON. The third is CAUGHT at
-    /// ``MeshRoutedPhotoBody/init(decoding:)`` rather than propagated, so one frozen vocabulary
-    /// covers the whole framing and no raw `DecodingError` reaches a routed audit line.
+    /// slice that is not this family's JSON. The third is CAUGHT at each body's `init(decoding:)`
+    /// (the host's: FernletSocial's photo, text and heart bodies) rather than propagated, so one
+    /// frozen vocabulary covers the whole framing and no raw `DecodingError` reaches a routed audit
+    /// line.
     case malformed
     /// The blob is larger than the caller's `maxBlobByteCount`, the resident bound. Refused
     /// **before** any plaintext is allocated.
