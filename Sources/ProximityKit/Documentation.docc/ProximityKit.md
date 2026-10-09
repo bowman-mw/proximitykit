@@ -468,9 +468,9 @@ inherits all three:
   marker instead.
 
 `MemoryLifecycleBoundaryTests` rule ML4 fails any unmarked `Task` construction in a file holding an
-`unowned` host or a `FernletMeshHost`; rule ML5 fails a test that builds a manager or a composition
-over an inline host expression. `ProximityManagerDeallocationTests` measures HP2 directly, with the
-beacon loop armed.
+`unowned` host, or holding or taking a `FernletMeshHost` (a stored property or a parameter); rule ML5
+fails a test that builds a manager or a composition over an inline host expression.
+`ProximityManagerDeallocationTests` measures HP2 directly, with the beacon loop armed.
 
 ### Localization: nothing on the wire is display copy
 

@@ -169,19 +169,29 @@ public protocol ProximityHost: AnyObject {
     /// **No default, like ``proximityNamespace``.** Which routed types a host's features carry, and
     /// each one's cap, destination semantics, retention, final acknowledgement, expiry and content
     /// scope, is the host's declaration, so ProximityKit never guesses a row: a host that supplies none
-    /// fails to compile. Each row's token is read off the host's own namespace's routed types, so a
-    /// host never registers another app's spelling.
+    /// fails to compile.
+    ///
+    /// **Reading each row's token off its own namespace's routed types is the host's obligation**, so
+    /// that it never registers another app's spelling, and every token it registers is one its
+    /// namespace's soundness rules already hold to 1 to 64 bytes of printable ASCII, the width a routed
+    /// manifest's type token may have (`MeshRoutedManifestFormat.maxTypeTokenLength`). The engine checks
+    /// no row's token. A row whose token is empty or wider than that is registered all the same, and
+    /// every item minted or received under it is then refused at the manifest; a row whose token is
+    /// well formed but none of the namespace's routed types is registered and carries items like any
+    /// other, under a spelling the namespace does not declare.
     ///
     /// Read once, by ``MeshNetworkManager``'s initializer, which builds its one routed type registry
-    /// from these rows alone: a token's first row wins; at most sixteen rows are read; and a row the
-    /// engine cannot register (a relay retention it does not implement, a cap outside the wire bound)
-    /// is dropped, its token then refused at every door. The widest accepted row's cap is the one
-    /// resident bound the engine's seal, open and projection guard share. Every door that admits,
-    /// resolves, acknowledges or forwards an item reads that registry, and a projection handler or a
-    /// ledger judge registers only under one of its rows. Fernlet's app answers FernletSocial's
-    /// `FernletRoutedTypes.entries` over its namespace's routed types (the temporary-message, heart and
-    /// photo rows) in `ProximityHostAdapter.swift`; the test target's doubles answer the same through
-    /// one test-only extension the app's conformance cannot see.
+    /// from these rows alone. What the engine itself applies to a row is exactly this: at most sixteen
+    /// rows are read, a token's first row wins, and a row is registered only when its relay retention is
+    /// one the engine implements, its cap is at least 1 byte and its cap is at most the wire bound
+    /// (`MeshRoutedManifestFormat.maxContentByteCount`); any other row is dropped, its token then
+    /// refused at every door. The widest accepted row's cap is the one resident bound the engine's
+    /// seal, open and projection guard share. Every door that admits, resolves, acknowledges or
+    /// forwards an item reads that registry, and a projection handler or a ledger judge registers only
+    /// under one of its rows. Fernlet's app answers FernletSocial's `FernletRoutedTypes.entries` over
+    /// its namespace's routed types (the temporary-message, heart and photo rows) in
+    /// `ProximityHostAdapter.swift`; the test target's doubles answer the same through one test-only
+    /// extension the app's conformance cannot see.
     var meshRoutedTypeEntries: [MeshRoutedTypeEntry] { get }
 }
 

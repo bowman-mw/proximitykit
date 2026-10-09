@@ -458,9 +458,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     }
 
     /// Ends every long-running task the manager owns if it is released without `stopSearching()`
-    /// (today it never is — it is a process-lifetime `lazy var` on the store — but the tasks must
-    /// not outlive their owner: the observation loop would stay parked and the `[weak self]` timers
-    /// would each spin one more tick). `isolated`: the handles are main-actor state.
+    /// (in shipping it never is: its host's composition owns it, for Fernlet FernletSocial's
+    /// `FernletMeshFeatures`, which the store keeps for the process as its `lazy var` `meshFeatures`;
+    /// but the tasks must not outlive their owner: the observation loop would stay parked and the
+    /// `[weak self]` timers would each spin one more tick). `isolated`: the handles are main-actor
+    /// state.
     isolated deinit {
         observationTask?.cancel()
         rotationTimer?.cancel()
@@ -10448,8 +10450,9 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Spawns a detached task that PINS this manager's host for the task's own lifetime.
     ///
-    /// ``store`` is `unowned` because the host owns this manager (`FernletStore.swift`'s `lazy var`
-    /// managers), and the unowned back-reference is that ownership's cycle-breaker. A detached task,
+    /// ``store`` is `unowned` because the host owns this manager, through the composition that owns it
+    /// (for Fernlet, FernletSocial's `FernletMeshFeatures`, the store's `lazy var` `meshFeatures`), and
+    /// the unowned back-reference is that ownership's cycle-breaker. A detached task,
     /// however, holds `self` STRONGLY for the duration of every `self?.method()` it awaits, so it can
     /// outlive the host and then read a destroyed object — `swift_abortRetainUnowned` aborts the whole
     /// process, which is what P5 item 1a's crash reports are. Capturing the host here, read
