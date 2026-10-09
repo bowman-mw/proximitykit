@@ -84,16 +84,19 @@ also stopped the mesh raising ``ProximityForegroundAnchor``'s Live Activity at a
 presents the system's own continued-processing card, §14 forbids the duplicate, and the mesh seats
 up to five coordinators — so the mesh path was ATTEMPTING one `Activity.request` per committed slot.
 None of those could render, which is the honest reason the suppression is unconditional and costs a
-person nothing: ``ProximityConnectionActivityAttributes`` is internal to this module and no widget in
-`App/FernletWidgets` declares an `ActivityConfiguration` for it, so each request either threw
-(audited) or made an activity nothing draws while spending the per-app Live Activity ceiling. **P9
-item 5 then took the decision item 6 deferred** — the 1:1 recipe-share and presence anchors were
-RETIRED, not given a widget. The ActivityKit conformer is deleted and ``ProximityCoordinator``'s
-default anchor is `NoopProximityForegroundAnchor` unconditionally on every platform, which is what
-the three shipping sites that omit the argument now get. Nothing in the app requests a proximity Live
-Activity; ``ProximityForegroundAnchoring`` survives as the seam a future widget would conform and the
-one tests inject through, and the once-per-launch orphan reaper is untouched — it is now the only
-code that names the attributes type, which is why that type outlives its requester.
+person nothing: the proximity activity's attributes type, `ProximityConnectionActivityAttributes`,
+was internal to this module and no widget in `App/FernletWidgets` declares an `ActivityConfiguration`
+for it, so each request either threw (audited) or made an activity nothing draws while spending the
+per-app Live Activity ceiling. **P9 item 5 then took the decision item 6 deferred** — the 1:1
+recipe-share and presence anchors were RETIRED, not given a widget. The ActivityKit conformer is
+deleted and ``ProximityCoordinator``'s default anchor is `NoopProximityForegroundAnchor`
+unconditionally on every platform, which is what the three shipping sites that omit the argument now
+get. Nothing in the app requests a proximity Live Activity; ``ProximityForegroundAnchoring`` survives
+as the seam a future widget would conform and the one tests inject through, and the once-per-launch
+orphan reaper is untouched — the only code that names the attributes type, which is why that type
+outlives its requester. Since plan step A0.6 the reaper and the attributes type are the app's
+(`ProximityLiveActivityReaper`, in `App/Fernlet/ProximityLiveActivityReaper.swift`), unchanged in
+behaviour, so this module holds no ActivityKit code.
 All three resolve the display name they advertise the same way
 (host preference, else the host's fallback name, Fernlet's device name), and the peer-supplied
 names that reach chat, hearts, vouches, and the keep-as-friend rows pass one sanitize-or-floor coercion
@@ -381,8 +384,7 @@ kicks an evicted peer's link (`MeshTransportSession.disconnectPeer`) so no zombi
 survives a slot (`Tests/FernletTests/MemoryLifecycleTests` + `MemoryLifecycleBoundaryTests` are
 the enforcement; see Docs/Memory-Leak-Review-2026-08-17.md). Framework delegate callbacks
 (NearbyInteraction; the retired MultipeerConnectivity radio's did too) transfer non-Sendable objects across the main-actor
-hop via documented `nonisolated(unsafe)` locals, as does the proximity Live Activity reaper's one
-remaining `end(_:dismissalPolicy:)` call. Signing inputs come from the deterministic
+hop via documented `nonisolated(unsafe)` locals. Signing inputs come from the deterministic
 binary serializer in `CanonicalSignatureSerializer.swift` (domain-tagged per signed type,
 cross-platform stable; the legacy JSON encoder is retained verify-only). Persistence follows one
 stance throughout: small device-local files in Application Support with `.completeFileProtection`,
@@ -798,14 +800,14 @@ chat with the content layer's first half, the session hearts with the heart ledg
 photos with their review — each through the engine's public seams (the payload token door and
 captured-slot send, the host's routed-type rows, the origination door, a projection handler or a
 ledger judge per routed type, the session observer, the capability-list provider and the vouch-list
-exchange); and the sealed-backup escrow is the app's (`SealedBackupEscrowKey`, the provisioning
-participant every identity the app builds carries, with the escrow's two feature labels).
+exchange); the sealed-backup escrow is the app's (`SealedBackupEscrowKey`, the provisioning
+participant every identity the app builds carries, with the escrow's two feature labels); and so,
+since plan step A0.6, is the Live Activity reaper (`ProximityLiveActivityReaper`, with the attributes
+type it enumerates), which only cleans up after Fernlet's own earlier builds.
 `ProximityNamespaceBoundaryTests` keeps every one of their types out of this module, and holds its
 dependencies to `FernletCrypto` and `FernletDomainModel`. What still ties this module to Fernlet
 leaves in these steps:
 
-- **A0.6** moves the Live Activity reaper, which only cleans up after Fernlet's own earlier builds, to
-  the app.
 - **A0.7 and C5** make the one-to-one radio a profile-driven pair session and add its coach profile.
   The recipe-share manager, its wire types and status copy, and the typed doors only it and Fernlet's
   features go through (the envelope's typed view of its token and the coordinator's typed send)
@@ -1407,9 +1409,8 @@ Each connection's provider is its host's (``ProximityHost/makeProximityRangingPr
 
 - ``ProximityForegroundAnchoring`` — the seam. Since P9 item 5 its only shipping conformer is the
   no-op, which is ``ProximityCoordinator``'s unconditional default: the app raises no proximity Live
-  Activity, because no widget ever declared an `ActivityConfiguration` for its attributes.
-- ``ProximityLiveActivityReaper`` — launch-time reaper for proximity Live Activities a killed
-  previous process stranded; `FernletStoreLoader.startIfNeeded()` calls `endOrphans()` once per process, before the store exists.
+  Activity, because no widget ever declared an `ActivityConfiguration` for its attributes. The
+  launch-time reaper of the activities earlier builds stranded is the app's since plan step A0.6.
 
 ### Trust and verification
 

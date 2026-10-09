@@ -10907,19 +10907,19 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // `maxTotalSlots` coordinators, each with its own anchor — so the mesh path was
             // ATTEMPTING one `Activity.request` per committed slot for a single session.
             // **None of those requests could render** (item 6's fix round, F1): the proximity
-            // activity's attributes type is internal to this module and no widget in
-            // `App/FernletWidgets` declares an `ActivityConfiguration` for it, so each call either
-            // threw — audited, by a token P9 item 5 removed with its emitter — or made an activity nothing
-            // draws while counting against the per-app ceiling a later workout or cooking activity
-            // needs. What this line removes is therefore the doomed requests, not a card: a person
-            // sees no change on a phone.
+            // activity's attributes type was internal to this module (the app's since plan step
+            // A0.6) and no widget in `App/FernletWidgets` declares an `ActivityConfiguration` for
+            // it, so each call either threw — audited, by a token P9 item 5 removed with its
+            // emitter — or made an activity nothing draws while counting against the per-app
+            // ceiling a later workout or cooking activity needs. What this line removes is
+            // therefore the doomed requests, not a card: a person sees no change on a phone.
             //
             // P9 item 5 ANSWERED the question this comment used to leave open ("ship the widget or
             // retire the anchor", for the 1:1 recipe-share and presence paths): retire. The
             // coordinator's default anchor is now the no-op on every platform, so this argument is
             // redundant — it is kept because the wall cell asserts this exact text at this door,
             // and because being explicit at the door is what made the mesh's behaviour legible in
-            // the first place. The once-per-launch orphan reaper still runs.
+            // the first place. The app's once-per-launch orphan reaper still runs.
             foregroundAnchor: NoopProximityForegroundAnchor(),
             displayName: displayName,
             capabilities: localCapabilities(),

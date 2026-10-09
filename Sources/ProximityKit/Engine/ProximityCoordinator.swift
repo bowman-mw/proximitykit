@@ -266,15 +266,15 @@ public final class ProximityCoordinator {
         self.replayCache = replayCache
         // P9 item 5: the default anchor is the no-op on EVERY platform. It used to be the Live
         // Activity anchor, on platforms that had the framework, and every request it made was
-        // doomed — the proximity activity's attributes type is internal to this module and
-        // `App/FernletWidgets/FernletWidgetsBundle.swift` declares no `ActivityConfiguration` for
-        // it, so each call either threw (audited) or spent one of the per-app Live Activity slots a
-        // workout or cooking activity needs on something nothing draws. Three shipping construction
-        // sites take this default by omitting the argument
+        // doomed — the proximity activity's attributes type was internal to this module (the app's
+        // since plan step A0.6) and `App/FernletWidgets/FernletWidgetsBundle.swift` declares no
+        // `ActivityConfiguration` for it, so each call either threw (audited) or spent one of the
+        // per-app Live Activity slots a workout or cooking activity needs on something nothing
+        // draws. Three shipping construction sites take this default by omitting the argument
         // (`ProximityRecipeShareManager.handleChannelReady`, and `PresenceManager`'s heart door
         // plus its teardown seam), so this one line retires all of them; the mesh's two doors and
         // the recipe-share test seam pass `NoopProximityForegroundAnchor()` explicitly and are left
-        // alone. `ProximityLiveActivityReaper.endOrphans()` still runs once per launch.
+        // alone. The app's `ProximityLiveActivityReaper.endOrphans()` still runs once per launch.
         self.foregroundAnchor = foregroundAnchor ?? NoopProximityForegroundAnchor()
         self.displayName = displayName
         self.localCapabilities = capabilities
