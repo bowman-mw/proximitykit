@@ -32,8 +32,9 @@ public protocol ProximityInspectorRecording: AnyObject {
 /// dispatches (`payloads.known`) but not one of the coordinator's own session messages (identity
 /// intro/ack, heartbeat); `peer` is the handshake-verified
 /// identity when one exists, else the pending identity — receivers must apply their own
-/// committed/blocked gates. Conformers: ``MeshNetworkManager`` and ``ProximityRecipeShareManager``
-/// here, and FernletSocial's `PresenceManager`. Held `weak` by the coordinator.
+/// committed/blocked gates. Conformers: ``MeshNetworkManager`` here, and FernletSocial's
+/// `PresenceManager` and `ProximityRecipeShareManager` (the one a ``ProximityPairSession`` hands its
+/// pairings' coordinators). Held `weak` by the coordinator.
 @MainActor
 public protocol ProximityPayloadHandling: AnyObject {
     func proximityCoordinator(
@@ -132,8 +133,8 @@ private nonisolated struct SessionHeartbeatPayload: Codable, Sendable {
 /// signed identity exchange and the proximity commit gate to a verified, heartbeat-kept session,
 /// and is the single choke point every inbound envelope passes through.
 ///
-/// One coordinator per peer connection, owned by a manager (mesh slot, recipe pairing, presence
-/// heart connection) that injects the transport, ranging provider, trust policy, payload handler,
+/// One coordinator per peer connection, owned by a manager or session (mesh slot, pair-session
+/// pairing, presence heart connection) that injects the transport, ranging provider, trust policy, payload handler,
 /// and shared ``ReplayCache``. The friend-mode state machine: transport connect →
 /// `awaitingIdentityIntroduction` (signed intro/ack with ranging token + capabilities) →
 /// `awaitingProximityCommit` (UWB 15 cm / 0.8 s dwell) or `awaitingManualCommit` (no UWB) →
@@ -271,9 +272,9 @@ public final class ProximityCoordinator {
         // `ActivityConfiguration` for it, so each call either threw (audited) or spent one of the
         // per-app Live Activity slots a workout or cooking activity needs on something nothing
         // draws. Three shipping construction sites take this default by omitting the argument
-        // (`ProximityRecipeShareManager.handleChannelReady`, and `PresenceManager`'s heart door
+        // (`ProximityPairSession.handleChannelReady`, and `PresenceManager`'s heart door
         // plus its teardown seam), so this one line retires all of them; the mesh's two doors and
-        // the recipe-share test seam pass `NoopProximityForegroundAnchor()` explicitly and are left
+        // the pair session's test seam pass `NoopProximityForegroundAnchor()` explicitly and are left
         // alone. The app's `ProximityLiveActivityReaper.endOrphans()` still runs once per launch.
         self.foregroundAnchor = foregroundAnchor ?? NoopProximityForegroundAnchor()
         self.displayName = displayName
@@ -453,7 +454,7 @@ public final class ProximityCoordinator {
 
     /// Signs and sends one payload to the confirmed peer under `payloadTypeToken`, a token its host's
     /// vocabulary names (`payloads.known`): the per-connection send a host's pairing goes through, the
-    /// recipe-share manager's pairings and a host's own connections (presence's heart delivery) alike.
+    /// pair session's pairings and a host's own connections (presence's heart delivery) alike.
     ///
     /// **`summary` must be built from frozen literals — never `String(localized:)`.** Every caller
     /// hands in a human-sounding title that is nonetheless a wire token: it is folded into the
@@ -487,15 +488,6 @@ public final class ProximityCoordinator {
             expiresAt: sentAt.addingTimeInterval(5 * 60)
         )
         try await send(envelope)
-    }
-
-    /// Exactly ``sendPayload(payloadTypeToken:summary:payload:sealed:)`` for `type`'s raw value: the
-    /// typed spelling the recipe-share manager calls while it is still in this module.
-    ///
-    /// Package access until A0.7: the recipe-share manager is its one caller, and it leaves with the
-    /// recipe profile, when the profile-driven pair session sends through the token send.
-    package func sendPayload(type: PayloadType, summary: PayloadSummary, payload: Data, sealed: Bool = false) async throws {
-        try await sendPayload(payloadTypeToken: type.rawValue, summary: summary, payload: payload, sealed: sealed)
     }
 
     private func sealIfNeeded(_ payload: Data, sealed: Bool) throws -> (Data, PayloadEncryption) {
@@ -764,7 +756,7 @@ public final class ProximityCoordinator {
     ///
     /// Confirms the identity the coordinator holds at a proximity gate (`awaitingManualCommit` or
     /// `awaitingProximityCommit`) and does nothing in any other state: the programmatic commit a
-    /// host's pairing takes with no user step (the recipe-share manager's pairings and presence's heart
+    /// host's pairing takes with no user step (the pair session's pairings and presence's heart
     /// connections), the mesh's slot commit and the debug Force button's. Safe to call repeatedly.
     public func commitManualProximity() async {
         switch state {

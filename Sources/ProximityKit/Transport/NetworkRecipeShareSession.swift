@@ -5,17 +5,17 @@ import os
 
 // MARK: - RecipeShareRadioSession
 
-/// The recipe-share radio, as the surface ``ProximityRecipeShareManager`` actually drives.
+/// The pair session's radio, as the surface ``ProximityPairSession`` actually drives.
 ///
-/// The seam the recipe manager did not have. `MeshNetworkManager` has held its radio behind
-/// `MeshTransportSession` since P2 item 8 and `PresenceManager` behind ``PresenceRadioSession``
+/// The seam the recipe radio's owner once did not have. `MeshNetworkManager` has held its radio
+/// behind `MeshTransportSession` since P2 item 8 and `PresenceManager` behind ``PresenceRadioSession``
 /// since P9 item 2; the recipe manager constructed its session inline, which is why not one of its
 /// advertise, dial, admission or stand-down decisions was reachable without starting a real radio.
-/// Everything the manager asks of a radio is here and nothing else is: no browse internals, no
+/// Everything the session asks of a radio is here and nothing else is: no browse internals, no
 /// tunnels, no framework type.
 ///
 /// The hooks are settable rather than delegate methods because that is the shape all three radios
-/// already publish, and because the manager wires them once at construction and never again.
+/// already publish, and because the session wires them once at construction and never again.
 @MainActor
 protocol RecipeShareRadioSession: AnyObject {
 
@@ -97,8 +97,8 @@ nonisolated struct RecipeSharePosture {
     let sessionID: String
 
     /// The TLS identity the listener presents. Accept-any validated by both ends — certificate
-    /// validation is not the authentication decision here; the coordinator's sealed introduction
-    /// is.
+    /// validation is not the authentication decision here; the coordinator's signed identity
+    /// introduction is.
     let tlsIdentity: EphemeralMeshTLSIdentity.Minted
 
     /// A freshly minted posture: a random instance name, a random session id, and a new key pair.
@@ -142,11 +142,12 @@ nonisolated struct RecipeSharePosture {
 ///   still lands, and the only symptom is a third device that can suddenly see a paired one.
 /// * **There is no signed channel introduction.** The mesh authenticates a tunnel with
 ///   ``MeshChannelIntroduction`` against its roster before a single app frame crosses. This radio
-///   must not: `ProximityCoordinator`'s SEALED introduction is the recipe handshake, and its whole
-///   point is that identity never travels in the clear.
+///   does not: `ProximityCoordinator`'s signed identity introduction, inside the channel, is the
+///   pair session's handshake (a plain signed envelope: the session passes the coordinator no peer
+///   key to seal it to), and the payloads after it are sealed to the verified peer.
 /// * **There IS a per-transfer stream, which presence has none of.** A shared recipe crosses as
 ///   ONE sealed frame — there is no chunking and no resume — but a recipe carrying a picture
-///   (`ProximityRecipeSharePayload.maxImageBytes`, 512 KiB, base64'd into the JSON) clears
+///   (FernletSocial's `ProximityRecipeSharePayload.maxImageBytes`, 512 KiB, base64'd into the JSON) clears
 ///   ``MeshTransferStreamTable/bulkFloorBytes`` and earns a stream of its own, exactly as a friend
 ///   photo does on the mesh. A text-only recipe stays on the control stream.
 /// * **No timer at all.** The posture is minted per `start()` and per resume and never rotates on
@@ -186,9 +187,10 @@ nonisolated struct RecipeSharePosture {
 @MainActor
 final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHost {
 
-    /// The recipe radio's QUIC service type, the host namespace's
-    /// `family.radios.recipeShare.serviceType`. A frozen wire token: it must also appear in the app's
-    /// Info.plist `NSBonjourServices` or discovery is silently dead on device.
+    /// The radio's QUIC service type, its pair profile's `radio.serviceType` (Fernlet's recipe
+    /// profile: the host namespace's `family.radios.recipeShare.serviceType`). A frozen wire token: it
+    /// must also appear in the app's Info.plist `NSBonjourServices` or discovery is silently dead on
+    /// device.
     ///
     /// Deliberately **not** a reuse of the retired radio's `_fernlet-recipe._tcp`/`._udp`. Those
     /// entries survive until P9 item 4 deletes them, and reusing a name during the migration
@@ -196,10 +198,14 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// browse the other's registrations as a peer.
     nonisolated let serviceType: String
 
-    /// ALPN for the recipe-share protocol, the host namespace's `family.radios.recipeShare.alpn`. A
-    /// frozen wire token, distinct from the mesh's `fernlet-mesh-v1` and presence's `fernlet-near-v1`
-    /// so no two radios can negotiate.
+    /// ALPN for the radio's protocol, its pair profile's `radio.alpn` (Fernlet's recipe profile: the
+    /// host namespace's `family.radios.recipeShare.alpn`). A frozen wire token, distinct from the
+    /// mesh's `fernlet-mesh-v1` and presence's `fernlet-near-v1` so no two radios can negotiate.
     nonisolated let alpn: String
+
+    /// The TXT `mode` value the pair profile advertises and believes (Fernlet's recipe profile:
+    /// `recipe`): the sighting audit's `recipe` context says whether a browsed record carries it.
+    nonisolated let advertisementMode: String
 
     /// The start of every Bonjour instance name this radio's postures advertise, the host
     /// namespace's `family.radios.meshInstanceNamePrefix`, shared with the mesh radio.
@@ -414,16 +420,21 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// Peers this radio currently holds a tunnel to, in no particular order.
     var connectedPeers: [PeerHandle] { tunnels.values.map(\.peer) }
 
-    /// A radio that speaks the host's wire: it advertises and browses the namespace's recipe-share
-    /// service type, negotiates its ALPN and logs under its subsystem (ProximityKit plan step
-    /// A0.2.7), and mints every posture with the namespace's mesh instance-name prefix and common
-    /// name. Each value is read once, here, with the namespace's soundness verdict; building a radio
-    /// starts nothing.
+    /// A radio that speaks the host's wire under a pair profile: it advertises and browses the
+    /// profile's service type and negotiates its ALPN, tests a browsed record for the profile's TXT
+    /// mode, and logs under the namespace's subsystem and mints every posture with the namespace's
+    /// mesh instance-name prefix and common name. Each value is read once, here: the service type and
+    /// ALPN off the profile's radio, the TXT mode the sighting audit tests for off the profile, and
+    /// the instance-name prefix, TLS common name, log subsystem and soundness verdict off the
+    /// namespace. Building a radio starts nothing.
     ///
-    /// - Parameter namespace: The host's protocol identity, as its manager holds it.
-    init(namespace: ProximityNamespace) {
-        serviceType = namespace.family.radios.recipeShare.serviceType
-        alpn = namespace.family.radios.recipeShare.alpn
+    /// - Parameters:
+    ///   - namespace: The host's protocol identity, as its pair session holds it.
+    ///   - profile: The pair session's profile, which the session has checked against `namespace`.
+    init(namespace: ProximityNamespace, profile: ProximityPairProfile) {
+        serviceType = profile.radio.serviceType
+        alpn = profile.radio.alpn
+        advertisementMode = profile.advertisementMode
         instanceNamePrefix = namespace.family.radios.meshInstanceNamePrefix
         tlsCommonName = namespace.family.radios.tlsCommonName
         namespaceSoundness = namespace.soundness
@@ -1124,7 +1135,7 @@ private extension NetworkRecipeShareSession {
             "recipe.quic.sighted",
             context: [
                 "peer": peerLabel(for: key),
-                "recipe": String(RecipeShareAdvertisement.isRecipeAdvertisement(advertisement))
+                "recipe": String(RecipeShareAdvertisement.isAdvertisement(advertisement, mode: advertisementMode))
             ]
         )
         onPeerDiscovered?(handle(for: key))

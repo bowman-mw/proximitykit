@@ -2,8 +2,9 @@ import Foundation
 
 // MARK: - RecipeShareAdvertisement
 
-/// What the recipe-share radio publishes in its Bonjour TXT record, and what it believes reading
-/// one back — as pure functions over `[String: String]`, so the whole vocabulary settles at tier 1.
+/// What the pair session's radio (the recipe-share radio) publishes in its Bonjour TXT record, and
+/// what it believes reading one back — as pure functions over `[String: String]`, so the whole
+/// vocabulary settles at tier 1.
 ///
 /// The counterpart of ``MeshLinkAdvertisement`` and ``PresenceAdvertisement`` for the third radio,
 /// and a separate type for the same reason they are separate from each other: the three publish
@@ -12,8 +13,8 @@ import Foundation
 ///
 /// ## The split of ownership, which is the point of this type
 ///
-/// The **owner** (`ProximityRecipeShareManager`) contributes `v`, `mode` and the byte-bounded
-/// `name` — the fields a picker row is rendered from. The **radio**
+/// The **owner** (``ProximityPairSession``) contributes `v`, its profile's `mode` and the
+/// byte-bounded `name` — the fields a picker row is rendered from. The **radio**
 /// (``NetworkRecipeShareSession``) contributes `sid`, because under QUIC the session id is minted
 /// with the instance name and the TLS identity and is replaced with them at every `start()` and
 /// every resume. Neither half can publish alone, and ``publishedFields(from:sessionID:)`` is the
@@ -24,8 +25,9 @@ import Foundation
 /// DNS-SD (RFC 6763 §6.1) gives each TXT entry a single length byte, so one `key=value` string may
 /// not exceed ``maxEntryByteCount``. Every value here is bounded well under that before it
 /// arrives: `sid` is a 36-character UUID, `name` is capped at
-/// ``MeshLinkAdvertisement/maxFieldValueLength`` bytes by ``RecipeShareAdvertisedName``, and `v`
-/// and `mode` are frozen tokens. The fields are published through
+/// ``MeshLinkAdvertisement/maxFieldValueLength`` bytes by ``RecipeShareAdvertisedName``, `v` is a
+/// frozen token, and `mode` is the pair profile's frozen token, which ``ProximityPairSession`` holds
+/// to that same byte bound. The fields are published through
 /// ``MeshLinkAdvertisement/publishedFields(from:)``, which drops an empty or over-long value
 /// rather than truncating it, so the bound holds by construction — and
 /// ``entriesFitTheTXTLimit(_:)`` is the assertion that says so out loud. Presence needed chunking
@@ -48,11 +50,9 @@ nonisolated enum RecipeShareAdvertisement {
     /// The key carrying the sender's chosen display name, absent when it cannot be published.
     static let nameKey = "name"
 
-    /// The key naming which Fernlet radio this registration belongs to.
+    /// The key naming which kind of pair session this registration belongs to: its value is the pair
+    /// profile's `advertisementMode` (Fernlet's recipe profile: `recipe`).
     static let modeKey = "mode"
-
-    /// The only mode this radio publishes or believes.
-    static let mode = "recipe"
 
     /// Bytes one whole `key=value` TXT entry may occupy — DNS-SD's single length byte.
     static let maxEntryByteCount = 255
@@ -69,15 +69,16 @@ nonisolated enum RecipeShareAdvertisement {
         return MeshLinkAdvertisement.publishedFields(from: fields)
     }
 
-    /// Whether a browsed record is a recipe-share advertisement this build understands.
-    static func isRecipeAdvertisement(_ fields: [String: String]?) -> Bool {
+    /// Whether a browsed record is an advertisement of this version under `mode`, the pair profile's
+    /// `advertisementMode`.
+    static func isAdvertisement(_ fields: [String: String]?, mode: String) -> Bool {
         fields?[versionKey] == version && fields?[modeKey] == mode
     }
 
-    /// The session id a browsed record carries, or nil when the record is not a recipe-share
-    /// advertisement of this version or carries no usable id.
-    static func sessionID(from fields: [String: String]?) -> String? {
-        guard isRecipeAdvertisement(fields), let sessionID = fields?[sessionIDKey],
+    /// The session id a browsed record carries, or nil when the record is not an advertisement of
+    /// this version under `mode` or carries no usable id.
+    static func sessionID(from fields: [String: String]?, mode: String) -> String? {
+        guard isAdvertisement(fields, mode: mode), let sessionID = fields?[sessionIDKey],
               !sessionID.isEmpty else { return nil }
         return sessionID
     }

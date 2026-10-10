@@ -624,7 +624,7 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// deinit exists for the owner that does not: a listener, browser, poll or per-tunnel task
     /// outlives its session otherwise, keeping a QUIC connection and a `MeshLinkKey` closure alive
     /// with nothing left to deliver to (memory-lifecycle rule ML1, the pattern `MeshNetworkManager`,
-    /// `PresenceManager` and `ProximityRecipeShareManager` all use).
+    /// `PresenceManager` and `ProximityPairSession` all use).
     isolated deinit {
         listenerTask?.cancel()
         browserTask?.cancel()

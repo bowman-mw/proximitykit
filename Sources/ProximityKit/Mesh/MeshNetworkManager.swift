@@ -14050,7 +14050,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
 
     /// Enters proximity-join mode WITHOUT starting the radios. `startJoin()` calls
     /// `startSearching()`, which starts real advertising and browsing — a unit test must never do
-    /// that. Mirrors `ProximityRecipeShareManager.markRunningForTesting`.
+    /// that. Mirrors `ProximityPairSession.markRunningForTesting`.
     ///
     /// Sets ``sessionEnteredByProximityJoin`` alongside it, exactly as `startJoin()` does, so a rig
     /// that stands the radios down and resumes gets the entry mode a real proximity session has.

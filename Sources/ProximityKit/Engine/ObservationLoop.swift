@@ -2,7 +2,8 @@
 // ProximityKit
 //
 // The single home of the coordinator-state observation loop that MeshNetworkManager,
-// ProximityRecipeShareManager, and PresenceManager (FernletSocial's) previously each hand-rolled
+// ProximityPairSession (the recipe-share manager's mechanism), and PresenceManager (FernletSocial's)
+// previously each hand-rolled
 // (byte-identical machinery whose leak-fix comment had drifted to only one copy —
 // exactly the hand-propagation hazard this extraction removes).
 
@@ -10,7 +11,7 @@ import Observation
 
 /// The shared `withObservationTracking` re-arm loop behind the proximity managers'
 /// coordinator-state observers (`MeshNetworkManager.startObserving`,
-/// `ProximityRecipeShareManager.startObserving` and FernletSocial's
+/// `ProximityPairSession.startObserving` and FernletSocial's
 /// `PresenceManager.startHeartObserving`).
 ///
 /// Each iteration registers the caller's tracked reads, suspends until Observation reports a

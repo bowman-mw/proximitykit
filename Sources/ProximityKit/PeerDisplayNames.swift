@@ -17,8 +17,8 @@ extension ProximityHost {
     /// and tabs (`CharacterSet.whitespaces`, never a line break), or, when that leaves nothing, the
     /// host's ``proximityFallbackDisplayName`` exactly as the host states it, untrimmed. The fallback
     /// is read only then, on every resolution, never cached. The single home of the three previously
-    /// identical private `displayName` vars in `MeshNetworkManager`, `ProximityRecipeShareManager`,
-    /// and `PresenceManager`.
+    /// identical private `displayName` vars in `MeshNetworkManager`, `ProximityPairSession` (the
+    /// recipe-share manager's mechanism), and `PresenceManager`.
     ///
     /// Public because the UI has to be able to SAY the resolved name: the Friends surfaces show it
     /// as the "You appear as" placeholder/hint so an unset name doesn't silently broadcast "iPhone".

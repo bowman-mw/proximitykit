@@ -483,7 +483,9 @@ nonisolated extension ProximityNamespace {
         public let mesh: Radio
         /// The presence radio.
         public let presence: Radio
-        /// The recipe-share radio. Plan step A0.7 turns it into the recipe pair-session profile.
+        /// The recipe-share radio: the radio Fernlet's recipe pair-session profile runs on,
+        /// FernletConnections' `ProximityPairProfile.recipeShare(in:)`, and the one pair-session row a
+        /// ``ProximityPairSession`` accepts a profile's radio as.
         public let recipeShare: Radio
         /// The mesh heartbeat datagram, which the receive path drops by byte equality alone.
         public let meshHeartbeat: Data

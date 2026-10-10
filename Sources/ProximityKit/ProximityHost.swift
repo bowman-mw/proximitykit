@@ -2,14 +2,14 @@ import Foundation
 import FernletDomainModel
 
 /// The narrow seam the Proximity subsystem uses to reach app-level state, so the
-/// mesh / recipe-share managers depend on this abstraction instead of the concrete
+/// mesh manager and the pair session depend on this abstraction instead of the concrete
 /// `FernletStore`. This removes the App→Proximity type coupling (the managers no
 /// longer name `FernletStore`), which is the precondition for `Proximity/` to
 /// become a standalone `ProximityKit` module (plan §5d). The app conforms
 /// `FernletStore` to it in `ProximityHostAdapter.swift`.
 ///
 /// Mirrors the existing `ProximityTrustPolicy` / `WorkoutSyncContext` host-protocol
-/// pattern. Surface is exactly what `MeshNetworkManager` + `ProximityRecipeShareManager`
+/// pattern. Surface is exactly what `MeshNetworkManager` + `ProximityPairSession`
 /// consume: display name and the block/fingerprint checks — and the requirements the extension
 /// below will never give a default, because each is the host's identity, custody, rule or platform
 /// fact, not the mechanism's: the host's protocol identity, ``proximityNamespace``, its install
@@ -137,7 +137,7 @@ public protocol ProximityHost: AnyObject {
     /// take theirs from the cell that builds them: another app's, or Fernlet's with some of its groups
     /// replaced, in the cells that test one.
     ///
-    /// Read once, at construction: ``MeshNetworkManager`` and ``ProximityRecipeShareManager`` here,
+    /// Read once, at construction: ``MeshNetworkManager`` and ``ProximityPairSession`` here,
     /// and FernletSocial's `PresenceManager`, each keep their own copy, build the radio they own by
     /// default from it and check against it the identity they own (``makeProximityIdentity()``'s when
     /// they are handed none), so no later read reaches back to the host; FernletSocial's mesh features
@@ -167,7 +167,7 @@ public protocol ProximityHost: AnyObject {
     ///
     /// **A new value per call, kept alive by the caller.** The coordinator holds its policy `weak`,
     /// so ``MeshNetworkManager`` (per slot), FernletSocial's `PresenceManager` (per heart connection)
-    /// and ``ProximityRecipeShareManager`` (per pairing) each call this once per connection, test seams
+    /// and ``ProximityPairSession`` (per pairing) each call this once per connection, test seams
     /// included, and keep the result beside that connection for its lifetime: a policy nothing
     /// retains lets the revoked and blocked drops silently stop firing.
     ///
@@ -180,7 +180,7 @@ public protocol ProximityHost: AnyObject {
     func makeProximityTrustPolicy() -> any ProximityTrustPolicy
 
     /// A fresh ranging provider for one connection: the ``RangingProvider`` that ``MeshNetworkManager``
-    /// (per slot), ``ProximityRecipeShareManager`` (per pairing) and a host's presence (FernletSocial's
+    /// (per slot), ``ProximityPairSession`` (per pairing) and a host's presence (FernletSocial's
     /// `PresenceManager`, per heart connection) each build that connection's ``ProximityCoordinator``
     /// over, calling this once per connection at their channel-ready doors. The coordinator owns the
     /// provider and stops it when the connection ends; the test seams that build a coordinator take a
@@ -202,7 +202,7 @@ public protocol ProximityHost: AnyObject {
     func makeProximityRangingProvider() -> any RangingProvider
 
     /// A fresh device identity for a manager that was handed none: the identity
-    /// ``MeshNetworkManager``, ``ProximityRecipeShareManager`` and FernletSocial's `PresenceManager`
+    /// ``MeshNetworkManager``, ``ProximityPairSession`` and FernletSocial's `PresenceManager`
     /// build by default, once each, at construction.
     ///
     /// **No default, like ``proximityNamespace``, because an identity's custody is the host's.** A

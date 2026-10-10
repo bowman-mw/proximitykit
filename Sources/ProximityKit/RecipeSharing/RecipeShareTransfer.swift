@@ -37,13 +37,13 @@ nonisolated enum RecipeShareDiscoveryGate {
     /// What the radio is holding at the instant an event arrives.
     struct Radio: Equatable, Sendable {
 
-        /// Whether the manager considers the radio up — `ProximityRecipeShareManager.isListening`.
+        /// Whether the pair session considers the radio up — `ProximityPairSession.isListening`.
         let isRunning: Bool
 
         /// Whether discovery is already standing down.
         let isPaused: Bool
 
-        /// How many connection records the manager holds AFTER applying the event.
+        /// How many connection records the pair session holds AFTER applying the event.
         let connectionCount: Int
 
         /// A radio reading. `connectionCount` is the count *after* the event, which is what makes
@@ -117,10 +117,10 @@ nonisolated enum RecipeShareDiscoveryGate {
 /// One recipe share, from the moment the user picks a recipient to the moment the payload has been
 /// handed to the transport — as a state machine with an exactly-once completion.
 ///
-/// ## What this pins that the manager could not
+/// ## What this pins that the status line could not
 ///
-/// The send pipeline's observable half (`ProximityRecipeShareManager.SendState`) is display copy: it
-/// exists to render a status line and is cleared 2.5 s after a terminal state. It is not a record of
+/// The send pipeline's observable half (`ProximityPairSession.status`) is display state: it exists
+/// to render a status line and is cleared 2.5 s after a terminal state. It is not a record of
 /// what happened, it carries no refusal, and a second completion would simply overwrite the first.
 /// This value is the record: every legal move is a row in the table below, every illegal one is a
 /// refusal the caller can see, and a completion is counted rather than assigned.
@@ -132,7 +132,7 @@ nonisolated enum RecipeShareDiscoveryGate {
 /// | `sending` | `sending` | refused | `sent` | `failed` | `cancelled` |
 /// | terminal | refused | refused | refused | refused | refused |
 ///
-/// `peerVerified` is idempotent because the manager re-evaluates every coordinator on every
+/// `peerVerified` is idempotent because the pair session re-evaluates every coordinator on every
 /// observation tick; `sendBegan` is not, because two send starts for one share is the defect.
 /// `sendCompleted` from anywhere but `sending` is refused, which is what makes
 /// ``completionCount`` an oracle rather than a counter: it can only ever be 0 or 1, and it is 1
@@ -227,7 +227,7 @@ nonisolated struct RecipeShareTransfer: Equatable, Sendable {
     /// says the second recipe landed when it is the first that did.
     ///
     /// So every send captures the token of the record it began and hands it back with its outcome,
-    /// and `ProximityRecipeShareManager.applyTransfer(_:token:)` refuses an outcome whose token is
+    /// and `ProximityPairSession.applyTransfer(_:token:)` refuses an outcome whose token is
     /// not the live record's. Events that belong to whatever share is live — a verification, a
     /// teardown, a discovery pause — pass no token and are unaffected.
     let token: UUID
@@ -270,14 +270,16 @@ nonisolated struct RecipeShareTransfer: Equatable, Sendable {
     /// known.
     ///
     /// A text-only recipe is a few kilobytes and stays on the control stream; a recipe carrying a
-    /// picture (`ProximityRecipeSharePayload.maxImageBytes`, 512 KiB, base64'd into the JSON) clears
-    /// ``MeshTransferStreamTable/bulkFloorBytes`` and earns a stream of its own.
+    /// picture (FernletSocial's `ProximityRecipeSharePayload.maxImageBytes`, 512 KiB, base64'd into the
+    /// JSON) clears ``MeshTransferStreamTable/bulkFloorBytes`` and earns a stream of its own.
     ///
-    /// **It is an estimate in both directions, not a floor.** The size here is the *plaintext* the
-    /// manager encodes, and the radio routes on the sealed frame's real size —
-    /// `SealedPayloadFraming.frame` DEFLATES a body of 128 bytes or more whenever that shrinks it,
-    /// so a verbose text recipe of 70 KiB can seal to well under the floor and ride the control
-    /// stream after all. Nothing acts on this value; it is what said, at pass 1, that this radio
+    /// **It is an estimate, not a floor.** The size here is the *plaintext* the pair session's owner
+    /// encodes, and the radio routes on the sealed frame's real size: the seal adds its fixed
+    /// overhead, and its format follows the PEER's advertised capabilities. A recipe body seals
+    /// unframed (`.legacy`, marker, ephemeral key, nonce and tag around the plaintext), because its
+    /// peer, a pair session's coordinator, advertises no capabilities; a peer that advertised the
+    /// namespace's wire2 would get the framed seal, where `SealedPayloadFraming.frame` DEFLATES a body
+    /// of 128 bytes or more whenever that shrinks it. Nothing acts on this value; it is what said, at pass 1, that this radio
     /// would need a per-transfer-stream acceptor. The two real cases — a text recipe, and a picture
     /// recipe at ~693 KiB on the wire after base64 — sit on the same side of the floor either way.
     ///

@@ -14,29 +14,29 @@ import Foundation
 ///
 /// ## Two different facts
 ///
-/// Six of the seven cases mean **nothing left this device**: the share was refused, or it ended
+/// Six of the seven cases mean **nothing left this device**: the send was refused, or it ended
 /// before the sealed payload was handed to the transport. ``sendIncomplete`` is the odd one out. The
 /// payload had started going out when the send failed or was cut off, so the other person **may**
 /// have it. The copy must never merge the two, which is what ``mayHaveReachedRecipient`` is for.
 ///
-/// There is deliberately no "delivered", "received", "accepted" or "queued" case. The recipe radio
-/// has no application receipt (the receiver's Import/Decline sends nothing back) and no routed or
-/// held path (recipe sharing is strictly one pairing at a time, in person), so this module can never
-/// know any of those things.
+/// There is deliberately no "delivered", "received", "accepted" or "queued" case. A pair session has
+/// no application receipt (a recipe share's receiver's Import/Decline sends nothing back) and no
+/// routed or held path (a pair session links two devices at a time, in person), so this module can
+/// never know any of those things.
 public nonisolated enum ProximityPairSendFailure: CaseIterable, Equatable, Sendable {
 
-    /// This device is already paired with a DIFFERENT Fernlet, and recipe sharing links two
-    /// Fernlets at a time. Refused before anything was attempted.
+    /// This device is already paired with a DIFFERENT device, and a pair session links two devices
+    /// at a time. Refused before anything was attempted.
     case pairedWithAnother
 
-    /// A connection attempt to a different Fernlet was already in flight. Refused before anything
+    /// A connection attempt to a different device was already in flight. Refused before anything
     /// was attempted.
     case connectingToAnother
 
-    /// The picked Fernlet was no longer discoverable when the share began.
+    /// The picked device was no longer discoverable when the send began.
     case recipientUnavailable
 
-    /// The pre-connect timer ran out: the other Fernlet never answered the dial (the usual reason is
+    /// The pre-connect timer ran out: the other device never answered the dial (the usual reason is
     /// that it is busy with its own pairing, locked, or closed).
     case noAnswer
 
@@ -68,14 +68,14 @@ public nonisolated enum ProximityPairSendFailure: CaseIterable, Equatable, Senda
 // MARK: - ProximityPairSendOutcome
 
 /// How one send over a one-to-one pairing (a recipe share) ended, published by
-/// ``ProximityRecipeShareManager/lastShareOutcome`` so the share sheet can say so plainly instead of
+/// ``ProximityPairSession/lastSendOutcome`` so an owner's sheet can say so plainly instead of
 /// silently clearing.
 ///
-/// ## Why this exists beside `SendState`
+/// ## Why this exists beside `status`
 ///
-/// ``ProximityRecipeShareManager/SendState`` is display copy for a status line: its failure arm is
-/// an English sentence composed in this module, and every terminal state is reset to `.idle` 2.5 s
-/// later. Neither property is usable for a confirmation that has to stay on screen until the user
+/// ``ProximityPairSession/status`` is a status line: its owner renders it as display copy (Fernlet's
+/// recipe share sheet shows an English sentence), and every terminal state is reset to `.idle` 2.5 s
+/// later. Neither is usable for a confirmation that has to stay on screen until the user
 /// dismisses it and has to be translated. This value is the record: a frozen cause
 /// (``ProximityPairSendFailure``), the names it happened to, and a fresh ``id`` per publication, so
 /// two identical failures in a row are still two changes an observer can see.

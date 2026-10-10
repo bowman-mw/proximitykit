@@ -41,8 +41,8 @@
 /// `malformedLabel`): no field path, label, token or name, so a host's log says why without repeating
 /// what.
 ///
-/// **One namespace per manager.** The mesh, presence and recipe-share managers compare the namespace of
-/// the identity they hold with their own: one they are handed (their `identity:` seam, which no
+/// **One namespace per manager.** The mesh and presence managers and the pair session compare the
+/// namespace of the identity they hold with their own: one they are handed (their `identity:` seam, which no
 /// shipping caller uses) or, handed none, the one their host's ``ProximityHost/makeProximityIdentity()``
 /// builds.
 /// On a mismatch a manager still constructs, as it does when provisioning fails, but audits
