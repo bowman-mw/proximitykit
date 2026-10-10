@@ -28,7 +28,8 @@ import it (nor it them, nor `FernletSocial`, whose heart dead-drop gets its Clou
 injected app-side through FernletDomainModel's `HeartDropTransporting` seam and so only ever hands
 ciphertext + rotating day tags outward). Its one seam back to app state is the
 ``ProximityHost`` protocol, which `FernletStore` conforms to via an app-side adapter; the
-"outward edges only" rule keeps the module a black box the app drives, never the reverse.
+"outward edges only" rule keeps the module a black box the app drives, never the reverse. It builds
+for iOS 26 and native macOS 26, compiled for both on every push; see "Platforms" below.
 
 **No SwiftUI view and no `FernletUI` edge** (step A0.1 of
 `Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md`, the first step towards ProximityKit as a
@@ -847,6 +848,56 @@ there, so it opens no door here. Rule 5 of `ProximityNamespaceBoundaryTests` lis
 by file, with the step that closes it, and fails a `package` line no row names (any code line on
 which `package` is an access modifier, a setter's `package(set)` included, however its declaration
 goes on) or a row whose line is gone; that list is the one place the counts live.
+
+### Platforms
+
+ProximityKit builds for iOS 26 and native macOS 26 (plan step A0.6). Mac Catalyst is not a
+destination, and nothing builds it. A fact whose right answer differs by platform is its host's to
+state, as a ``ProximityHost`` requirement whose doc says what a Mac host answers (the name an unnamed
+device goes by, and whether a connection ranges), except the storage root, which this module still
+defaults until plan step A0.6.6 (see "Hosting on macOS" below). Two platform mechanisms stay in this
+module, each compiled only where its framework is usable:
+
+- ``NIRangingSession``, the NearbyInteraction provider a host on iOS hands out, is compiled on iOS
+  only: its whole file is under `#if os(iOS)`. NearbyInteraction's module ships in the macOS SDK with
+  every type it declares unavailable there, so `canImport` would not keep it out of a Mac build. A host
+  without ranging answers ``NoopRangingProvider``.
+- ``ProtectedSidecar``'s protected-data retry observes UIKit's protected-data notification under
+  `#if canImport(UIKit)` and compiles out without it, so on a Mac a read retries on access only.
+
+**The gate.** `Scripts/macos-build-check.sh` builds the package's `ProximityKit` product, this module
+and its closure (`FernletCrypto`, `FernletDomainModel` and `FernletFoundation`), for
+`generic/platform=macOS`, arm64 and x86_64, with warnings as errors, and then requires native macOS
+products, because that destination also matches Mac Catalyst. That closure is the Mac-ready set: the
+manifest's `.macOS(.v26)` is package-wide, as SwiftPM declares platforms, and no other module is built
+for macOS (`FernletSocial`'s photo path still needs `UIImage`). `Scripts/macos-build-selftest.sh`
+proves the check load-bearing: an `import UIKit` it plants in this module must fail the check, and the
+clean tree must pass it. CI runs the self-test on every push (the "ProximityKit on native macOS" step
+of `s3-wall.yml`), and the pre-push hook runs the check when a push touches the closure, the manifest
+or either script. It is an `xcodebuild` build, not `swift build`: the SwiftPM command line leaves the
+closure's string catalogs unprocessed. The build is the compiler half, which refuses any symbol native
+macOS lacks wherever it stands outside its guard. `ProximityPlatformBoundaryTests`, on the s3-grep CI
+line, is the source half: it holds this module's imports to a neutral baseline and the two seams
+above, refuses a device-name source, a platform directory and a default for a host fact beyond exact
+rows, and pins that the gate runs.
+
+### Hosting on macOS
+
+A host on a Mac owes this module the following, beside the requirements every host answers. No build
+checks them; plan step P0.2 and A1's device lanes prove them on hardware.
+
+| Topic | What a Mac host owes |
+| --- | --- |
+| Keychain | Every query this module issues sets `kSecUseDataProtectionKeychain` (``ProximityKeychainItem``). On macOS that keychain needs the host signed with entitlements a provisioning profile authorizes (Apple's TN3137). Without them `SecItem` returns `errSecMissingEntitlement` (-34018), and identity provisioning throws ``IdentityError/keychainReadFailed(_:)`` and fails closed. A bare `swift test` runner is the same case. |
+| Local network | `NSLocalNetworkUsageDescription`, and `NSBonjourServices` listing its namespace's service types (Fernlet's are in `App/Fernlet/Info.plist`); when sandboxed, `com.apple.security.network.client` and `com.apple.security.network.server`, because the radios both listen and dial. |
+| Routed access gate | ``MeshNetworkManager``'s gate starts ``MeshRoutedAccessGate/closed``, and its three facts are iOS-shaped. A Mac host answers each in the same meaning, `protectedDataAvailable` (the user's session is unlocked and the host's keys are readable), `appIsForeground` (the app is active) and `duressActive` (its own lock's duress session, or `false`), and pushes them through ``MeshNetworkManager/applyRoutedAccessGate(_:now:)`` on every change; otherwise nothing routed is ever decrypted. |
+| Lifecycle | macOS never suspends a process, while Fernlet's run policy (the app's) leans on iOS suspension, so a Mac host stops or holds the radios itself. App Nap can stretch the mesh radio's 1 s poll and its 30 s heartbeat past the 90 s QUIC idle reap, so a Mac host holds a user-initiated `ProcessInfo` activity while a session is live. |
+| Protected data | ``ProtectedSidecar``'s retry observer compiles out without UIKit, so its reads retry on access only. Data protection's file-protection classes are iOS's; on a Mac, the sealed stores carry the at-rest guarantee. |
+| Peer-to-peer | The mesh radio asks for peer-to-peer Wi-Fi everywhere but the simulator, macOS included, so a Mac uses AWDL beside its other interfaces; the cellular ban is moot there. Untested on a Mac until plan step P0.2. |
+| Ranging | Answer ``NoopRangingProvider`` from ``ProximityHost/makeProximityRangingProvider()``, so every session commits by hand or by the QR ceremony. An iOS host that answers ``NIRangingSession`` must declare `NSNearbyInteractionUsageDescription`. |
+| Name | ``ProximityHost/proximityFallbackDisplayName`` is a generic word, a token that is never localized, and never the Computer Name (`Host.current().localizedName`, `SCDynamicStoreCopyComputerName`, `ProcessInfo.processInfo.hostName`), because it rides the recipe radio's unauthenticated TXT record. |
+| Storage | ``ProximityHost/proximitySupportDirectory`` is a folder no other app shares: a sandboxed host's container's Application Support, or, for an unsandboxed host, a folder named for its bundle identifier. Its namespace's ``ProximityNamespace/installationCollisions(with:)`` must be empty against every app of its family, so its `directoryName` is never another app's, and never "Fernlet". Until plan step A0.6.6 this module still defaults the root to the namespace's folder under the process's Application Support, which on an unsandboxed Mac every app shares, so a Mac host states its own. |
+| Continued processing | `BGContinuedProcessingTask` is the iOS app's (Fernlet's continuation host); a Mac host has nothing to continue into. |
 
 ## Topics
 
