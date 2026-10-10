@@ -388,7 +388,8 @@ the enforcement; see Docs/Memory-Leak-Review-2026-08-17.md). Framework delegate 
 hop via documented `nonisolated(unsafe)` locals. Signing inputs come from the deterministic
 binary serializer in `CanonicalSignatureSerializer.swift` (domain-tagged per signed type,
 cross-platform stable; the legacy JSON encoder is retained verify-only). Persistence follows one
-stance throughout: small device-local files in Application Support with `.completeFileProtection`,
+stance throughout: small device-local files under the root the host states (Fernlet's
+`Application Support/Fernlet`), with `.completeFileProtection` on iOS,
 never synced. This module's own two durable surfaces, the mesh session context and the routed store,
 are sealed (see "Two durable surfaces" below); data of record a host's feature keeps loads through
 ``ProtectedSidecar``, which classifies read failures so a locked-device read can never be mistaken
@@ -410,14 +411,17 @@ The heart ledger and the activity manager take their file URL with no default, s
 the file, and there is deliberately no argument-less default on `FernletSocial`'s `JSONSidecarFile`:
 every owner states its root, because a default that silently resolves to the process-wide
 `Application Support/Fernlet` is exactly how a store rejoins the shared-root race, and the omission
-compiles. The root defaults to the host namespace's `installation.storage.defaultDirectory` (for
-Fernlet `Application Support/Fernlet`, the path the cache has always used). The indirection exists
-because the wall's index is re-saved WHOLE on every keep or delete and re-read by every session-photo
-object at init — on a single process-wide path, one live `MeshSessionPhotos` inherits and then
-overwrites another's album. That is invisible in the app, which has one, and a live cross-suite race
-under the test runner, where suites share a process. Routing the root through the host means every
-composition a test builds over its own store inherits that store's isolation without naming a
-directory.
+compiles. The root itself has no default either (plan step A0.6.6): where an installation keeps its
+files is its host's fact, so this module computes no directory and a host that states none fails to
+compile. ``ProximityNamespace/Storage/directory(under:)`` puts the namespace's folder under a base the
+host picks, and Fernlet's app states `Application Support/Fernlet`, the path the cache has always used
+(`FernletConnections`' `FernletProximityStorage.productionDirectory`), or a test store's own root. The
+indirection exists because the wall's index is re-saved WHOLE on every keep or delete and re-read by
+every session-photo object at init — on a single process-wide path, one live `MeshSessionPhotos`
+inherits and then overwrites another's album. That is invisible in the app, which has one, and a live
+cross-suite race under the test runner, where suites share a process. Routing the root through the
+host means every composition a test builds over its own store inherits that store's isolation without
+naming a directory.
 
 The wall's whole-index re-save is the sharpest version of the hazard, but not the only one: `resetAll`
 calls `clearAll()` on the moderation, friend-state, closeness and activity ledgers, and turning
@@ -622,15 +626,16 @@ protocol extension, as are the display name, `isBlockedFingerprint(_:)`,
 ``ProximityHost/proximityFallbackDisplayName``, the per-connection trust policy,
 ``ProximityHost/makeProximityTrustPolicy()``, the per-connection ranging provider,
 ``ProximityHost/makeProximityRangingProvider()``, the identity a manager builds when it is handed none,
-``ProximityHost/makeProximityIdentity()``, and the routed-type rows the mesh registers,
-``ProximityHost/meshRoutedTypeEntries``. Both are among those it will never default, because each is
-the host's identity, custody, rule or platform fact (`ProximityHost.swift`'s header names them), so a
-host that leaves either out fails to compile instead of running under another app's identity or
+``ProximityHost/makeProximityIdentity()``, the routed-type rows the mesh registers,
+``ProximityHost/meshRoutedTypeEntries``, and the root of the installation's files,
+``ProximityHost/proximitySupportDirectory``. Both are among those it will never default, because each
+is the host's identity, custody, rule or platform fact (`ProximityHost.swift`'s header names them), so
+a host that leaves either out fails to compile instead of running under another app's identity or
 binding. The identity is the host's custody: a host that keeps keys beside
 the device identity answers one carrying its ``IdentityProvisioningParticipant`` (Fernlet's app answers
 its own factory's, which carries its sealed-backup escrow key), and this module never guesses one. The
-extension's three defaults are the sidecar root (`installation.storage.defaultDirectory`, built from
-the namespace) and both mesh storage scopes (built from the namespace and the binding). What only a
+extension's two defaults are both mesh storage scopes, built from the root, the namespace and the
+binding the host states: its namespace's production rows on its root. What only a
 host's features read — its trusted peers, its trust store, the in-person hearts setting and the
 heart-eligibility predicate over them — is no requirement here; Fernlet's features declare it in
 `FernletSocial`'s refinement, `FernletSocialHost`.
@@ -665,7 +670,7 @@ hand it:
 | The presence posture: `PresenceEpochPosture` | Is minted, and rotated, with the presence instance-name prefix and the TLS common name its caller passes: `FernletSocial`'s `PresenceManager`'s posture mint, built in `init` from the manager's namespace, passes them. |
 | The name display: ``PeerNameDisplay/personName(_:fingerprint:in:)``, with `FernletConnections`' placeholders (`shown`, `firstName`) and `FernletSocial`'s `PresenceManager.firstName(of:in:)` over it | Take `in namespace:` last, sanitize under its peer-name cap and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
 | The peer-name coercion: `ProximityDisplayName.peerDisplayName(_:in:)`, ``FernletIdentityEnvelope/sanitizedSenderDisplayName(in:)`` and ``FernletIdentityEnvelope/disclosedSenderDisplayName(in:)``, `RecipeShareAdvertisedName.publishable(_:in:)`, and over them `FernletSocial`'s chat store (`SessionMessageStore.receiveIncoming(…in:)`) and incoming-photo coercion | Take `in namespace:` last and read `installation.peerNames`: a peer's sanitized name keeps at most the cap and reads as the floor when nothing displayable is left, and the advertised recipe name is capped the same way. The managers pass their own namespace (the mesh manager also to its descriptor coercion, a mesh name under the cap), the coordinator its identity's, and `FernletSocial`'s features their composition's. `ProximityDisplayName.sanitized(_:maxLength:)` is FernletDomainModel's `ItemNameModeration.sanitizedName` copied scalar for scalar; only `FernletSocial`'s activities still use the original. |
-| Storage scopes: ``MeshSessionStorageScope``, ``MeshRoutedStorageScope`` | Carry the namespace and the install binding (`init(namespace:directory:keychainService:installBinding:)`, ``MeshSessionStorageScope/production(for:installBinding:)``); the two stores read their file names, seal-key accounts and column-seal labels off `scope.namespace`. |
+| Storage scopes: ``MeshSessionStorageScope``, ``MeshRoutedStorageScope`` | Carry the namespace and the install binding (`init(namespace:directory:keychainService:installBinding:)`, ``MeshSessionStorageScope/production(for:directory:installBinding:)`` on the root the host states); the two stores read their file names, seal-key accounts and column-seal labels off `scope.namespace`. |
 | Closures that cross an actor | Capture the `Sendable` value when they are made, as `FernletSocial`'s `PresenceManager`'s radio factory does. |
 
 **What pins it.** `ProximityNamespaceGoldenTests`, on the crypto-goldens CI line, holds every value
@@ -853,10 +858,10 @@ goes on) or a row whose line is gone; that list is the one place the counts live
 
 ProximityKit builds for iOS 26 and native macOS 26 (plan step A0.6). Mac Catalyst is not a
 destination, and nothing builds it. A fact whose right answer differs by platform is its host's to
-state, as a ``ProximityHost`` requirement whose doc says what a Mac host answers (the name an unnamed
-device goes by, and whether a connection ranges), except the storage root, which this module still
-defaults until plan step A0.6.6 (see "Hosting on macOS" below). Two platform mechanisms stay in this
-module, each compiled only where its framework is usable:
+state, as a ``ProximityHost`` requirement with no default whose doc says what a Mac host answers (the
+name an unnamed device goes by, whether a connection ranges, and where an installation keeps its
+files; see "Hosting on macOS" below). Two platform mechanisms stay in this module, each compiled only
+where its framework is usable:
 
 - ``NIRangingSession``, the NearbyInteraction provider a host on iOS hands out, is compiled on iOS
   only: its whole file is under `#if os(iOS)`. NearbyInteraction's module ships in the macOS SDK with
@@ -896,7 +901,7 @@ checks them; plan step P0.2 and A1's device lanes prove them on hardware.
 | Peer-to-peer | The mesh radio asks for peer-to-peer Wi-Fi everywhere but the simulator, macOS included, so a Mac uses AWDL beside its other interfaces; the cellular ban is moot there. Untested on a Mac until plan step P0.2. |
 | Ranging | Answer ``NoopRangingProvider`` from ``ProximityHost/makeProximityRangingProvider()``, so every session commits by hand or by the QR ceremony. An iOS host that answers ``NIRangingSession`` must declare `NSNearbyInteractionUsageDescription`. |
 | Name | ``ProximityHost/proximityFallbackDisplayName`` is a generic word, a token that is never localized, and never the Computer Name (`Host.current().localizedName`, `SCDynamicStoreCopyComputerName`, `ProcessInfo.processInfo.hostName`), because it rides the recipe radio's unauthenticated TXT record. |
-| Storage | ``ProximityHost/proximitySupportDirectory`` is a folder no other app shares: a sandboxed host's container's Application Support, or, for an unsandboxed host, a folder named for its bundle identifier. Its namespace's ``ProximityNamespace/installationCollisions(with:)`` must be empty against every app of its family, so its `directoryName` is never another app's, and never "Fernlet". Until plan step A0.6.6 this module still defaults the root to the namespace's folder under the process's Application Support, which on an unsandboxed Mac every app shares, so a Mac host states its own. |
+| Storage | ``ProximityHost/proximitySupportDirectory`` is a folder no other app shares: a sandboxed host's container's Application Support, or, for an unsandboxed host, a folder named for its bundle identifier. Its namespace's ``ProximityNamespace/installationCollisions(with:)`` must be empty against every app of its family, so its `directoryName` is never another app's, and never "Fernlet". The requirement has no default, and this module computes no directory: ``ProximityNamespace/Storage/directory(under:)`` puts the namespace's folder under the base the host picks, so nothing lands in the process's Application Support, which on an unsandboxed Mac every app shares, unless the host picks it. |
 | Continued processing | `BGContinuedProcessingTask` is the iOS app's (Fernlet's continuation host); a Mac host has nothing to continue into. |
 
 ## Topics

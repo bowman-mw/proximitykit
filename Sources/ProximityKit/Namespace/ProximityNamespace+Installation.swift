@@ -21,7 +21,7 @@ nonisolated extension ProximityNamespace {
     public nonisolated struct Installation: Hashable, Sendable {
         /// The keychain rows ProximityKit writes for the device identity and the two mesh seal keys.
         public let keychain: Keychain
-        /// The default directory's name and the two mesh stores' on-disk names.
+        /// The installation folder's name and the two mesh stores' on-disk names.
         public let storage: Storage
         /// The `os.Logger` subsystem the three radios log under. Never on the wire.
         public let logSubsystem: String
@@ -32,7 +32,7 @@ nonisolated extension ProximityNamespace {
         ///
         /// - Parameters:
         ///   - keychain: The identity's and the two mesh seal keys' keychain rows.
-        ///   - storage: The default directory's name and the two mesh stores' on-disk names.
+        ///   - storage: The installation folder's name and the two mesh stores' on-disk names.
         ///   - logSubsystem: The radios' log subsystem.
         ///   - peerNames: How this app shows a peer's name.
         public init(keychain: Keychain, storage: Storage, logSubsystem: String, peerNames: PeerNames) {
@@ -125,11 +125,21 @@ nonisolated extension ProximityNamespace {
 
     // MARK: - Storage
 
-    /// The on-disk names ProximityKit writes for its default directory and the two mesh stores.
-    /// FernletSocial's production heart-drop scope reads its directory here too: `.fernlet`'s
-    /// ``defaultDirectory``.
+    /// The on-disk names ProximityKit writes: the folder an installation's files live in and the two
+    /// mesh stores' entries inside it.
+    ///
+    /// Names only. Where the folder sits is its host's call (plan step A0.6.6): this module computes
+    /// no directory and reads no platform location, so a host states its root
+    /// (``ProximityHost/proximitySupportDirectory``), and ``directory(under:)`` puts this
+    /// installation's folder under a base the host picks. Fernlet's app keeps its files in `.fernlet`'s
+    /// folder under its container's Application Support (`FernletConnections`'
+    /// `FernletProximityStorage.productionDirectory`), which FernletSocial's production heart-drop
+    /// scope reads too.
     public nonisolated struct Storage: Hashable, Sendable {
-        /// The folder under Application Support that a host passing no root of its own gets.
+        /// The folder this installation's files live in, under a base its host picks: one path
+        /// component, never another installation's of the same family
+        /// (``ProximityNamespace/installationCollisions(with:)``), so two apps keep apart under one
+        /// shared base.
         public let directoryName: String
         /// The sealed mesh-session context file.
         public let meshSessionContextFileName: String
@@ -138,10 +148,11 @@ nonisolated extension ProximityNamespace {
         /// The directory holding the routed store's chunk files.
         public let meshRoutedChunkDirectoryName: String
 
-        /// Names the default directory and the two mesh stores' on-disk entries.
+        /// Names the installation's folder and the two mesh stores' on-disk entries.
         ///
         /// - Parameters:
-        ///   - directoryName: The folder under Application Support.
+        ///   - directoryName: The folder this installation's files live in, under a base its host
+        ///     picks.
         ///   - meshSessionContextFileName: The sealed mesh-session context file.
         ///   - meshRoutedIndexFileName: The routed store's sealed index file.
         ///   - meshRoutedChunkDirectoryName: The routed store's chunk directory.
@@ -155,12 +166,17 @@ nonisolated extension ProximityNamespace {
             self.meshRoutedChunkDirectoryName = meshRoutedChunkDirectoryName
         }
 
-        /// `URL.applicationSupportDirectory/<directoryName>`: the root a host gets when it passes none.
+        /// This installation's folder under `base`: `base/<directoryName>/`, a directory URL.
         ///
-        /// Built the way Fernlet's proximity sidecar root has always been built, so a host whose
-        /// ``directoryName`` matches that folder resolves the same path.
-        public var defaultDirectory: URL {
-            URL.applicationSupportDirectory.appendingPathComponent(directoryName, isDirectory: true)
+        /// Pure: it reads no file system and no platform location, and creates nothing. The base is
+        /// the host's: on iOS its app container's Application Support, on an unsandboxed Mac a folder
+        /// no other app shares. Under `URL.applicationSupportDirectory`, `.fernlet`'s is
+        /// `Application Support/Fernlet`, built exactly as Fernlet's proximity root has always been.
+        ///
+        /// - Parameter base: The directory the host keeps its installation folders in.
+        /// - Returns: ``directoryName`` appended to `base` as a directory.
+        public func directory(under base: URL) -> URL {
+            base.appendingPathComponent(directoryName, isDirectory: true)
         }
     }
 

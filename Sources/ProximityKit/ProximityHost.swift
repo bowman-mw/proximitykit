@@ -16,8 +16,9 @@ import FernletDomainModel
 /// binding, ``proximityInstallBinding``, the session trust policy every connection's coordinator
 /// consults, ``makeProximityTrustPolicy()``, the ranging provider each connection's coordinator
 /// measures distance with, ``makeProximityRangingProvider()``, the device identity a manager holds,
-/// ``makeProximityIdentity()``, the routed types its features carry, ``meshRoutedTypeEntries``, and
-/// the name this device goes by when its user set none, ``proximityFallbackDisplayName``. The
+/// ``makeProximityIdentity()``, the routed types its features carry, ``meshRoutedTypeEntries``, the
+/// name this device goes by when its user set none, ``proximityFallbackDisplayName``, and where its
+/// installation keeps its files, ``proximitySupportDirectory``. The
 /// requirements only a host's social features read — its trusted-peer records, its durable trust
 /// store, the in-person hearts opt-in and the heart-eligibility predicate over them — are
 /// FernletSocial's `FernletSocialHost`'s, a refinement of this protocol: no code in this module reads
@@ -47,7 +48,7 @@ public protocol ProximityHost: AnyObject {
     func isBlockedFingerprint(_ fingerprint: String) -> Bool
     func blockProximityPeer(signingPublicKey: Data)
     /// Root directory for the proximity subsystem's on-disk files: this module's two sealed mesh
-    /// stores, through the default ``meshSessionStorage`` and ``meshRoutedStorage`` built from it, and
+    /// stores, through the default ``meshSessionStorage`` and ``meshRoutedStorage`` built on it, and
     /// the files a host's mesh features keep on the same root — for Fernlet, FernletSocial's session
     /// photos' friend photo-wall index (`MeshPhotoCache.sealed`, GCM-sealed under the friend-wall media
     /// key; a legacy plaintext `MeshPhotoCache.json` is read once, resealed, and deleted by
@@ -55,6 +56,18 @@ public protocol ProximityHost: AnyObject {
     /// pending session-photo corpus (`PendingSessionPhotos/`), the activity ledger
     /// (`ActivityLedger.json`), and the heart set (`HeartLedger.json` plus the three sealed sidecars
     /// named by FernletSocial's `HeartDropStorageScope`).
+    ///
+    /// **No default, because where an installation keeps its files is a platform fact** (plan step
+    /// A0.6.6), and this module computes no directory: a host that supplies none fails to compile. On
+    /// iOS a host answers a folder in its app container's Application Support; on an unsandboxed Mac,
+    /// where every app shares the user's Application Support, a folder no other app shares.
+    /// ``ProximityNamespace/Storage/directory(under:)`` puts the namespace's folder under a base the
+    /// host picks, and an empty ``ProximityNamespace/installationCollisions(with:)`` against every app
+    /// of its family keeps two apps out of one folder. Fernlet's app answers each store's own root in
+    /// `ProximityHostAdapter.swift`, in production `Application Support/Fernlet` (the
+    /// `FernletConnections` module's `FernletProximityStorage.productionDirectory`); the test target's
+    /// doubles that state none answer their namespace's folder under Application Support through one
+    /// test-only extension the app's conformance cannot see.
     ///
     /// Comes through the HOST rather than being a constant because it is shared *mutable on-disk
     /// state*: a photo's delete and an answer's keep re-save the whole wall index, every hold and
@@ -65,6 +78,8 @@ public protocol ProximityHost: AnyObject {
     /// through the host means every manager and composition built over a store inherits its isolation
     /// for free. Same reasoning as
     /// `FernletStore.photoDocumentsDirectory`, for the corpus on the other side of the media-key split.
+    /// Every manager, composition and default scope reads it when it builds its stores, so it must
+    /// answer the same root for the host's lifetime.
     ///
     /// The heart-drop sidecars share this root but need a second half the wall does not: they are
     /// sealed, and their key is wiped by service, so isolating them means isolating FernletSocial's
@@ -78,8 +93,10 @@ public protocol ProximityHost: AnyObject {
     /// axis more: the seal key is wiped **by service**, so a store isolated only by directory would
     /// still have its files un-openable the moment a concurrently-running suite ran delete-all.
     /// The app's `FernletStore` derives both halves from seams other walls already enforce
-    /// (`MeshSessionStoreIsolationTests`); the default below keeps a test double's scope private to
-    /// its own sidecar root rather than lodging it on the production keychain row.
+    /// (`MeshSessionStoreIsolationTests`). The default below is the namespace's production scope on
+    /// the root the host states, so a host that keeps more than one installation's files in one
+    /// process, or a test double on a root of its own that opens a store, answers this itself
+    /// (`MeshRoutedStoreIsolationTests` holds every test double that states its root to that).
     var meshSessionStorage: MeshSessionStorageScope { get }
 
     /// This host's sealed ROUTED-CONTENT scope (network migration P5 item 3): the directory holding
@@ -90,8 +107,8 @@ public protocol ProximityHost: AnyObject {
     /// keychain service, because one fate per service is the only arrangement a service-wide delete
     /// can express honestly, and a session wipe must not silently orphan routed ciphertext this
     /// device is holding for other people. Routed through the host for the same isolation reason
-    /// ``meshSessionStorage`` is; the default below keeps a test double's scope private to its own
-    /// sidecar root.
+    /// ``meshSessionStorage`` is, and defaulted the same way: the namespace's production scope on the
+    /// root the host states.
     var meshRoutedStorage: MeshRoutedStorageScope { get }
 
     /// The host's protocol identity: the labels, radio values, QR
@@ -110,8 +127,8 @@ public protocol ProximityHost: AnyObject {
     /// `ProximityNamespaceBoundaryTests` allowlists each literal that spells `fernlet` and each line
     /// that still names one of Fernlet's domain types, with the step that removes it.
     ///
-    /// **Deliberately no default.** The extension below hands a host that carries no value of its
-    /// own the sidecar root and the two storage scopes; it hands out no namespace, and never will.
+    /// **Deliberately no default.** The extension below hands a host that carries no scope of its
+    /// own the two storage scopes; it hands out no namespace, and never will.
     /// ProximityKit holds no namespace instance
     /// and keeps no global, so a host that supplies none gets a compile error, never another app's
     /// identity. Fernlet's app supplies `ProximityNamespace.fernlet` (the `FernletConnections` module)
@@ -125,8 +142,8 @@ public protocol ProximityHost: AnyObject {
     /// default from it and check against it the identity they own (``makeProximityIdentity()``'s when
     /// they are handed none), so no later read reaches back to the host; FernletSocial's mesh features
     /// read the copy their composition's host holder keeps the same way. The extension below also
-    /// builds this host's default sidecar root and both storage scopes from it, and every scope
-    /// carries it to the store that reads its names.
+    /// builds this host's two default storage scopes from it, on the root the host states, and every
+    /// scope carries it to the store that reads its names.
     var proximityNamespace: ProximityNamespace { get }
 
     /// The host's install binding: the per-install bytes the two
@@ -241,60 +258,24 @@ public protocol ProximityHost: AnyObject {
 
 public extension ProximityHost {
 
-    /// Default for hosts that do not carry their own scope (test doubles), built from the host's
-    /// namespace (plan step A0.2.8) and install binding (plan step A0.2.9). On the namespace's
-    /// default directory it is the namespace's production scope — for Fernlet
-    /// `Application Support/Fernlet` + `com.fernlet.mesh-session`, unchanged; a host on any other
-    /// sidecar root gets a service named after that root, so it can never wipe — or be wiped by —
-    /// the production row or another double's.
+    /// Default for a host that carries no mesh-session scope of its own: its namespace's production
+    /// scope (``MeshSessionStorageScope/production(for:directory:installBinding:)``) on the root it
+    /// states, ``proximitySupportDirectory``, sealed under its install binding (plan steps A0.2.8,
+    /// A0.2.9 and A0.6.6) — the namespace's seal-key service on whatever root that is. A host that
+    /// keeps more than one installation's files in one process answers this itself, so no two share
+    /// a seal key; Fernlet's store does, deriving each store's service beside its heart-drop service.
     var meshSessionStorage: MeshSessionStorageScope {
-        let namespace = proximityNamespace
-        let directory = proximitySupportDirectory
-        guard directory != namespace.installation.storage.defaultDirectory else {
-            return MeshSessionStorageScope(
-                namespace: namespace,
-                directory: directory,
-                keychainService: namespace.installation.keychain.meshSessionSealKey.service,
-                installBinding: proximityInstallBinding
-            )
-        }
-        return MeshSessionStorageScope(
-            namespace: namespace,
-            directory: directory,
-            keychainService: namespace.installation.keychain.meshSessionSealKey.service
-                + ".host." + directory.lastPathComponent,
-            installBinding: proximityInstallBinding
-        )
+        .production(for: proximityNamespace, directory: proximitySupportDirectory,
+                    installBinding: proximityInstallBinding)
     }
 
-    /// Default for hosts that do not carry their own routed scope (test doubles), built from the
-    /// host's namespace (plan step A0.2.8) and install binding (plan step A0.2.9). On the
-    /// namespace's default directory it is the namespace's production scope — for Fernlet
-    /// `Application Support/Fernlet` + `com.fernlet.mesh-routed`, unchanged; a host on any other
-    /// sidecar root gets a service named after that root, so it can never wipe — or be wiped by —
-    /// the production row or another double's.
+    /// Default for a host that carries no routed scope of its own: its namespace's production scope
+    /// (``MeshRoutedStorageScope/production(for:directory:installBinding:)``) on the root it states,
+    /// ``proximitySupportDirectory``, sealed under its install binding (plan steps A0.2.8, A0.2.9 and
+    /// A0.6.6) — the namespace's seal-key service on whatever root that is. A host that keeps more
+    /// than one installation's files in one process answers this itself, as Fernlet's store does.
     var meshRoutedStorage: MeshRoutedStorageScope {
-        let namespace = proximityNamespace
-        let directory = proximitySupportDirectory
-        guard directory != namespace.installation.storage.defaultDirectory else {
-            return MeshRoutedStorageScope(
-                namespace: namespace,
-                directory: directory,
-                keychainService: namespace.installation.keychain.meshRoutedSealKey.service,
-                installBinding: proximityInstallBinding
-            )
-        }
-        return MeshRoutedStorageScope(
-            namespace: namespace,
-            directory: directory,
-            keychainService: namespace.installation.keychain.meshRoutedSealKey.service
-                + ".host." + directory.lastPathComponent,
-            installBinding: proximityInstallBinding
-        )
+        .production(for: proximityNamespace, directory: proximitySupportDirectory,
+                    installBinding: proximityInstallBinding)
     }
-    /// The production sidecar home, and the default for hosts that don't redirect it (test doubles
-    /// that never touch the wall): the host namespace's `installation.storage.defaultDirectory` (plan
-    /// step A0.2.8; for Fernlet `Application Support/Fernlet`, unchanged). The app's `FernletStore`
-    /// overrides it with a per-instance root.
-    var proximitySupportDirectory: URL { proximityNamespace.installation.storage.defaultDirectory }
 }

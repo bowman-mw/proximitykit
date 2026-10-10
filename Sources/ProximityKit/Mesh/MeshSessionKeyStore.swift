@@ -32,10 +32,10 @@ import Security
 /// running "delete everything" destroys both for every concurrently-running suite. That is the
 /// shared-disk-root flake family (`PhotoDirectoryIsolationTests`), and this scope is what keeps it
 /// from gaining a new member — `MeshSessionStoreIsolationTests` is the grep-wall that enforces it.
-/// A host's shipped scope is ``production(for:installBinding:)``. Fernlet's app derives each store's
-/// service instead, through FernletSocial's `keychainService(besideHeartDrop:in:)` extension of this
-/// type, which maps the production heart-drop service to that same production service and an
-/// isolated one to a sibling of its own.
+/// A host with one installation ships ``production(for:directory:installBinding:)`` on the root it
+/// states. Fernlet's app derives each store's service instead, through FernletSocial's
+/// `keychainService(besideHeartDrop:in:)` extension of this type, which maps the production heart-drop
+/// service to that same production service and an isolated one to a sibling of its own.
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: configuration, read from
 /// nonisolated stores and from `FernletStore`'s nonisolated stored properties. Not `Equatable` since
@@ -82,26 +82,32 @@ public nonisolated struct MeshSessionStorageScope: Sendable {
         self.installBinding = installBinding
     }
 
-    /// The shipped scope of a host: the namespace's `installation.storage.defaultDirectory` (for
-    /// Fernlet `Application Support/Fernlet`, the path every proximity sidecar already uses) plus its
-    /// `installation.keychain.meshSessionSealKey.service` (for Fernlet `com.fernlet.mesh-session`: its
-    /// own service, not a lodger under `com.fernlet.heartdrop`, because delete-all takes this one
-    /// whole while the heart-drop service has a different survivor story, and one service per fate
-    /// is the only arrangement a service-wide delete can express honestly). Replaces the static
-    /// `production` and `productionKeychainService` (plan step A0.2.8); takes the host's install
-    /// binding since plan step A0.2.9.
+    /// The scope of an installation's one production store: on the root its host states, the
+    /// namespace's `installation.keychain.meshSessionSealKey.service` (for Fernlet
+    /// `com.fernlet.mesh-session`: its own service, not a lodger under `com.fernlet.heartdrop`, because
+    /// delete-all takes this one whole while the heart-drop service has a different survivor story,
+    /// and one service per fate is the only arrangement a service-wide delete can express honestly),
+    /// sealed under the host's install binding. The one-line answer for a host with one installation,
+    /// and what ``ProximityHost``'s default ``ProximityHost/meshSessionStorage`` answers.
+    ///
+    /// Replaces the static `production` and `productionKeychainService` (plan step A0.2.8); takes the
+    /// host's install binding since plan step A0.2.9, and the root since plan step A0.6.6, when this
+    /// module stopped computing a directory: Fernlet's is `Application Support/Fernlet`, the path
+    /// every proximity sidecar already uses.
     ///
     /// - Parameters:
     ///   - namespace: The host's protocol identity.
+    ///   - directory: The root the host states, ``ProximityHost/proximitySupportDirectory``.
     ///   - installBinding: The host's install binding.
-    /// - Returns: The namespace's production scope.
+    /// - Returns: The namespace's production scope on `directory`.
     public static func production(
         for namespace: ProximityNamespace,
+        directory: URL,
         installBinding: any ProximityInstallBinding
     ) -> MeshSessionStorageScope {
         MeshSessionStorageScope(
             namespace: namespace,
-            directory: namespace.installation.storage.defaultDirectory,
+            directory: directory,
             keychainService: namespace.installation.keychain.meshSessionSealKey.service,
             installBinding: installBinding
         )

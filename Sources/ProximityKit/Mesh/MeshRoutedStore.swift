@@ -311,9 +311,9 @@ public nonisolated struct MeshRoutedStore: Sendable {
     /// Builds a store on one scope.
     ///
     /// - Parameters:
-    ///   - scope: Namespace + directory + keychain service + install binding. Pass
-    ///     ``MeshRoutedStorageScope/production(for:installBinding:)`` in the app; tests pass a temp
-    ///     directory and a unique service.
+    ///   - scope: Namespace + directory + keychain service + install binding. Pass the host's scope
+    ///     (``MeshRoutedStorageScope/production(for:directory:installBinding:)`` on its root, for a
+    ///     host with one installation); tests pass a temp directory and a unique service.
     ///   - capacity: The cap model this store's doors refuse at. Shipping code takes the default;
     ///     a test drives a door to its bound in milliseconds by injecting a small one.
     init(scope: MeshRoutedStorageScope, capacity: MeshRoutedCapacity = .production) {

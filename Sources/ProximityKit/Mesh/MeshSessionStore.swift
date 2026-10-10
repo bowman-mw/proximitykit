@@ -250,9 +250,9 @@ public nonisolated struct MeshSessionStore: Sendable {
 
     /// Builds a store on one scope.
     ///
-    /// - Parameter scope: Namespace + directory + keychain service + install binding. Pass
-    ///   ``MeshSessionStorageScope/production(for:installBinding:)`` in the app; tests pass a temp
-    ///   directory and a unique service.
+    /// - Parameter scope: Namespace + directory + keychain service + install binding. Pass the
+    ///   host's scope (``MeshSessionStorageScope/production(for:directory:installBinding:)`` on its
+    ///   root, for a host with one installation); tests pass a temp directory and a unique service.
     init(scope: MeshSessionStorageScope) {
         self.scope = scope
     }
