@@ -85,8 +85,9 @@ nonisolated enum MeshChunkMintError: Error, Equatable, Sendable {
 /// ``MeshChunkFormat/chunkCount(forSize:)`` reach the same arithmetic without an actor hop.
 ///
 /// **Emission contract, built by item 6, stated here so it is not re-invented:** one
-/// ``MeshChunkPayload`` per chunk inside one
-/// `FernletIdentityEnvelope.signed(payloadType: .meshRoutedChunk, payloadEncryption: .none, …)`,
+/// ``MeshChunkPayload`` per chunk inside one envelope signed through the raw factory,
+/// `FernletIdentityEnvelope.signed(…, payloadTypeToken:, payloadEncryption: .none, …)`, its token the
+/// mesh's `.meshRoutedChunk` role's (`MeshPayloadRole.token(in:)`, the host vocabulary's `routedChunk`),
 /// sent `.reliable`, at most ``MeshChunkFormat/maxChunksInFlightPerPeer`` outstanding per peer. A
 /// 256 KiB payload in a signed envelope is above `MeshTransferStreamTable.bulkFloorBytes` and below
 /// `SealedPayloadFraming.maxInflatedByteCount`, so it takes a transfer stream by size alone — "ride

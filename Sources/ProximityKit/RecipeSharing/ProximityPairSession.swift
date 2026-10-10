@@ -50,7 +50,8 @@ public struct ProximityPairPeer: Identifiable, Equatable {
     /// reports back as its `recipientID`.
     public var id: UUID
     /// The name the row shows: the name the device advertised, or, once its introduction verifies,
-    /// the name it disclosed there.
+    /// the name it disclosed there. A row the radio never discovered (an inbound pairing's) whose peer
+    /// withheld its name is filed under its verified fingerprint.
     public var displayName: String
     /// The verified signing-key fingerprint, nil until the identity introduction completes.
     public var fingerprint: String?
@@ -143,7 +144,8 @@ public final class ProximityPairSession {
     public nonisolated enum Status: Equatable, Sendable {
         /// Between sends.
         case idle
-        /// A send has begun and its pairing is not verified yet; the picked row's name.
+        /// A send has begun and has not started sending yet: its pairing may still be connecting or
+        /// verifying, or may already be verified, its send about to start; the picked row's name.
         case connecting(recipientName: String)
         /// The verified pairing is sending the payload; the picked row's name.
         case sending(recipientName: String)
@@ -274,7 +276,9 @@ public final class ProximityPairSession {
 
     /// The picker's rows: every nearby device the radio discovered, sorted by name, each re-filed
     /// under its verified fingerprint (and the name it disclosed, if it disclosed one) once its
-    /// pairing verifies.
+    /// pairing verifies; and every device whose pairing verified though the radio never discovered it
+    /// (an inbound pairing), added when it verifies, named as it disclosed or, when it withheld its
+    /// name, by its verified fingerprint.
     public private(set) var nearbyPeers: [ProximityPairPeer] = []
     /// The send pipeline's status line, typed (see ``Status``); its owner renders it.
     public private(set) var status: Status = .idle
