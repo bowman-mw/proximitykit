@@ -451,22 +451,27 @@ public final class ProximityCoordinator {
         transition(to: .connected(peer: connectedPeerIdentity ?? identity))
     }
 
-    /// Signs and sends one payload to the connected peer.
+    /// Signs and sends one payload to the confirmed peer under `payloadTypeToken`, a token its host's
+    /// vocabulary names (`payloads.known`): the per-connection send a host's pairing goes through, the
+    /// recipe-share manager's pairings and a host's own connections (presence's heart delivery) alike.
     ///
-    /// **`summary` must be built from frozen English literals — never `String(localized:)`.** Every
-    /// caller (recipe share, good vibes, clothing catalog, session goodbye) hands in a
-    /// human-sounding title that is nonetheless a wire token: it is folded into the Ed25519
-    /// canonical bytes AND surfaced in the RECEIVING device's Connection Inspector. The rationale,
-    /// and the receiver-side plan for a localized inspector, live on
+    /// **`summary` must be built from frozen literals — never `String(localized:)`.** Every caller
+    /// hands in a human-sounding title that is nonetheless a wire token: it is folded into the
+    /// envelope's canonical signing bytes AND surfaced in the RECEIVING device's Connection Inspector.
+    /// The rationale, and the receiver-side plan for a localized inspector, live on
     /// `FernletIdentityEnvelope.payloadSummary`.
     ///
-    /// Throws ``CoordinatorError/notConnected`` before it signs anything when no peer is connected;
-    /// with `sealed`, seals to the connected peer's key-agreement key when it has one, in the
-    /// framing the peer's capabilities negotiate.
-    ///
-    /// Package access for FernletSocial until A0.7: presence's heart delivery and the recipe-share
-    /// manager are its shipping callers, and the profile-driven pair session's send replaces it.
-    package func sendPayload(type: PayloadType, summary: PayloadSummary, payload: Data, sealed: Bool = false) async throws {
+    /// Throws ``CoordinatorError/notConnected`` before signing when no transport peer is connected, and
+    /// from ``send(_:)`` when no identity has been confirmed: it sends to a confirmed peer only. The
+    /// envelope names the confirmed peer's fingerprint as recipient and this side's disclosed name as
+    /// sender, and expires five minutes after it is signed. With `sealed`, the payload is sealed to the
+    /// confirmed peer's key-agreement key, framed when that peer supports the namespace's wire2
+    /// capability (it advertised it, or listed none and the namespace assumes it for such peers) and
+    /// unframed otherwise; a peer that presented no key-agreement key gets it unsealed, which a
+    /// receiver whose rules require sealing refuses.
+    public func sendPayload(
+        payloadTypeToken: String, summary: PayloadSummary, payload: Data, sealed: Bool = false
+    ) async throws {
         guard currentTransportPeer != nil else { throw CoordinatorError.notConnected }
         let (finalPayload, encryption) = try sealIfNeeded(payload, sealed: sealed)
         let sentAt = now()
@@ -474,7 +479,7 @@ public final class ProximityCoordinator {
             identityService: identity,
             senderDisplayName: disclosedDisplayName,
             recipientFingerprint: connectedIdentity?.fingerprint,
-            payloadType: type,
+            payloadTypeToken: payloadTypeToken,
             payloadEncryption: encryption,
             payloadSummary: summary,
             payload: finalPayload,
@@ -482,6 +487,15 @@ public final class ProximityCoordinator {
             expiresAt: sentAt.addingTimeInterval(5 * 60)
         )
         try await send(envelope)
+    }
+
+    /// Exactly ``sendPayload(payloadTypeToken:summary:payload:sealed:)`` for `type`'s raw value: the
+    /// typed spelling the recipe-share manager calls while it is still in this module.
+    ///
+    /// Package access until A0.7: the recipe-share manager is its one caller, and it leaves with the
+    /// recipe profile, when the profile-driven pair session sends through the token send.
+    package func sendPayload(type: PayloadType, summary: PayloadSummary, payload: Data, sealed: Bool = false) async throws {
+        try await sendPayload(payloadTypeToken: type.rawValue, summary: summary, payload: payload, sealed: sealed)
     }
 
     private func sealIfNeeded(_ payload: Data, sealed: Bool) throws -> (Data, PayloadEncryption) {
@@ -748,13 +762,11 @@ public final class ProximityCoordinator {
     /// Manual proximity confirmation — works for both non-UWB (awaitingManualCommit)
     /// and UWB devices where the debug Force button overrides the proximity gate.
     ///
-    /// Confirms the identity the coordinator holds at a proximity gate and does nothing in any
-    /// other state.
-    ///
-    /// Package access for FernletSocial until A0.7: presence's heart connections auto-commit
-    /// through it, as the recipe-share manager's pairings do, and the profile-driven pair session's
-    /// commit replaces it.
-    package func commitManualProximity() async {
+    /// Confirms the identity the coordinator holds at a proximity gate (`awaitingManualCommit` or
+    /// `awaitingProximityCommit`) and does nothing in any other state: the programmatic commit a
+    /// host's pairing takes with no user step (the recipe-share manager's pairings and presence's heart
+    /// connections), the mesh's slot commit and the debug Force button's. Safe to call repeatedly.
+    public func commitManualProximity() async {
         switch state {
         case .awaitingManualCommit(let peerIdentity), .awaitingProximityCommit(let peerIdentity):
             inspector?.recordCoordinatorEvent("manual proximity commit")

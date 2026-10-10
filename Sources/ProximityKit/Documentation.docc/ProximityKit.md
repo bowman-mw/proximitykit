@@ -817,7 +817,8 @@ leaves in these steps:
 - **A0.7 and C5** make the one-to-one radio a profile-driven pair session and add its coach profile.
   The recipe-share manager, its wire types and status copy, and the typed doors only it and Fernlet's
   features go through (the envelope's typed view of its token and the coordinator's typed send)
-  leave with the recipe profile (A0.7), and the coordinator's two `package` doors close with them;
+  leave with the recipe profile (A0.7), and the coordinator's last `package` door, the typed send,
+  closes with them;
   the connection profiles are what the coordinator's `Mode`, Fernlet's `ProximityMode` (a session
   profile, not a token), generalizes into (A0.7 / C5).
 - **Later.** FernletCrypto's 40 twins of `.fernlet`'s labels (38 protocol labels and the two
@@ -843,10 +844,16 @@ the type's doc comment does). The doors, by what they open:
   `rotated`; and `PresenceAdvertisement`'s `publishedFields(tags:)`, `isPresenceAdvertisement(_:)` and
   `tags(from:)`. Before this module leaves FernletKit the seam is published as mechanism or wrapped
   by a presence engine.
-- **The coordinator's typed send and manual commit, until A0.7.**
-  `ProximityCoordinator.sendPayload(type:summary:payload:sealed:)` and `commitManualProximity()`, which
-  `FernletSocial`'s presence heart delivery and the recipe-share manager call; the profile-driven pair
-  session's API replaces them.
+- **The coordinator's typed send, until A0.7.**
+  `ProximityCoordinator.sendPayload(type:summary:payload:sealed:)`, a forwarder to the coordinator's
+  public token send that only the recipe-share manager still calls; it leaves with the recipe profile.
+
+The coordinator's per-connection API is public, with its contract: its token send,
+``ProximityCoordinator/sendPayload(payloadTypeToken:summary:payload:sealed:)``, which signs one payload
+under a token its host's vocabulary names and sends it, sealed or not, to the confirmed peer, and its
+manual commit, ``ProximityCoordinator/commitManualProximity()``, which confirms the identity it holds at
+a proximity gate. `FernletSocial`'s presence heart connections send and commit through them, as the
+recipe-share manager's pairings commit, and the mesh commits a slot through the same method.
 
 The naive JSON sidecar `FernletSocial`'s ledgers persist through is that module's own, internal
 there, so it opens no door here. Rule 5 of `ProximityNamespaceBoundaryTests` lists every door, file
