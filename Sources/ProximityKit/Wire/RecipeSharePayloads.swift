@@ -333,19 +333,3 @@ public struct PendingProximityRecipeShare: Identifiable, Equatable {
         self.payload = payload
     }
 }
-
-/// A nearby Fernlet the user can send a recipe to, as shown in the share sheet's recipient list.
-///
-/// `id` is the discovered peer's UUID; `fingerprint` stays nil until the identity introduction
-/// verifies, after which the row upgrades to the verified display name.
-public struct ProximityRecipeShareRecipient: Identifiable, Equatable {
-    public var id: UUID
-    public var displayName: String
-    public var fingerprint: String?  // nil until identity introduction completes
-
-    public init(id: UUID, displayName: String, fingerprint: String?) {
-        self.id = id
-        self.displayName = displayName
-        self.fingerprint = fingerprint
-    }
-}

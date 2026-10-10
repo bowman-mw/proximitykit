@@ -725,10 +725,11 @@ left this module for `FernletSocial` or the app (the heart dead-drop's, presence
 closeness's and friend state's types, the parked chat payload, the mesh features' — the clothing
 shop's, the report relay's, the activity manager's, the chat's and the content layer's, the session
 hearts' with the heart ledger, the session photos' with their review, the JSON sidecar and the camera's
-copy vault — the deleted support layout and the sealed-backup escrow's) is declared, extended or
-aliased here again, a list that only grows as A0.7 moves features out, because a feature that came
-back under its old name with no Fernlet string, label or domain type of its own would pass the other
-rules; and the target depends on exactly `FernletCrypto` and `FernletDomainModel`. The literal and
+copy vault — the deleted support layout and the sealed-backup escrow's), and none of the recipe
+share's three public values this module renamed for the one-to-one send (`RecipeShareOutcome`,
+`RecipeShareFailure`, `ProximityRecipeShareRecipient`), is declared, extended or aliased here again,
+a list that only grows as A0.7 moves features out, because a feature that came back under its old
+name with no Fernlet string, label or domain type of its own would pass the other rules; and the target depends on exactly `FernletCrypto` and `FernletDomainModel`. The literal and
 domain-type lists can only shrink, and a door's row lasts exactly as long as the door. The exact
 per-file lists in `ProximityNamespaceBoundaryTests` are the one place the ratchet's numbers live.
 
@@ -3036,19 +3037,23 @@ peer's synthesized decode ignores them and still reads a whole recipe. The "Incl
 only cleared `steps` would leave a partition the receiver's strict decode refuses.
 
 **Sent is not received.** Every share the user begins ends in exactly one
-``ProximityRecipeShareManager/lastShareOutcome``: a ``RecipeShareOutcome`` that is either `sent` or
-`notSent` with a frozen ``RecipeShareFailure`` (seven causes, including a pairing that came up and
-died before the send, and a teardown that cut a share off). It sits beside `SendState`, which stays
-the status line's English, auto-clearing copy. `sent` means the sealed payload was handed to the
-transport. A text recipe's control-stream send completed; only a picture recipe also reads a
-one-byte transport ack. There is no application receipt and no queued or routed path, so the app's
-confirmation may say "sent" and never "delivered", and there is no "will arrive later" to report.
-`sendIncomplete` is the one cause where the other person may still have it; every other cause means
-nothing left this device. The causes are tokens: the app maps them to localized copy.
+``ProximityRecipeShareManager/lastShareOutcome``: a ``ProximityPairSendOutcome`` that is either `sent`
+or `notSent` with a frozen ``ProximityPairSendFailure`` (seven causes, including a pairing that came
+up and died before the send, and a teardown that cut a share off), naming the picked
+``ProximityPairPeer`` row and the send's `subject`, the recipe's title. It sits beside `SendState`,
+the status line's English, auto-clearing copy. The manager's mechanism composes no English: its
+status line is typed and its diagnostics are typed events, and one renderer at the foot of its file
+turns both into the frozen sentences the share sheet shows. `sent` means the sealed payload was
+handed to the transport. A text recipe's control-stream send completed; only a picture recipe also
+reads a one-byte transport ack. There is no application receipt and no queued or routed path, so
+the app's confirmation may say "sent" and never "delivered", and there is no "will arrive later" to
+report. `sendIncomplete` is the one cause where the other person may still have it; every other
+cause means nothing left this device. The causes are tokens: the app maps them to localized copy.
 
 - ``ProximityRecipeShareManager``
-- ``RecipeShareOutcome``
-- ``RecipeShareFailure``
+- ``ProximityPairSendOutcome``
+- ``ProximityPairSendFailure``
+- ``ProximityPairPeer``
 - ``RecipeShareDiscoveryGate``
 - ``RecipeShareTransfer``
 - ``RecipeShareAdvertisedName``
@@ -3057,7 +3062,6 @@ nothing left this device. The causes are tokens: the app maps them to localized 
 - ``ProximitySharedRecipeKind``
 - ``SharedSavedRecipePayload``
 - ``PendingProximityRecipeShare``
-- ``ProximityRecipeShareRecipient``
 - ``ProximityRecipeShareDiagnostics``
 - ``ProximityRecipeShareDiagnosticEvent``
 

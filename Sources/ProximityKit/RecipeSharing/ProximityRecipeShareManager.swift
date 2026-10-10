@@ -2,6 +2,30 @@ import Foundation
 import Observation
 import FernletDomainModel
 
+/// A nearby device a one-to-one pairing can send to, as a picker row (Fernlet's recipe share sheet
+/// lists them).
+///
+/// `id` is the discovered peer's handle id; `fingerprint` stays nil until the pairing's identity
+/// introduction verifies, after which the row carries the verified fingerprint and, when the peer
+/// disclosed one, its name.
+public struct ProximityPairPeer: Identifiable, Equatable {
+    /// The discovered peer's handle id: what a send names and what ``ProximityPairSendOutcome``
+    /// reports back as its `recipientID`.
+    public var id: UUID
+    /// The name the row shows: the name the device advertised, or, once its introduction verifies,
+    /// the name it disclosed there.
+    public var displayName: String
+    /// The verified signing-key fingerprint, nil until the identity introduction completes.
+    public var fingerprint: String?
+
+    /// A row.
+    public init(id: UUID, displayName: String, fingerprint: String?) {
+        self.id = id
+        self.displayName = displayName
+        self.fingerprint = fingerprint
+    }
+}
+
 /// One live recipe-share pairing: the peer, its channel + coordinator, and (once the handshake
 /// completes) the verified fingerprint and KA key.
 ///
@@ -31,7 +55,7 @@ private struct RecipeShareConnection: Identifiable {
 /// legitimately in flight. It is set when a connection record for this recipient's device is
 /// registered, or already exists when the share is minted.
 private struct LiveRecipeShare {
-    let recipient: ProximityRecipeShareRecipient
+    let recipient: ProximityPairPeer
     let recipeTitle: String
     let token: UUID
     var pairingSeen: Bool
@@ -97,11 +121,17 @@ public enum ProximityRecipeShareDiagnostics {
 /// (ContentView gates on tab/scene/lock). `@MainActor @Observable`.
 ///
 /// Every share the user begins ends in exactly one ``lastShareOutcome``
-/// (``RecipeShareOutcome``): `sent`, or `notSent` with a frozen ``RecipeShareFailure``, including a
-/// pairing that came up and died before the send (`couldNotConnect`) and a teardown that cut a share
-/// off (`interrupted` / `sendIncomplete`). **Sent is not received**: `sent` means the sealed payload
-/// was handed to the transport, and nothing ever comes back from the other device, so no outcome
-/// here can say "delivered", "accepted" or "saved".
+/// (``ProximityPairSendOutcome``): `sent`, or `notSent` with a frozen ``ProximityPairSendFailure``,
+/// including a pairing that came up and died before the send (`couldNotConnect`) and a teardown that
+/// cut a share off (`interrupted` / `sendIncomplete`). **Sent is not received**: `sent` means the
+/// sealed payload was handed to the transport, and nothing ever comes back from the other device, so
+/// no outcome here can say "delivered", "accepted" or "saved".
+///
+/// The mechanism composes no English: its status line is a typed `Status`, and everything it records
+/// for the diagnostics list is a typed `Event`, emitted where it acts. The English the share sheet
+/// shows, the ``SendState`` line and each diagnostic, is rendered from those two in one place, the
+/// renderer at the foot of this file (`sendState(for:)`, `statusMessage(for:)`, `diagnostic(for:)`),
+/// byte for byte the sentences the share sheet and its tests read.
 @MainActor
 @Observable
 public final class ProximityRecipeShareManager: ProximityPayloadHandling {
@@ -109,10 +139,11 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// message; `idle` between sends.
     ///
     /// Display copy, not a record: every terminal state is reset to `.idle` 2.5 s later
-    /// (`scheduleStatusClear`), and `failed`'s message is an English sentence composed here. A
-    /// surface that has to stay up until the user dismisses it, or has to be translated, reads
-    /// ``lastShareOutcome`` instead. `sent` carries the same meaning as
-    /// ``RecipeShareOutcome/Result/sent``: handed to the transport, never "delivered".
+    /// (`scheduleStatusClear`), and `failed`'s message is an English sentence, rendered from the
+    /// typed `status` by `sendState(for:)`. A surface that has to stay up until the user
+    /// dismisses it, or has to be translated, reads ``lastShareOutcome`` instead. `sent` carries the
+    /// same meaning as ``ProximityPairSendOutcome/Result/sent``: handed to the transport, never
+    /// "delivered".
     public enum SendState: Equatable {
         case idle
         case connecting(recipientName: String)
@@ -121,19 +152,125 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         case failed(message: String)
     }
 
-    public private(set) var nearbyRecipients: [ProximityRecipeShareRecipient] = []
-    public private(set) var sendState: SendState = .idle
+    /// The send pipeline's status line, typed: what ``sendState`` renders. Display state, not a
+    /// record: a terminal value returns to ``Status/idle`` 2.5 s later (`scheduleStatusClear`), and a
+    /// surface that must stay up reads ``lastShareOutcome``.
+    nonisolated enum Status: Equatable, Sendable {
+        /// Between sends.
+        case idle
+        /// A send has begun and its pairing is not verified yet; the picked row's name.
+        case connecting(recipientName: String)
+        /// The verified pairing is sending the payload; the picked row's name.
+        case sending(recipientName: String)
+        /// The sealed payload was handed to the transport (never "delivered"); the picked row's name.
+        case sent(recipientName: String)
+        /// The send, or a search, was refused or failed, for the given reason.
+        case failed(Failure)
+
+        /// Why the status line shows a failure.
+        nonisolated enum Failure: Equatable, Sendable {
+            /// A search restart refused while paired; the name of the device holding the pairing.
+            case searchRefusedWhilePaired(pairedWith: String)
+            /// The picked row's device was no longer discoverable.
+            case recipientUnavailable
+            /// A connection attempt to another device was in flight.
+            case connectingToAnother
+            /// A send refused while paired with another device; that device's name.
+            case pairedWithAnother(pairedWith: String)
+            /// The pre-connect timer ran out; the picked row's name.
+            case noAnswer(recipientName: String)
+            /// The pairing came up and ended before the send; the picked row's name.
+            case couldNotConnect(recipientName: String)
+            /// A second send of one share was refused.
+            case duplicateSend
+            /// The send threw.
+            case sendFailed
+        }
+    }
+
+    /// What the manager did, refused or saw, for its diagnostics list, emitted in the order it acts:
+    /// each case carries only names the user already saw (a picker row's, the share's subject) or,
+    /// for a radio failure, the radio's own diagnostic text, and no copy.
+    nonisolated enum Event: Equatable, Sendable {
+        /// `start()` brought the radio up (emitted before the radio's start).
+        case discoveryStarted
+        /// `stop()` stood a running radio down.
+        case discoveryStopped
+        /// `refreshDiscovery()` restarted the search.
+        case discoveryRefreshed
+        /// A start failure stood the radio down; the run-policy seam retries on its next run.
+        case listeningWillRetry
+        /// The radio's `start(advertisement:)` threw; the error, as `"\(error)"` spells it.
+        case radioDidNotStart(error: String)
+        /// The radio reported a start failure; its own message, verbatim.
+        case radioFailed(message: String)
+        /// A search restart refused while paired; the name of the device holding the pairing.
+        case searchSkippedWhilePaired(pairedWith: String)
+        /// A send began; the picked row's name.
+        case connecting(recipientName: String)
+        /// The picked row's device was no longer discoverable; its name.
+        case recipientUnavailable(recipientName: String)
+        /// A send refused while a connection to another device was in flight; the picked row's name.
+        case connectingToAnother(recipientName: String)
+        /// A send refused while paired with another device; the picked row's name and that device's.
+        case sendRefusedWhilePaired(recipientName: String, pairedWith: String)
+        /// The pre-connect timer ran out; the picked row's name.
+        case noAnswer(recipientName: String)
+        /// The pairing came up and ended before the send; the picked row's name.
+        case couldNotConnect(recipientName: String)
+        /// The verified pairing began the send; the share's subject and the picked row's name.
+        case sending(subject: String, recipientName: String)
+        /// A second send of one share was refused; the share's subject.
+        case duplicateSendRefused(subject: String)
+        /// A send completed against a newer share record, so its completion was not counted.
+        case completionNotCounted
+        /// The sealed payload was handed to the transport; the share's subject and the row's name.
+        case sent(subject: String, recipientName: String)
+        /// The send threw; the picked row's name.
+        case sendFailed(recipientName: String)
+        /// An outcome arrived for a superseded share and was not shown.
+        case outcomeSuperseded
+        /// The radio discovered a device; the name its row shows.
+        case discovered(name: String)
+        /// A discovered device went away; the name its row showed.
+        case lost(name: String)
+        /// The radio reported a device's disconnect; the device's name.
+        case disconnected(name: String)
+        /// A third device's channel was refused under the two-device cap; its name.
+        case turnedAway(name: String)
+        /// A channel was admitted and its pairing begins; the device's name.
+        case channelOpened(name: String)
+        /// A pairing was registered and discovery closed; the paired device's name.
+        case closedToOthers(pairedWith: String)
+        /// A pairing reached the proximity gate and is being committed.
+        case confirming
+        /// A pairing's identity verified; the verified name, or the fingerprint when none was disclosed.
+        case verified(name: String)
+        /// The last pairing's record was evicted and discovery reopened.
+        case reopened
+        /// A pairing stalled before verification was dropped by the sweep; the device's name.
+        case droppedStalled(name: String)
+    }
+
+    /// The picker's rows: every nearby device the radio discovered, sorted by name, each re-filed
+    /// under its verified fingerprint (and the name it disclosed, if it disclosed one) once its
+    /// pairing verifies.
+    public private(set) var nearbyRecipients: [ProximityPairPeer] = []
+    /// The status line, typed; ``sendState`` renders it.
+    private(set) var status: Status = .idle
+    /// The status line the share sheet shows: the typed `status` rendered (see ``SendState``).
+    public var sendState: SendState { Self.sendState(for: status) }
     /// How the most recent share the user began ended — the value the share sheet's confirmation
     /// is built from.
     ///
     /// Published exactly once per share, at its terminal moment, through `finishShare(_:token:)`
     /// (or directly, for the outbound-cap refusal that happens before a share is minted). Unlike
     /// ``sendState`` it is never auto-cleared, carries a frozen cause instead of English, and gets a
-    /// fresh ``RecipeShareOutcome/id`` every time. Cleared at the start of each send and by
+    /// fresh ``ProximityPairSendOutcome/id`` every time. Cleared at the start of each send and by
     /// ``wipeIdentityForDeleteAll()``. A teardown (`stop()`, a search restart) that ends a share
     /// still in flight publishes `interrupted` or `sendIncomplete` here, so an observer that was
     /// NOT waiting on that share (the sheet that is itself closing) must ignore it.
-    public private(set) var lastShareOutcome: RecipeShareOutcome?
+    public private(set) var lastShareOutcome: ProximityPairSendOutcome?
     public private(set) var diagnosticEvents: [ProximityRecipeShareDiagnosticEvent] = []
     /// R6: read-only outside this file — the cap (`maxPendingShares`) and the dedup live in this
     /// file's writers, and the two `dismissRecipeShare` methods cover the external mutation need.
@@ -170,9 +307,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     @ObservationIgnored private var connectTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var parkedSweepTask: Task<Void, Never>?
     @ObservationIgnored private var parkedSince: [UUID: Date] = [:]
-    @ObservationIgnored private var pendingOutgoing: (payload: ProximityRecipeSharePayload, recipient: ProximityRecipeShareRecipient)?
+    @ObservationIgnored private var pendingOutgoing: (payload: ProximityRecipeSharePayload, recipient: ProximityPairPeer)?
     /// The share the user is currently making, as ``RecipeShareTransfer`` records it — the exchange's
-    /// state machine, alongside `sendState`'s display copy rather than instead of it. Minted in
+    /// state machine, alongside `status`'s display state rather than instead of it. Minted in
     /// `sendRecipeShare`, cleared by `stop()`/`refreshDiscovery()`. Its one production effect is the
     /// once-only send start in `sendPendingPayload`.
     @ObservationIgnored private var transfer: RecipeShareTransfer?
@@ -281,14 +418,14 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         ) else { return }
         guard !isRunning else { return }
         isRunning = true
-        recordDiagnostic("Recipe share discovery started.")
+        emit(.discoveryStarted)
         do {
             try session.start(advertisement: discoveryInfo())
         } catch {
             // The same stand-down door a post-start failure goes through: the radio never came up,
             // so `isListening` must say so and the run-policy seam re-applies a running verdict at
             // its next run (P8 item 0, device finding (b)).
-            handleTransportError("The recipe share radio could not start: \(error)")
+            handleTransportError(.radioDidNotStart(error: "\(error)"))
             return
         }
         startObserving()
@@ -303,7 +440,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// lock engages) can say so. A sheet that is closing ignores it.
     public func stop() {
         if isRunning {
-            recordDiagnostic("Recipe share discovery stopped.")
+            emit(.discoveryStopped)
         }
         isRunning = false
         observationTask?.cancel()
@@ -328,7 +465,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         finishShareEndedByTeardown()
         transfer = nil
         engagedRecipientID = nil
-        sendState = .idle
+        status = .idle
     }
 
     public func refreshDiscovery() {
@@ -337,13 +474,13 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         // visibly instead; discovery reopens on its own when the connection record is evicted.
         if let connection = connections.first {
             let name = displayName(for: connection)
-            recordDiagnostic("Search skipped — already paired with \(name).")
-            sendState = .failed(message: "Connected to \(name) — recipe sharing links two Fernlets at a time.")
+            emit(.searchSkippedWhilePaired(pairedWith: name))
+            status = .failed(.searchRefusedWhilePaired(pairedWith: name))
             scheduleStatusClear()
             return
         }
         let shouldRestart = isRunning
-        recordDiagnostic("Recipe share discovery refreshed.")
+        emit(.discoveryRefreshed)
         observationTask?.cancel()
         observationTask = nil
         connectTimeoutTask?.cancel()
@@ -360,7 +497,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         finishShareEndedByTeardown()
         transfer = nil   // discarded, not cancelled — see `stop()`
         engagedRecipientID = nil
-        sendState = .idle
+        status = .idle
         isRunning = false
         if shouldRestart {
             start()
@@ -373,7 +510,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// Every way this share can end publishes exactly one ``lastShareOutcome``: the outbound-cap
     /// refusal here (before a share is minted, so it never touches a live share), and every later
     /// end through `finishShare(_:token:)`. The previous outcome is cleared first.
-    public func sendRecipeShare(_ payload: ProximityRecipeSharePayload, to recipient: ProximityRecipeShareRecipient) {
+    public func sendRecipeShare(_ payload: ProximityRecipeSharePayload, to recipient: ProximityPairPeer) {
         connectTimeoutTask?.cancel()
         lastShareOutcome = nil
 
@@ -394,9 +531,9 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             token: token,
             pairingSeen: connection(with: recipient) != nil
         )
-        sendState = .connecting(recipientName: recipient.displayName)
+        status = .connecting(recipientName: recipient.displayName)
         engagedRecipientID = recipient.id
-        recordDiagnostic("Connecting to \(recipient.displayName).")
+        emit(.connecting(recipientName: recipient.displayName))
 
         if let connection = connection(with: recipient),
            connection.verifiedKeyAgreementPublicKey != nil {
@@ -410,8 +547,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         guard let peer = peer(for: recipient) else {
             failLiveShare(
                 .recipientUnavailable,
-                statusMessage: "That nearby Fernlet is no longer available.",
-                diagnostic: "Recipe share failed: \(recipient.displayName) is no longer available.")
+                status: .recipientUnavailable,
+                event: .recipientUnavailable(recipientName: recipient.displayName))
             return
         }
         // Hard 2-device cap (connecting window): an attempt to a different peer is already in
@@ -419,8 +556,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         if session.hasConnectingPeers(besides: peer) {
             failLiveShare(
                 .connectingToAnother,
-                statusMessage: "Still connecting to another Fernlet — recipe sharing links two Fernlets at a time.",
-                diagnostic: "Refused share to \(recipient.displayName): another connection attempt is in flight.")
+                status: .connectingToAnother,
+                event: .connectingToAnother(recipientName: recipient.displayName))
             return
         }
         session.dial(peer, helloSID: session.advertisedSessionID)
@@ -433,16 +570,16 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     private func refuseWhilePaired(
         with connection: RecipeShareConnection,
         payload: ProximityRecipeSharePayload,
-        recipient: ProximityRecipeShareRecipient
+        recipient: ProximityPairPeer
     ) {
         let name = displayName(for: connection)
-        sendState = .failed(message: "Still sharing with \(name) — recipe sharing links two Fernlets at a time.")
-        recordDiagnostic("Refused share to \(recipient.displayName): already paired with \(name).")
+        status = .failed(.pairedWithAnother(pairedWith: name))
+        emit(.sendRefusedWhilePaired(recipientName: recipient.displayName, pairedWith: name))
         scheduleStatusClear()
-        lastShareOutcome = RecipeShareOutcome(
+        lastShareOutcome = ProximityPairSendOutcome(
             recipientID: recipient.id,
             recipientName: recipient.displayName,
-            recipeTitle: payload.recipe.title,
+            subject: payload.recipe.title,
             otherPeerName: name,
             result: .notSent(.pairedWithAnother)
         )
@@ -532,7 +669,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             guard let self else { return }
             self.handlePeerLost(peer)
             self.removeConnections(matching: peer)
-            self.recordDiagnostic("\(self.displayName(for: peer)) disconnected.")
+            self.emit(.disconnected(name: self.displayName(for: peer)))
         }
         session.resolveDialer = { [weak self] sessionID in
             self?.peerAdvertising(sessionID: sessionID)
@@ -551,7 +688,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             return !self.session.hasConnectingPeers(besides: peer)
         }
         session.onTransportError = { [weak self] message in
-            self?.handleTransportError(message)
+            self?.handleTransportError(.radioFailed(message: message))
         }
     }
 
@@ -575,12 +712,13 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// radio's tunnels and pending map, not in `connections`, and `stop()` cancels both. Under MC
     /// that window was unreachable from here (the door opened at start and nowhere else); a QUIC
     /// browser failing mid-evening would otherwise abort the user's tap and clear the picker. The
-    /// message is still recorded either way, so nothing about it is silent.
-    private func handleTransportError(_ message: String) {
-        recordDiagnostic(message)
+    /// failure itself, `first` (the radio's own message, or the error a `start()` caught), is
+    /// emitted either way, so nothing about it is silent.
+    private func handleTransportError(_ first: Event) {
+        emit(first)
         guard connections.isEmpty, !session.hasConnectingPeers(besides: nil), isRunning else { return }
         stop()
-        recordDiagnostic("Recipe share radio failed to start — listening will retry on the next app event.")
+        emit(.listeningWillRetry)
     }
 
     /// The browsed peer advertising `sessionID`, for the radio's inbound dialer resolution.
@@ -664,7 +802,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         if let remoteSID = RecipeShareAdvertisement.sessionID(from: peer.discoveryInfo),
            remoteSID == session.advertisedSessionID { return }
         discoveredPeers[peer.id] = peer
-        let recipient = ProximityRecipeShareRecipient(
+        let recipient = ProximityPairPeer(
             id: peer.id,
             // Pre-handshake label straight off the wire — the picker, the browse list and the
             // diagnostics all read it back from here, so this is the one ingest to coerce. The
@@ -677,14 +815,14 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         nearbyRecipients.removeAll { $0.id == recipient.id }
         nearbyRecipients.append(recipient)
         nearbyRecipients.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-        recordDiagnostic("Discovered \(recipient.displayName).")
+        emit(.discovered(name: recipient.displayName))
     }
 
     private func handlePeerLost(_ peer: PeerHandle) {
         let name = displayName(for: peer)
         discoveredPeers.removeValue(forKey: peer.id)
         nearbyRecipients.removeAll { $0.id == peer.id }
-        recordDiagnostic("\(name) is no longer nearby.")
+        emit(.lost(name: name))
     }
 
     /// True when `peer`'s DEVICE already holds the pairing.
@@ -710,7 +848,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// proven — so the disjunction only ever recovers matches an id test would have lost.
     private func isSameDevice(
         _ connection: RecipeShareConnection,
-        as recipient: ProximityRecipeShareRecipient
+        as recipient: ProximityPairPeer
     ) -> Bool {
         if connection.id == recipient.id { return true }
         if let verified = connection.fingerprint, let claimed = recipient.fingerprint,
@@ -723,7 +861,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     /// The live connection with the DEVICE `recipient` names, if any — see
     /// ``isSameDevice(_:as:)``.
-    private func connection(with recipient: ProximityRecipeShareRecipient) -> RecipeShareConnection? {
+    private func connection(with recipient: ProximityPairPeer) -> RecipeShareConnection? {
         connections.first { isSameDevice($0, as: recipient) }
     }
 
@@ -773,13 +911,13 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         case .turnAway:
             // Hard 2-device cap, belt-and-braces: a third peer that won the connecting-window race
             // anyway is never admitted — end its tunnel and leave the existing pairing untouched.
-            recordDiagnostic("Turned away \(displayName(for: channel.peer)) — recipe sharing links two Fernlets at a time.")
+            emit(.turnedAway(name: displayName(for: channel.peer)))
             session.endTunnel(channel.peer)
             return
         case .admit:
             break
         }
-        recordDiagnostic("Secure recipe-share channel opened with \(displayName(for: channel.peer)).")
+        emit(.channelOpened(name: displayName(for: channel.peer)))
         let trustPolicy = store.makeProximityTrustPolicy()
         let coordinator = ProximityCoordinator(
             identity: identity,
@@ -838,7 +976,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             liveShare?.pairingSeen = true
         }
         applyDiscoveryGate(.connectionRegistered)
-        recordDiagnostic("Recipe sharing closed to others while paired with \(displayName(for: connection)).")
+        emit(.closedToOthers(pairedWith: displayName(for: connection)))
         updateEngagedRecipient()
         startParkedSweepIfNeeded()
     }
@@ -865,7 +1003,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             switch connections[index].coordinator.state {
             case .awaitingManualCommit, .awaitingProximityCommit:
                 let coordinator = connections[index].coordinator
-                recordDiagnostic("Recipe share recipient verified; confirming selected recipient.")
+                emit(.confirming)
                 // host-pin: exempt — coordinator/channel only, no `self`, no host read
                 Task { await coordinator.commitManualProximity() }
             default:
@@ -878,7 +1016,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
                     connections[index].fingerprint = fingerprint
                     connections[index].verifiedKeyAgreementPublicKey = peerIdentity.keyAgreementPublicKey
                     ensureRecipient(for: connections[index], identity: peerIdentity)
-                    recordDiagnostic("Verified \(peerIdentity.displayNameOrFingerprint).")
+                    emit(.verified(name: peerIdentity.displayNameOrFingerprint))
                 }
                 if let outgoing = pendingOutgoing, isSameDevice(connections[index], as: outgoing.recipient) {
                     applyTransfer(.peerVerified)
@@ -957,7 +1095,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         parkedSweepTask = nil
         parkedSince.removeAll()
         if applyDiscoveryGate(.connectionsEvicted) == .resume {
-            recordDiagnostic("Recipe sharing reopened to nearby Fernlets.")
+            emit(.reopened)
         }
     }
 
@@ -1011,7 +1149,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// is the common case — surface it as a distinct visible failure instead of an eternal
     /// "Connecting…". `registerConnection` cancels this the moment the channel comes up;
     /// past that point the coordinator's 25 s handshake budget owns failure.
-    private func armConnectTimeout(for recipient: ProximityRecipeShareRecipient) {
+    private func armConnectTimeout(for recipient: ProximityPairPeer) {
         connectTimeoutTask?.cancel()
         let timeout = connectTimeoutSeconds
         // host-pin: timer — stored handle, synchronous main-actor body (connect-timeout failure) (HP2)
@@ -1027,8 +1165,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             guard self.connection(with: recipient) == nil else { return }
             self.failLiveShare(
                 .noAnswer,
-                statusMessage: "No answer from \(recipient.displayName) — that Fernlet may be busy sharing with someone else.",
-                diagnostic: "Connect timeout: \(recipient.displayName) did not answer.")
+                status: .noAnswer(recipientName: recipient.displayName),
+                event: .noAnswer(recipientName: recipient.displayName))
             // End the half-open attempt so it doesn't linger in the connecting window and
             // block the next accepted dial.
             if let peer = self.peer(for: recipient) {
@@ -1040,17 +1178,17 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     // MARK: - Share outcome
 
     /// The one tail every failure of the live share before its send takes: drop the queued
-    /// payload, cancel the exchange record, show the (English, auto-clearing) status line, record
-    /// the diagnostic, release the engaged row, and publish the frozen cause.
+    /// payload, cancel the exchange record, show the (auto-clearing) failed status line, emit the
+    /// event, release the engaged row, and publish the frozen cause, in that order.
     ///
     /// The four copies of this tail it replaces (recipient unavailable, connecting window, connect
-    /// timeout, and the new lost-pairing path) differed only in their two strings and — now — their
+    /// timeout, and the lost-pairing path) differed only in their status, their event and their
     /// cause, so they are one function and cannot drift apart.
-    private func failLiveShare(_ reason: RecipeShareFailure, statusMessage: String, diagnostic: String) {
+    private func failLiveShare(_ reason: ProximityPairSendFailure, status failure: Status.Failure, event: Event) {
         pendingOutgoing = nil
         applyTransfer(.cancelled)
-        sendState = .failed(message: statusMessage)
-        recordDiagnostic(diagnostic)
+        status = .failed(failure)
+        emit(event)
         updateEngagedRecipient()
         scheduleStatusClear()
         finishShare(.notSent(reason), token: nil)
@@ -1076,8 +1214,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         let name = live.recipient.displayName
         failLiveShare(
             .couldNotConnect,
-            statusMessage: "Could not connect securely to \(name).",
-            diagnostic: "Recipe share to \(name) ended before sending: the connection closed during setup.")
+            status: .couldNotConnect(recipientName: name),
+            event: .couldNotConnect(recipientName: name))
     }
 
     /// Publishes the outcome of a share a teardown (`stop()`, a search restart) ended while it was
@@ -1098,17 +1236,17 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// is recorded as a diagnostic and never shown, and one that arrives after a teardown (no live
     /// share) is dropped, because the teardown already published that share's outcome. Outcomes that
     /// belong to whatever share is live (a refusal, a timeout, a lost pairing, a teardown) pass nil.
-    private func finishShare(_ result: RecipeShareOutcome.Result, token: UUID?) {
+    private func finishShare(_ result: ProximityPairSendOutcome.Result, token: UUID?) {
         guard let live = liveShare else { return }
         guard token == nil || token == live.token else {
-            recordDiagnostic("A share outcome arrived for a superseded share — not shown.")
+            emit(.outcomeSuperseded)
             return
         }
         liveShare = nil
-        lastShareOutcome = RecipeShareOutcome(
+        lastShareOutcome = ProximityPairSendOutcome(
             recipientID: live.recipient.id,
             recipientName: live.recipient.displayName,
-            recipeTitle: live.recipeTitle,
+            subject: live.recipeTitle,
             result: result
         )
     }
@@ -1163,7 +1301,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             // the coordinator stalled — end it.
             session.endTunnel(connection.peer)
             parkedSince.removeValue(forKey: connection.id)
-            recordDiagnostic("Dropped stalled connection to \(displayName(for: connection)).")
+            emit(.droppedStalled(name: displayName(for: connection)))
             connections.removeAll { $0.id == connection.id }
         }
         finalizeConnectionRemovals(previousCount: before)
@@ -1177,7 +1315,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         let shownName = peerIdentity.isDisplayNameWithheld
             ? (nearbyRecipients.first { $0.id == connection.id }?.displayName ?? peerIdentity.fingerprint)
             : peerIdentity.displayName
-        let recipient = ProximityRecipeShareRecipient(
+        let recipient = ProximityPairPeer(
             id: connection.id,
             displayName: shownName,
             fingerprint: peerIdentity.fingerprint
@@ -1197,8 +1335,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
         let token = transfer?.token
         pendingOutgoing = nil
         updateEngagedRecipient()
-        sendState = .sending(recipientName: outgoing.recipient.displayName)
-        recordDiagnostic("Sending \(outgoing.payload.recipe.title) to \(outgoing.recipient.displayName).")
+        status = .sending(recipientName: outgoing.recipient.displayName)
+        emit(.sending(subject: outgoing.payload.recipe.title, recipientName: outgoing.recipient.displayName))
         do {
             // DO NOT LOCALIZE "Recipe share" — it is signed into the envelope's canonical bytes and
             // rendered in the RECEIVING device's Connection Inspector, so translating it here would
@@ -1218,8 +1356,8 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             // already ended, a duplicate while the first send is still going) leaves the outcome to
             // the path that owns it, and publishing here would drop that one.
             guard applyTransfer(.sendBegan(wireByteCount: payloadData.count), token: token) else {
-                sendState = .failed(message: "Could not send that recipe.")
-                recordDiagnostic("Refused a second send of \(outgoing.payload.recipe.title).")
+                status = .failed(.duplicateSend)
+                emit(.duplicateSendRefused(subject: outgoing.payload.recipe.title))
                 scheduleStatusClear()
                 return
             }
@@ -1238,24 +1376,24 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
             // recipe the user is no longer watching. The observable half is the half the token was
             // meant to protect.
             guard applyTransfer(.sendCompleted, token: token) else {
-                recordDiagnostic("A send completed against a newer share record — completion not counted.")
+                emit(.completionNotCounted)
                 return
             }
-            sendState = .sent(recipientName: outgoing.recipient.displayName)
-            recordDiagnostic("Sent \(outgoing.payload.recipe.title) to \(outgoing.recipient.displayName).")
+            status = .sent(recipientName: outgoing.recipient.displayName)
+            emit(.sent(subject: outgoing.payload.recipe.title, recipientName: outgoing.recipient.displayName))
             finishShare(.sent, token: token)
         } catch {
             // Whether anything had been handed over: the encode above can throw before `sendBegan`.
             let hadBegun = transfer?.phase == .sending
             applyTransfer(.sendFailed, token: token)
-            sendState = .failed(message: "Could not send that recipe.")
-            recordDiagnostic("Recipe share failed while sending to \(outgoing.recipient.displayName).")
+            status = .failed(.sendFailed)
+            emit(.sendFailed(recipientName: outgoing.recipient.displayName))
             finishShare(.notSent(hadBegun ? .sendIncomplete : .interrupted), token: token)
         }
         scheduleStatusClear()
     }
 
-    private func peer(for recipient: ProximityRecipeShareRecipient) -> PeerHandle? {
+    private func peer(for recipient: ProximityPairPeer) -> PeerHandle? {
         if let connection = connection(with: recipient) {
             return connection.peer
         }
@@ -1265,15 +1403,23 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     private func scheduleStatusClear() {
         clearStatusTask?.cancel()
-        // host-pin: timer — stored handle, synchronous main-actor body (`sendState = .idle`) (HP2)
+        // host-pin: timer — stored handle, synchronous main-actor body (`status = .idle`) (HP2)
         clearStatusTask = Task { @MainActor [weak self] in
             // A superseding `scheduleStatusClear` cancels this one — NOT clearing the status is
             // the correct recovery, because the newer timer owns it.
             do { try await Task.sleep(for: .seconds(2.5)) } catch { return }
-            self?.sendState = .idle
+            self?.status = .idle
         }
     }
 
+    /// Records what the mechanism just did: `event` rendered by ``diagnostic(for:)`` and appended to
+    /// the diagnostics list, synchronously, so the list's order is the order the manager acts in.
+    private func emit(_ event: Event) {
+        recordDiagnostic(Self.diagnostic(for: event))
+    }
+
+    /// Appends one line to the capped diagnostics list: a rendered ``Event``, or one of the receive
+    /// handler's own lines.
     private func recordDiagnostic(_ message: String) {
         diagnosticEvents = ProximityRecipeShareDiagnostics.appending(
             ProximityRecipeShareDiagnosticEvent(message: message),
@@ -1439,7 +1585,7 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
     /// `token` exactly as `sendPendingPayload` attributes a send's result. A unit test cannot drive a
     /// real verified send (that needs a live coordinator over a real channel), so this is how the
     /// token gate — a live share publishes, a superseded or torn-down one does not — is reachable.
-    func finishShareForTesting(_ result: RecipeShareOutcome.Result, token: UUID?) {
+    func finishShareForTesting(_ result: ProximityPairSendOutcome.Result, token: UUID?) {
         finishShare(result, token: token)
     }
 
@@ -1474,4 +1620,85 @@ public final class ProximityRecipeShareManager: ProximityPayloadHandling {
 
     /// The fields the radio advertises — so the name bound is assertable off the production builder.
     var discoveryInfoForTesting: [String: String] { discoveryInfo() }
+}
+
+// MARK: - The English the share sheet shows
+
+/// The renderer: the one place the recipe share's status line and diagnostics become English.
+///
+/// Every sentence is a frozen literal the share sheet renders verbatim (`Text(verbatim:)`) and the
+/// recipe battery asserts by substring, so each is byte for byte the sentence the mechanism once
+/// composed at its site. The switches are exhaustive with no `default`: a new ``Status/Failure`` or
+/// ``Event`` case is a build error here until it has its sentence. `FernletFeatureGoldenTests` 31e
+/// renders every case with distinct arguments against its frozen sentence.
+extension ProximityRecipeShareManager {
+
+    /// The status line the share sheet shows for `status`: the same case with the same name, and a
+    /// failure's sentence from ``statusMessage(for:)``.
+    static func sendState(for status: Status) -> SendState {
+        switch status {
+        case .idle: return .idle
+        case .connecting(let name): return .connecting(recipientName: name)
+        case .sending(let name): return .sending(recipientName: name)
+        case .sent(let name): return .sent(recipientName: name)
+        case .failed(let failure): return .failed(message: statusMessage(for: failure))
+        }
+    }
+
+    /// The status line's sentence for `failure`.
+    static func statusMessage(for failure: Status.Failure) -> String {
+        switch failure {
+        case .searchRefusedWhilePaired(let name):
+            return "Connected to \(name) — recipe sharing links two Fernlets at a time."
+        case .recipientUnavailable:
+            return "That nearby Fernlet is no longer available."
+        case .connectingToAnother:
+            return "Still connecting to another Fernlet — recipe sharing links two Fernlets at a time."
+        case .pairedWithAnother(let name):
+            return "Still sharing with \(name) — recipe sharing links two Fernlets at a time."
+        case .noAnswer(let name):
+            return "No answer from \(name) — that Fernlet may be busy sharing with someone else."
+        case .couldNotConnect(let name):
+            return "Could not connect securely to \(name)."
+        case .duplicateSend, .sendFailed:
+            return "Could not send that recipe."
+        }
+    }
+
+    /// The diagnostics line for `event`; a radio failure's message is the radio's own, verbatim.
+    static func diagnostic(for event: Event) -> String {
+        switch event {
+        case .discoveryStarted: return "Recipe share discovery started."
+        case .discoveryStopped: return "Recipe share discovery stopped."
+        case .discoveryRefreshed: return "Recipe share discovery refreshed."
+        case .listeningWillRetry: return "Recipe share radio failed to start — listening will retry on the next app event."
+        case .radioDidNotStart(let error): return "The recipe share radio could not start: \(error)"
+        case .radioFailed(let message): return message
+        case .searchSkippedWhilePaired(let name): return "Search skipped — already paired with \(name)."
+        case .connecting(let name): return "Connecting to \(name)."
+        case .recipientUnavailable(let name): return "Recipe share failed: \(name) is no longer available."
+        case .connectingToAnother(let name): return "Refused share to \(name): another connection attempt is in flight."
+        case .sendRefusedWhilePaired(recipientName: let recipient, pairedWith: let name):
+            return "Refused share to \(recipient): already paired with \(name)."
+        case .noAnswer(let name): return "Connect timeout: \(name) did not answer."
+        case .couldNotConnect(let name):
+            return "Recipe share to \(name) ended before sending: the connection closed during setup."
+        case .sending(subject: let subject, recipientName: let name): return "Sending \(subject) to \(name)."
+        case .duplicateSendRefused(let subject): return "Refused a second send of \(subject)."
+        case .completionNotCounted: return "A send completed against a newer share record — completion not counted."
+        case .sent(subject: let subject, recipientName: let name): return "Sent \(subject) to \(name)."
+        case .sendFailed(let name): return "Recipe share failed while sending to \(name)."
+        case .outcomeSuperseded: return "A share outcome arrived for a superseded share — not shown."
+        case .discovered(let name): return "Discovered \(name)."
+        case .lost(let name): return "\(name) is no longer nearby."
+        case .disconnected(let name): return "\(name) disconnected."
+        case .turnedAway(let name): return "Turned away \(name) — recipe sharing links two Fernlets at a time."
+        case .channelOpened(let name): return "Secure recipe-share channel opened with \(name)."
+        case .closedToOthers(let name): return "Recipe sharing closed to others while paired with \(name)."
+        case .confirming: return "Recipe share recipient verified; confirming selected recipient."
+        case .verified(let name): return "Verified \(name)."
+        case .reopened: return "Recipe sharing reopened to nearby Fernlets."
+        case .droppedStalled(let name): return "Dropped stalled connection to \(name)."
+        }
+    }
 }

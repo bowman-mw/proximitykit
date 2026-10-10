@@ -214,7 +214,7 @@ nonisolated struct RecipeShareTransfer: Equatable, Sendable {
         case discoveryResumed
     }
 
-    /// The picker row this share is for — `ProximityRecipeShareRecipient.id`.
+    /// The picker row this share is for — `ProximityPairPeer.id`.
     let recipientID: UUID
 
     /// This record's own identity, minted per SEND.
