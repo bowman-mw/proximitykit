@@ -883,9 +883,10 @@ or either script. It is an `xcodebuild` build, not `swift build`: the SwiftPM co
 closure's string catalogs unprocessed. The build is the compiler half, which refuses any symbol native
 macOS lacks wherever it stands outside its guard. `ProximityPlatformBoundaryTests`, on the s3-grep CI
 line, is the source half: it holds this module's imports to a neutral baseline and the two seams
-above, refuses every device-name source, platform directory and default for a host fact (its rows
-for them are empty), holds every channel-ready door to its host's ranging provider, and pins that
-the gate runs.
+above, and its platform branches (`#if os(…)`) to the NearbyInteraction file's guard, refuses the
+device-name sources, platform-directory APIs and host-fact defaults it lists (its rows for them are
+empty), holds every channel-ready door to its host's ranging provider, and pins that the gate runs,
+neither skipped nor tolerated in CI and on by default in the pre-push hook.
 
 ### Hosting on macOS
 
