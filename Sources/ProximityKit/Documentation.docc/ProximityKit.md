@@ -18,9 +18,8 @@ files that are deliberately **never** part of the synced snapshot.
 **Position in the FernletKit graph and the S3 wall.** The `ProximityKit` target depends on
 `FernletCrypto` (only for the `CryptographicPurpose` signing overloads of ``IdentityService``, which
 the app's duress and probe signatures and `FernletSocial`'s feature labels sign through until C1;
-see "Protocol namespace" below) and `FernletDomainModel` (Fernlet's payload vocabulary and session
-mode, named only on the lines `ProximityNamespaceBoundaryTests` allowlists, which leave with the
-envelope's typed view or the session profile), and on nothing else: that wall pins the list, so neither `FernletFoundation` nor
+see "Protocol namespace" below) and `FernletDomainModel` (Fernlet's session mode, named only on the
+one line `ProximityNamespaceBoundaryTests` allowlists, until C5), and on nothing else: that wall pins the list, so neither `FernletFoundation` nor
 `PrivateMediaStore`, which only Fernlet's mesh features read, can come back unseen. It sits on the
 *protected* side of the S3 privacy wall: the walled `AIProviders` / `CloudKitSync` targets can never
 import it (nor it them, nor `FernletSocial`, whose heart dead-drop gets its CloudKit transport
@@ -499,8 +498,9 @@ wrong language and a future cross-stack signature mismatch nobody can reproduce 
 The localized inspector is still reachable, and the wire already carries what it needs. Every
 envelope has `payloadTypeToken`, a stable enum rawValue identical on every device. Localize on the
 RECEIVING side: map that token to a `String(localized:)` label at render time, and fall back to the
-raw summary for tokens this build has no case for (`isUnknownPayloadType` — a newer peer's payload
-type has no local label). Senders keep emitting frozen English forever.
+raw summary for tokens this build has no case for (the host's typed view says so: Fernlet's
+`isUnknownPayloadType`, in `FernletConnections` — a newer peer's payload type has no local label).
+Senders keep emitting frozen English forever.
 
 ### Protocol namespace: what the host supplies
 
@@ -516,9 +516,9 @@ the coordinator's session messages and capability rules, the managers' wire2 tok
 digest's record kinds, the routed type registry's routed types and the mesh engine's own messages.
 The mesh features' payload and capability tokens are their host's: Fernlet's features, in
 `FernletSocial`, register, send and gate on Fernlet's `PayloadType` and `ProximityCapability` raw
-values through this module's token doors, and this module names `PayloadType` only on the envelope's
-typed view of its token, which leaves for `FernletConnections` (see "What is left for A0.7 onward"
-below). It reads no feature label:
+values through this module's token doors, and read and sign envelopes through Fernlet's typed view
+of the envelope's token, which is `FernletConnections`'; this module names no `PayloadType`. It reads
+no feature label:
 the activities' and the moderation report's are `FernletSocial`'s, signed and verified there through
 ``IdentityService``'s `CryptographicPurpose` overloads, and the sealed-backup escrow's two are the
 app's, with its escrow. The heart dead-drop's keychain service and the moderation ban store's are
@@ -667,7 +667,7 @@ hand it:
 | Verifiers: the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
 | The membership digest and its holders: `MeshInventoryDigest`, `MeshMembershipRecordVerifier`, `MeshLedgerAdoption` | Take the whole family (`family:`, or the adoption's `in family:`, with no default), because the digest needs its record kinds beside its labels: every record is tagged with its kind's token from `family.vocabulary.membershipRecordKinds` (`MeshMembershipRecordKind.token(in:)`). The verifier keeps the family as its copy, so its labels and record kinds come from one namespace; an identity's signed digest uses its own namespace's. |
 | The routed type registry: ``MeshRoutedTypeRegistry`` and its projection, the ack-stage table | Read no namespace: ``MeshNetworkManager`` builds its one registry at `init` from its host's rows (``ProximityHost/meshRoutedTypeEntries``), each keyed by a token the host reads off its own namespace's `family.vocabulary.routedTypes` (Fernlet's, `FernletSocial`'s `FernletRoutedTypes`), and the manifest mint takes the manager's registry with no default, so this module spells no routed type. |
-| The envelope: ``FernletIdentityEnvelope/verify(identityService:replayCache:sealedPayloadFormat:)`` | Reads its identity's namespace's `family.vocabulary.payloads`, in the checks' fixed order: an unsealed envelope whose token is in `sealingRequired` is refused, and one whose token is outside `known` is parked (authenticated and replay-recorded, never opened). The token form of `signed` mints under a token the host names; `payloadType` and `isUnknownPayloadType` are Fernlet's typed view of the token. |
+| The envelope: ``FernletIdentityEnvelope/verify(identityService:replayCache:sealedPayloadFormat:)`` | Reads its identity's namespace's `family.vocabulary.payloads`, in the checks' fixed order: an unsealed envelope whose token is in `sealingRequired` is refused, and one whose token is outside `known` is parked (authenticated and replay-recorded, never opened). `signed` mints under a token the host names; Fernlet's typed view of the token (`payloadType`, `isUnknownPayloadType`, and a typed initializer and `signed`) is `FernletConnections`', and delegates to the raw forms. |
 | The session coordinator: ``ProximityCoordinator`` | Reads its identity's namespace's `family.vocabulary` at each use: it signs its introduction, acknowledgement and heartbeat with its reply under `session`'s tokens and titles and dispatches by them, parks a token outside `payloads.known`, and takes the wire2 token, the legacy assumption and its receive bound on a peer's list (twice `capabilities.known.count`) from `capabilities`. |
 | The mesh engine's own frames: ``MeshNetworkManager``, `MeshPayloadRole` | Name each frame by role, never by spelling: `MeshPayloadRole` has one case per mesh message, and its `token(in:)` and `role(for:in:)` are the one place a role meets its token, read off the manager's namespace's `family.vocabulary.mesh`. Every engine send is signed under the role's token, which is also its summary title; the payload door parks a token outside `payloads.known`, switches on the role of one inside it, and hands any other token, a feature's, to the handler registry, which is keyed by token (a host's feature registers its handler under its own token, ``MeshNetworkManager/registerPayloadHandler(forToken:handler:)``). The encrypted-metadata door resolves its inner token the same way, and every audit line names the token. A feature's payload goes out under its own token through the feature-only send, ``MeshNetworkManager/sendFeatureEnvelope(_:encodable:via:sealed:)``. |
 | Capability gates: `ProximityCoordinator.PeerIdentity.supports(_:in:)`, `PeerSlot.supports(_:in:)` | Take a token and the host's `capabilities` last: a peer that listed none supports exactly `assumedForLegacyPeers`. A host's features gate on their own capability tokens through these token forms (Fernlet's spell `ProximityCapability` raw values; this module has no typed overload); the mesh's sealed sends and the coordinator ask for the host's wire2 token, which the mesh, through its host's capability list, and presence advertise. |
@@ -724,9 +724,8 @@ an exact allowlist that names why it is still here and the plan step that remove
 test-hook names, A1);
 FernletDomainModel's `PayloadType`, `ProximityCapability`, `ProximityMode`, `ItemNameModeration`,
 `ProximityTrustedPeerRecord`, `TrainerAuditEvent` and `ConnectionSessionLog` are named only on an
-exact per-file, per-type allowlist: the typed door only Fernlet's features go through, the
-envelope's typed view of its token (A0.7), and the coordinator's session-mode alias (A0.7 / C5), the
-other five types named nowhere;
+exact per-file, per-type allowlist: one line, the coordinator's session-mode alias (C5), the other
+six types named nowhere (Fernlet's typed view of the envelope's token is `FernletConnections`');
 `package` is declared only on the doors its list names (see "Package doors" below); no type that
 left this module for `FernletSocial` or the app (the heart dead-drop's, presence's, moderation's,
 closeness's and friend state's types, the parked chat payload, the mesh features' — the clothing
@@ -798,7 +797,7 @@ exactly as they did when this module named `FernletAuditLog` itself. `ProximityA
 the canary for that install: every test asserting that an event was not logged would pass vacuously
 without it.
 
-**What is left for A0.7 onward.** The vocabulary and the session rules are the host's: every group
+**What is left.** The vocabulary and the session rules are the host's: every group
 of the vocabulary is read off the namespace its reader holds (the reader table above), the radios
 and the presence posture mint their Bonjour instance names (`fernlet-mesh-…` and `fn-…` for Fernlet)
 and certificates under the namespace's strings, the coordinator has no display default (every caller
@@ -824,18 +823,27 @@ type it enumerates), which only cleans up after Fernlet's own earlier builds.
 dependencies to `FernletCrypto` and `FernletDomainModel`. What still ties this module to Fernlet
 leaves in these steps:
 
-- **A0.7 and C5.** The one-to-one radio is a profile-driven pair session, ``ProximityPairSession``
-  over a host's ``ProximityPairProfile``, whose per-connection half is the coordinator's public token
-  send and manual commit; the envelope's typed view of its token, the one typed door only Fernlet's
-  features go through, leaves for `FernletConnections` (A0.7). The coach profile joins at C5, and
-  the connection profiles are what the coordinator's `Mode`, Fernlet's `ProximityMode` (a session
-  profile, not a token), generalizes into (A0.7 / C5).
-- **Later.** FernletCrypto's 40 twins of `.fernlet`'s labels (38 protocol labels and the two
-  feature salts) retire at plan step C1, with the app's duress and probe purposes;
-  `IdentityService`'s `CryptographicPurpose` overloads of `sign` and `verify` serve those and the
-  feature labels until then. The DEBUG test-hook names are settled when
-  the package leaves Fernlet's tree (A1), and so are the presence radio's `package` doors, published
-  as mechanism or wrapped (see "Package doors" below).
+- **C1.** FernletCrypto's 40 twins of `.fernlet`'s labels (38 protocol labels and the two
+  feature salts) retire, with the app's duress and probe purposes; `IdentityService`'s
+  `CryptographicPurpose` overloads of `sign` and `verify` serve those and the feature labels until
+  then.
+- **C5.** The one-to-one radio is a profile-driven pair session, ``ProximityPairSession`` over a
+  host's ``ProximityPairProfile``, whose per-connection half is the coordinator's public token send
+  and manual commit (see "Package doors" below); Fernlet's typed view of the envelope's token and its
+  recipe profile are `FernletConnections`'. The coach profile joins at C5, and each of its needs is
+  a defaulted profile field, a new verb or a new case: its radio row (the session's profile check
+  widens to it, and the radio's inbound resolution and dial hello change for its admission), roles
+  and admission after the identity handshake, a confirmation timeout long enough for pairing, a
+  sealed send before confirmation that fails closed, an introduction bound to the channel, and the
+  radio's `recipe.quic.*` labels, pinned in a golden before they are parameterized. The coordinator's
+  `Mode`, Fernlet's `ProximityMode` (a session profile, not a token, and the one line of Fernlet's
+  domain vocabulary this module still names), generalizes then into the session policy that profile
+  brings, the first other than friend.
+- **A1.** The DEBUG test-hook names are settled when the package leaves Fernlet's tree, and so are
+  the presence radio's `package` doors, published as mechanism or wrapped (see "Package doors"
+  below). Before its 0.1.0 tag, one pass renames what still says recipe in the pair session's
+  mechanism: the internal `RecipeShare*` types, the radio `NetworkRecipeShareSession`, the
+  `RecipeSharing/` folder and the namespace's `Radios.recipeShare` row (its bytes stay).
 
 ### Package doors
 

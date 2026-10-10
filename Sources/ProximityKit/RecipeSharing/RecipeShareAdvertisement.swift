@@ -115,7 +115,7 @@ nonisolated enum RecipeShareAdvertisement {
 /// the air a second earlier, and the responder believes it exactly as far as it believes the
 /// advertisement: it looks the token up among the peers it has actually browsed and refuses the
 /// connection outright if it names none, or names this device itself. The identity decision is
-/// untouched — it is `ProximityCoordinator`'s sealed introduction, after the channel exists.
+/// untouched — it is `ProximityCoordinator`'s signed identity introduction, after the channel exists.
 ///
 /// **What it is not.** Not an identity claim, not signed, and never trusted for anything but
 /// routing the connection to a browsed peer.

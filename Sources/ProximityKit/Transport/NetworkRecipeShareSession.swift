@@ -244,7 +244,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     nonisolated static let maxPendingInbound = 2
 
     /// Frames one tunnel may deliver before its receive loop retires (Power of 10 rule 2). Three
-    /// orders of magnitude above a recipe exchange, which is a sealed introduction and one share.
+    /// orders of magnitude above a recipe exchange, which is a signed introduction and one share.
     nonisolated static let maxInboundFramesPerConnection = 2_000
 
     /// Browse results considered in one callback. Bounded for the same reason the other radios

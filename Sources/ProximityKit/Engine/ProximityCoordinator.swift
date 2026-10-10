@@ -1310,7 +1310,8 @@ public final class ProximityCoordinator {
             // every device and in every language. Localize on the RECEIVING side by mapping that
             // token to a `String(localized:)` label at render time (a `PayloadType` → label switch in
             // the Inspector view), and keep `summary` as the raw fallback for tokens this build does
-            // not know (`isUnknownPayloadType` — a newer peer's payload type has no local label).
+            // not know (the host's typed view says so, Fernlet's `isUnknownPayloadType` — a newer
+            // peer's payload type has no local label).
             // The sender must keep sending frozen English so signatures and cross-build audit rows
             // stay comparable; nothing here should ever call `String(localized:)`.
             summary: encrypted ? envelope.payloadTypeToken : envelope.payloadSummary.title
