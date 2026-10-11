@@ -2,11 +2,11 @@ import Combine
 import Foundation
 @testable import ProximityKit
 
-// The deterministic in-memory transport fabric. `MockMultipeerTransport` beside it stays: it is a
-// single-peer script for coordinator handshake tests and does its job. This is the other thing —
-// a multi-endpoint medium with links that can be delayed, cut and healed on a clock a test owns,
-// which is what plan §16.2's partition matrix needs and what a scripted single-peer mock cannot be
-// bent into.
+// The deterministic in-memory transport fabric. FernletTests' `MockMultipeerTransport` stays: it
+// is a single-peer script for coordinator handshake tests and does its job. This is the other
+// thing — a multi-endpoint medium with links that can be delayed, cut and healed on a clock a
+// test owns, which is what plan §16.2's partition matrix needs and what a scripted single-peer
+// mock cannot be bent into.
 //
 // The one rule that governs the whole file: **no wall-clock sleeps**. This repository has a
 // documented flake family whose root cause was wait helpers with no deadline floor, and a partition
@@ -392,8 +392,8 @@ final class FakePeerTransport: PeerTransport {
 
 // MARK: - MeshPeerChannel
 
-/// The fake also serves as a mesh slot CHANNEL, so `FakeMeshTransportSession` can hand
-/// `MeshNetworkManager` a real endpoint of this fabric where production hands it a
+/// The fake also serves as a mesh slot CHANNEL, so FernletTests' `FakeMeshTransportSession` can
+/// hand `MeshNetworkManager` a real endpoint of this fabric where production hands it a
 /// `NetworkPeerChannel` (the retired MC radio handed a `PeerChannelTransport` in its place).
 ///
 /// `peer` is this endpoint's own handle: a slot addresses its channel by the peer that channel

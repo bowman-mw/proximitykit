@@ -2,7 +2,6 @@ import ProximityKit
 import Testing
 import Foundation
 import Combine
-import FernletDomainModel
 
 @Suite(.serialized) @MainActor
 struct NearbyRangingSessionTests {

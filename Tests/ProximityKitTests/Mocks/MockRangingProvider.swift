@@ -2,7 +2,6 @@ import ProximityKit
 import Foundation
 import Combine
 import simd
-import FernletDomainModel
 
 @MainActor
 final class MockRangingProvider: RangingProvider {

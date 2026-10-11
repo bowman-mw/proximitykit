@@ -931,7 +931,7 @@ checks them; plan step P0.2 and A1's device lanes prove them on hardware.
 
 This module's own tests live in the package's test target, `ProximityKitTests`
 (`FernletKit/Tests/ProximityKitTests`, plan step A0.8), and travel with the package at plan step A1.
-It holds the suites that need nothing but this module and its closure: the in-memory transport fabric
+It holds the suites that need nothing but this module: the in-memory transport fabric
 and the peer handle (`FakePeerTransportTests`, `PeerHandleIdentityTests`, on CI's mesh-batteries line)
 and, on the `proximitykit` line, the membership records (`MeshDerivedRosterTests`,
 `MeshMembershipMergeTests`, `MeshMembershipBoundsTests`), the routed drain plan
@@ -940,19 +940,23 @@ and, on the `proximitykit` line, the membership records (`MeshDerivedRosterTests
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (every `SecItem` call returns
 `errSecMissingEntitlement`) and no ``ProximityAuditSink`` is installed (every audit line is dropped).
-It builds in Swift 6 language mode with no default isolation and the upcoming features Fernlet's own
-tests use, and depends on this module alone. CI runs it on the iOS simulator; a macOS lane is A1's.
+It builds in Swift 6 language mode with no default isolation; with the three upcoming features it
+declares, that is every upcoming feature Fernlet's own tests use, though they build in Swift 5 mode.
+It declares this module as its one dependency, and its files import nothing else of the package: this
+module's closure (`FernletCrypto`, `FernletDomainModel`, `FernletFoundation`) holds Fernlet's values
+and does not travel. CI runs it on the iOS simulator; a macOS lane is A1's.
 The three helpers both test targets use (the fake peer transport, the ranging mock and the membership
 fixtures) live in each, held identical but for their imports, because a test target cannot import
 another. CI names its suites `ProximityKitTests/<Suite>`; `Tests/suite-inventory.tsv` and
 `CIGateSelectorBoundaryTests` hold every suite to one target, one file and its lines, and refuse what
-this bundle cannot serve.
+this bundle cannot serve and an import of the closure.
 
 Every other ProximityKit suite still runs in the app's `FernletTests` until A1 brings a test namespace
 in place of `.fernlet`, a host double, an audit sink, an answer for the keychain and a package-rooted
 file locator. `ProximityNamespaceSoundnessTests` needs none of them, but it stays there, on the
 crypto-goldens line beside Fernlet's goldens, with its five framing byte pins over a literal namespace,
-and moves with the package at A1 (an owner decision).
+and moves with the package at A1 (an owner decision), once the mesh-message spelling helper its file
+declares, which three staying suites build their fixtures with, has a file of its own.
 
 ## Topics
 
