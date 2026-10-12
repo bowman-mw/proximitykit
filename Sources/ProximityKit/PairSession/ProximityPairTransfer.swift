@@ -1,8 +1,8 @@
 import Foundation
 
-// MARK: - RecipeShareDiscoveryGate
+// MARK: - ProximityPairDiscoveryGate
 
-/// Whether the recipe-share radio should be quiet to new peers right now — the whole of the
+/// Whether the pair session's radio should be quiet to new peers right now — the whole of the
 /// pause/resume contract, said once, as a value.
 ///
 /// ## Why this is a value and not two call sites
@@ -32,7 +32,7 @@ import Foundation
 ///
 /// Pure, bounded, clock-free and `nonisolated`, so the policy is settled at tier 1 and every radio
 /// only acts on the answer.
-nonisolated enum RecipeShareDiscoveryGate {
+nonisolated enum ProximityPairDiscoveryGate {
 
     /// What the radio is holding at the instant an event arrives.
     struct Radio: Equatable, Sendable {
@@ -47,7 +47,7 @@ nonisolated enum RecipeShareDiscoveryGate {
         let connectionCount: Int
 
         /// A radio reading. `connectionCount` is the count *after* the event, which is what makes
-        /// ``RecipeShareDiscoveryGate/Event/connectionsEvicted`` answerable without a second field.
+        /// ``ProximityPairDiscoveryGate/Event/connectionsEvicted`` answerable without a second field.
         init(isRunning: Bool, isPaused: Bool, connectionCount: Int) {
             self.isRunning = isRunning
             self.isPaused = isPaused
@@ -112,10 +112,11 @@ nonisolated enum RecipeShareDiscoveryGate {
     }
 }
 
-// MARK: - RecipeShareTransfer
+// MARK: - ProximityPairTransfer
 
-/// One recipe share, from the moment the user picks a recipient to the moment the payload has been
-/// handed to the transport — as a state machine with an exactly-once completion.
+/// One send over a pairing (Fernlet's: a recipe share), from the moment the user picks a recipient to
+/// the moment the payload has been handed to the transport — as a state machine with an exactly-once
+/// completion.
 ///
 /// ## What this pins that the status line could not
 ///
@@ -150,7 +151,7 @@ nonisolated enum RecipeShareDiscoveryGate {
 /// like a flaky share rather than a transport change. This row is the wall against that.
 ///
 /// Pure, `nonisolated`, clock-free and driven by no radio.
-nonisolated struct RecipeShareTransfer: Equatable, Sendable {
+nonisolated struct ProximityPairTransfer: Equatable, Sendable {
 
     /// Where one share has got to.
     enum Phase: Equatable, Sendable {
@@ -344,9 +345,9 @@ nonisolated struct RecipeShareTransfer: Equatable, Sendable {
     }
 }
 
-// MARK: - RecipeShareAdvertisedName
+// MARK: - ProximityPairAdvertisedName
 
-/// The local display name the recipe radio advertises, bounded so every transport can carry it.
+/// The local display name the pair session's radio advertises, bounded so every transport can carry it.
 ///
 /// ## Why a byte bound and not a character one
 ///
@@ -363,7 +364,7 @@ nonisolated struct RecipeShareTransfer: Equatable, Sendable {
 /// renders: `ProximityDisplayName.peerDisplayName(_:in:)` re-caps an inbound name at the host's
 /// `installation.peerNames.maxLength` (Fernlet's 24) Characters, so anything past that was never
 /// displayed by anyone.
-nonisolated enum RecipeShareAdvertisedName {
+nonisolated enum ProximityPairAdvertisedName {
 
     /// Bytes one advertised name may occupy — the bound ``MeshLinkAdvertisement`` publishes under,
     /// so a name that passes here is publishable by every transport unchanged.

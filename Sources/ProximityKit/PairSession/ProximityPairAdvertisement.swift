@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - RecipeShareAdvertisement
+// MARK: - ProximityPairAdvertisement
 
 /// What the pair session's radio (the recipe-share radio) publishes in its Bonjour TXT record, and
 /// what it believes reading one back — as pure functions over `[String: String]`, so the whole
@@ -15,7 +15,7 @@ import Foundation
 ///
 /// The **owner** (``ProximityPairSession``) contributes `v`, its profile's `mode` and the
 /// byte-bounded `name` — the fields a picker row is rendered from. The **radio**
-/// (``NetworkRecipeShareSession``) contributes `sid`, because under QUIC the session id is minted
+/// (``NetworkPairSession``) contributes `sid`, because under QUIC the session id is minted
 /// with the instance name and the TLS identity and is replaced with them at every `start()` and
 /// every resume. Neither half can publish alone, and ``publishedFields(from:sessionID:)`` is the
 /// one place they are joined.
@@ -25,7 +25,7 @@ import Foundation
 /// DNS-SD (RFC 6763 §6.1) gives each TXT entry a single length byte, so one `key=value` string may
 /// not exceed ``maxEntryByteCount``. Every value here is bounded well under that before it
 /// arrives: `sid` is a 36-character UUID, `name` is capped at
-/// ``MeshLinkAdvertisement/maxFieldValueLength`` bytes by ``RecipeShareAdvertisedName``, `v` is a
+/// ``MeshLinkAdvertisement/maxFieldValueLength`` bytes by ``ProximityPairAdvertisedName``, `v` is a
 /// frozen token, and `mode` is the pair profile's frozen token, which ``ProximityPairSession`` holds
 /// to that same byte bound. The fields are published through
 /// ``MeshLinkAdvertisement/publishedFields(from:)``, which drops an empty or over-long value
@@ -34,7 +34,7 @@ import Foundation
 /// here (24 tags were 311 bytes); this record's worst case is ~150.
 ///
 /// Every key and value is a frozen wire token in English, never localized.
-nonisolated enum RecipeShareAdvertisement {
+nonisolated enum ProximityPairAdvertisement {
 
     /// The advertisement version key. A reader that does not see ``version`` under it believes
     /// nothing else in the record.
@@ -44,7 +44,7 @@ nonisolated enum RecipeShareAdvertisement {
     static let version = "1"
 
     /// The key carrying the radio's per-start session id — the token an inbound dialer claims in
-    /// its ``RecipeShareDialHello`` and the one this device excludes its own echo by.
+    /// its ``ProximityPairDialHello`` and the one this device excludes its own echo by.
     static let sessionIDKey = "sid"
 
     /// The key carrying the sender's chosen display name, absent when it cannot be published.
@@ -97,9 +97,9 @@ nonisolated enum RecipeShareAdvertisement {
     }
 }
 
-// MARK: - RecipeShareDialHello
+// MARK: - ProximityPairDialHello
 
-/// The one frame a recipe-share dialer writes before anything else on its control stream: the
+/// The one frame a pair-session dialer writes before anything else on its control stream: the
 /// session id it is advertising.
 ///
 /// **Why it exists.** Under MultipeerConnectivity the inbound side got peer resolution for free —
@@ -119,14 +119,14 @@ nonisolated enum RecipeShareAdvertisement {
 ///
 /// **What it is not.** Not an identity claim, not signed, and never trusted for anything but
 /// routing the connection to a browsed peer.
-nonisolated struct RecipeShareDialHello: Codable, Equatable, Sendable {
+nonisolated struct ProximityPairDialHello: Codable, Equatable, Sendable {
 
     /// Hard ceiling on the encoded frame, enforced before a byte of it is read. Two short frozen
     /// keys and one 36-character UUID encode to 54 bytes; 96 is generous for that and still
     /// refuses anything shaped like a payload.
     static let maxEncodedBytes = 96
 
-    /// The frozen version token — ``RecipeShareAdvertisement/version``, the same vocabulary the TXT
+    /// The frozen version token — ``ProximityPairAdvertisement/version``, the same vocabulary the TXT
     /// record uses, so there is one version to move if the recipe wire ever changes.
     let version: String
 
@@ -141,7 +141,7 @@ nonisolated struct RecipeShareDialHello: Codable, Equatable, Sendable {
 
     /// A hello claiming `sessionID`, at the current wire version.
     init(sessionID: String) {
-        self.version = RecipeShareAdvertisement.version
+        self.version = ProximityPairAdvertisement.version
         self.sessionID = sessionID
     }
 
@@ -156,7 +156,7 @@ nonisolated struct RecipeShareDialHello: Codable, Equatable, Sendable {
     static func encoded(sessionID: String) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(RecipeShareDialHello(sessionID: sessionID))
+        let data = try encoder.encode(ProximityPairDialHello(sessionID: sessionID))
         guard data.count <= maxEncodedBytes else {
             throw MeshTransportError.oversizedFrame(byteCount: data.count)
         }
@@ -172,10 +172,10 @@ nonisolated struct RecipeShareDialHello: Codable, Equatable, Sendable {
     /// ``MeshLinkAdvertisement/maxFieldValueLength``, the same bound that decides whether a `sid`
     /// could have been advertised at all: an id too long to publish can never name a browsed peer,
     /// so believing one would only widen what reaches the resolver.
-    static func decoded(_ data: Data) -> RecipeShareDialHello? {
+    static func decoded(_ data: Data) -> ProximityPairDialHello? {
         guard data.count <= maxEncodedBytes,
-              let hello = try? JSONDecoder().decode(RecipeShareDialHello.self, from: data),
-              hello.version == RecipeShareAdvertisement.version,
+              let hello = try? JSONDecoder().decode(ProximityPairDialHello.self, from: data),
+              hello.version == ProximityPairAdvertisement.version,
               !hello.sessionID.isEmpty,
               hello.sessionID.utf8.count <= MeshLinkAdvertisement.maxFieldValueLength else { return nil }
         return hello

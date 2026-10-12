@@ -623,7 +623,7 @@ and, for the mesh manager, every founding a caller can begin without one
 first commit needs a peer the radio linked), so that identity founds no mesh and links no peer.
 A ``ProximityPairSession`` checks its ``ProximityPairProfile`` against its host's namespace too, once,
 at construction: a profile whose radio is not one of the namespace's pair-session rows
-(`family.radios.recipeShare`), or whose TXT mode is empty or over 64 UTF-8 bytes, is refused the same
+(`family.radios.pair`), or whose TXT mode is empty or over 64 UTF-8 bytes, is refused the same
 way, under `<auditArea>.profile.namespaceMismatch` (at `construction`, then at every refused `start`),
 before its radio can start, so namespace soundness still covers every value its radio runs on.
 `FernletSocial`'s `HeartDropService` holds no namespace of its own to compare with; its identity's
@@ -683,10 +683,10 @@ hand it:
 | Capability gates: `ProximityCoordinator.PeerIdentity.supports(_:in:)`, `PeerSlot.supports(_:in:)` | Take a token and the host's `capabilities` last: a peer that listed none supports exactly `assumedForLegacyPeers`. A host's features gate on their own capability tokens through these token forms (Fernlet's spell `ProximityCapability` raw values; this module has no typed overload); the mesh's sealed sends and the coordinator ask for the host's wire2 token, which the mesh, through its host's capability list, and presence advertise. |
 | Stateless helpers: the serializer's `canonicalBytes(for:in:)` overloads and `canonicalInventoryDigestBytes`, ``MeshRoutedContentDigest``, ``MeshChunkAssembly``, the item seal and the content-key wrap, ``ProximityVerifyQR/parse(_:in:)``, ``MeshEpochRef/minted(counter:coordinatorFingerprint:meshID:in:)`` | Take `in purposes:` (or `in:` a namespace) last. |
 | Ids that hash a label: ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)``, ``MeshRecipientReceipt/receiptID(in:)`` | Are functions, not stored properties: a value decoded off the wire carries no namespace, so `Codable` stays namespace-free. |
-| The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkRecipeShareSession` | Take `init(namespace:)` (the pair session's radio `init(namespace:profile:)`, reading its service type, ALPN and TXT mode off its pair profile, which its session has checked against the namespace) and read their service type, ALPN, heartbeat, exporter label, log subsystem and soundness verdict there, once (their `start` refuses an unsound namespace by that verdict); the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
+| The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkPairSession` | Take `init(namespace:)` (the pair session's radio `init(namespace:profile:)`, reading its service type, ALPN and TXT mode off its pair profile, which its session has checked against the namespace) and read their service type, ALPN, heartbeat, exporter label, log subsystem and soundness verdict there, once (their `start` refuses an unsound namespace by that verdict); the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
 | The presence posture: `PresenceEpochPosture` | Is minted, and rotated, with the presence instance-name prefix and the TLS common name its caller passes: `FernletSocial`'s `PresenceManager`'s posture mint, built in `init` from the manager's namespace, passes them. |
 | The name display: ``PeerNameDisplay/personName(_:fingerprint:in:)``, with `FernletConnections`' placeholders (`shown`, `firstName`) and `FernletSocial`'s `PresenceManager.firstName(of:in:)` over it | Take `in namespace:` last, sanitize under its peer-name cap and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
-| The peer-name coercion: `ProximityDisplayName.peerDisplayName(_:in:)`, ``FernletIdentityEnvelope/sanitizedSenderDisplayName(in:)`` and ``FernletIdentityEnvelope/disclosedSenderDisplayName(in:)``, `RecipeShareAdvertisedName.publishable(_:in:)`, and over them `FernletSocial`'s chat store (`SessionMessageStore.receiveIncoming(…in:)`) and incoming-photo coercion | Take `in namespace:` last and read `installation.peerNames`: a peer's sanitized name keeps at most the cap and reads as the floor when nothing displayable is left, and the advertised recipe name is capped the same way. The managers pass their own namespace (the mesh manager also to its descriptor coercion, a mesh name under the cap), the coordinator its identity's, and `FernletSocial`'s features their composition's. `ProximityDisplayName.sanitized(_:maxLength:)` is FernletDomainModel's `ItemNameModeration.sanitizedName` copied scalar for scalar; only `FernletSocial`'s activities still use the original. |
+| The peer-name coercion: `ProximityDisplayName.peerDisplayName(_:in:)`, ``FernletIdentityEnvelope/sanitizedSenderDisplayName(in:)`` and ``FernletIdentityEnvelope/disclosedSenderDisplayName(in:)``, `ProximityPairAdvertisedName.publishable(_:in:)`, and over them `FernletSocial`'s chat store (`SessionMessageStore.receiveIncoming(…in:)`) and incoming-photo coercion | Take `in namespace:` last and read `installation.peerNames`: a peer's sanitized name keeps at most the cap and reads as the floor when nothing displayable is left, and the advertised recipe name is capped the same way. The managers pass their own namespace (the mesh manager also to its descriptor coercion, a mesh name under the cap), the coordinator its identity's, and `FernletSocial`'s features their composition's. `ProximityDisplayName.sanitized(_:maxLength:)` is FernletDomainModel's `ItemNameModeration.sanitizedName` copied scalar for scalar; only `FernletSocial`'s activities still use the original. |
 | Storage scopes: ``MeshSessionStorageScope``, ``MeshRoutedStorageScope`` | Carry the namespace and the install binding (`init(namespace:directory:keychainService:installBinding:)`, ``MeshSessionStorageScope/production(for:directory:installBinding:)`` on the root the host states); the two stores read their file names, seal-key accounts and column-seal labels off `scope.namespace`. |
 | Closures that cross an actor | Capture the `Sendable` value when they are made, as `FernletSocial`'s `PresenceManager`'s radio factory does. |
 
@@ -747,10 +747,13 @@ hearts' with the heart ledger, the session photos' with their review, the JSON s
 copy vault — the deleted support layout, the sealed-backup escrow's and the recipe share's: its
 manager, the diagnostics ring presence shares with it, and its wire types), and none of the recipe
 share's three public values this module renamed for the one-to-one send (`RecipeShareOutcome`,
-`RecipeShareFailure`, `ProximityRecipeShareRecipient`), is declared, extended or aliased here again,
-a list that only grows as features move out, because a feature that came back under its old
-name with no Fernlet string, label or domain type of its own would pass the other rules; and the
-target depends on nothing in FernletKit. The literal and
+`RecipeShareFailure`, `ProximityRecipeShareRecipient`), nor the nine recipe-named types of the pair
+session's mechanism, renamed with pair names before the split (`ProximityPairTransfer`,
+`NetworkPairSession` and the rest; the wall lists the old names), is declared, extended or aliased
+here again (and the old name of the namespace's pair-session radio, renamed `pair` with them, is
+named nowhere in this module's code), a list that only grows as features move out, because a
+feature that came back under its old name with no Fernlet string, label or domain type of its own
+would pass the other rules; and the target depends on nothing in FernletKit. The literal and
 domain-type lists can only shrink, and a door's row lasts exactly as long as the door. The exact
 per-file lists in `ProximityNamespaceBoundaryTests` are the one place the ratchet's numbers live.
 
@@ -853,9 +856,7 @@ dependencies to none (plan step A1.0). What still ties this module to Fernlet le
   generalizes then into the session policy that profile brings, the first other than friend.
 - **A1.** The DEBUG test-hook names are settled when the package leaves Fernlet's tree, and so are
   the presence radio's `package` doors, published as mechanism or wrapped (see "Package doors"
-  below). Before its 0.1.0 tag, one pass renames what still says recipe in the pair session's
-  mechanism: the internal `RecipeShare*` types, the radio `NetworkRecipeShareSession`, the
-  `RecipeSharing/` folder and the namespace's `Radios.recipeShare` row (its bytes stay).
+  below).
 
 ### Package doors
 
@@ -1078,7 +1079,7 @@ asserts **zero** framework identifiers under the whole package.
 radio** since 2026-09-21 — see
 [the network migration plan](../../../../Docs/Plan-ProximityKit-Network-Migration-2026-08-27.md) §7),
 `NetworkPresenceSession` (the same framework, the presence radio, §17.1) and
-`NetworkRecipeShareSession` (the recipe radio, same plan section) each multiplex into per-peer
+`NetworkPairSession` (the recipe radio, same plan section) each multiplex into per-peer
 channels — `NetworkPeerChannel` — that conform to ``PeerTransport``. The three share one channel
 type through `NetworkChannelHost` and one parameter factory through `ProximityQUICParameters`,
 which is where `prohibitedInterfaceTypes = [.cellular]`, the accept-any validator and the declared
@@ -1466,27 +1467,27 @@ actually lives: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkPeerChan
 `MeshRosterVerdict`, `MeshIntroductionNonceCache`, `MeshVerifiedPeer`, `MeshIntroductionAuthority`.
 
 The pair session's radio, the recipe-share radio, is on QUIC (P9 item 3 pass 2:
-`NetworkRecipeShareSession`, behind the `RecipeShareRadioSession` seam, on its pair profile's row:
+`NetworkPairSession`, behind the `ProximityPairRadioSession` seam, on its pair profile's row:
 `_fernlet-recipe2._udp`, ALPN `fernlet-recipe-v1`, TXT mode `recipe` under Fernlet's recipe profile),
 and the two decisions a transport swap would have lost quietly were settled as tier-1 values first.
-``RecipeShareDiscoveryGate`` is the
+``ProximityPairDiscoveryGate`` is the
 pause/resume contract — the radio goes quiet to new peers the moment a pairing is registered and
 reopens only when that pairing's session-level RECORD is evicted, never on a transport disconnect
-event (a failed handshake fires none) and never over a stopped radio. ``RecipeShareTransfer`` is the
+event (a failed handshake fires none) and never over a stopped radio. ``ProximityPairTransfer`` is the
 share itself: `connecting → verified → sending → sent/failed/cancelled`, with a completion that is
 counted rather than assigned, and with the row that matters most — a discovery pause or resume is
 accepted in every phase and moves none of them, because closing the radio to new peers is not
-pausing a share in flight. ``RecipeShareAdvertisedName`` bounds the advertised display name in
+pausing a share in flight. ``ProximityPairAdvertisedName`` bounds the advertised display name in
 BYTES, not Characters, so the Bonjour publisher (which DROPS an over-long TXT value rather than
 truncating it) cannot silently strip the name off a long one; a name it cannot publish at all is
-omitted rather than sent empty, and ``RecipeShareAdvertisedName/received(_:hint:)`` falls back to
+omitted rather than sent empty, and ``ProximityPairAdvertisedName/received(_:hint:)`` falls back to
 the peer's transport hint on an absent *and* an empty one. The gate answers `unchanged` for
 `refreshRequested`, `transportErrorWhileListening` and `stopped` only because the SESSION's own
-`stop()` clears its paused flag — `NetworkRecipeShareSession.stop()` does, and a cell says so,
+`stop()` clears its paused flag — `NetworkPairSession.stop()` does, and a cell says so,
 because otherwise a refresh restarts into a radio that is still standing down and the only symptom
 is a search that finds nothing.
 
-**What the QUIC radio adds, and what it deliberately does not.** It wears a `RecipeSharePosture`
+**What the QUIC radio adds, and what it deliberately does not.** It wears a `ProximityPairPosture`
 minted fresh at every `start()` and every resume — a random instance name, a new TLS identity and a
 new `sid`, with **no rotation timer**, because the radio's lifetime is a Food-tab visit. That is an
 improvement on what it replaces rather than a reproduction: the retired radio advertised the
@@ -3091,7 +3092,7 @@ bundle the signed identity introduction carries is this module's wire type.
 
 A ``ProximityPairSession`` is a one-to-one connection between two devices, driven by a
 ``ProximityPairProfile`` its host builds from its own namespace: the radio it runs on (one of the
-namespace's pair-session rows, `family.radios.recipeShare`), the TXT `mode` it advertises and
+namespace's pair-session rows, `family.radios.pair`), the TXT `mode` it advertises and
 believes, and the area its own audit events go under. Fernlet's recipe profile is
 `FernletConnections`' `ProximityPairProfile.recipeShare(in:)`, and Fernlet's recipe share,
 `FernletSocial`'s `ProximityRecipeShareManager`, is its owner. The session owns its radio, this
@@ -3128,9 +3129,9 @@ The causes are tokens: the app maps them to localized copy.
 - ``ProximityPairPeer``
 - ``ProximityPairSendOutcome``
 - ``ProximityPairSendFailure``
-- ``RecipeShareDiscoveryGate``
-- ``RecipeShareTransfer``
-- ``RecipeShareAdvertisedName``
+- ``ProximityPairDiscoveryGate``
+- ``ProximityPairTransfer``
+- ``ProximityPairAdvertisedName``
 
 ### Peer names on screen
 

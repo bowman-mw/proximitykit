@@ -573,7 +573,7 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// and an unsalted digest of it would be recomputable by anyone who can hash.
     ///
     /// The same shape as `NetworkPresenceSession.peerLabelSalt` and
-    /// `NetworkRecipeShareSession.peerLabelSalt`, deliberately: three radios that label peers three
+    /// `NetworkPairSession.peerLabelSalt`, deliberately: three radios that label peers three
     /// different ways are three separate arguments to have to make.
     private let peerLabelSalt: [UInt8] =
         PresenceEpochPosture.systemEntropy(NetworkMeshSession.peerLabelSaltByteCount)

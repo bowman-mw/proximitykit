@@ -582,7 +582,7 @@ nonisolated extension ProximityNamespace.Radios {
         [
             (field: "family.radios.mesh.serviceType", value: mesh.serviceType),
             (field: "family.radios.presence.serviceType", value: presence.serviceType),
-            (field: "family.radios.recipeShare.serviceType", value: recipeShare.serviceType)
+            (field: "family.radios.pair.serviceType", value: pair.serviceType)
         ]
     }
 
@@ -591,7 +591,7 @@ nonisolated extension ProximityNamespace.Radios {
         [
             (field: "family.radios.mesh.alpn", value: mesh.alpn),
             (field: "family.radios.presence.alpn", value: presence.alpn),
-            (field: "family.radios.recipeShare.alpn", value: recipeShare.alpn)
+            (field: "family.radios.pair.alpn", value: pair.alpn)
         ]
     }
 

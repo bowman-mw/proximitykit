@@ -484,13 +484,13 @@ nonisolated extension ProximityNamespace {
         public let mesh: Radio
         /// The presence radio.
         public let presence: Radio
-        /// The recipe-share radio: the radio Fernlet's recipe pair-session profile runs on,
-        /// FernletConnections' `ProximityPairProfile.recipeShare(in:)`, and the one pair-session row a
-        /// ``ProximityPairSession`` accepts a profile's radio as.
-        public let recipeShare: Radio
+        /// The pair session's radio: the one pair-session row a ``ProximityPairSession`` accepts a
+        /// profile's radio as, and the radio Fernlet's recipe pair-session profile runs on,
+        /// FernletConnections' `ProximityPairProfile.recipeShare(in:)`.
+        public let pair: Radio
         /// The mesh heartbeat datagram, which the receive path drops by byte equality alone.
         public let meshHeartbeat: Data
-        /// The start of the mesh and recipe-share radios' Bonjour instance names, which go on with 12
+        /// The start of the mesh and pair-session radios' Bonjour instance names, which go on with 12
         /// lowercase hex characters. A display layer never shows a name that begins with it as a
         /// person's name.
         public let meshInstanceNamePrefix: String
@@ -506,18 +506,18 @@ nonisolated extension ProximityNamespace {
         /// - Parameters:
         ///   - mesh: The friend mesh's radio.
         ///   - presence: The presence radio.
-        ///   - recipeShare: The recipe-share radio.
+        ///   - pair: The pair session's radio.
         ///   - meshHeartbeat: The mesh heartbeat datagram.
-        ///   - meshInstanceNamePrefix: The mesh and recipe-share radios' instance-name prefix.
+        ///   - meshInstanceNamePrefix: The mesh and pair-session radios' instance-name prefix.
         ///   - presenceInstanceNamePrefix: The presence radio's instance-name prefix.
         ///   - tlsCommonName: The ephemeral certificates' common name.
         public init(
-            mesh: Radio, presence: Radio, recipeShare: Radio, meshHeartbeat: Data,
+            mesh: Radio, presence: Radio, pair: Radio, meshHeartbeat: Data,
             meshInstanceNamePrefix: String, presenceInstanceNamePrefix: String, tlsCommonName: String
         ) {
             self.mesh = mesh
             self.presence = presence
-            self.recipeShare = recipeShare
+            self.pair = pair
             self.meshHeartbeat = meshHeartbeat
             self.meshInstanceNamePrefix = meshInstanceNamePrefix
             self.presenceInstanceNamePrefix = presenceInstanceNamePrefix

@@ -3,7 +3,7 @@ import Foundation
 import Network
 import os
 
-// MARK: - RecipeShareRadioSession
+// MARK: - ProximityPairRadioSession
 
 /// The pair session's radio, as the surface ``ProximityPairSession`` actually drives.
 ///
@@ -17,7 +17,7 @@ import os
 /// The hooks are settable rather than delegate methods because that is the shape all three radios
 /// already publish, and because the session wires them once at construction and never again.
 @MainActor
-protocol RecipeShareRadioSession: AnyObject {
+protocol ProximityPairRadioSession: AnyObject {
 
     /// A peer appeared in the browse results, with its advertisement.
     var onPeerDiscovered: ((PeerHandle) -> Void)? { get set }
@@ -66,9 +66,9 @@ protocol RecipeShareRadioSession: AnyObject {
     func channel(for peer: PeerHandle) -> NetworkPeerChannel
 }
 
-// MARK: - RecipeSharePosture
+// MARK: - ProximityPairPosture
 
-/// The ephemeral identity one recipe-share radio wears: the Bonjour instance name it is found by,
+/// The ephemeral identity one pair-session radio wears: the Bonjour instance name it is found by,
 /// the TLS identity it presents, and the session id it advertises.
 ///
 /// **Deliberately not a ``PresenceEpochPosture``.** That type carries an `epoch` and anchors its
@@ -88,12 +88,12 @@ protocol RecipeShareRadioSession: AnyObject {
 ///
 /// Nothing here is persisted: no keychain row, no file, no `UserDefaults` key. A dropped posture
 /// is gone.
-nonisolated struct RecipeSharePosture {
+nonisolated struct ProximityPairPosture {
 
     /// The service instance name this radio is found by.
     let instanceName: String
 
-    /// The session id advertised in the TXT record and claimed in a ``RecipeShareDialHello``.
+    /// The session id advertised in the TXT record and claimed in a ``ProximityPairDialHello``.
     let sessionID: String
 
     /// The TLS identity the listener presents. Accept-any validated by both ends — certificate
@@ -113,8 +113,8 @@ nonisolated struct RecipeSharePosture {
     ///   which the caller reports as a start failure rather than advertising without an identity.
     static func minted(
         instanceNamePrefix: String, commonName: String, now: Date = Date()
-    ) throws -> RecipeSharePosture {
-        RecipeSharePosture(
+    ) throws -> ProximityPairPosture {
+        ProximityPairPosture(
             instanceName: MeshLinkAdvertisement.randomInstanceName(prefix: instanceNamePrefix),
             sessionID: UUID().uuidString,
             tlsIdentity: try EphemeralMeshTLSIdentity.mint(commonName: commonName, now: now)
@@ -122,11 +122,11 @@ nonisolated struct RecipeSharePosture {
     }
 }
 
-// MARK: - NetworkRecipeShareSession
+// MARK: - NetworkPairSession
 
-/// The recipe-share radio's Network.framework/QUIC surface: one listener, one browser, and the
-/// single short-lived pairwise tunnel the hard 2-device cap allows, multiplexed into a
-/// ``NetworkPeerChannel``.
+/// The pair session's radio (Fernlet's recipe-share radio), its Network.framework/QUIC surface: one
+/// listener, one browser, and the single short-lived pairwise tunnel the hard 2-device cap allows,
+/// multiplexed into a ``NetworkPeerChannel``.
 ///
 /// The third radio of plan §17.1, and — like ``NetworkPresenceSession`` — a separate, much smaller
 /// session than ``NetworkMeshSession`` rather than a parameterization of it. What the three share
@@ -137,7 +137,7 @@ nonisolated struct RecipeSharePosture {
 /// * **One tunnel, and the pause that goes with it.** Recipe sharing links two Fernlets at a time,
 ///   and while a pairing is held this radio goes *quiet* — ``pauseDiscovery()`` stands the
 ///   listener and the browser down so a third Fernlet can neither see this one nor invite it.
-///   That is shipped, user-visible behaviour (``RecipeShareDiscoveryGate`` is its contract), and
+///   That is shipped, user-visible behaviour (``ProximityPairDiscoveryGate`` is its contract), and
 ///   it is precisely what a naive transport swap loses silently: the bytes still flow, the share
 ///   still lands, and the only symptom is a third device that can suddenly see a paired one.
 /// * **There is no signed channel introduction.** The mesh authenticates a tunnel with
@@ -158,11 +158,11 @@ nonisolated struct RecipeSharePosture {
 ///
 /// The retired radio resolved an inbound peer for free: an invitation arrives bearing the peer the
 /// browser already found. QUIC does not — an inbound connection carries a connection id that
-/// belongs to no browse result — so the dialer opens with one ``RecipeShareDialHello`` naming the
+/// belongs to no browse result — so the dialer opens with one ``ProximityPairDialHello`` naming the
 /// session id it advertises, and the owner resolves that id to a peer it has already browsed
 /// through ``resolveDialer``, then rules on it through ``shouldAcceptDialer``. A hello that names
 /// no such peer, or names this device itself, is refused before any channel or handle exists. See
-/// ``RecipeShareDialHello`` for why that frame discloses nothing the air did not.
+/// ``ProximityPairDialHello`` for why that frame discloses nothing the air did not.
 ///
 /// ## Glare
 ///
@@ -185,10 +185,10 @@ nonisolated struct RecipeSharePosture {
 ///
 /// `@MainActor`; framework callbacks arrive `@Sendable` and hop in.
 @MainActor
-final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHost {
+final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
 
     /// The radio's QUIC service type, its pair profile's `radio.serviceType` (Fernlet's recipe
-    /// profile: the host namespace's `family.radios.recipeShare.serviceType`). A frozen wire token: it
+    /// profile: the host namespace's `family.radios.pair.serviceType`). A frozen wire token: it
     /// must also appear in the app's Info.plist `NSBonjourServices` or discovery is silently dead on
     /// device.
     ///
@@ -199,7 +199,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     nonisolated let serviceType: String
 
     /// ALPN for the radio's protocol, its pair profile's `radio.alpn` (Fernlet's recipe profile: the
-    /// host namespace's `family.radios.recipeShare.alpn`). A frozen wire token, distinct from the
+    /// host namespace's `family.radios.pair.alpn`). A frozen wire token, distinct from the
     /// mesh's `fernlet-mesh-v1` and presence's `fernlet-near-v1` so no two radios can negotiate.
     nonisolated let alpn: String
 
@@ -350,7 +350,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// The posture this radio is wearing — the ONLY source of the advertised instance name, the
     /// TLS identity and the session id. Minted here, per ``start()`` and per
     /// ``resumeDiscovery()``, and dropped by ``stop()``.
-    private var posture: RecipeSharePosture?
+    private var posture: ProximityPairPosture?
 
     /// The owner's half of the TXT record, recorded at ``start(advertisement:)`` so a resume can
     /// republish it under the new posture without asking the owner again.
@@ -387,7 +387,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
 
     /// Whether ``pauseDiscovery()`` is holding this radio.
     ///
-    /// **Cleared by ``stop()``.** ``RecipeShareDiscoveryGate``'s three "unchanged" rows —
+    /// **Cleared by ``stop()``.** ``ProximityPairDiscoveryGate``'s three "unchanged" rows —
     /// `refreshRequested`, `transportErrorWhileListening` and `stopped` — all resolve through the
     /// radio's own `stop()`/`start()` rather than through the gate, which is only true if the flag
     /// resets in this teardown. A pause that survived a stop would leave the next `start()`
@@ -412,7 +412,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// endpoint's id, which contains the peer's advertised instance name verbatim, and an unsalted
     /// digest of it would be recomputable by anyone who can hash.
     private let peerLabelSalt: [UInt8] =
-        PresenceEpochPosture.systemEntropy(NetworkRecipeShareSession.peerLabelSaltByteCount)
+        PresenceEpochPosture.systemEntropy(NetworkPairSession.peerLabelSaltByteCount)
 
     /// The session id this radio is advertising, or "" while it is down.
     var advertisedSessionID: String { posture?.sessionID ?? "" }
@@ -467,7 +467,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
             namespaceSoundness, event: "recipe.quic.namespaceUnsound", at: .start)
         guard !isRunning else { return }
         ownerFields = advertisement
-        posture = try RecipeSharePosture.minted(
+        posture = try ProximityPairPosture.minted(
             instanceNamePrefix: instanceNamePrefix, commonName: tlsCommonName)
         isRunning = true
         isDiscoveryPaused = false
@@ -510,7 +510,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// down is what stops this one seeing a third. What the pause deliberately does NOT touch is
     /// the pairing: an outbound tunnel is its own connection and an inbound one is owned by its own
     /// task, neither by the listener, so a share in flight is untouched by the very event that
-    /// closes the door behind it. ``RecipeShareTransfer``'s pause rows are the wall against getting
+    /// closes the door behind it. ``ProximityPairTransfer``'s pause rows are the wall against getting
     /// that wrong.
     func pauseDiscovery() {
         guard isRunning, !isDiscoveryPaused else { return }
@@ -536,7 +536,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
             // leave an unpaused radio wearing the PRE-PAUSE posture and answering
             // `advertisedSessionID` with a `sid` it has already withdrawn — which the owner would
             // then write into a dial hello. The flag clears only once there is a posture to wear.
-            let fresh = try RecipeSharePosture.minted(
+            let fresh = try ProximityPairPosture.minted(
                 instanceNamePrefix: instanceNamePrefix, commonName: tlsCommonName)
             previousInstanceName = posture?.instanceName
             posture = fresh
@@ -703,7 +703,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// The TXT fields this radio would put on the air right now.
     var advertisedFieldsForTesting: [String: String] {
         guard let posture else { return [:] }
-        return RecipeShareAdvertisement.publishedFields(
+        return ProximityPairAdvertisement.publishedFields(
             from: ownerFields, sessionID: posture.sessionID
         )
     }
@@ -723,7 +723,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     ///
     /// ``start(advertisement:)`` creates a real `NetworkListener`, which a unit test must never do.
     @discardableResult
-    func runWithoutRadiosForTesting(advertisement: [String: String] = [:]) throws -> RecipeSharePosture {
+    func runWithoutRadiosForTesting(advertisement: [String: String] = [:]) throws -> ProximityPairPosture {
         radiosSuppressed = true
         try start(advertisement: advertisement)
         guard let posture else { throw MeshTransportError.tlsIdentityUnavailable }
@@ -772,7 +772,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
 
     /// Runs the whole inbound resolution ``serveInbound(stream:pendingKey:)`` runs on a decoded
     /// hello: the self-dial refusal, the owner's resolver and the owner's admission gate.
-    func resolveInboundForTesting(_ hello: RecipeShareDialHello) -> PeerHandle? {
+    func resolveInboundForTesting(_ hello: ProximityPairDialHello) -> PeerHandle? {
         resolveInbound(hello)
     }
 
@@ -786,7 +786,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     /// decoded hello — the owner's gate asked with this connection excluded from the connecting
     /// window — and answers the key it admitted, or nil for a refusal.
     func adjudicateInboundForTesting(
-        _ hello: RecipeShareDialHello,
+        _ hello: ProximityPairDialHello,
         pendingKey: MeshLinkKey
     ) -> MeshLinkKey? {
         adjudicateInbound(hello, pendingKey: pendingKey)?.key
@@ -832,7 +832,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
     }
 
     /// The channel this radio would hand the owner for `peer`, built exactly as the live path
-    /// builds one. ``RecipeShareRadioSession`` requirement.
+    /// builds one. ``ProximityPairRadioSession`` requirement.
     func channel(for peer: PeerHandle) -> NetworkPeerChannel {
         NetworkPeerChannel(peer: peer, host: self)
     }
@@ -840,7 +840,7 @@ final class NetworkRecipeShareSession: RecipeShareRadioSession, NetworkChannelHo
 
 // MARK: - Listener and browser
 
-private extension NetworkRecipeShareSession {
+private extension NetworkPairSession {
 
     /// Brings up the QUIC listener over Bonjour under the posture's name and identity.
     func startListener() throws {
@@ -849,7 +849,7 @@ private extension NetworkRecipeShareSession {
             ProximityAudit.log("recipe.quic.advertised", context: auditContext(for: posture))
             return
         }
-        let fields = RecipeShareAdvertisement.publishedFields(
+        let fields = ProximityPairAdvertisement.publishedFields(
             from: ownerFields, sessionID: posture.sessionID
         )
         let listener = try NetworkListener(
@@ -982,7 +982,7 @@ private extension NetworkRecipeShareSession {
         ProximityAudit.log("recipe.quic.registrationWithdrawn", context: [:])
         cancelListener()
         do {
-            let fresh = try RecipeSharePosture.minted(
+            let fresh = try ProximityPairPosture.minted(
                 instanceNamePrefix: instanceNamePrefix, commonName: tlsCommonName)
             previousInstanceName = posture?.instanceName
             posture = fresh
@@ -1017,7 +1017,7 @@ private extension NetworkRecipeShareSession {
     /// Every value here is ours, which is the whole of the exception — it is what a tier-2 runner
     /// reads a pause and its resume off, on each device, with no byte in common. No PEER's name is
     /// logged anywhere in this file; a browsed peer is named by ``peerLabel(for:)``.
-    func auditContext(for posture: RecipeSharePosture) -> [String: String] {
+    func auditContext(for posture: ProximityPairPosture) -> [String: String] {
         [
             "name": posture.instanceName,
             "certificate": Self.certificateDigest(of: posture)
@@ -1027,7 +1027,7 @@ private extension NetworkRecipeShareSession {
     /// The first 16 hexadecimal characters of the SHA-256 of a posture's certificate — a per-mint
     /// label for a diagnostic line, never an identity and never on the wire. Not a cryptographic
     /// decision: nothing compares two of these.
-    static func certificateDigest(of posture: RecipeSharePosture) -> String {
+    static func certificateDigest(of posture: ProximityPairPosture) -> String {
         let digest = SHA256.hash(data: posture.tlsIdentity.certificateDER)
         return String(PresenceEpochPosture.hexadecimal(Array(digest)).prefix(16))
     }
@@ -1071,7 +1071,7 @@ private extension NetworkRecipeShareSession {
 
 // MARK: - Discovery
 
-private extension NetworkRecipeShareSession {
+private extension NetworkPairSession {
 
     /// One browse result set: refresh what is known, announce arrivals, announce departures.
     ///
@@ -1135,7 +1135,7 @@ private extension NetworkRecipeShareSession {
             "recipe.quic.sighted",
             context: [
                 "peer": peerLabel(for: key),
-                "recipe": String(RecipeShareAdvertisement.isAdvertisement(advertisement, mode: advertisementMode))
+                "recipe": String(ProximityPairAdvertisement.isAdvertisement(advertisement, mode: advertisementMode))
             ]
         )
         onPeerDiscovered?(handle(for: key))
@@ -1161,7 +1161,7 @@ private extension NetworkRecipeShareSession {
     /// The only two tokens this radio could put there instead are the peer's random Bonjour
     /// instance name and the endpoint key that CONTAINS that name, and both are exactly what
     /// P9-2-A's salted peer labelling exists to keep out of anything anyone reads. An absent hint
-    /// makes ``RecipeShareAdvertisedName/received(_:hint:)`` fall through to the picker's existing
+    /// makes ``ProximityPairAdvertisedName/received(_:hint:)`` fall through to the picker's existing
     /// placeholder, the host's peer-name floor, for a peer that published no `name`, which is the
     /// right answer.
     func handle(for key: MeshLinkKey) -> PeerHandle {
@@ -1186,7 +1186,7 @@ private extension NetworkRecipeShareSession {
 
 // MARK: - Tunnels
 
-private extension NetworkRecipeShareSession {
+private extension NetworkPairSession {
 
     /// Dialing side: open the control stream, write the dial hello, then read app frames.
     ///
@@ -1198,7 +1198,7 @@ private extension NetworkRecipeShareSession {
     func runInitiator(_ connection: NetworkConnection<QUIC>, key: MeshLinkKey, helloSID: String) async {
         do {
             let stream = try await connection.openStream()
-            let hello = try RecipeShareDialHello.encoded(sessionID: helloSID)
+            let hello = try ProximityPairDialHello.encoded(sessionID: helloSID)
             var frame = NetworkMeshWire.header(for: hello.count)
             frame.append(hello)
             try await stream.send(frame)
@@ -1292,7 +1292,7 @@ private extension NetworkRecipeShareSession {
     /// There is deliberately no suspension point between the set and the `defer`: see
     /// ``adjudicatingInbound`` for why one slot is then enough.
     func adjudicateInbound(
-        _ hello: RecipeShareDialHello,
+        _ hello: ProximityPairDialHello,
         pendingKey: MeshLinkKey
     ) -> (key: MeshLinkKey, task: Task<Void, Never>)? {
         adjudicatingInbound = pendingKey
@@ -1311,7 +1311,7 @@ private extension NetworkRecipeShareSession {
     /// Both hooks fail closed, and the self-dial refusal is this radio's own: a session id we are
     /// advertising can only reach us from an echo of our own registration or from a replay, and
     /// neither is a peer.
-    func resolveInbound(_ hello: RecipeShareDialHello) -> PeerHandle? {
+    func resolveInbound(_ hello: ProximityPairDialHello) -> PeerHandle? {
         guard hello.sessionID != posture?.sessionID else { return nil }
         guard let peer = resolveDialer?(hello.sessionID) else { return nil }
         guard shouldAcceptDialer?(peer) == true else { return nil }
@@ -1371,20 +1371,20 @@ private extension NetworkRecipeShareSession {
         )
     }
 
-    /// Reads exactly one length-framed ``RecipeShareDialHello``, or nil for anything else.
+    /// Reads exactly one length-framed ``ProximityPairDialHello``, or nil for anything else.
     ///
-    /// The frame's own ceiling is ``RecipeShareDialHello/maxEncodedBytes``, which is far below
+    /// The frame's own ceiling is ``ProximityPairDialHello/maxEncodedBytes``, which is far below
     /// ``maxInboundWireBytes``: a first frame the size of a payload is not a hello, and refusing it
     /// here is what keeps an unresolved connection from ever allocating one.
-    func readDialHello(from stream: Network.QUIC.Stream<QUICStream>) async -> RecipeShareDialHello? {
+    func readDialHello(from stream: Network.QUIC.Stream<QUICStream>) async -> ProximityPairDialHello? {
         do {
             let header = try await stream.receive(exactly: NetworkMeshWire.headerByteCount).content
             let length = try NetworkMeshWire.payloadLength(
                 from: header,
-                ceiling: RecipeShareDialHello.maxEncodedBytes
+                ceiling: ProximityPairDialHello.maxEncodedBytes
             )
             let payload = try await stream.receive(exactly: length).content
-            return RecipeShareDialHello.decoded(payload)
+            return ProximityPairDialHello.decoded(payload)
         } catch {
             return nil
         }
@@ -1447,7 +1447,7 @@ private extension NetworkRecipeShareSession {
 ///
 /// The two are claimed together and released together, so a slot cannot be taken for a tunnel whose
 /// connection has already gone.
-private struct RecipeShareTransferClaim {
+private struct PairTransferClaim {
 
     /// The budget slot this transfer holds, released when it finishes however it finishes.
     let id: MeshTransferID
@@ -1456,7 +1456,7 @@ private struct RecipeShareTransferClaim {
     let connection: NetworkConnection<QUIC>
 }
 
-private extension NetworkRecipeShareSession {
+private extension NetworkPairSession {
 
     /// Claims a transfer stream for one outbound frame, or answers nil to send it on the control
     /// stream.
@@ -1464,11 +1464,11 @@ private extension NetworkRecipeShareSession {
     /// Both answers mean the same thing to the caller — a recipe under
     /// ``MeshTransferStreamTable/bulkFloorBytes`` and a recipe that arrived while the direction was
     /// full both ride the control stream — which is why they are one value.
-    func claimTransferStream(_ key: MeshLinkKey, byteCount: Int) -> RecipeShareTransferClaim? {
+    func claimTransferStream(_ key: MeshLinkKey, byteCount: Int) -> PairTransferClaim? {
         guard var tunnel = tunnels[key], let connection = tunnel.connection,
               let id = tunnel.transfers.openOutbound(reliableByteCount: byteCount) else { return nil }
         tunnels[key] = tunnel
-        return RecipeShareTransferClaim(id: id, connection: connection)
+        return PairTransferClaim(id: id, connection: connection)
     }
 
     /// Writes one length-framed payload on a stream of its own and waits for the peer's ack.
@@ -1482,7 +1482,7 @@ private extension NetworkRecipeShareSession {
     func sendOverTransferStream(
         _ payload: Data,
         key: MeshLinkKey,
-        claim: RecipeShareTransferClaim
+        claim: PairTransferClaim
     ) async throws {
         defer { tunnels[key]?.transfers.closeOutbound(claim.id) }
         do {

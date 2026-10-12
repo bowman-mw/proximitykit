@@ -15,7 +15,7 @@ public nonisolated struct ProximityPairProfile: Hashable, Sendable {
     /// `<auditArea>.identity.provisionFailed` and `<auditArea>.profile.namespaceMismatch`.
     public let auditArea: String
     /// The radio the session listens, browses and dials on: one of its host namespace's pair-session
-    /// radios (`family.radios.recipeShare`), which namespace soundness vets. The session checks it at
+    /// radios (`family.radios.pair`), which namespace soundness vets. The session checks it at
     /// construction: a profile naming any other radio is refused (see
     /// ``ProximityPairSession/init(host:profile:)``). The host lists the service type under
     /// `NSBonjourServices`, or discovery dies on device with no log.
@@ -84,7 +84,7 @@ private struct PairConnection: Identifiable {
 }
 
 /// The send the user is making, as its outcome will name it: the row they tapped, the send's
-/// subject, the ``RecipeShareTransfer`` token it was minted under, and whether its pairing ever came
+/// subject, the ``ProximityPairTransfer`` token it was minted under, and whether its pairing ever came
 /// up.
 ///
 /// Kept beside the transfer record rather than inside it because the record is a pure, identity-free
@@ -102,7 +102,7 @@ private struct LiveSend {
 /// A one-to-one connection between two devices, driven by a ``ProximityPairProfile``: discovery on
 /// the profile's radio, at most one verified pairing at a time, and sealed, signed payloads over it.
 ///
-/// It owns its radio (a ``RecipeShareRadioSession``, the QUIC ``NetworkRecipeShareSession`` in
+/// It owns its radio (a ``ProximityPairRadioSession``, the QUIC ``NetworkPairSession`` in
 /// production, on the profile's row), this device's ``IdentityService`` cache and a ``ReplayCache``.
 /// Each pairing is a ``ProximityCoordinator`` over the host's ranging provider and a trust policy the
 /// session retains for the pairing's life, ``ProximityHost/makeProximityTrustPolicy()`` (the
@@ -113,8 +113,8 @@ private struct LiveSend {
 /// check, and the belt-and-braces channel admission — with the radio PAUSED while paired
 /// (`pauseDiscovery`) and reopened, under a freshly minted posture, only on session-level record
 /// eviction, never on a transport disconnect event (a failed handshake fires none). That pause/resume
-/// contract and the send pipeline's state machine are tier-1 values (``RecipeShareDiscoveryGate``,
-/// ``RecipeShareTransfer``), and the radio is bound to those tables rather than to a reading of
+/// contract and the send pipeline's state machine are tier-1 values (``ProximityPairDiscoveryGate``,
+/// ``ProximityPairTransfer``), and the radio is bound to those tables rather than to a reading of
 /// two guard chains.
 /// Timeouts: a 12 s pre-connect timer (the peer-is-busy case), the coordinator's 25 s handshake
 /// budget, a 30 s sweep of pairings stalled before verification, and a 2.5 s clear of a terminal
@@ -316,7 +316,7 @@ public final class ProximityPairSession {
     /// session's decisions (the inbound gate, the pause flag, a discovery callback) are reachable
     /// before `start()` ever runs — which is also what lets a unit test hand in an in-memory
     /// conformer through the init seam and exercise them with no Bonjour anywhere.
-    @ObservationIgnored private let session: any RecipeShareRadioSession
+    @ObservationIgnored private let session: any ProximityPairRadioSession
     @ObservationIgnored private let identity: IdentityService
     /// Whether ``identity`` is of ``namespace``, decided once at `init`. False only when the identity
     /// this session holds, handed in through the `identity:` seam or answered by the host's
@@ -339,11 +339,11 @@ public final class ProximityPairSession {
     @ObservationIgnored private var parkedSweepTask: Task<Void, Never>?
     @ObservationIgnored private var parkedSince: [UUID: Date] = [:]
     @ObservationIgnored private var pendingOutgoing: (outgoing: Outgoing, recipient: ProximityPairPeer)?
-    /// The send the user is currently making, as ``RecipeShareTransfer`` records it — the exchange's
+    /// The send the user is currently making, as ``ProximityPairTransfer`` records it — the exchange's
     /// state machine, alongside `status`'s display state rather than instead of it. Minted in
     /// `send(_:to:)`, cleared by `stop()`/`refreshDiscovery()`. Its one production effect is the
     /// once-only send start in `sendPendingPayload`.
-    @ObservationIgnored private var transfer: RecipeShareTransfer?
+    @ObservationIgnored private var transfer: ProximityPairTransfer?
     /// What ``lastSendOutcome`` will name for the send in flight, minted beside ``transfer`` and
     /// cleared the moment that send's outcome is published or discarded.
     @ObservationIgnored private var liveShare: LiveSend?
@@ -383,7 +383,7 @@ public final class ProximityPairSession {
     /// The production default is the QUIC radio on the profile's row and nothing in shipping code
     /// passes a factory — the counterpart of `PresenceManager.makeSession` for a session that owns
     /// its radio from construction rather than from `start()`. It is an **optional closure resolved
-    /// in the body** rather than a default argument because `NetworkRecipeShareSession` is
+    /// in the body** rather than a default argument because `NetworkPairSession` is
     /// `@MainActor` and a main-actor type cannot be a default-argument value.
     ///
     /// `identity` is the same seam `PresenceManager` and `MeshNetworkManager` already take (owner-calls
@@ -399,7 +399,7 @@ public final class ProximityPairSession {
     init(
         host store: any ProximityHost,
         profile: ProximityPairProfile,
-        makeRadio: (() -> any RecipeShareRadioSession)?,
+        makeRadio: (() -> any ProximityPairRadioSession)?,
         identity injected: IdentityService? = nil
     ) {
         self.store = store
@@ -407,7 +407,7 @@ public final class ProximityPairSession {
         self.namespace = namespace
         self.profile = profile
         self.profileIsOfNamespace = Self.check(profile, isOf: namespace)
-        self.session = makeRadio?() ?? NetworkRecipeShareSession(namespace: namespace, profile: profile)
+        self.session = makeRadio?() ?? NetworkPairSession(namespace: namespace, profile: profile)
         let id = injected ?? store.makeProximityIdentity()
         self.identityIsOfNamespace = ProximityNamespaceGate.checkIdentity(
             id, isOf: namespace, event: "\(profile.auditArea).identity.namespaceMismatch")
@@ -424,11 +424,11 @@ public final class ProximityPairSession {
     }
 
     /// Whether `profile` is of `namespace`: its radio is one of the namespace's pair-session rows
-    /// (`family.radios.recipeShare`), and its TXT mode is non-empty and within the advertisement's
+    /// (`family.radios.pair`), and its TXT mode is non-empty and within the advertisement's
     /// field bound. On `false` it writes `<auditArea>.profile.namespaceMismatch` at `construction`,
     /// the identity check's line shape.
     static func check(_ profile: ProximityPairProfile, isOf namespace: ProximityNamespace) -> Bool {
-        let isOf = profile.radio == namespace.family.radios.recipeShare
+        let isOf = profile.radio == namespace.family.radios.pair
             && !profile.advertisementMode.isEmpty
             && profile.advertisementMode.utf8.count <= MeshLinkAdvertisement.maxFieldValueLength
         if !isOf {
@@ -585,7 +585,7 @@ public final class ProximityPairSession {
 
         // Hard 2-device cap (outbound): refuse — visibly, never silently — while a connection
         // to a DIFFERENT peer exists. The radio is paused while paired, so an invite could not
-        // go out anyway (see RecipeShareRadioSession.pauseDiscovery's contract).
+        // go out anyway (see ProximityPairRadioSession.pauseDiscovery's contract).
         if let connection = connections.first, !isSameDevice(connection, as: recipient) {
             refuseWhilePaired(with: connection, outgoing: outgoing, recipient: recipient)
             return
@@ -730,7 +730,7 @@ public final class ProximityPairSession {
     private func peerAdvertising(sessionID: String) -> PeerHandle? {
         guard !sessionID.isEmpty else { return nil }
         for peer in discoveredPeers.values.sorted(by: { $0.id.uuidString < $1.id.uuidString })
-        where RecipeShareAdvertisement.sessionID(
+        where ProximityPairAdvertisement.sessionID(
             from: peer.discoveryInfo, mode: profile.advertisementMode) == sessionID {
             return peer
         }
@@ -738,7 +738,7 @@ public final class ProximityPairSession {
     }
 
     /// The advertised fields. `name` is bounded in BYTES rather than Characters — see
-    /// ``RecipeShareAdvertisedName`` for why a 32-Character cap is not a bound at all once these
+    /// ``ProximityPairAdvertisedName`` for why a 32-Character cap is not a bound at all once these
     /// fields become a Bonjour TXT record, and why an over-long value is dropped rather than cut.
     ///
     /// The bound narrows the wire on a second axis too: the sanitizer caps at the namespace's
@@ -752,15 +752,15 @@ public final class ProximityPairSession {
     /// hint, an empty one would render as the host's peer-name floor.
     /// The `sid` is deliberately **absent**: it belongs to the radio, which mints it with its
     /// instance name and TLS identity at every `start()` and every resume, and joins it to these
-    /// fields in ``RecipeShareAdvertisement/publishedFields(from:sessionID:)``. A copy kept here
+    /// fields in ``ProximityPairAdvertisement/publishedFields(from:sessionID:)``. A copy kept here
     /// would go stale at the first resume.
     private func discoveryInfo() -> [String: String] {
         var fields = [
-            RecipeShareAdvertisement.versionKey: RecipeShareAdvertisement.version,
-            RecipeShareAdvertisement.modeKey: profile.advertisementMode
+            ProximityPairAdvertisement.versionKey: ProximityPairAdvertisement.version,
+            ProximityPairAdvertisement.modeKey: profile.advertisementMode
         ]
-        let name = RecipeShareAdvertisedName.publishable(displayName, in: namespace)
-        if !name.isEmpty { fields[RecipeShareAdvertisement.nameKey] = name }
+        let name = ProximityPairAdvertisedName.publishable(displayName, in: namespace)
+        if !name.isEmpty { fields[ProximityPairAdvertisement.nameKey] = name }
         return fields
     }
 
@@ -800,7 +800,7 @@ public final class ProximityPairSession {
         // name (which it mints and therefore recognizes even before a TXT record arrives), and
         // this catches an echo that reaches the owner carrying our own advertised `sid`.
         // Blocklist is enforced post-introduction.
-        if let remoteSID = RecipeShareAdvertisement.sessionID(
+        if let remoteSID = ProximityPairAdvertisement.sessionID(
             from: peer.discoveryInfo, mode: profile.advertisementMode),
            remoteSID == session.advertisedSessionID { return }
         discoveredPeers[peer.id] = peer
@@ -808,7 +808,7 @@ public final class ProximityPairSession {
             id: peer.id,
             // Pre-handshake label straight off the wire — the picker, the browse list and the
             // diagnostics all read it back from here, so this is the one ingest to coerce. The
-            // QUIC radio publishes NO transport hint (see `NetworkRecipeShareSession.handle(for:)`),
+            // QUIC radio publishes NO transport hint (see `NetworkPairSession.handle(for:)`),
             // so an absent or empty `name` falls through to the placeholder rather than to a random
             // Bonjour instance name — see `displayName(for peer:)`.
             displayName: displayName(for: peer),
@@ -1139,8 +1139,8 @@ public final class ProximityPairSession {
     private func displayName(for peer: PeerHandle) -> String {
         if let row = nearbyPeers.first(where: { $0.id == peer.id }) { return row.displayName }
         return ProximityDisplayName.peerDisplayName(
-            RecipeShareAdvertisedName.received(
-                peer.discoveryInfo?[RecipeShareAdvertisement.nameKey], hint: ""
+            ProximityPairAdvertisedName.received(
+                peer.discoveryInfo?[ProximityPairAdvertisement.nameKey], hint: ""
             ),
             in: namespace
         )
@@ -1413,7 +1413,7 @@ public final class ProximityPairSession {
 
     // MARK: - Exchange and discovery gate
 
-    /// Applies ``RecipeShareDiscoveryGate``'s verdict for `event` to the radio and tells the live
+    /// Applies ``ProximityPairDiscoveryGate``'s verdict for `event` to the radio and tells the live
     /// exchange which way the door moved.
     ///
     /// The two bare pause/resume call sites the recipe radio's owner used to hold are one table, so the
@@ -1421,13 +1421,13 @@ public final class ProximityPairSession {
     /// verdict is returned rather than swallowed because the resume's diagnostic line is conditional
     /// on it and the pause's is not — exactly as they are today.
     @discardableResult
-    private func applyDiscoveryGate(_ event: RecipeShareDiscoveryGate.Event) -> RecipeShareDiscoveryGate.Verdict {
-        let radio = RecipeShareDiscoveryGate.Radio(
+    private func applyDiscoveryGate(_ event: ProximityPairDiscoveryGate.Event) -> ProximityPairDiscoveryGate.Verdict {
+        let radio = ProximityPairDiscoveryGate.Radio(
             isRunning: isRunning,
             isPaused: session.isDiscoveryPaused,
             connectionCount: connections.count
         )
-        let verdict = RecipeShareDiscoveryGate.verdict(for: event, radio: radio)
+        let verdict = ProximityPairDiscoveryGate.verdict(for: event, radio: radio)
         switch verdict {
         case .pause:
             session.pauseDiscovery()
@@ -1455,7 +1455,7 @@ public final class ProximityPairSession {
     ///   its outcome is attributed exactly as its send events are.
     @discardableResult
     private func mintTransfer(for recipientID: UUID) -> UUID {
-        let record = RecipeShareTransfer(recipientID: recipientID, radioIsQuiet: session.isDiscoveryPaused)
+        let record = ProximityPairTransfer(recipientID: recipientID, radioIsQuiet: session.isDiscoveryPaused)
         transfer = record
         return record.token
     }
@@ -1474,7 +1474,7 @@ public final class ProximityPairSession {
     ///   send path mints one, so a missing record means a teardown has already run and the caller's
     ///   own guards have handled it — a refusal here would turn that into a silent dropped send.
     @discardableResult
-    private func applyTransfer(_ event: RecipeShareTransfer.Event, token: UUID? = nil) -> Bool {
+    private func applyTransfer(_ event: ProximityPairTransfer.Event, token: UUID? = nil) -> Bool {
         guard var live = transfer else { return true }
         if let token, live.token != token { return false }
         let accepted = live.apply(event)
@@ -1529,7 +1529,7 @@ public final class ProximityPairSession {
     /// session's own radio callbacks (`onPeerDiscovered`, `onPeerDisconnected`,
     /// `shouldAcceptDialer`) — the production writers need live radios a unit test must never
     /// start. A cell that needs to *drive* the radio hands one in through the init seam instead.
-    var radioForTesting: any RecipeShareRadioSession { session }
+    var radioForTesting: any ProximityPairRadioSession { session }
 
     var connectionCountForTesting: Int { connections.count }
 
@@ -1563,7 +1563,7 @@ public final class ProximityPairSession {
     }
 
     /// The live exchange record — the read the state-table cells assert against.
-    var transferForTesting: RecipeShareTransfer? { transfer }
+    var transferForTesting: ProximityPairTransfer? { transfer }
 
     /// Publishes a send outcome through the PRODUCTION `finishShare(_:token:)`, attributed to
     /// `token` exactly as `sendPendingPayload` attributes a send's result. A unit test cannot drive a
@@ -1582,14 +1582,14 @@ public final class ProximityPairSession {
 
     /// Drives one exchange event through the production helper.
     @discardableResult
-    func applyTransferForTesting(_ event: RecipeShareTransfer.Event) -> Bool {
+    func applyTransferForTesting(_ event: ProximityPairTransfer.Event) -> Bool {
         applyTransfer(event)
     }
 
     /// Drives one exchange event through the production helper, ATTRIBUTED to `token` — the path a
     /// send's own outcome takes. An event whose token is not the live record's is refused.
     @discardableResult
-    func applyTransferForTesting(_ event: RecipeShareTransfer.Event, token: UUID?) -> Bool {
+    func applyTransferForTesting(_ event: ProximityPairTransfer.Event, token: UUID?) -> Bool {
         applyTransfer(event, token: token)
     }
 
@@ -1597,8 +1597,8 @@ public final class ProximityPairSession {
     /// reachable without starting a radio.
     @discardableResult
     func applyDiscoveryGateForTesting(
-        _ event: RecipeShareDiscoveryGate.Event
-    ) -> RecipeShareDiscoveryGate.Verdict {
+        _ event: ProximityPairDiscoveryGate.Event
+    ) -> ProximityPairDiscoveryGate.Verdict {
         applyDiscoveryGate(event)
     }
 
