@@ -12,7 +12,6 @@
 // accounted for, and keeps no such key itself.
 
 import Foundation
-import FernletCrypto
 import CryptoKit
 import Security
 
@@ -204,31 +203,20 @@ public final class IdentityService {
         keyAgreementKey?.publicKey.rawRepresentation ?? Data()
     }
 
-    /// Signs an already domain-tagged transcript. The typed purpose is checked against the bytes at
-    /// this one raw Ed25519 boundary, so a new caller cannot accidentally turn the identity into an
-    /// unscoped signing oracle.
+    /// Signs an already domain-tagged transcript under a signature label: a namespace field, or a host
+    /// feature's label minted by ``ProximityCryptographicPurpose/featureSignature(_:framing:)``.
     ///
-    /// **Transitional** (plan step A0.2.3). A namespace label signs through the
-    /// `ProximityCryptographicPurpose` overload below; this one stays for FernletCrypto's registry
-    /// until C1: FernletSocial's activity join token, roster snapshot and moderation report labels,
-    /// the app's duress and probe purposes, and the tests that name them. Every core label's builder
-    /// signs through the namespace overload since step A0.2.5.
-    /// The purpose's type picks the overload. No deprecation attribute: warnings are errors.
-    public func sign(_ data: Data, purpose: CryptographicPurpose) throws -> Data {
-        guard let key = signingKey else { throw IdentityError.notProvisioned }
-        guard let signingBytes = purpose.signingBytes(data) else { throw IdentityError.invalidKeyData }
-        return try key.signature(for: signingBytes)
-    }
-
-    /// Signs an already domain-tagged transcript under a namespace signature label.
-    ///
-    /// The same single raw Ed25519 boundary as the `CryptographicPurpose` overload, with the same
-    /// positional check that the transcript begins with the label's prefix (`signingBytes`). The
-    /// label's role lets it refuse two things that overload cannot tell apart:
+    /// The one raw Ed25519 boundary, so a new caller cannot turn the identity into an unscoped signing
+    /// oracle. The label is checked against the bytes here, positionally: the transcript must begin
+    /// with the label's prefix (`signingBytes`). Its role, which ProximityKit fixed when it minted the
+    /// label, refuses the rest:
     /// - a verify-only label, `.signature(.absent)` (the legacy pair), which accepts every
     ///   transcript, so signing under it would make this identity an unscoped signing oracle;
     /// - a label in a non-signature role — a hash domain, a salt, a column seal, an AAD or an
     ///   exporter label — which never authorizes a signature.
+    ///
+    /// This identity signs under no other type: every label it signs under is a
+    /// ``ProximityCryptographicPurpose``, a source literal ProximityKit minted with its role.
     ///
     /// - Parameters:
     ///   - data: The transcript, already framed with `purpose`'s prefix.
@@ -264,30 +252,14 @@ public final class IdentityService {
     // WI-9: the pure crypto statics below are `nonisolated` — they read no instance/actor state
     // (only their parameters + CryptoKit), so signature verification and fingerprinting can run off the
     // main actor. Required by the `nonisolated` `MeshAdmissionToken.verify` and the off-main verify path.
-    /// Verifies an already domain-tagged transcript. Legacy read purposes are explicitly marked in
-    /// the registry; all current transcript purposes must be embedded in the supplied bytes.
-    ///
-    /// **Transitional** (plan step A0.2.3), like the `CryptographicPurpose` `sign`: a namespace label
-    /// verifies through the `ProximityCryptographicPurpose` overload below, and this one stays for
-    /// FernletCrypto's registry until C1, for the same callers.
-    public nonisolated static func verify(
-        _ signature: Data,
-        of data: Data,
-        by publicKeyData: Data,
-        purpose: CryptographicPurpose
-    ) -> Bool {
-        guard let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData) else { return false }
-        guard let signingBytes = purpose.signingBytes(data) else { return false }
-        return publicKey.isValidSignature(signature, for: signingBytes)
-    }
-
-    /// Verifies a signature over an already domain-tagged transcript under a namespace signature
-    /// label.
+    /// Verifies a signature over an already domain-tagged transcript under a signature label: a
+    /// namespace field, or a host feature's label minted by
+    /// ``ProximityCryptographicPurpose/featureSignature(_:framing:)``.
     ///
     /// The transcript must begin with the label's prefix (`signingBytes`), so a label in a
     /// non-signature role verifies nothing. A verify-only `.signature(.absent)` label — the legacy
     /// pair — accepts every transcript: that is what reading a format from before domain separation
-    /// takes, and why `sign` refuses one.
+    /// takes, and why `sign` refuses one. Like `sign`, it takes no other label type.
     ///
     /// - Parameters:
     ///   - signature: The Ed25519 signature to check.

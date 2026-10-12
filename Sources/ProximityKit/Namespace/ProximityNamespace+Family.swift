@@ -381,8 +381,9 @@ nonisolated extension ProximityNamespace {
     // MARK: - FeaturePurposes
 
     /// The HKDF salts a host's features derive pair secrets under: the labels
-    /// ``IdentityService/pairSecret(with:purpose:)`` consumes, and the only ones a host mints for
-    /// itself.
+    /// ``IdentityService/pairSecret(with:purpose:)`` consumes, which a host mints for itself and
+    /// declares here (the signature labels it mints for its own transcripts, with
+    /// ``ProximityCryptographicPurpose/featureSignature(_:framing:)``, are declared nowhere).
     ///
     /// The protocol's labels fill fixed fields. A host's features are its own, so the host mints each
     /// salt one of them uses with ``ProximityCryptographicPurpose/featureKeyDerivationSalt(_:)`` and

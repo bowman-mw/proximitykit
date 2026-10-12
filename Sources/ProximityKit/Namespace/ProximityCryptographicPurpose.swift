@@ -6,9 +6,11 @@
 // `CryptographicPurpose` exactly — the same `data`, the same three framings, the same positional
 // `signingBytes` test — but the host supplies the bytes, as a source literal handed to a
 // `ProximityNamespace` group initializer (or, for a salt one of its own features derives under, to
-// `featureKeyDerivationSalt(_:)`), and ProximityKit decides how each label is consumed.
+// `featureKeyDerivationSalt(_:)`, and for a signature one of its own features makes, to
+// `featureSignature(_:framing:)`), and ProximityKit decides how each label is consumed.
 // A0.2's later commits routed ProximityKit's label reads through the namespace, so every protocol
-// label ProximityKit consumes is one of these.
+// label ProximityKit consumes is one of these, and since plan step A1.0 every label its identity
+// signs or verifies under is one too.
 
 import Foundation
 
@@ -21,17 +23,19 @@ import Foundation
 /// changes a key, a digest, or the bytes an existing signature verifies.
 ///
 /// **Why a label is a source literal.** The host hands the bytes over as a `StaticString`, and a
-/// `StaticString` can only be written as a literal. It does so two ways: to a ``ProximityNamespace``
-/// group initializer, for a field the protocol fixes, or to ``featureKeyDerivationSalt(_:)``, for an
+/// `StaticString` can only be written as a literal. It does so three ways: to a ``ProximityNamespace``
+/// group initializer, for a field the protocol fixes; to ``featureKeyDerivationSalt(_:)``, for an
 /// HKDF salt one of its own features derives under, which reaches its one door only when the host's
-/// namespace declares it (``ProximityNamespace/FeaturePurposes``). Every label is therefore a reviewed
-/// spelling in somebody's source: a domain assembled at run time is a domain nobody reviewed, and one
-/// assembled from peer or user input lets an attacker choose where their bytes are accepted. There is
-/// no public initializer (the one host-callable mint takes a `StaticString` and fixes the role
-/// itself), no `Codable` conformance and no decoding path, so a purpose never arrives over the wire or
-/// from configuration. FernletCrypto's registry gets the same guarantee from a `fileprivate`
-/// initializer; a host in another module cannot reach one of those, and a `StaticString` parameter
-/// keeps the guarantee structural across the module boundary.
+/// namespace declares it (``ProximityNamespace/FeaturePurposes``); or to
+/// ``featureSignature(_:framing:)``, for a transcript one of its own features signs and verifies
+/// through ``IdentityService``. Every label is therefore a reviewed spelling in somebody's source: a
+/// domain assembled at run time is a domain nobody reviewed, and one assembled from peer or user input
+/// lets an attacker choose where their bytes are accepted. There is no public initializer (the two
+/// host-callable mints take a `StaticString` and fix the role themselves), no `Codable` conformance
+/// and no decoding path, so a purpose never arrives over the wire or from configuration.
+/// FernletCrypto's registry gets the same guarantee from a `fileprivate` initializer; a host in
+/// another module cannot reach one of those, and a `StaticString` parameter keeps the guarantee
+/// structural across the module boundary.
 ///
 /// **Why ProximityKit fixes the role.** ``role`` says which ProximityKit consumer reads the bytes and
 /// how: a length-prefixed transcript, a raw-prefix one, a salt, a column seal, an AAD, an exporter
@@ -39,7 +43,9 @@ import Foundation
 /// label fills decides it, the feature-salt mint gives its one role, and no initializer takes one. A
 /// host free to choose could only get it wrong: a raw-prefix role on a length-prefixed transcript
 /// makes ``signingBytes(_:)`` refuse every signature, and an `.absent` role on a live transcript would
-/// accept any bytes at all.
+/// accept any bytes at all. The one thing a host states is the framing of a transcript of its own,
+/// whose serializer it writes, and the feature-signature mint takes only the two framings a live write
+/// format has (``FeatureSignatureFraming``), never `.absent`.
 ///
 /// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: inert `Sendable` value data,
 /// read from the nonisolated serializers, verifiers and stores.
@@ -87,12 +93,26 @@ public nonisolated struct ProximityCryptographicPurpose: Hashable, Sendable {
     /// How ProximityKit consumes ``data``, fixed by the namespace field this label fills.
     public let role: Role
 
+    /// The two framings a host's own signature label may take: the shapes a live write format puts its
+    /// label in, each the ``Framing`` case of the same name. There is no `absent` case: a label that
+    /// accepts every transcript is verify-only, a legacy format's, and a host's feature mints a label
+    /// for transcripts it writes, so ``featureSignature(_:framing:)`` cannot be handed one and needs no
+    /// refusal at run time.
+    public nonisolated enum FeatureSignatureFraming: Hashable, Sendable {
+        /// The transcript begins with the label's bytes, verbatim: ``Framing/rawPrefix``.
+        case rawPrefix
+        /// The label is the transcript's first length-prefixed field, an 8-byte big-endian byte count
+        /// then the bytes: ``Framing/lengthPrefixed``.
+        case lengthPrefixed
+    }
+
     /// Mints a purpose from a host's literal.
     ///
     /// Internal on purpose: only the ``ProximityNamespace`` group initializers call it, each with the
-    /// role its field fixes, and ``featureKeyDerivationSalt(_:)``, with the one role a host may mint
-    /// for itself. `description` copies the literal into a `String` without touching
-    /// `StaticString`'s unsafe-pointer accessors (Power of 10 R9).
+    /// role its field fixes, and the two host mints, ``featureKeyDerivationSalt(_:)`` and
+    /// ``featureSignature(_:framing:)``, each with the roles a host may mint for itself. `description`
+    /// copies the literal into a `String` without touching `StaticString`'s unsafe-pointer accessors
+    /// (Power of 10 R9).
     ///
     /// - Parameters:
     ///   - spelling: The host's source literal.
@@ -102,8 +122,8 @@ public nonisolated struct ProximityCryptographicPurpose: Hashable, Sendable {
         self.role = role
     }
 
-    /// Mints a host feature's HKDF salt from the host's literal: the one role a host may mint a label
-    /// for itself.
+    /// Mints a host feature's HKDF salt from the host's literal, in the one key-derivation role a host
+    /// may mint a label for itself.
     ///
     /// The protocol's labels fill the fixed fields of the namespace's groups. A host's feature that
     /// derives a pair secret (Fernlet's heart dead-drop and presence, for two) needs a salt of its
@@ -118,6 +138,47 @@ public nonisolated struct ProximityCryptographicPurpose: Hashable, Sendable {
     /// - Returns: The salt, its role ``Role/keyDerivationSalt``.
     public static func featureKeyDerivationSalt(_ spelling: StaticString) -> ProximityCryptographicPurpose {
         ProximityCryptographicPurpose(spelling, role: .keyDerivationSalt)
+    }
+
+    /// Mints a host feature's signature label from the host's literal, in the writable signature role
+    /// of the framing its transcript puts the label in.
+    ///
+    /// **Who calls it.** A host, for a transcript one of its own features writes, signs through
+    /// ``IdentityService/sign(_:purpose:)`` and checks through
+    /// ``IdentityService/verify(_:of:by:purpose:)``: a format the protocol has no field for (Fernlet's
+    /// activity join token, roster snapshot and moderation report, its duress recovery request and
+    /// reply, and its DEBUG mesh probe's introduction). ProximityKit's own transcripts sign under their
+    /// namespace fields, and ProximityKit mints no label here outside `Namespace/`.
+    ///
+    /// **What it guarantees.** The identity still signs and verifies under nothing but a value of this
+    /// type, which only ProximityKit mints: a host hands it a literal and a framing, never a role or a
+    /// type of its own. The label is a domain-separated literal: its role is
+    /// ``Role/signature(_:)`` under ``Framing/lengthPrefixed`` or ``Framing/rawPrefix`` alone (the
+    /// framing's type has no `absent`), so ``signingBytes(_:)`` passes only a transcript that begins
+    /// with the label at its position, and the identity, which refuses every other role, never becomes
+    /// an unscoped signing oracle. The label is declared in no namespace, so the namespace's soundness
+    /// verdict does not judge it: keeping it distinct from, and no byte prefix of, the namespace's
+    /// labels and the host's others is the host's review, as for any label it writes (Fernlet's six
+    /// are twins of its FernletCrypto registry's entries, held to that registry's separation rules).
+    /// Total and pure: it reads nothing but its arguments.
+    ///
+    /// The spelling and the framing are bytes once used: a signature made under them verifies only
+    /// under the same two, so changing either orphans every signature a peer still holds.
+    ///
+    /// - Parameters:
+    ///   - spelling: The host's source literal.
+    ///   - framing: Where the host's serializer puts the label in the transcript.
+    /// - Returns: The label, its role ``Role/signature(_:)`` under the framing of the same name.
+    public static func featureSignature(
+        _ spelling: StaticString,
+        framing: FeatureSignatureFraming
+    ) -> ProximityCryptographicPurpose {
+        switch framing {
+        case .rawPrefix:
+            return ProximityCryptographicPurpose(spelling, role: .signature(.rawPrefix))
+        case .lengthPrefixed:
+            return ProximityCryptographicPurpose(spelling, role: .signature(.lengthPrefixed))
+        }
     }
 
     /// `Data(rawValue.utf8)`: the label's bytes, with no terminator and no normalization.
