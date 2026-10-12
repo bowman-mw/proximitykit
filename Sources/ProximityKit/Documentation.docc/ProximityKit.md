@@ -526,9 +526,9 @@ the activities' and the moderation report's are `FernletSocial`'s, signed and ve
 ``ProximityCryptographicPurpose/featureSignature(_:framing:)``, and the sealed-backup escrow's two are
 the app's, with its escrow. The heart dead-drop's keychain service and the moderation ban store's are
 `FernletSocial`'s, and so is presence, with its labels and the heart payload format it checks.
-`ProximityNamespaceBoundaryTests` refuses any read of FernletCrypto's registry here, and allowlists
-each literal that spells `fernlet` and each line that still names one of Fernlet's domain types, with
-the step that removes it. Beside it the
+`ProximityNamespaceBoundaryTests` refuses any read of FernletCrypto's registry here, and any literal
+that spells `fernlet` or line that names one of Fernlet's domain types outside an exact allowlist
+naming the step that removes it; both lists are empty. Beside it the
 host supplies two things this module used to take from Fernlet's own modules, the install binding
 the sealed mesh stores seal under and the sink audit lines go to, and two mechanisms were copied in
 rather than shared: the column seal and the keychain item. This module holds no instance of the
@@ -731,9 +731,9 @@ camera's hold-failure line, the audit lines the features write, and the order a 
 end run their legs in.
 `ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
-named nowhere in its code; every remaining string literal that spells `fernlet` is on
-an exact allowlist that names why it is still here and the plan step that removes it (the DEBUG
-test-hook names, A1);
+named nowhere in its code; a string literal that spells `fernlet` is only on an exact allowlist
+that names why it is still here and the plan step that removes it, which is empty: no literal
+spells it (the DEBUG launch-environment keys this module reads are its own, `PROXIMITYKIT_*`);
 FernletDomainModel's `PayloadType`, `ProximityCapability`, `ProximityMode`, `ItemNameModeration`,
 `ProximityTrustedPeerRecord`, `TrainerAuditEvent` and `ConnectionSessionLog` are named only on an
 exact per-file, per-type allowlist, which is empty: the seven types are named nowhere (the
@@ -854,9 +854,8 @@ dependencies to none (plan step A1.0). What still ties this module to Fernlet le
   radio's `recipe.quic.*` labels, pinned in a golden before they are parameterized. The coordinator's
   `Mode`, ``ProximitySessionMode`` (a session profile, not a token; its raw values are frozen),
   generalizes then into the session policy that profile brings, the first other than friend.
-- **A1.** The DEBUG test-hook names are settled when the package leaves Fernlet's tree, and so are
-  the presence radio's `package` doors, published as mechanism or wrapped (see "Package doors"
-  below).
+- **A1.** The presence radio's `package` doors are settled when the package leaves Fernlet's tree,
+  published as mechanism or wrapped (see "Package doors" below).
 
 ### Package doors
 
@@ -1504,7 +1503,11 @@ transfer are audited and nothing more, because the owner's transport-error hook 
 radio down.
 
 Internal to the module, DEBUG-only, and listed here so they are never mistaken for production
-behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroductionChaosBehaviour`.
+behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroductionChaosBehaviour`,
+switched on by the launch-environment keys `PROXIMITYKIT_MESH_CONSOLE_LOG`,
+`PROXIMITYKIT_MESH_CHAOS` and `PROXIMITYKIT_MESH_CHAOS_BARRED` (the module's own names, as are the
+`PROXIMITYKIT_UI_TEST_MESH_*` flags ``MeshNetworkManager`` `injectUITestStateIfNeeded()` seeds a
+canned mesh from).
 They exist so the rejection matrix above can be *observed on a real radio* rather than only
 enumerated at tier 1 — the runbook's Lane C, two Simulators on one Mac. **Three** Simulators run on
 the same lane and form a **full mesh** (3/3 runs, 2026-09-02): every node reaches `slots total=2
@@ -2147,7 +2150,7 @@ a member it had dropped, so `barred` was empty in production and a removed peer 
 anonymous `unknownIdentity` — matrix row 3 (`barredMember`) was produced by a DEBUG chaos hook. The
 admission record keeps the member's signing key, so a verified removal or departure names a key and
 `barred` has real contents. P3 item 9 then drove the `barredMember` branch on the radio with
-`FERNLET_MESH_CHAOS_BARRED` **unset** — a pair, a really-signed removal record, and the shipping
+`PROXIMITYKIT_MESH_CHAOS_BARRED` **unset** — a pair, a really-signed removal record, and the shipping
 derived roster's own refusal — so the hook survives only where a *real* quorum is needed
 (⌊2/2⌋ + 1 = 2 votes with the target excluded leaves one eligible voter), which takes three nodes. With **no** ledger the answer falls back to the gossiped
 descriptor's members and logs `mesh.introductionAuthority.legacyRosterFallback` once — reachable

@@ -22,8 +22,8 @@ nonisolated enum MeshTransportConsoleLog {
     static let prefix = "[mesh-quic]"
 
     #if DEBUG
-    /// Launch environment key enabling the mirror, e.g. `FERNLET_MESH_CONSOLE_LOG=1`.
-    static let enabledKey = "FERNLET_MESH_CONSOLE_LOG"
+    /// Launch environment key enabling the mirror, e.g. `PROXIMITYKIT_MESH_CONSOLE_LOG=1`.
+    static let enabledKey = "PROXIMITYKIT_MESH_CONSOLE_LOG"
 
     /// Whether this process mirrors. Read once, at first use, and never written.
     static let isEnabled = ProcessInfo.processInfo.environment[enabledKey] == "1"
@@ -69,7 +69,7 @@ nonisolated enum MeshIntroductionChaosBehaviour: String, CaseIterable, Sendable 
 /// The DEBUG-only chaos seam the signed channel introduction consults, and the one place the
 /// misbehaviours are switched on.
 ///
-/// **Default-off, read once, never persisted.** With `FERNLET_MESH_CHAOS` absent every member here
+/// **Default-off, read once, never persisted.** With `PROXIMITYKIT_MESH_CHAOS` absent every member here
 /// returns exactly what the honest path returns: ``introductionNonce()`` is
 /// ``MeshChannelIntroductionFormat/randomNonce()``, ``signature(_:)`` is the identity function, and
 /// ``additionalBarredKeys`` is empty. There is no setting, no UI and no `UserDefaults` key, so this
@@ -92,11 +92,11 @@ nonisolated enum MeshIntroductionChaos {
 
     #if DEBUG
     /// Launch environment key naming the misbehaviours, comma-separated, e.g.
-    /// `FERNLET_MESH_CHAOS=frozenNonce,tamperSignature`. Unrecognized tokens are ignored.
-    static let behaviourKey = "FERNLET_MESH_CHAOS"
+    /// `PROXIMITYKIT_MESH_CHAOS=frozenNonce,tamperSignature`. Unrecognized tokens are ignored.
+    static let behaviourKey = "PROXIMITYKIT_MESH_CHAOS"
 
     /// Launch environment key carrying base64 Ed25519 signing keys to bar, comma-separated.
-    static let barredKeysKey = "FERNLET_MESH_CHAOS_BARRED"
+    static let barredKeysKey = "PROXIMITYKIT_MESH_CHAOS_BARRED"
 
     /// The misbehaviours this process performs. Read once, at first use.
     static let behaviours = parseBehaviours(ProcessInfo.processInfo.environment[behaviourKey])
