@@ -39,7 +39,6 @@
 // The wire format remains the types' synthesized `Codable` conformance (unchanged).
 
 import Foundation
-import FernletDomainModel
 
 // WI-9: every declaration in this file is `nonisolated`. ProximityKit sets
 // `.defaultIsolation(MainActor.self)`, which would otherwise MainActor-isolate this pure signing-byte

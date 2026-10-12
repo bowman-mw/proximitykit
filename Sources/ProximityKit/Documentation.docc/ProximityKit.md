@@ -16,12 +16,13 @@ social exhaust (who you met, who sent you warmth, who you reported) lives in dev
 files that are deliberately **never** part of the synced snapshot.
 
 **Position in the FernletKit graph and the S3 wall.** The `ProximityKit` target depends on
-`FernletCrypto` (only for the `CryptographicPurpose` signing overloads of ``IdentityService``, which
-the app's duress and probe signatures and `FernletSocial`'s feature labels sign through until C1;
-see "Protocol namespace" below) and `FernletDomainModel` (Fernlet's session mode, named only on the
-one line `ProximityNamespaceBoundaryTests` allowlists, until C5), and on nothing else: that wall pins the list, so neither `FernletFoundation` nor
-`PrivateMediaStore`, which only Fernlet's mesh features read, can come back unseen. It sits on the
-*protected* side of the S3 privacy wall: the walled `AIProviders` / `CloudKitSync` targets can never
+`FernletCrypto` alone, and only for the `CryptographicPurpose` signing overloads of
+``IdentityService``, which the app's duress and probe signatures and `FernletSocial`'s feature labels
+sign through until plan step A1.0 replaces them with a host label mint (see "Protocol namespace"
+below). Its session mode is its own (``ProximitySessionMode``), which Fernlet converts to the
+`ProximityMode` it persists, so it has no `FernletDomainModel` edge. `ProximityNamespaceBoundaryTests`
+pins the list, so none of `FernletDomainModel`, `FernletFoundation` and `PrivateMediaStore` can come
+back unseen. It sits on the *protected* side of the S3 privacy wall: the walled `AIProviders` / `CloudKitSync` targets can never
 import it (nor it them, nor `FernletSocial`, whose heart dead-drop gets its CloudKit transport
 injected app-side through FernletDomainModel's `HeartDropTransporting` seam and so only ever hands
 ciphertext + rotating day tags outward). Its one seam back to app state is the
@@ -724,8 +725,9 @@ an exact allowlist that names why it is still here and the plan step that remove
 test-hook names, A1);
 FernletDomainModel's `PayloadType`, `ProximityCapability`, `ProximityMode`, `ItemNameModeration`,
 `ProximityTrustedPeerRecord`, `TrainerAuditEvent` and `ConnectionSessionLog` are named only on an
-exact per-file, per-type allowlist: one line, the coordinator's session-mode alias (C5), the other
-six types named nowhere (Fernlet's typed view of the envelope's token is `FernletConnections`');
+exact per-file, per-type allowlist, which is empty: the seven types are named nowhere (the
+coordinator's session mode is ``ProximitySessionMode``, and Fernlet's typed view of the envelope's
+token is `FernletConnections`');
 `package` is declared only on the doors its list names (see "Package doors" below); no type that
 left this module for `FernletSocial` or the app (the heart dead-drop's, presence's, moderation's,
 closeness's and friend state's types, the parked chat payload, the mesh features' — the clothing
@@ -736,7 +738,8 @@ manager, the diagnostics ring presence shares with it, and its wire types), and 
 share's three public values this module renamed for the one-to-one send (`RecipeShareOutcome`,
 `RecipeShareFailure`, `ProximityRecipeShareRecipient`), is declared, extended or aliased here again,
 a list that only grows as features move out, because a feature that came back under its old
-name with no Fernlet string, label or domain type of its own would pass the other rules; and the target depends on exactly `FernletCrypto` and `FernletDomainModel`. The literal and
+name with no Fernlet string, label or domain type of its own would pass the other rules; and the
+target depends on exactly `FernletCrypto`. The literal and
 domain-type lists can only shrink, and a door's row lasts exactly as long as the door. The exact
 per-file lists in `ProximityNamespaceBoundaryTests` are the one place the ratchet's numbers live.
 
@@ -820,13 +823,13 @@ participant every identity the app builds carries, with the escrow's two feature
 since plan step A0.6, is the Live Activity reaper (`ProximityLiveActivityReaper`, with the attributes
 type it enumerates), which only cleans up after Fernlet's own earlier builds.
 `ProximityNamespaceBoundaryTests` keeps every one of their types out of this module, and holds its
-dependencies to `FernletCrypto` and `FernletDomainModel`. What still ties this module to Fernlet
-leaves in these steps:
+dependencies to `FernletCrypto`. What still ties this module to Fernlet leaves in these steps:
 
+- **A1.0.** `IdentityService`'s `CryptographicPurpose` overloads of `sign` and `verify`, which the
+  app's duress and probe signatures and `FernletSocial`'s feature labels go through, give way to a
+  host label mint on ``ProximityCryptographicPurpose``, and the `FernletCrypto` edge goes with them.
 - **C1.** FernletCrypto's 40 twins of `.fernlet`'s labels (38 protocol labels and the two
-  feature salts) retire, with the app's duress and probe purposes; `IdentityService`'s
-  `CryptographicPurpose` overloads of `sign` and `verify` serve those and the feature labels until
-  then.
+  feature salts) retire, with the app's duress and probe purposes.
 - **C5.** The one-to-one radio is a profile-driven pair session, ``ProximityPairSession`` over a
   host's ``ProximityPairProfile``, whose per-connection half is the coordinator's public token send
   and manual commit (see "Package doors" below); Fernlet's typed view of the envelope's token and its
@@ -836,9 +839,8 @@ leaves in these steps:
   and admission after the identity handshake, a confirmation timeout long enough for pairing, a
   sealed send before confirmation that fails closed, an introduction bound to the channel, and the
   radio's `recipe.quic.*` labels, pinned in a golden before they are parameterized. The coordinator's
-  `Mode`, Fernlet's `ProximityMode` (a session profile, not a token, and the one line of Fernlet's
-  domain vocabulary this module still names), generalizes then into the session policy that profile
-  brings, the first other than friend.
+  `Mode`, ``ProximitySessionMode`` (a session profile, not a token; its raw values are frozen),
+  generalizes then into the session policy that profile brings, the first other than friend.
 - **A1.** The DEBUG test-hook names are settled when the package leaves Fernlet's tree, and so are
   the presence radio's `package` doors, published as mechanism or wrapped (see "Package doors"
   below). Before its 0.1.0 tag, one pass renames what still says recipe in the pair session's
@@ -891,18 +893,20 @@ where its framework is usable:
 - ``ProtectedSidecar``'s protected-data retry observes UIKit's protected-data notification under
   `#if canImport(UIKit)` and compiles out without it, so on a Mac a read retries on access only.
 
-**The gate.** `Scripts/macos-build-check.sh` builds the package's `ProximityKit` product, this module
-and its closure (`FernletCrypto`, `FernletDomainModel` and `FernletFoundation`), for
+**The gate.** `Scripts/macos-build-check.sh` builds the package's `MacReady` product, which names the
+Mac-ready set: this module, and `FernletFoundation`, `FernletCrypto` and `FernletDomainModel`, which a
+Mac host of Fernlet's needs whatever this module depends on. It builds them for
 `generic/platform=macOS`, arm64 and x86_64, with warnings as errors, and then requires native macOS
-products, because that destination also matches Mac Catalyst. That closure is the Mac-ready set: the
-manifest's `.macOS(.v26)` is package-wide, as SwiftPM declares platforms, and no other module is built
-for macOS (`FernletSocial`'s photo path still needs `UIImage`). `Scripts/macos-build-selftest.sh`
-proves the check load-bearing: an `import UIKit` it plants in this module must fail the check, and the
-clean tree must pass it. CI runs the self-test on every push (the "ProximityKit on native macOS" step
-of `s3-wall.yml`), and the pre-push hook runs the check when a push touches the closure, the manifest
-or either script. It is an `xcodebuild` build, not `swift build`: the SwiftPM command line leaves the
-closure's string catalogs unprocessed. The build is the compiler half, which refuses any symbol native
-macOS lacks wherever it stands outside its guard. `ProximityPlatformBoundaryTests`, on the s3-grep CI
+products, because that destination also matches Mac Catalyst. The manifest's `.macOS(.v26)` is
+package-wide, as SwiftPM declares platforms, and no other module is built for macOS
+(`FernletSocial`'s photo path still needs `UIImage`). `Scripts/macos-build-selftest.sh` proves the
+check load-bearing: an `import UIKit` it plants in this module must fail the check, and the clean tree
+must pass it. CI runs the self-test on every push (the "ProximityKit on native macOS" step of
+`s3-wall.yml`), and the pre-push hook runs the check when a push touches one of the four modules, the
+manifest or either script. It is an `xcodebuild` build, not `swift build`: the SwiftPM command line
+leaves the set's string catalogs (`FernletFoundation`'s and `FernletDomainModel`'s) unprocessed. The
+build is the compiler half, which refuses any symbol native macOS lacks wherever it stands outside its
+guard. `ProximityPlatformBoundaryTests`, on the s3-grep CI
 line, is the source half: it holds this module's imports to a neutral baseline and the two seams
 above, and its platform branches (`#if os(…)`) to the NearbyInteraction file's guard, refuses the
 device-name sources, platform-directory APIs and host-fact defaults it lists (its rows for them are
@@ -943,8 +947,8 @@ the simulator's `xctest` agent, so no keychain entitlement reaches it (every `Se
 It builds in Swift 6 language mode with no default isolation; with the three upcoming features it
 declares, that is every upcoming feature Fernlet's own tests use, though they build in Swift 5 mode.
 It declares this module as its one dependency, and its files import nothing else of the package: this
-module's closure (`FernletCrypto`, `FernletDomainModel`, `FernletFoundation`) holds Fernlet's values
-and does not travel. CI runs it on the iOS simulator; a macOS lane is A1's.
+module's closure (`FernletCrypto`) holds Fernlet's values and does not travel. CI runs it on the iOS
+simulator; a macOS lane is A1's.
 The three helpers both test targets use (the fake peer transport, the ranging mock and the membership
 fixtures) live in each, held identical but for their imports, because a test target cannot import
 another. CI names its suites `ProximityKitTests/<Suite>`; `Tests/suite-inventory.tsv` and
@@ -1031,10 +1035,11 @@ activities, the moderation report relay and friend state.
 
 A coordinator reports its session to the ``ProximityInspectorRecording`` its owner attaches in this
 module's own value types (an envelope record, a distance sample, the peer line, transport events
-stamped with the coordinator's own clock, the role and the ranging mode) and names no host's log: a
-host that keeps one converts each value into its own record, as Fernlet's app-side
+stamped with the coordinator's own clock, the role, the ranging mode and the session mode) and names
+no host's log: a host that keeps one converts each value into its own record, as Fernlet's app-side
 `ConnectionInspector` does into its persisted `ConnectionSessionLog`, which keeps its own copies of
-the role and ranging mode with the same raw values.
+the role and ranging mode, and FernletDomainModel's `ProximityMode` for the session mode, with the
+same raw values.
 
 - ``ProximityCoordinator``
 - ``ProximityCommitDetector``
@@ -1042,6 +1047,7 @@ the role and ranging mode with the same raw values.
 - ``ObservationLoop``
 - ``ProximityRole``
 - ``ProximityRangingMode``
+- ``ProximitySessionMode``
 - ``ProximityInspectorRecording``
 - ``ProximityInspectorEventRecorder``
 - ``ProximityInspectorEnvelope``

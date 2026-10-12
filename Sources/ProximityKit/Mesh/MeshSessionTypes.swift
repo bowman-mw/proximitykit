@@ -1,5 +1,4 @@
 import Foundation
-import FernletDomainModel
 
 /// Failures of the mesh group-key photo/metadata AES-GCM crypto.
 ///

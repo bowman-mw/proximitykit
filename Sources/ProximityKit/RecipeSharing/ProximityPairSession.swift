@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import FernletDomainModel
 
 /// What makes one kind of one-to-one connection itself: the radio it runs on, the TXT `mode` value
 /// it advertises and believes, and the area its own audit events go under.

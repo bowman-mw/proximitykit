@@ -1,7 +1,6 @@
 import Foundation
 import Combine
 import Observation
-import FernletDomainModel
 
 /// Diagnostic sink for a ``ProximityCoordinator``'s session lifecycle: state transitions,
 /// envelope records, ranging samples, transport events, and errors.
@@ -166,11 +165,11 @@ private nonisolated struct SessionHeartbeatPayload: Codable, Sendable {
 @MainActor
 @Observable
 public final class ProximityCoordinator {
-    // Role and RangingMode are this module's ProximityRole and ProximityRangingMode; Mode is
-    // FernletDomainModel's ProximityMode. The typealiases keep every `ProximityCoordinator.Role` /
-    // bare `Role` reference across the proximity subtree reading as it does.
+    // Role, RangingMode and Mode are this module's ProximityRole, ProximityRangingMode and
+    // ProximitySessionMode. The typealiases keep every `ProximityCoordinator.Role` / bare `Role`
+    // reference across the proximity subtree reading as it does.
     public typealias Role = ProximityRole
-    public typealias Mode = ProximityMode
+    public typealias Mode = ProximitySessionMode
 
     public private(set) var state: State = .idle
     public private(set) var lastKnownDistance: RangingDistance?
