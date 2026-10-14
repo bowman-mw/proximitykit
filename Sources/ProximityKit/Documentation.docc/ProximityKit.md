@@ -947,13 +947,16 @@ checks them; plan step P0.2 and A1's device lanes prove them on hardware.
 
 This module's own tests live in the package's test target, `ProximityKitTests`
 (`FernletKit/Tests/ProximityKitTests`, plan step A0.8), and travel with the package at plan step A1.
-It holds the suites that need nothing but this module: the in-memory transport fabric
-and the peer handle (`FakePeerTransportTests`, `PeerHandleIdentityTests`, on CI's mesh-batteries line),
+It holds the suites that need nothing but this module and its own test support: the in-memory transport
+fabric, the peer handle and the rule a claimed `sid` answers to (`FakePeerTransportTests`,
+`PeerHandleIdentityTests`, `MeshSessionIDClaimTests`, on CI's mesh-batteries line),
 the namespace's soundness and collision rules (`ProximityNamespaceSoundnessTests`, on the
 crypto-goldens line) and, on the `proximitykit` line, the membership records (`MeshDerivedRosterTests`,
-`MeshMembershipMergeTests`, `MeshMembershipBoundsTests`), the routed drain plan
+`MeshMembershipMergeTests`, `MeshMembershipBoundsTests`), the epoch model (`MeshEpochRefTests`,
+`MeshEpochKeyringTests`, `MeshEpochAcceptanceTests`, `MeshFrameReplayWindowTests`), the routed drain plan
 (`MeshRoutedDrainPlanTests`), the commit detector and the ranging fallback
-(`NearbyRangingSessionTests`) and the replay cache (`ReplayCacheTests`): nine suites, 102 tests. The
+(`NearbyRangingSessionTests`), the replay cache (`ReplayCacheTests`) and the test support's own facts
+(`PackageTestSupportTests`): fifteen suites, 140 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (every `SecItem` call returns
 `errSecMissingEntitlement`) and no ``ProximityAuditSink`` is installed (every audit line is dropped).
@@ -962,15 +965,32 @@ declares, that is every upcoming feature Fernlet's own tests use, though they bu
 It declares this module as its one dependency, and its files import nothing else of the package,
 whose other modules hold Fernlet's values and do not travel (this module depends on none of them). CI runs it on the iOS
 simulator; a macOS lane is A1's.
-The four helpers both test targets use (the fake peer transport, the ranging mock, the membership
-fixtures and the mesh-message spelling helper) live in each, held identical but for their imports,
-because a test target cannot import another. CI names its suites `ProximityKitTests/<Suite>`;
+
+Its test support lives in `TestSupport/`. The suites compute under a namespace of their own,
+`.packageTest` (`PackageTestNamespace.swift`), built from this module's public API alone out of
+`pktest.*` labels, `_pktest-*._udp` radios and `org.example.pktest.*` keychain services, in the shapes
+Fernlet's namespace takes (its legacy peers accepted, two feature salts, a two-letter presence prefix,
+`pk-`, and a peer-name cap of 24), and declared on the namespace, its family, its labels and its
+installation, each level a call may hand this module. `PackageTestSupportTests` holds it sound, and
+Fernlet's `ProximityNamespaceGoldenTests`, which can name both, holds it disjoint from `.fernlet`
+everywhere. The call shapes the suites moved from `FernletTests` were written against come back in
+`PackageTestBindings.swift`, each Fernlet's test binding with `.packageTest` for `.fernlet`. A suite that
+reads one of this module's sources names it relative to the package root through `PackageRoot`
+(`PackageRoot.swift`), which walks up from its own file to the first folder holding both `Package.swift`
+and `Sources/ProximityKit`: `FernletKit/` in Fernlet's repository, the root of ProximityKit's own.
+
+Six helpers both test targets use live in each, held identical but for their imports, because a test
+target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
+mesh-message spelling helper, the test namespace and the epoch fixtures, whose one mint binds in each
+target to that target's namespace. The test bindings are a replacement, not a twin: this target's bind to
+`.packageTest` and Fernlet's to `.fernlet`, so `CIGateSelectorBoundaryTests` holds each declaration of
+this target's to one of Fernlet's with that one token read across, and lets the extensions both declare
+live nowhere else. CI names its suites `ProximityKitTests/<Suite>`;
 `Tests/suite-inventory.tsv` and `CIGateSelectorBoundaryTests` hold every suite to one target, one file
 and its lines, and refuse what this bundle cannot serve and an import of the closure.
 
-Every other ProximityKit suite still runs in the app's `FernletTests` until A1 brings a test namespace
-in place of `.fernlet`, a host double, an audit sink, an answer for the keychain and a package-rooted
-file locator. `ProximityNamespaceSoundnessTests` needs none of them, so it runs in this module's
+Every other ProximityKit suite still runs in the app's `FernletTests` until A1 brings a host double, an
+audit sink and an answer for the keychain. `ProximityNamespaceSoundnessTests` needs none of them, so it runs in this module's
 test target, still on the crypto-goldens line beside Fernlet's goldens: its five framing byte pins are
 over a literal namespace that belongs to no app, and it imports this module plainly, not `@testable`,
 so it sees only what a host sees. The mesh-message spelling helper it builds its fixtures with
