@@ -708,8 +708,8 @@ sends and dispatch under a namespace whose mesh messages are its own; and it hol
 sanitizer to FernletDomainModel's byte for byte and drives the peer-name coercion, the envelope's
 sender reads, the name display, the advertised recipe name, the session message store and the mesh
 and recipe-share managers under `.fernlet` and under a namespace whose peer-name policy is its own.
-`ProximityNamespaceSoundnessTests`, on the same line (in Fernlet's `FernletTests` until plan step A1;
-see "Its tests" below), holds the soundness and collision rules, a declared feature salt's place in
+`ProximityNamespaceSoundnessTests`, on the same line (in this module's own package test target; see
+"Its tests" below), holds the soundness and collision rules, a declared feature salt's place in
 them included, over namespaces built only from literals.
 `FernletFeatureGoldenTests`, on the crypto-goldens line too, holds the bytes of Fernlet's features
 over this module, in `FernletSocial` and the app, which no move may change, to frozen literals: the
@@ -946,11 +946,12 @@ checks them; plan step P0.2 and A1's device lanes prove them on hardware.
 This module's own tests live in the package's test target, `ProximityKitTests`
 (`FernletKit/Tests/ProximityKitTests`, plan step A0.8), and travel with the package at plan step A1.
 It holds the suites that need nothing but this module: the in-memory transport fabric
-and the peer handle (`FakePeerTransportTests`, `PeerHandleIdentityTests`, on CI's mesh-batteries line)
-and, on the `proximitykit` line, the membership records (`MeshDerivedRosterTests`,
+and the peer handle (`FakePeerTransportTests`, `PeerHandleIdentityTests`, on CI's mesh-batteries line),
+the namespace's soundness and collision rules (`ProximityNamespaceSoundnessTests`, on the
+crypto-goldens line) and, on the `proximitykit` line, the membership records (`MeshDerivedRosterTests`,
 `MeshMembershipMergeTests`, `MeshMembershipBoundsTests`), the routed drain plan
 (`MeshRoutedDrainPlanTests`), the commit detector and the ranging fallback
-(`NearbyRangingSessionTests`) and the replay cache (`ReplayCacheTests`): eight suites, 59 tests. The
+(`NearbyRangingSessionTests`) and the replay cache (`ReplayCacheTests`): nine suites, 102 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (every `SecItem` call returns
 `errSecMissingEntitlement`) and no ``ProximityAuditSink`` is installed (every audit line is dropped).
@@ -959,19 +960,20 @@ declares, that is every upcoming feature Fernlet's own tests use, though they bu
 It declares this module as its one dependency, and its files import nothing else of the package,
 whose other modules hold Fernlet's values and do not travel (this module depends on none of them). CI runs it on the iOS
 simulator; a macOS lane is A1's.
-The three helpers both test targets use (the fake peer transport, the ranging mock and the membership
-fixtures) live in each, held identical but for their imports, because a test target cannot import
-another. CI names its suites `ProximityKitTests/<Suite>`; `Tests/suite-inventory.tsv` and
-`CIGateSelectorBoundaryTests` hold every suite to one target, one file and its lines, and refuse what
-this bundle cannot serve and an import of the closure.
+The four helpers both test targets use (the fake peer transport, the ranging mock, the membership
+fixtures and the mesh-message spelling helper) live in each, held identical but for their imports,
+because a test target cannot import another. CI names its suites `ProximityKitTests/<Suite>`;
+`Tests/suite-inventory.tsv` and `CIGateSelectorBoundaryTests` hold every suite to one target, one file
+and its lines, and refuse what this bundle cannot serve and an import of the closure.
 
 Every other ProximityKit suite still runs in the app's `FernletTests` until A1 brings a test namespace
 in place of `.fernlet`, a host double, an audit sink, an answer for the keychain and a package-rooted
-file locator. `ProximityNamespaceSoundnessTests` needs none of them, but it stays there, on the
-crypto-goldens line beside Fernlet's goldens, with its five framing byte pins over a literal namespace,
-and moves with the package at A1 (an owner decision). The mesh-message spelling helper it builds its
-fixtures with, which three staying suites use too, has a file of its own
-(`ProximityNamespaceMeshMessagesSpelling.swift`), so the suite's file declares nothing they need.
+file locator. `ProximityNamespaceSoundnessTests` needs none of them, so it runs in this module's
+test target, still on the crypto-goldens line beside Fernlet's goldens: its five framing byte pins are
+over a literal namespace that belongs to no app, and it imports this module plainly, not `@testable`,
+so it sees only what a host sees. The mesh-message spelling helper it builds its fixtures with
+(`ProximityNamespaceMeshMessagesSpelling.swift`) is the fourth helper: the namespace and vocabulary
+goldens and the runtime gate, which stay in `FernletTests`, build their fixtures with it too.
 
 ## Topics
 
