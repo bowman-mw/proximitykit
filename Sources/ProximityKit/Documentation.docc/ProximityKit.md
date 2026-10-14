@@ -735,7 +735,8 @@ activity ledgers' files, the photo wall's files and the keychain role each photo
 the vouch list's lifetime and label, the item report and friend state sealed at a commit, the
 camera's hold-failure line, the audit lines the features write, and the order a session's commit and
 end run their legs in.
-`ProximityNamespaceBoundaryTests`, on the s3-grep CI line, keeps the result from eroding: no
+`ProximityNamespaceBoundaryTests`, one of this module's own tests (see "Its tests"), keeps the result
+from eroding wherever the module lives: no
 namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
 named nowhere in its code; a string literal that spells `fernlet` is only on an exact allowlist
 that names why it is still here and the plan step that removes it, which is empty: no literal
@@ -970,8 +971,9 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 `MeshEpochKeyringTests`, `MeshEpochAcceptanceTests`, `MeshFrameReplayWindowTests`), the routed drain plan
 (`MeshRoutedDrainPlanTests`), the commit detector and the ranging fallback
 (`NearbyRangingSessionTests`), the replay cache (`ReplayCacheTests`), the test support's own facts
-(`PackageTestSupportTests`), the test keychain (`PackageKeychainStoreTests`) and the test host and
-audit sink (`PackageTestHostTests`): seventeen suites, 150 tests. The
+(`PackageTestSupportTests`), the test keychain (`PackageKeychainStoreTests`), the test host and
+audit sink (`PackageTestHostTests`) and the namespace wall (`ProximityNamespaceBoundaryTests`):
+eighteen suites, 162 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (a `SecItem` call returns
 `errSecMissingEntitlement`, and on a Mac it would reach the developer's own keychain) and no app
@@ -1046,10 +1048,20 @@ the doubles, and `MeshSessionStoreIsolationTests`) and its acceptance batteries'
 this target's folder too, and `ProximityAuditBridgeTests` holds the installer to the one install of a
 sink in either test target.
 
-Six helpers both test targets use live in each, held identical but for their imports, because a test
+The namespace wall, `ProximityNamespaceBoundaryTests` (see "Protocol namespace" and "Package doors"),
+is one of this target's suites, on the `proximitykit` line, so it travels with the package and runs
+in either repository. It reads this module's sources and its manifest through `PackageRoot`, by the
+paths `Sources/ProximityKit` and `Package.swift`, and reads code apart from comments and literals
+through the package's copy of the source walls' lexer (`TestSupport/SwiftSourceLexer.swift`), which
+its lexer cell holds to its fixtures. Its manifest pin needs only the `ProximityKit` target's literal
+`dependencies: []`, so it reads either repository's manifest alike. What it refuses is Fernlet's: the
+app's strings, labels, domain types and the types that left this module for its features.
+
+Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
-mesh-message spelling helper, the test namespace and the epoch fixtures, whose one mint binds in each
-target to that target's namespace. The test bindings are a replacement, not a twin: this target's bind to
+mesh-message spelling helper, the test namespace, the epoch fixtures, whose one mint binds in each
+target to that target's namespace, and the source walls' lexer, each copy held to the same fixtures in
+its own target. The test bindings are a replacement, not a twin: this target's bind to
 `.packageTest` and Fernlet's to `.fernlet`, so `CIGateSelectorBoundaryTests` holds each declaration of
 this target's to one of Fernlet's with that one token read across, and lets the extensions both declare
 live nowhere else. CI names its suites `ProximityKitTests/<Suite>`;
