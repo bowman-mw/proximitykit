@@ -1,10 +1,11 @@
 // PackageKeychainStoreTests.swift
 // ProximityKitTests
 //
-// ProximityKit plan step A1.1: the canary of the package tests' keychain. This bundle is unhosted, so the
-// system keychain answers it errSecMissingEntitlement (-34018) on the simulator and is the developer's own
-// on a Mac; PackageTestEnvironment installs an in-memory store (TestSupport/PackageKeychainStore.swift) as
-// ProximityKit's keychain backend before the first keychain call. These cells hold that it did, and that
+// ProximityKit plan step A1.1: the canary of the package tests' keychain. This bundle is unhosted: on the
+// simulator the system keychain answers every call errSecMissingEntitlement (-34018), and on a Mac a package
+// test must not reach the system keychain whatever it answers (Apple's TN3137 gives -34018 for a process
+// without keychain entitlements); PackageTestEnvironment installs an in-memory store
+// (TestSupport/PackageKeychainStore.swift) as ProximityKit's keychain backend before the first keychain call. These cells hold that it did, and that
 // ProximityKit's identity and its two seal keys provision, read back, defer and wipe through the store as
 // they do through the keychain: a row reads back, an absent row is absent, an unreadable row is never read
 // as absent, and a service sees only its own rows. Every keychain service here is a `.test.` service of
@@ -99,9 +100,9 @@ import Testing
     // MARK: - Absent and unreadable
 
     /// A service the store answers with `errSecInteractionNotAllowed`, as a keychain does before the first
-    /// unlock, is never read as empty: the funnel's read reports it unreadable with that very status, an
-    /// identity refuses to provision with it and a seal key defers, sealing and opening alike, and none of
-    /// them writes a row. Once the services read again, the same calls find them absent: the read says so,
+    /// unlock, is never read as empty, and no other service is: the funnel's read reports it unreadable
+    /// with that very status, an identity refuses to provision with it and a seal key defers, sealing and
+    /// opening alike, an add and a delete on it answer that status too, and none of them writes a row. Once the services read again, the same calls find them absent: the read says so,
     /// opening is refused as a missing key, and the identity and the seal key mint.
     @MainActor @Test func anUnreadableServiceIsNeverReadAsAbsent() throws {
         let rows = ProximityNamespace.packageTest.installation.keychain.identity
@@ -109,11 +110,18 @@ import Testing
         let scope = Self.sessionScope()
         let status = store.makeUnreadable(service: service)
         #expect(store.makeUnreadable(service: scope.service) == status)
+        #expect(Self.signingRow(on: Self.testService(under: rows.service)) == "absent",
+                "making one service unreadable reached another")
 
         #expect(Self.signingRow(on: service) == "unreadable \(status)", "the funnel's read lost the status")
         #expect(throws: IdentityError.keychainReadFailed(status)) { try Self.provisionedIdentity(on: service) }
         #expect(Self.key(scope, opening: false) == "deferred sealKeyTransientlyUnreadable")
         #expect(Self.key(scope, opening: true) == "deferred sealKeyTransientlyUnreadable")
+        #expect(ProximityKeychainItem.store(Data([0x01]), account: "row", service: service,
+                                            accessibility: PackageKeychainStore.deviceOnly) == status,
+                "an add on an unreadable service did not answer its status")
+        #expect(ProximityKeychainItem.deleteAllReportingStatus(service: service) == status,
+                "a delete on an unreadable service did not answer its status")
         #expect(store.rows(service: service).isEmpty && store.rows(service: scope.service).isEmpty,
                 "an unreadable service was minted over")
 
@@ -156,12 +164,14 @@ import Testing
     // MARK: - The keychain's model
 
     /// The store keeps the keychain's two synchronizable variants of one account apart, as the funnel's
-    /// scopes and `store`'s `replacing:` rely on: a device-only row and its synced twin coexist; `.synced`
-    /// and `.local` each list and read exactly their own row and `.any` both; a device-only add over the
-    /// device-only row a narrow `.synced` delete leaves is a duplicate, which keeps that row as it was; an
-    /// enumeration lists both rows with their accounts; a `.local` delete leaves the synced twin; and a
-    /// whole-service delete leaves an empty slot, which enumerates as no rows rather than as unreadable,
-    /// and a delete of a row that is gone succeeds.
+    /// scopes and `store`'s `replacing:` rely on: a device-only row and its synced twin coexist, each
+    /// under the class it was added with; `.synced` and `.local` each list and read exactly their own row
+    /// and `.any` both, in the store's order; a device-only add over the device-only row a narrow
+    /// `.synced` delete leaves is a duplicate, which keeps that row as it was; an enumeration lists both
+    /// rows with their accounts, in the store's order; a `.local` delete leaves the synced twin; a
+    /// synchronizable add under a `ThisDeviceOnly` class is refused and adds no row; and a whole-service
+    /// delete leaves an empty slot, which enumerates as no rows rather than as unreadable, and a delete
+    /// of a row that is gone succeeds.
     @Test func theStoreKeepsTheSynchronizableVariantsApart() {
         let service = Self.testService(under: ProximityNamespace.packageTest.installation.keychain.identity.service)
         let account = "escrow"
@@ -173,6 +183,9 @@ import Testing
         #expect(ProximityKeychainItem.store(synced, account: account, service: service,
                                             accessibility: PackageKeychainStore.afterFirstUnlock, synchronizable: true,
                                             replacing: .synced) == PackageKeychainStore.success)
+        #expect(store.rows(service: service).map(\.accessibility)
+                    == [deviceOnly as String, PackageKeychainStore.afterFirstUnlock as String],
+                "the store did not keep each row's class")
         let scopes: [(ProximityKeychainItem.SynchronizableScope, [Data])] = [
             (.synced, [synced]), (.local, [local]), (.any, [local, synced])
         ]
@@ -197,6 +210,10 @@ import Testing
         #expect(ProximityKeychainItem.deleteReportingStatus(account: account, service: service, synchronizable: .local)
                     == PackageKeychainStore.success)
         #expect(store.rows(service: service).map(\.data) == [synced], "a .local delete reached the synced twin")
+        #expect(ProximityKeychainItem.store(local, account: "synced-device-only", service: service, accessibility: deviceOnly,
+                                            synchronizable: true) != PackageKeychainStore.success,
+                "a synchronizable add under a ThisDeviceOnly class was stored")
+        #expect(store.rows(service: service).map(\.data) == [synced], "the refused add changed the rows")
         #expect(ProximityKeychainItem.deleteAllReportingStatus(service: service) == PackageKeychainStore.success)
         #expect(store.rows(service: service).isEmpty, "the whole-service delete left a row")
         let emptied = ProximityKeychainItem.loadAllDistinguishingFailure(service: service)

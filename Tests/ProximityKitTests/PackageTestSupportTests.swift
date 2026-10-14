@@ -17,7 +17,7 @@ import Testing
 
     /// `.packageTest` passes every soundness rule, at every level a binding hands ProximityKit:
     /// `soundness` is `.sound`, the throwing builder returns the same namespace, and its family's labels
-    /// are the `Purposes` value the bindings pass for a label group.
+    /// are the package tests' own `Purposes` (`.packageTest`).
     @Test func thePackageTestNamespaceIsSound() throws {
         let namespace = ProximityNamespace.packageTest
         #expect(namespace.soundness == .sound, "the package tests' namespace is unsound: \(namespace.soundness)")

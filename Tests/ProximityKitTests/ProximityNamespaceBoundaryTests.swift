@@ -612,7 +612,8 @@ import Testing
     /// engine (`ProximityPresenceSession`). Every code line on which `package` is an access modifier
     /// counts, once, however its declaration goes on (``packageDeclarationPattern``), a setter's
     /// `package(set)` included; comments and literals may say `package` freely, and code may use it
-    /// as a name.
+    /// as a name. Every row of rules 3 to 5 names the plan step that closes it: a row whose `exit` is
+    /// nil fails here, whichever of the three lists it is on.
     @Test func packageIsDeclaredOnlyOnTheListedLines() throws {
         let matcher = try NSRegularExpression(pattern: Self.packageDeclarationPattern)
         let sources = try Self.proximitySources()
@@ -639,6 +640,14 @@ import Testing
                 or deleted here, so the list stays exact.
                 """)
         }
+        // R2: bounded by the three lists.
+        let unnamed = Self.fernletLiterals.filter { $0.reason.exit == nil }.count
+            + Self.domainTypeLines.filter { $0.reason.exit == nil }.count
+            + Self.packageDeclarationLines.values.filter { $0.reason.exit == nil }.count
+        #expect(unnamed == 0, """
+            \(unnamed) rows of rules 3 to 5 name no plan step: every row names the step that closes it; nil is \
+            the platform wall's 'permanent', never a debt row's
+            """)
     }
 
     /// Rule 5's matcher, fixtured both ways, because the matcher is the wall: it sees `package`
@@ -1140,9 +1149,10 @@ import Testing
     ///
     /// No case is left, so rules 3 to 5 list nothing and the enum is uninhabited, as
     /// `ProximityPlatformNeutralityTests.ExitStep` is: a ``Reason``'s `exit` is optional so the type
-    /// still compiles, and nil would name no step. A later step that adds a row adds its case with its
-    /// step's name as a `String` raw value, the raw type with it, and ``exitText(_:)``'s arm naming it,
-    /// which the compiler then requires.
+    /// still compiles, and nil would name no step, so rule 5's cell refuses a row of rules 3 to 5 that
+    /// carries it. A later step that adds a row adds its case with its step's name as a `String` raw
+    /// value, the raw type with it, and ``exitText(_:)``'s arm naming it, which the compiler then
+    /// requires.
     enum ExitStep: Sendable {}
 
     /// A row's exit step, as a failure message says it: every row of rules 3 to 5 names one, and no

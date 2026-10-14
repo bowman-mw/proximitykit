@@ -33,8 +33,9 @@ import ProximityKit
 ///   one `.test.` service ``identityService``, `org.example.pktest.identity.test.<UUID>`, with no
 ///   provisioning participant;
 /// - three routed rows, the temporary-message, heart and photo rows on its namespace's tokens, in the
-///   shapes Fernlet's rows take and with the caps Fernlet's rows compute to, written here as literals
-///   (the constants they are computed from are FernletSocial's); none under the reserved `control` token.
+///   shapes Fernlet's rows take and with the caps Fernlet's rows computed to at plan step A1.1, written
+///   here as literals (the constants they are computed from are FernletSocial's); none under the
+///   reserved `control` token.
 ///
 /// One UUID per host names its root and its three services, so two hosts share no file and no row.
 ///
@@ -160,7 +161,8 @@ final class PackageTestHost: ProximityHost {
     }
 
     /// The temporary-message, heart and photo rows on this host's namespace's routed types: the shapes
-    /// Fernlet's rows take, and the caps they compute to (9 065, 553 and 10 551 337 bytes) as literals.
+    /// Fernlet's rows take, and the caps they computed to at plan step A1.1 (9 065, 553 and 10 551 337
+    /// bytes) as literals.
     var meshRoutedTypeEntries: [MeshRoutedTypeEntry] {
         let types = proximityNamespace.family.vocabulary.routedTypes
         return [

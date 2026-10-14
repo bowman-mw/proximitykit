@@ -394,8 +394,10 @@ nonisolated enum ProximityKeychainItem {
     /// in-memory store here once, before the bundle's first keychain call. No shipping code installs a
     /// backend, and Fernlet's hosted tests install none, so they exercise the system keychain. The door
     /// is compiled in a Debug build only: a Release build has no way to install one, and its ``backend``
-    /// is the system keychain without a slot to read. `KeyCustodyBoundaryTests` holds the door's one
-    /// caller to the package tests' installer.
+    /// is the system keychain without a slot to read. This module's own package tests
+    /// (`ProximityKeychainDoorTests`) hold the door's one caller to their installer and its declaration
+    /// to this `#if DEBUG` branch; a host's walls hold that it calls none (Fernlet's
+    /// `KeyCustodyBoundaryTests`).
     ///
     /// - Parameter backend: The backend; called synchronously, from any executor.
     static func installBackend(_ backend: any ProximityKeychainBackend) {

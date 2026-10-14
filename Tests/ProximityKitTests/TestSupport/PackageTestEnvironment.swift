@@ -14,11 +14,13 @@
 ///
 /// **The keychain.** ``keychain`` is the bundle's in-memory keychain, a ``PackageKeychainStore``,
 /// installed as ProximityKit's keychain backend before the first read returns it. This bundle is
-/// unhosted, so the system keychain answers it `errSecMissingEntitlement` (-34018) on the simulator and is
-/// the developer's own on a Mac; a suite or helper that reaches the keychain (an identity's provisioning,
-/// a seal key, a call of the keychain funnel itself) reads ``keychain`` first, so every such call reaches
-/// the store. This is the one caller of the funnel's install door in either test target: Fernlet's
-/// hosted tests install nothing and run against the system keychain.
+/// unhosted: on the simulator the system keychain answers every call `errSecMissingEntitlement` (-34018),
+/// and on a Mac a package test must not reach the system keychain whatever it answers (Apple's TN3137
+/// gives -34018 for a process without keychain entitlements); a suite or helper that reaches the keychain
+/// (an identity's provisioning, a seal key, a call of the keychain funnel itself) reads ``keychain``
+/// first, so every such call reaches the store. This is the one caller of the funnel's install door in
+/// either test target, held there by this package's `ProximityKeychainDoorTests`: Fernlet's hosted tests
+/// install nothing and run against the system keychain.
 ///
 /// **The audit sink.** ``audit`` is the bundle's ``PackageAuditSink``, installed with ProximityKit's
 /// `ProximityAudit.install(_:)` before the first read returns it. No app installs a sink in this bundle,

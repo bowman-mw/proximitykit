@@ -20,6 +20,10 @@ import Testing
 /// manager built over the host works unhosted.
 @Suite struct PackageTestHostTests {
 
+    /// The bundle's in-memory keychain, read as each cell's suite instance is built, so the installer has
+    /// run before a cell builds a host or a manager whose identity reaches the keychain.
+    let keychain = PackageTestEnvironment.keychain
+
     // MARK: - The audit sink
 
     /// The bundle's sink is installed and delivers a line ProximityKit logs to a capture whose context
@@ -60,7 +64,9 @@ import Testing
     /// A host's root is a fresh folder directly under the temporary directory, never under Application
     /// Support, which building the host does not create; both its scopes live on that root, under its
     /// namespace and its sixteen-byte binding; every keychain service it states is a `.test.` service of
-    /// `.packageTest`'s, its identity's among them; and two hosts share no root and no service.
+    /// `.packageTest`'s, its identity's among them; and two hosts share no root and no service. The scopes
+    /// are read through `any ProximityHost`, as a manager reads them, so a host whose own scope no longer
+    /// answers the requirement (and leaves its default, the production scope, in place) fails here.
     @MainActor @Test func aHostsRootAndServicesAreScratchOfItsOwn() throws {
         let host = PackageTestHost()
         let second = PackageTestHost()
@@ -70,14 +76,15 @@ import Testing
                 "the host's root \(root.path) is not a PackageTestHost folder directly under \(scratch.path)")
         #expect(!root.pathComponents.contains("Application Support"), "the host's root is under Application Support")
         #expect(!FileManager.default.fileExists(atPath: root.path), "building the host created its root")
-        #expect(host.meshSessionStorage.directory == host.proximitySupportDirectory
-                    && host.meshRoutedStorage.directory == host.proximitySupportDirectory,
-                "a scope lives off the host's root")
-        #expect(host.meshSessionStorage.namespace == .packageTest && host.meshRoutedStorage.namespace == .packageTest,
-                "a scope is not under the host's namespace")
-        #expect(host.meshSessionStorage.installBinding is PinnedInstallBinding
-                    && host.meshRoutedStorage.installBinding is PinnedInstallBinding,
-                "a scope is not sealed under the host's binding")
+        let asHost: any ProximityHost = host
+        #expect(asHost.meshSessionStorage.directory == host.proximitySupportDirectory
+                    && asHost.meshRoutedStorage.directory == host.proximitySupportDirectory,
+                "a scope a manager reads lives off the host's root")
+        #expect(asHost.meshSessionStorage.namespace == .packageTest && asHost.meshRoutedStorage.namespace == .packageTest,
+                "a scope a manager reads is not under the host's namespace")
+        #expect(asHost.meshSessionStorage.installBinding is PinnedInstallBinding
+                    && asHost.meshRoutedStorage.installBinding is PinnedInstallBinding,
+                "a scope a manager reads is not sealed under the host's binding")
         let sealing = try host.proximityInstallBinding.read(for: .seal)
         let opening = try host.proximityInstallBinding.read(for: .open)
         #expect(sealing?.count == 16 && opening == sealing,
@@ -183,8 +190,10 @@ import Testing
 
     // MARK: - Helpers
 
-    /// Every keychain service `host` states: its identity's and both scopes'.
+    /// Every keychain service `host` states: its identity's and both scopes', each scope read through
+    /// `any ProximityHost`, as a manager reads it.
     @MainActor private static func services(of host: PackageTestHost) -> Set<String> {
-        [host.identityService, host.meshSessionStorage.keychainService, host.meshRoutedStorage.keychainService]
+        let asHost: any ProximityHost = host
+        return [host.identityService, asHost.meshSessionStorage.keychainService, asHost.meshRoutedStorage.keychainService]
     }
 }

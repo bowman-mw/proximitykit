@@ -91,7 +91,8 @@ final class PackageAuditSink: ProximityAuditSink {
 /// installs the sink, so the sink is ProximityKit's before the capture exists: a cell that reads no line
 /// read a sink that would have delivered one.
 ///
-/// **Ends.** ``stop()`` unregisters it, and its deinit does too; a line delivered after that is not kept.
+/// **Ends.** ``stop()`` unregisters it, and its deinit does too; no line the sink receives after that is
+/// kept, though a line already being handed out on another thread when it is called may still land.
 /// The name is the package's own: Fernlet's tests read their lines through `FernletAuditLog`, which this
 /// bundle cannot import, under other names.
 final class PackageAuditCapture: Sendable {
@@ -118,12 +119,16 @@ final class PackageAuditCapture: Sendable {
 
     /// Starts capturing: from the moment it returns, every line the bundle's sink receives is kept when
     /// its context holds every key of `scope` with that key's value and, when `markedOnly`, it was logged
-    /// inside this capture's ``marking(_:)``.
+    /// inside this capture's ``marking(_:)``. A capture is always scoped one way or the other: unscoped,
+    /// it would keep every line every parallel suite logs, so a count read off it would be a count of the
+    /// whole process, and building one traps.
     ///
     /// - Parameters:
-    ///   - scope: The context pairs a kept line must hold; empty keeps a line whatever its context.
+    ///   - scope: The context pairs a kept line must hold; empty only with `markedOnly`.
     ///   - markedOnly: Whether to keep only the lines logged inside ``marking(_:)``.
     init(context scope: [String: String] = [:], markedOnly: Bool = false) {
+        precondition(!scope.isEmpty || markedOnly,
+                     "an unscoped capture keeps every line every parallel suite logs: scope it by context or by its mark")
         let token = UUID()
         let kept = Kept()
         let mark = Self.mark
@@ -165,7 +170,8 @@ final class PackageAuditCapture: Sendable {
         try Self.mark.withValue(token, operation: body)
     }
 
-    /// Unregisters the capture: no line delivered after this returns is kept.
+    /// Unregisters the capture: no line the sink receives after this returns is kept, though a line
+    /// already being handed out on another thread when it is called may still land.
     ///
     /// - Returns: Whether it was still registered.
     @discardableResult

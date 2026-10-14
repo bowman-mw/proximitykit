@@ -2,8 +2,9 @@
 // ProximityKitTests
 //
 // ProximityKit plan step A1.1: the keychain ProximityKit's package tests run against. Their bundle is
-// unhosted: on the simulator the system keychain answers every call with errSecMissingEntitlement
-// (-34018), and on a Mac a call would reach the developer's own data-protection keychain. So the bundle's
+// unhosted: on the simulator the system keychain answers every call errSecMissingEntitlement (-34018), and
+// on a Mac a package test must not reach the system keychain whatever it answers (Apple's TN3137 gives
+// -34018 for a process without keychain entitlements). So the bundle's
 // installer (PackageTestEnvironment.swift) installs this store as ProximityKit's keychain backend before
 // the bundle's first keychain call, and every identity row and seal key a package test writes lives here,
 // in memory, for the life of the test process. It reads the query dictionaries ProximityKeychainItem's
@@ -26,8 +27,11 @@ import Synchronization
 /// either variant under `kSecAttrSynchronizableAny` and one under `true` or `false`; and a read, an
 /// enumeration or a delete that matches nothing is `errSecItemNotFound`. A dictionary of another shape
 /// than the funnel's builders spell (another class, no data-protection flag, a missing name, an unknown
-/// match limit) is refused with `errSecParam`, so a builder that drifted fails here rather than being
-/// served. Accessibility is recorded, never enforced: the store has no lock state.
+/// match limit) is refused with `errSecParam` rather than served, and so is a synchronizable add under a
+/// `ThisDeviceOnly` class, which SecItem.h forbids. Accessibility is recorded, never enforced: the store
+/// has no lock state. Where the keychain promises no order (an enumeration, or a single-row read under
+/// `kSecAttrSynchronizableAny` that matches both variants) the store answers in its own order, by account
+/// and then the device-only variant first; a suite must not rely on that order.
 ///
 /// **An unreadable service on demand.** ``makeUnreadable(service:)`` makes every call on one service
 /// answer `errSecInteractionNotAllowed`, the status a keychain answers before the first unlock, which no
@@ -93,11 +97,15 @@ final class PackageKeychainStore: ProximityKeychainBackend {
 
     // MARK: - The funnel's three calls
 
-    /// Adds the row an add dictionary describes: `errSecDuplicateItem` when its key is taken.
+    /// Adds the row an add dictionary describes: `errSecDuplicateItem` when its key is taken, and
+    /// `errSecParam` for a synchronizable row under a `ThisDeviceOnly` class.
     func add(_ query: [String: Any]) -> OSStatus {
         guard let match = Self.match(query), let account = match.account, let synchronizable = match.synchronizable,
               let accessibility = query[kSecAttrAccessible as String] as? String,
               let data = query[kSecValueData as String] as? Data else { return errSecParam }
+        let deviceOnlyClasses = [kSecAttrAccessibleWhenUnlockedThisDeviceOnly, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                                 kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly].map { $0 as String }
+        guard !(synchronizable && deviceOnlyClasses.contains(accessibility)) else { return errSecParam }
         let key = RowKey(service: match.service, account: account, synchronizable: synchronizable)
         let row = Row(service: match.service, account: account, synchronizable: synchronizable,
                       accessibility: accessibility, data: data)

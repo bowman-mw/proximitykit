@@ -811,10 +811,13 @@ calls `SecItemAdd`, `SecItemCopyMatching` and `SecItemDelete` with that dictiona
 row and every status is the keychain's. A Debug build also holds one `Mutex` slot and its internal
 door, `installBackend(_:)`, which nothing in a host calls: only this module's own package tests, whose
 unhosted bundle has no keychain, install an in-memory store through it (see "Its tests"). A Release
-build has neither the slot nor the door. Fernlet's `KeyCustodyBoundaryTests` holds the door's one
-caller to the package tests' installer and its declaration to the `#if DEBUG` branch, and holds the
-funnel on the system keychain in Fernlet's hosted tests, where the golden's live round trip and the
-key-custody walls read real rows.
+build has neither the slot nor the door. This module's own package tests hold the door's one caller to
+their installer and its declaration to the `#if DEBUG` branch (`ProximityKeychainDoorTests`, see "Its
+tests"). No CI step compiles a Release build; ProximityKit's door suite pins the text of the `#if DEBUG`
+/ `#else` region, so the Release branch can only break where the Debug one does. Fernlet's
+`KeyCustodyBoundaryTests` holds that no file of Fernlet's names the door, and holds the funnel on the
+system keychain in Fernlet's hosted tests, where the golden's live round trip and the key-custody walls
+read real rows.
 
 **The audit sink.** This module writes its audit lines (frozen English event names such as
 `mesh.routedDrain.rejected`, with counts, reasons and salted labels as context, which a sink keeps
@@ -974,8 +977,10 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 (`MeshRoutedDrainPlanTests`), the commit detector and the ranging fallback
 (`NearbyRangingSessionTests`), the replay cache (`ReplayCacheTests`), the test support's own facts
 (`PackageTestSupportTests`), the test keychain (`PackageKeychainStoreTests`), the test host and
-audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoundaryTests`) and the
-platform wall (`ProximityPlatformNeutralityTests`): nineteen suites, 167 tests. The
+audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoundaryTests`), the
+platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
+(`ProximityKeychainDoorTests`) and the presence engine (`ProximityPresenceSessionTests`): twenty-one
+suites, 173 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (a `SecItem` call returns
 `errSecMissingEntitlement`, and on a Mac it would reach the developer's own keychain) and no app
@@ -1003,7 +1008,8 @@ and `Sources/ProximityKit`: `FernletKit/` in Fernlet's repository, the root of P
 
 The bundle's keychain is `PackageKeychainStore` (`PackageKeychainStore.swift`), an in-memory store
 that answers the keychain funnel's query dictionaries as the keychain does: rows keyed by service,
-account and synchronizable flag, a duplicate add refused, single-row reads and enumerations, one-row and
+account and synchronizable flag, a duplicate add refused, a synchronizable add under a
+`ThisDeviceOnly` class refused, single-row reads and enumerations, one-row and
 whole-service deletes, the any, synced and device-only matches, and, on demand, a service that answers
 `errSecInteractionNotAllowed`, as a keychain does before the first unlock, which no simulator can be made
 to return. `PackageTestEnvironment` (`PackageTestEnvironment.swift`) installs it through the funnel's
@@ -1068,6 +1074,21 @@ location needles for this target (what an unhosted test may not reach), so while
 Fernlet's repository `CIGateSelectorBoundaryTests` holds Fernlet's copy of the list equal to this
 suite's, line for line. A host's own doors and its Mac build are its own walls' to hold: Fernlet's
 `ProximityPlatformBoundaryTests` holds presence's heart door and pins the native macOS build.
+
+The keychain door's wall, `ProximityKeychainDoorTests` (see "The keychain mechanism"), is one of this
+target's suites as well, on the `proximitykit` line. It reads this module's sources and this target's
+own files through `PackageRoot` and their code through the same copy of the lexer, and holds the
+funnel's Debug-only door declared once, in its `#if DEBUG` branch, whose whole text it pins, and named
+by this target's installer alone, its readers fixtured first. A host's own walls hold that the host
+names the door nowhere: Fernlet's `KeyCustodyBoundaryTests`.
+
+The presence engine's own contract is held here too, by `ProximityPresenceSessionTests`, over an
+in-memory radio of the suite's own, under `.packageTest` and the engine's own posture mint: a sighting
+under a name the session wore, or of another record version, never reaches the host, and the ring of
+worn names forgets only its oldest name past its cap; a failed mint drops the worn posture, so nothing
+is re-advertised under the previous epoch's name; a start and a republish advertise the tags they are
+handed, with all six of the radio's hooks wired before it starts; each hook reaches the host's own; and
+the engine and its radio are released when the host lets go of them without a stop.
 
 Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
