@@ -4,13 +4,14 @@
 // literals as the compiler does. A twin (ProximityKit plan step A1.1): the same file at Tests/FernletTests
 // and FernletKit/Tests/ProximityKitTests/TestSupport, held identical but for its imports by
 // CIGateSelectorBoundaryTests.everyTwinMatchesItsOriginal(), because ProximityKit's namespace, platform
-// and keychain-door walls and its tests' hygiene (ProximityNamespaceBoundaryTests,
+// and keychain-door walls, its tests' hygiene and its tree walls (ProximityNamespaceBoundaryTests,
 // ProximityPlatformNeutralityTests, ProximityKeychainDoorTests and, since ProximityKit plan step A1.1.13,
-// PackageTestHygieneTests, in ProximityKit's package tests) read ProximityKit's sources and tests through
-// it and Fernlet's own source walls read theirs (the key-custody, store-isolation, photo-directory,
-// audit-bridge and continuation task-host walls, the platform wall's presence door and the feature
-// golden's recipe-copy scan), and a test target cannot import another. Each target holds its copy to the
-// same fixtures: the namespace wall's lexer cell in the package, `SwiftSourceLexerTests` in FernletTests.
+// PackageTestHygieneTests and, since A1.1.14, PackageTestTreeWallTests, in ProximityKit's package tests)
+// read ProximityKit's sources and tests through it and Fernlet's own source walls read theirs (the
+// key-custody, store-isolation, photo-directory, audit-bridge and continuation task-host walls, the
+// platform wall's presence door and the feature golden's recipe-copy scan), and a test target cannot
+// import another. Each target holds its copy to the same fixtures: the namespace wall's lexer cell in the
+// package, `SwiftSourceLexerTests` in FernletTests.
 
 /// A small Swift lexer for the source walls. It tells code from comments and string literals the way
 /// the compiler does, so a wall can read code without the prose about it, and literals without the

@@ -45,10 +45,10 @@ import ProximityKit
 /// every identity row and seal key lands in the store, never a keychain, and every line reaches the
 /// bundle's captures.
 ///
-/// **Held by Fernlet's walls.** `MeshRoutedStoreIsolationTests` reads this file as one of the test roots'
-/// host doubles: a double that states its root states both scopes. `MemoryLifecycleBoundaryTests`' ML5
-/// refuses a manager built over a host expression that is a call, so a cell builds one over a host it
-/// holds in a `let` that outlives the manager.
+/// **Held by this target's walls.** `PackageTestTreeWallTests` reads this file as the package tests' host
+/// double: a double that states its root states both scopes. Its ML5 refuses a manager or a pair session
+/// built over a host expression that is a call, so a cell builds one over a host it holds in a `let` that
+/// outlives the manager.
 @MainActor
 final class PackageTestHost: ProximityHost {
 

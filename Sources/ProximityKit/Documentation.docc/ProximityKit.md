@@ -485,7 +485,9 @@ inherits all three:
 
 `MemoryLifecycleBoundaryTests` rule ML4 fails any unmarked `Task` construction in a file holding an
 `unowned` host, or holding or taking a `FernletMeshHost` (a stored property or a parameter); rule ML5
-fails a test that builds a manager or a composition over an inline host expression.
+fails a test that builds a manager or a composition over an inline host expression. A host's ML5 holds
+the host's tests; in this module's own tests `PackageTestTreeWallTests` holds the same rule over its two
+holders, the mesh manager and the pair session.
 `ProximityManagerDeallocationTests` measures HP2 directly, with the beacon loop armed.
 
 ### Localization: nothing on the wire is display copy
@@ -840,7 +842,9 @@ exactly as they did when this module named `FernletAuditLog` itself. `ProximityA
 the canary for that install: every test asserting that an event was not logged would pass vacuously
 without it. This module's own package tests run unhosted, with no app to install a sink, so their test
 support installs one of its own (see "Its tests"); `ProximityAuditBridgeTests` also holds that the
-app's install and that one are the only two.
+app's install is the only one in Fernlet's code and tests, and this module's tree walls
+(`PackageTestTreeWallTests`) hold its tests' install to the one in their installer and this module's
+code to none.
 
 **What is left.** The vocabulary and the session rules are the host's: every group
 of the vocabulary is read off the namespace its reader holds (the reader table above), the radios
@@ -983,8 +987,9 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 (`PackageTestSupportTests`), the test keychain (`PackageKeychainStoreTests`), the test host and
 audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoundaryTests`), the
 platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
-(`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`) and the tests' own
-hygiene (`PackageTestHygieneTests`): twenty-two suites, 179 tests. The
+(`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`), the tests' own
+hygiene (`PackageTestHygieneTests`) and their tree walls (`PackageTestTreeWallTests`): twenty-three
+suites, 185 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1059,11 +1064,9 @@ more; the host's root and services are scratch of its own, and two hosts share n
 its rows, its policy and its radio itself; and a ``MeshNetworkManager`` built over it, unhosted,
 provisions its identity into the in-memory store and logs no line, while one whose identity service
 the store answers as unreadable logs its failure. So a suite in this target can build a manager over
-`PackageTestHost` and read this module's audit lines, a line's absence included. Fernlet's store
-isolation walls (`MeshRoutedStoreIsolationTests`, whose scratch-root needle holds the host as one of
-the doubles, and `MeshSessionStoreIsolationTests`) and its acceptance batteries' test-tree scans read
-this target's folder too, and `ProximityAuditBridgeTests` holds the installer to the one install of a
-sink in either test target.
+`PackageTestHost` and read this module's audit lines, a line's absence included. This target's tree
+walls (`PackageTestTreeWallTests`, below) hold the host as the package tests' host double and the
+installer to the one install of a sink in these tests.
 
 The namespace wall, `ProximityNamespaceBoundaryTests` (see "Protocol namespace" and "Package doors"),
 is one of this target's suites, on the `proximitykit` line, so it travels with the package and runs
@@ -1103,6 +1106,20 @@ I11): this module, Foundation, Testing, Combine, simd and Synchronization, and S
 store's file alone. The target's own inventory, `Tests/ProximityKitTests.tsv` beside this target's
 folder, is the tree: every suite's file and its declared tests, the row count and the tests' sum
 measured, which CI's test-count floor reads. And nothing extends ``ProximityHost``.
+
+The tests' tree walls, `PackageTestTreeWallTests`, are one of this target's suites as well, on the
+`proximitykit` line, so the walls that keep these tests from harming one another in one process travel
+with them. Each reads every Swift file of this target, and one of them this module's sources too,
+through the walls' walker at its file floor, each matcher fixtured first, and holds four rules. The
+audit install: ``ProximityAudit/install(_:)`` is named in this target's installer alone, once, and in
+none of this module's code, and outside ProximityAudit's own file nothing extends it, aliases it or takes
+its metatype. The stores: every session or routed store a test builds names a scope of its own, none
+reaches a production scope by any spelling, and every host double that states a root of its own states
+both scopes on it (`PackageTestHost` the one double). ML5: no test builds a ``MeshNetworkManager`` or a
+``ProximityPairSession``, the two holders of an `unowned` host, over a host expression that is itself a
+call. And no test file is a home of either determinism digest, which a host's acceptance batteries pin.
+In Fernlet's repository, Fernlet's own walls (`ProximityAuditBridgeTests`, the store isolation walls,
+ML5 and the batteries' digest homes) hold the same rules over Fernlet's trees and not this folder.
 
 The presence engine's own contract is held here too, by `ProximityPresenceSessionTests`, over an
 in-memory radio of the suite's own, under `.packageTest` and the engine's own posture mint: a sighting

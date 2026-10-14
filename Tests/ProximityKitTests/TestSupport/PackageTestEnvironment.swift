@@ -27,8 +27,9 @@
 /// and ProximityKit drops every line while none is installed, so a check that a line was not logged
 /// would pass whatever the code did; every ``PackageAuditCapture`` registers with ``audit`` as it is
 /// built, so the sink is installed before any capture exists. This is the one install of a sink in
-/// either test target: Fernlet's hosted tests inherit the bridge `FernletApp.init` installs, and
-/// Fernlet's `ProximityAuditBridgeTests` holds both.
+/// either test target: Fernlet's hosted tests inherit the bridge `FernletApp.init` installs. This
+/// target's `PackageTestTreeWallTests` holds the one install of a sink in these tests, and none in
+/// ProximityKit's code; Fernlet's `ProximityAuditBridgeTests` holds its app's.
 ///
 /// **Once, from any thread.** A `static let`'s initializer runs once under the runtime's guard, so
 /// parallel suites racing to read one all get the one value, installed before any of them gets it.

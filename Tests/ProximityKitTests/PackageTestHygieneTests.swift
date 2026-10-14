@@ -196,8 +196,8 @@ import Testing
         let stores = """
             a store seals its files under a seal key it reads from the keychain, so it needs an allowlist \
             row whose invariant says what reads PackageTestEnvironment.keychain first, and writes them \
-            under its scope's directory, which the store isolation walls hold to a scope of the test's \
-            own, never the production one (they read this folder too since plan step A1.1.6)
+            under its scope's directory, which this target's PackageTestTreeWallTests holds to a scope of \
+            the test's own, never the production one
             """
         let location = "a production or process-shared location; on an unsandboxed Mac, the developer's own"
         let repo = """
@@ -413,6 +413,13 @@ import Testing
             rule I9's own file: its needles, reasons, allowlist rows and fixtures, and rule I11's and the \
             inventory readers' fixtures, are data in literals it reads as text and never runs; I9 reads its \
             code, comments dropped and literals emptied, and refuses a needle there as anywhere
+            """),
+        (file: "PackageTestTreeWallTests.swift",
+         invariant: """
+            the tree walls' own file: the stores, scopes, production directories and services, inline \
+            hosts and audit installs its matchers and samples spell are data in literals it reads as text \
+            and never runs; I9 reads its code, comments dropped and literals emptied, and refuses a needle \
+            there as anywhere
             """)
     ]
 
@@ -911,13 +918,15 @@ import Testing
     }
 
     /// The MEASURED row count (rule I2). MEASURED at ProximityKit plan step A1.1.13 (2026-10-14): the 21
-    /// suites the package held at A1.1.10 and this one. A suite added, moved out or deleted changes it in
-    /// the same commit, argued and measured; a deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 22
+    /// suites the package held at A1.1.10 and this one. RAISED at A1.1.14 (2026-10-14): 22 → 23, for the
+    /// package's NEW `PackageTestTreeWallTests`. A suite added, moved out or deleted changes it in the same
+    /// commit, argued and measured; a deletion lowers it only with the retirement argued.
+    static let measuredInventoryRows = 23
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
-    /// (2026-10-14): 173 at A1.1.10 + this suite's 6. A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 179
+    /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
+    /// `PackageTestTreeWallTests`' 6. A test added or removed changes it in the same commit.
+    static let measuredDeclaredTests = 185
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three
