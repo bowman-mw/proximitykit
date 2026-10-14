@@ -803,6 +803,18 @@ key-custody walls read them. A failed `delete` or `deleteAll` is audited as `key
 or `keychain.deleteAll.failed`, with FernletFoundation's context keys. The golden holds every query
 dictionary to the one FernletFoundation's source spells.
 
+Every member reaches the keychain through one backend (plan step A1.1): the add, the match and the
+delete each hand the dictionary its builder spelled to an internal `ProximityKeychainBackend`. The
+system keychain, `ProximityKeychainItem.SystemKeychain`, is the only backend a shipping build has; it
+calls `SecItemAdd`, `SecItemCopyMatching` and `SecItemDelete` with that dictionary unchanged, so every
+row and every status is the keychain's. A Debug build also holds one `Mutex` slot and its internal
+door, `installBackend(_:)`, which nothing in a host calls: only this module's own package tests, whose
+unhosted bundle has no keychain, install an in-memory store through it (see "Its tests"). A Release
+build has neither the slot nor the door. Fernlet's `KeyCustodyBoundaryTests` holds the door's one
+caller to the package tests' installer and its declaration to the `#if DEBUG` branch, and holds the
+funnel on the system keychain in Fernlet's hosted tests, where the golden's live round trip and the
+key-custody walls read real rows.
+
 **The audit sink.** This module writes its audit lines (frozen English event names such as
 `mesh.routedDrain.rejected`, with counts, reasons and salted labels as context, which a sink keeps
 private because a few lines name a peer) through ``ProximityAudit``, which hands each one to the
@@ -932,7 +944,7 @@ checks them; plan step P0.2 and A1's device lanes prove them on hardware.
 
 | Topic | What a Mac host owes |
 | --- | --- |
-| Keychain | Every query this module issues sets `kSecUseDataProtectionKeychain` (``ProximityKeychainItem``). On macOS that keychain needs the host signed with entitlements a provisioning profile authorizes (Apple's TN3137). Without them `SecItem` returns `errSecMissingEntitlement` (-34018), and identity provisioning throws ``IdentityError/keychainReadFailed(_:)`` and fails closed. A bare `swift test` runner is the same case. |
+| Keychain | Every query this module issues sets `kSecUseDataProtectionKeychain` (``ProximityKeychainItem``). On macOS that keychain needs the host signed with entitlements a provisioning profile authorizes (Apple's TN3137). Without them `SecItem` returns `errSecMissingEntitlement` (-34018), and identity provisioning throws ``IdentityError/keychainReadFailed(_:)`` and fails closed. A bare `swift test` runner is the same case, which is why this module's own tests run against an in-memory store instead ("Its tests"); a host has no such door. |
 | Local network | `NSLocalNetworkUsageDescription`, and `NSBonjourServices` listing its namespace's service types (Fernlet's are in `App/Fernlet/Info.plist`); when sandboxed, `com.apple.security.network.client` and `com.apple.security.network.server`, because the radios both listen and dial. |
 | Routed access gate | ``MeshNetworkManager``'s gate starts ``MeshRoutedAccessGate/closed``, and its three facts are iOS-shaped. A Mac host answers each in the same meaning, `protectedDataAvailable` (the user's session is unlocked and the host's keys are readable), `appIsForeground` (the app is active) and `duressActive` (its own lock's duress session, or `false`), and pushes them through ``MeshNetworkManager/applyRoutedAccessGate(_:now:)`` on every change; otherwise nothing routed is ever decrypted. |
 | Lifecycle | macOS never suspends a process, while Fernlet's run policy (the app's) leans on iOS suspension, so a Mac host stops or holds the radios itself. App Nap can stretch the mesh radio's 1 s poll and its 30 s heartbeat past the 90 s QUIC idle reap, so a Mac host holds a user-initiated `ProcessInfo` activity while a session is live. |
@@ -955,11 +967,14 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 `MeshMembershipMergeTests`, `MeshMembershipBoundsTests`), the epoch model (`MeshEpochRefTests`,
 `MeshEpochKeyringTests`, `MeshEpochAcceptanceTests`, `MeshFrameReplayWindowTests`), the routed drain plan
 (`MeshRoutedDrainPlanTests`), the commit detector and the ranging fallback
-(`NearbyRangingSessionTests`), the replay cache (`ReplayCacheTests`) and the test support's own facts
-(`PackageTestSupportTests`): fifteen suites, 140 tests. The
+(`NearbyRangingSessionTests`), the replay cache (`ReplayCacheTests`), the test support's own facts
+(`PackageTestSupportTests`) and the test keychain (`PackageKeychainStoreTests`): sixteen suites, 146
+tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
-the simulator's `xctest` agent, so no keychain entitlement reaches it (every `SecItem` call returns
-`errSecMissingEntitlement`) and no ``ProximityAuditSink`` is installed (every audit line is dropped).
+the simulator's `xctest` agent, so no keychain entitlement reaches it (a `SecItem` call returns
+`errSecMissingEntitlement`, and on a Mac it would reach the developer's own keychain) and no
+``ProximityAuditSink`` is installed (every audit line is dropped). Its keychain is therefore an
+in-memory store its test support installs as this module's keychain backend, described below.
 It builds in Swift 6 language mode with no default isolation; with the three upcoming features it
 declares, that is every upcoming feature Fernlet's own tests use, though they build in Swift 5 mode.
 It declares this module as its one dependency, and its files import nothing else of the package,
@@ -979,6 +994,23 @@ reads one of this module's sources names it relative to the package root through
 (`PackageRoot.swift`), which walks up from its own file to the first folder holding both `Package.swift`
 and `Sources/ProximityKit`: `FernletKit/` in Fernlet's repository, the root of ProximityKit's own.
 
+The bundle's keychain is `PackageKeychainStore` (`PackageKeychainStore.swift`), an in-memory store
+that answers the keychain funnel's query dictionaries as the keychain does: rows keyed by service,
+account and synchronizable flag, a duplicate add refused, single-row reads and enumerations, one-row and
+whole-service deletes, the any, synced and device-only matches, and, on demand, a service that answers
+`errSecInteractionNotAllowed`, as a keychain does before the first unlock, which no simulator can be made
+to return. `PackageTestEnvironment` (`PackageTestEnvironment.swift`) installs it through the funnel's
+Debug-only door once, lazily, by a `static let` the first read runs: Swift Testing has no bundle-level
+set-up, so whatever reaches the keychain reads `PackageTestEnvironment.keychain` first, and its every
+call reaches the store, never a keychain. The store's file is the one package file that imports
+Security, to read those dictionaries. `PackageKeychainStoreTests` holds the store installed (the funnel
+resolves it) and holds this module's identity and two seal keys to it, on `.test.` services of
+`.packageTest`'s: an identity provisions, reads its public keys back and wipes; each seal key mints,
+reads back the same key and wipes; an unreadable service defers or refuses and is never minted over,
+while an absent one mints; scopes on two services never see each other's rows; and the synced and
+device-only variants of one account stay apart. The bundle runs natively on a Mac too
+(`swift build --product FernletKitPackageTests`, then `swift test --skip-build`), touching no keychain.
+
 Six helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
 mesh-message spelling helper, the test namespace and the epoch fixtures, whose one mint binds in each
@@ -989,8 +1021,8 @@ live nowhere else. CI names its suites `ProximityKitTests/<Suite>`;
 `Tests/suite-inventory.tsv` and `CIGateSelectorBoundaryTests` hold every suite to one target, one file
 and its lines, and refuse what this bundle cannot serve and an import of the closure.
 
-Every other ProximityKit suite still runs in the app's `FernletTests` until A1 brings a host double, an
-audit sink and an answer for the keychain. `ProximityNamespaceSoundnessTests` needs none of them, so it runs in this module's
+Every other ProximityKit suite still runs in the app's `FernletTests` until A1 brings a host double and
+an audit sink. `ProximityNamespaceSoundnessTests` needs neither, so it runs in this module's
 test target, still on the crypto-goldens line beside Fernlet's goldens: its five framing byte pins are
 over a literal namespace that belongs to no app, and it imports this module plainly, not `@testable`,
 so it sees only what a host sees. The mesh-message spelling helper it builds its fixtures with

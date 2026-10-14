@@ -9,9 +9,60 @@
 // lines, which now go through `ProximityAudit` under the same event names and context. Fernlet's
 // catalogue stayed behind: the `Account` names, the typed overloads, the service constants, the device
 // sealing-key mint and the update-in-place primitive nothing here calls.
+//
+// ProximityKit plan step A1.1: the add, the match and the delete reach the keychain through one
+// backend, `ProximityKeychainBackend`, handed each query dictionary exactly as its builder spells it.
+// The system keychain is the backend every shipping build has; a Debug build also holds the slot
+// through which ProximityKit's own package tests, unhosted and so without a keychain, install an
+// in-memory store.
 
 import Foundation
 import Security
+import Synchronization
+
+/// The three keychain calls ``ProximityKeychainItem`` makes, as one replaceable seam: an add, a match
+/// and a delete, each handed the query dictionary the funnel's builders spelled, unchanged.
+///
+/// ``ProximityKeychainItem/SystemKeychain`` is the conformer every shipping build uses: it passes each
+/// dictionary to `SecItemAdd`, `SecItemCopyMatching` or `SecItemDelete` exactly as the funnel's members
+/// call them, so every row's bytes and every status are the system keychain's. The only other
+/// conformer is the in-memory store ProximityKit's own package tests install, in a Debug build, through
+/// ``ProximityKeychainItem/installBackend(_:)``: that bundle runs unhosted, where the system keychain
+/// answers `errSecMissingEntitlement` (-34018) on the simulator and would reach the developer's own
+/// keychain on a Mac.
+///
+/// Each requirement is synchronous and `nonisolated`, like the call it stands for, and the protocol
+/// refines `Sendable` because one value serves every caller in the process, main-actor managers and
+/// `nonisolated` seal-key helpers alike.
+nonisolated protocol ProximityKeychainBackend: Sendable {
+
+    /// Adds the item `query` describes, as `SecItemAdd(query, nil)` does.
+    ///
+    /// - Parameter query: The add dictionary
+    ///   (``ProximityKeychainItem/addQuery(_:account:service:accessibility:synchronizable:)``).
+    /// - Returns: The add's status: `errSecDuplicateItem` when an item with the same primary key
+    ///   (class, service, account and synchronizable flag) is already there.
+    func add(_ query: [String: Any]) -> OSStatus
+
+    /// Matches the items `query` describes, as `SecItemCopyMatching(query, &result)` does.
+    ///
+    /// - Parameters:
+    ///   - query: A single-item read or an enumeration dictionary
+    ///     (``ProximityKeychainItem/readQuery(account:service:synchronizable:)``,
+    ///     ``ProximityKeychainItem/enumerationQuery(service:synchronizable:)``).
+    ///   - result: Set to what the query asks back on success: the one item's data, or every match's
+    ///     attribute dictionary with its data. Left as it is when the call fails.
+    /// - Returns: The match's status: `errSecItemNotFound` when nothing matches.
+    func copyMatching(_ query: [String: Any], result: inout AnyObject?) -> OSStatus
+
+    /// Deletes every item `query` matches, as `SecItemDelete(query)` does.
+    ///
+    /// - Parameter query: One row's or a whole service's delete dictionary
+    ///   (``ProximityKeychainItem/deleteQuery(account:service:synchronizable:)``,
+    ///   ``ProximityKeychainItem/deleteAllQuery(service:)``).
+    /// - Returns: The delete's status: `errSecItemNotFound` when nothing matched.
+    func delete(_ query: [String: Any]) -> OSStatus
+}
 
 /// Generic data-protection keychain accessors for ProximityKit's key stores: a copy of
 /// FernletFoundation's `KeychainItem` mechanism (plan step A0.2.11).
@@ -48,9 +99,18 @@ import Security
 /// audit sees the lines it always saw.
 ///
 /// Mechanism only: no account, service or accessibility class of its own. Each caller passes its
-/// row's names and class, which is where the key-custody walls read them. `nonisolated`: pure
-/// Security-framework calls with no shared state, called from main-actor managers and from the
-/// `nonisolated` seal-key helpers alike.
+/// row's names and class, which is where the key-custody walls read them. `nonisolated`: called from
+/// main-actor managers and from the `nonisolated` seal-key helpers alike.
+///
+/// **One backend (plan step A1.1).** Every member reaches the keychain through ``backend``: the add,
+/// the match and the delete each hand the dictionary its builder spelled to a
+/// ``ProximityKeychainBackend``. Its system conformer, ``SystemKeychain``, is the only backend a
+/// shipping build has, and calls `SecItemAdd`, `SecItemCopyMatching` and `SecItemDelete` with that
+/// dictionary unchanged, so the rows and the statuses are the system keychain's. A Debug build also
+/// holds one slot, filled only by ProximityKit's own package tests through ``installBackend(_:)``
+/// with an in-memory store, because their unhosted bundle has no keychain. The slot is this type's
+/// one piece of shared state, a `Mutex` it owns; with nothing installed, which is every shipping
+/// process and Fernlet's hosted tests, ``backend`` is the system keychain.
 nonisolated enum ProximityKeychainItem {
 
     /// Which synchronizable variant of an item a query should match.
@@ -131,7 +191,7 @@ nonisolated enum ProximityKeychainItem {
         delete(account: account, service: service, synchronizable: replacing)
         let query = addQuery(data, account: account, service: service, accessibility: accessibility,
                              synchronizable: synchronizable)
-        return SecItemAdd(query as CFDictionary, nil)
+        return backend.add(query)
     }
 
     /// Loads the data of the single item matching `service` + `account` within `synchronizable`
@@ -140,7 +200,7 @@ nonisolated enum ProximityKeychainItem {
         guard !account.isEmpty, !service.isEmpty else { return nil }   // R5: no row is ever filed under an empty key.
         var result: AnyObject?
         let query = readQuery(account: account, service: service, synchronizable: synchronizable)
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+        guard backend.copyMatching(query, result: &result) == errSecSuccess else { return nil }
         return result as? Data
     }
 
@@ -160,7 +220,7 @@ nonisolated enum ProximityKeychainItem {
         guard !account.isEmpty, !service.isEmpty else { return .unreadable(errSecParam) }
         var result: AnyObject?
         let query = readQuery(account: account, service: service, synchronizable: synchronizable)
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = backend.copyMatching(query, result: &result)
         switch status {
         case errSecSuccess:
             guard let data = result as? Data else { return .unreadable(status) }
@@ -209,7 +269,7 @@ nonisolated enum ProximityKeychainItem {
         guard !service.isEmpty else { return .unreadable(errSecParam) }
         var result: AnyObject?
         let query = enumerationQuery(service: service, synchronizable: synchronizable)
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = backend.copyMatching(query, result: &result)
         return enumerationResult(status: status, matches: result as? [[String: Any]])
     }
 
@@ -272,7 +332,7 @@ nonisolated enum ProximityKeychainItem {
     ) -> OSStatus {
         guard !account.isEmpty, !service.isEmpty else { return errSecParam }   // R5: nothing is filed under an empty key.
         let query = deleteQuery(account: account, service: service, synchronizable: synchronizable)
-        let status = SecItemDelete(query as CFDictionary)
+        let status = backend.delete(query)
         return status == errSecItemNotFound ? errSecSuccess : status
     }
 
@@ -293,9 +353,68 @@ nonisolated enum ProximityKeychainItem {
     static func deleteAllReportingStatus(service: String) -> OSStatus {
         guard !service.isEmpty else { return errSecParam }   // R5: refuse to sweep an unnamed slot.
         let query = deleteAllQuery(service: service)
-        let status = SecItemDelete(query as CFDictionary)
+        let status = backend.delete(query)
         return status == errSecItemNotFound ? errSecSuccess : status
     }
+
+    // MARK: - Backend
+
+    /// The system keychain, the backend every shipping build has: each requirement is the Security
+    /// call the funnel's members make, handed the builder's dictionary bridged to `CFDictionary`.
+    nonisolated struct SystemKeychain: ProximityKeychainBackend {
+
+        /// `SecItemAdd(query, nil)`.
+        func add(_ query: [String: Any]) -> OSStatus {
+            SecItemAdd(query as CFDictionary, nil)
+        }
+
+        /// `SecItemCopyMatching(query, &result)`.
+        func copyMatching(_ query: [String: Any], result: inout AnyObject?) -> OSStatus {
+            SecItemCopyMatching(query as CFDictionary, &result)
+        }
+
+        /// `SecItemDelete(query)`.
+        func delete(_ query: [String: Any]) -> OSStatus {
+            SecItemDelete(query as CFDictionary)
+        }
+    }
+
+    #if DEBUG
+    /// The backend ProximityKit's own package tests installed, or nil for none.
+    ///
+    /// Compiled in a Debug build only. The one process-global in this type: an immutable `let` that
+    /// owns its lock (R6/R9), written only by ``installBackend(_:)`` and read only by ``backend``, each
+    /// inside `withLock`; the backend is `Sendable`, so nothing else needs guarding.
+    private static let installedBackend = Mutex<(any ProximityKeychainBackend)?>(nil)
+
+    /// Installs the backend every later keychain call goes to, replacing any installed before it.
+    ///
+    /// For ProximityKit's own package tests alone: their bundle runs unhosted, with no keychain
+    /// entitlement on the simulator and the developer's own keychain on a Mac, so its installer puts an
+    /// in-memory store here once, before the bundle's first keychain call. No shipping code installs a
+    /// backend, and Fernlet's hosted tests install none, so they exercise the system keychain. The door
+    /// is compiled in a Debug build only: a Release build has no way to install one, and its ``backend``
+    /// is the system keychain without a slot to read. `KeyCustodyBoundaryTests` holds the door's one
+    /// caller to the package tests' installer.
+    ///
+    /// - Parameter backend: The backend; called synchronously, from any executor.
+    static func installBackend(_ backend: any ProximityKeychainBackend) {
+        installedBackend.withLock { $0 = backend }
+    }
+
+    /// The backend every keychain call goes through: the one ProximityKit's package tests installed,
+    /// else the system keychain.
+    static var backend: any ProximityKeychainBackend {
+        guard let installed = installedBackend.withLock({ $0 }) else { return SystemKeychain() }
+        return installed
+    }
+    #else
+    /// The backend every keychain call goes through: in a Release build, always the system keychain,
+    /// the only backend such a build has.
+    static var backend: any ProximityKeychainBackend {
+        SystemKeychain()
+    }
+    #endif
 
     // MARK: - Query dictionaries
 
