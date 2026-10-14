@@ -1139,7 +1139,7 @@ import Testing
     /// presence engine) was.
     ///
     /// No case is left, so rules 3 to 5 list nothing and the enum is uninhabited, as
-    /// `ProximityPlatformBoundaryTests.ExitStep` is: a ``Reason``'s `exit` is optional so the type
+    /// `ProximityPlatformNeutralityTests.ExitStep` is: a ``Reason``'s `exit` is optional so the type
     /// still compiles, and nil would name no step. A later step that adds a row adds its case with its
     /// step's name as a `String` raw value, the raw type with it, and ``exitText(_:)``'s arm naming it,
     /// which the compiler then requires.

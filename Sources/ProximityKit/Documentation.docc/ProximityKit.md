@@ -933,12 +933,14 @@ must pass it. CI runs the self-test on every push (the "ProximityKit on native m
 manifest or either script. It is an `xcodebuild` build, not `swift build`: the SwiftPM command line
 leaves the set's string catalogs (`FernletFoundation`'s and `FernletDomainModel`'s) unprocessed. The
 build is the compiler half, which refuses any symbol native macOS lacks wherever it stands outside its
-guard. `ProximityPlatformBoundaryTests`, on the s3-grep CI
-line, is the source half: it holds this module's imports to a neutral baseline and the two seams
-above, and its platform branches (`#if os(…)`) to the NearbyInteraction file's guard, refuses the
-device-name sources, platform-directory APIs and host-fact defaults it lists (its rows for them are
-empty), holds every channel-ready door to its host's ranging provider, and pins that the gate runs,
-neither skipped nor tolerated in CI and on by default in the pre-push hook.
+guard. `ProximityPlatformNeutralityTests`, one of this module's own tests on the `proximitykit` CI line
+(see "Its tests"), is the source half: it holds this module's imports to a neutral baseline and the
+two seams above, and its platform branches (`#if os(…)`) to the NearbyInteraction file's guard,
+refuses the device-name sources, platform-directory APIs and host-fact defaults it lists (its rows for
+them are empty), and holds this module's two channel-ready doors to their host's ranging provider and
+`NIRangingSession` to its own file. Fernlet's `ProximityPlatformBoundaryTests`, on the s3-grep CI line,
+holds its own channel-ready door, presence's heart door in `FernletSocial`, to the same rule, and pins
+that the gate runs, neither skipped nor tolerated in CI and on by default in the pre-push hook.
 
 ### Hosting on macOS
 
@@ -972,8 +974,8 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 (`MeshRoutedDrainPlanTests`), the commit detector and the ranging fallback
 (`NearbyRangingSessionTests`), the replay cache (`ReplayCacheTests`), the test support's own facts
 (`PackageTestSupportTests`), the test keychain (`PackageKeychainStoreTests`), the test host and
-audit sink (`PackageTestHostTests`) and the namespace wall (`ProximityNamespaceBoundaryTests`):
-eighteen suites, 162 tests. The
+audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoundaryTests`) and the
+platform wall (`ProximityPlatformNeutralityTests`): nineteen suites, 167 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (a `SecItem` call returns
 `errSecMissingEntitlement`, and on a Mac it would reach the developer's own keychain) and no app
@@ -1056,6 +1058,16 @@ through the package's copy of the source walls' lexer (`TestSupport/SwiftSourceL
 its lexer cell holds to its fixtures. Its manifest pin needs only the `ProximityKit` target's literal
 `dependencies: []`, so it reads either repository's manifest alike. What it refuses is Fernlet's: the
 app's strings, labels, domain types and the types that left this module for its features.
+
+The platform wall, `ProximityPlatformNeutralityTests` (see "Platforms"), is one of this target's
+suites too, on the `proximitykit` line, so it also travels with the package. It walks this module's
+sources with the namespace wall's walk, through `PackageRoot`, reads its two channel-ready doors by
+their paths under the package root, and reads code through the same copy of the lexer, its readers
+fixtured in a cell of their own. Its platform-directory needles are also Fernlet's selector wall's
+location needles for this target (what an unhosted test may not reach), so while the module is in
+Fernlet's repository `CIGateSelectorBoundaryTests` holds Fernlet's copy of the list equal to this
+suite's, line for line. A host's own doors and its Mac build are its own walls' to hold: Fernlet's
+`ProximityPlatformBoundaryTests` holds presence's heart door and pins the native macOS build.
 
 Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
