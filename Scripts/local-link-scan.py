@@ -54,9 +54,9 @@ PERMITTED_LOCAL_LINK_FILES = (
     # The QUIC presence radio: the same three, advertising under a PresenceEpochPosture that is
     # replaced whole at every 900 s epoch boundary.
     "Sources/ProximityKit/Transport/NetworkPresenceSession.swift",
-    # The QUIC recipe-share radio: the same three, advertising under a RecipeSharePosture minted per
+    # The QUIC pair radio: the same three, advertising under a ProximityPairPosture minted per
     # start and per resume, and standing the listener and the browser down while a pairing is held.
-    "Sources/ProximityKit/Transport/NetworkRecipeShareSession.swift",
+    "Sources/ProximityKit/Transport/NetworkPairSession.swift",
 )
 
 

@@ -24,7 +24,7 @@ when it finds a violation.
 - `power-of-10-scan.py` checks the Power of 10 rules that a line scanner can decide. That means no
   `while true`, no function longer than 60 lines of code, no force unwraps or traps, no mutable
   globals, no `try?` that drops an error, and only simple `#if` conditions. Unsafe pointers are
-  allowed only at the three seams in `power-of-10-allowlist.json`, and each entry says why its seam
+  allowed only at the two seams in `power-of-10-allowlist.json`, and each entry says why its seam
   is safe.
 - `doc-coverage-scan.py` checks that every struct, class, protocol, enum and actor in `Sources/`
   has a `///` doc comment.
