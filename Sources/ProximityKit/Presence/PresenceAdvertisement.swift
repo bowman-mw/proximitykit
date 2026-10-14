@@ -39,11 +39,10 @@ import Foundation
 ///
 /// Every key and value here is a frozen wire token in English, never localized.
 ///
-/// Package access for FernletSocial until A1, with ``publishedFields(tags:)``,
-/// ``isPresenceAdvertisement(_:)`` and ``tags(from:)``: Fernlet's presence manager builds the record
-/// it hands the presence radio's seam (``PresenceRadioSession``) and reads its peers' records with
-/// them, so they exit with that seam. The keys, the bounds and the dial hello stay internal.
-package nonisolated enum PresenceAdvertisement {
+/// Internal, with every member: ``ProximityPresenceSession`` builds the record its radio advertises
+/// from its host's tags and decodes a sighting's record into tags, so a host reads and writes tags
+/// and never this record.
+nonisolated enum PresenceAdvertisement {
 
     /// The advertisement version key. A reader that does not see ``version`` under it believes
     /// nothing else in the record.
@@ -82,9 +81,8 @@ package nonisolated enum PresenceAdvertisement {
     /// `v` is always present — an advertisement with no tags is still a presence advertisement, and
     /// a device with no eligible friends must look exactly like one that has them but is out of
     /// range. The tags are sorted so the record is a function of the set alone: an unstable
-    /// ordering would re-publish (and therefore re-register) an unchanged advertisement. Package
-    /// access for FernletSocial until A1, with the type.
-    package static func publishedFields(tags: [String]) -> [String: String] {
+    /// ordering would re-publish (and therefore re-register) an unchanged advertisement.
+    static func publishedFields(tags: [String]) -> [String: String] {
         var fields = [versionKey: version]
         var chunk = ""
         var index = 0
@@ -104,9 +102,8 @@ package nonisolated enum PresenceAdvertisement {
         return fields
     }
 
-    /// Whether a browsed record is a presence advertisement this build understands. Package access
-    /// for FernletSocial until A1, with the type.
-    package static func isPresenceAdvertisement(_ fields: [String: String]?) -> Bool {
+    /// Whether a browsed record is a presence advertisement this build understands.
+    static func isPresenceAdvertisement(_ fields: [String: String]?) -> Bool {
         fields?[versionKey] == version
     }
 
@@ -114,9 +111,8 @@ package nonisolated enum PresenceAdvertisement {
     ///
     /// Empty for anything that is not a version-1 presence advertisement, and bounded at
     /// ``maxInboundTags`` however many a peer crams in. Empty tokens are dropped rather than
-    /// matched: an empty string would be a token every malformed record shares. Package access for
-    /// FernletSocial until A1, with the type.
-    package static func tags(from fields: [String: String]?) -> Set<String> {
+    /// matched: an empty string would be a token every malformed record shares.
+    static func tags(from fields: [String: String]?) -> Set<String> {
         guard let fields, isPresenceAdvertisement(fields) else { return [] }
         var tags: Set<String> = []
         for index in 0..<maxChunks {

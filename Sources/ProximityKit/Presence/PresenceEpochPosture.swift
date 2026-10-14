@@ -89,16 +89,14 @@ nonisolated enum PresencePostureError: Error, Equatable {
 /// ## What this value is not
 ///
 /// A pure value: no radio, no task, no timer, no manager. It holds no reference to anything that
-/// can start a radio, and it never rotates itself — `PresenceManager` rotates it on the epoch tick
-/// it already runs, and `stop()` drops it. Nothing writes it to the keychain, a file or
-/// `UserDefaults`; a posture that is dropped is gone.
+/// can start a radio, and it never rotates itself — ``ProximityPresenceSession`` rotates it when its
+/// host asks, from the host's own epoch tick (FernletSocial's `PresenceManager` runs one), and its
+/// `stop()` drops it. Nothing writes it to the keychain, a file or `UserDefaults`; a posture that is
+/// dropped is gone.
 ///
-/// Package access for FernletSocial until A1, with ``epoch``, ``instanceName`` and the production
-/// ``minted(at:instanceNamePrefix:commonName:)`` and ``rotated(at:instanceNamePrefix:commonName:)``:
-/// FernletSocial's presence manager mints and rotates the posture it hands the presence radio's
-/// seam (``PresenceRadioSession``), which exits with it. The injected-source mints, the TLS identity
-/// and the name construction stay internal.
-package nonisolated struct PresenceEpochPosture {
+/// Internal, with every member: ``ProximityPresenceSession`` mints, rotates and wears it, and a host
+/// sees only its epoch (``ProximityPresenceSession/postureEpoch``).
+nonisolated struct PresenceEpochPosture {
 
     // MARK: Shape
 
@@ -129,13 +127,11 @@ package nonisolated struct PresenceEpochPosture {
     // MARK: The posture
 
     /// The presence epoch this posture belongs to — `IdentityService.presenceEpoch(at:)`, the
-    /// single presence clock. Not a second counter, and never advertised on its own. Package access
-    /// for FernletSocial until A1, with the type.
-    package let epoch: UInt64
+    /// single presence clock. Not a second counter, and never advertised on its own.
+    let epoch: UInt64
 
-    /// The service instance name advertised for this epoch. Package access for FernletSocial until
-    /// A1, with the type.
-    package let instanceName: String
+    /// The service instance name advertised for this epoch.
+    let instanceName: String
 
     /// The TLS identity presented for this epoch: a fresh self-signed P-256 key pair whose
     /// certificate's subject is the host namespace's `family.radios.tlsCommonName`, a token shared
@@ -187,8 +183,7 @@ package nonisolated struct PresenceEpochPosture {
     }
 
     /// The production mint: the system CSPRNG and the module's one certificate path, under the
-    /// host's presence prefix and common name. Package access for FernletSocial until A1, with the
-    /// type.
+    /// host's presence prefix and common name.
     ///
     /// - Parameters:
     ///   - now: the clock reading the epoch comes from.
@@ -196,7 +191,7 @@ package nonisolated struct PresenceEpochPosture {
     ///   - commonName: the host namespace's `family.radios.tlsCommonName`.
     /// - Throws: ``PresencePostureError/entropyUnavailable(byteCount:)``, or what the certificate
     ///   mint throws.
-    package static func minted(at now: Date, instanceNamePrefix: String, commonName: String) throws -> PresenceEpochPosture {
+    static func minted(at now: Date, instanceNamePrefix: String, commonName: String) throws -> PresenceEpochPosture {
         try minted(
             at: now,
             instanceNamePrefix: instanceNamePrefix,
@@ -224,8 +219,7 @@ package nonisolated struct PresenceEpochPosture {
     }
 
     /// The production rotation, on the same terms as ``rotated(at:instanceNamePrefix:entropy:mintIdentity:)``.
-    /// Package access for FernletSocial until A1, with the type.
-    package func rotated(at now: Date, instanceNamePrefix: String, commonName: String) throws -> PresenceEpochPosture {
+    func rotated(at now: Date, instanceNamePrefix: String, commonName: String) throws -> PresenceEpochPosture {
         guard IdentityService.presenceEpoch(at: now) != epoch else { return self }
         return try Self.minted(at: now, instanceNamePrefix: instanceNamePrefix, commonName: commonName)
     }
