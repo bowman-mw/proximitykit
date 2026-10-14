@@ -423,10 +423,11 @@ import Testing
             """),
         (file: "ProximitySourceWallTests.swift",
          invariant: """
-            the source walls' own file: the keychain writes, accessibility classes and launch-hook reads \
-            its matcher samples spell are data in literals it reads as text and never runs, and it reads \
-            ProximityKit's sources only as text through the walls' walker; I9 reads its code, comments \
-            dropped and literals emptied, and refuses a needle there as anywhere
+            the source walls' own file: the keychain writes, accessibility classes, launch-hook reads, \
+            primitive calls and escape-hatch markers its matcher samples spell are data in literals it \
+            reads as text and never runs, and it reads ProximityKit's sources only as text through the \
+            walls' walker; I9 reads its code, comments dropped and literals emptied, and refuses a needle \
+            there as anywhere
             """)
     ]
 
@@ -934,8 +935,10 @@ import Testing
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
     /// `PackageTestTreeWallTests`' 6. RAISED at A1.1.15 (2026-10-14): 185 → 191, for
-    /// `ProximitySourceWallTests`' 6. A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 191
+    /// `ProximitySourceWallTests`' 6. RAISED at A1.1.16 (2026-10-14): 191 → 197, for the six cells the
+    /// purpose wall and the escape-hatch census add to `ProximitySourceWallTests`. A test added or removed
+    /// changes it in the same commit.
+    static let measuredDeclaredTests = 197
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

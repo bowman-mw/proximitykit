@@ -992,7 +992,7 @@ audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoun
 platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
 (`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`), the tests' own
 hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`) and the source walls
-over this module's own code (`ProximitySourceWallTests`): twenty-four suites, 191 tests. The
+over this module's own code (`ProximitySourceWallTests`): twenty-four suites, 197 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1127,13 +1127,23 @@ ML5 and the batteries' digest homes) hold the same rules over Fernlet's trees an
 The source walls, `ProximitySourceWallTests`, are one of this target's suites as well, on the
 `proximitykit` line, so the rules a host holds over its shipping code hold this module's code wherever
 it lives. They read every Swift file of this module through the walls' walker at its file floor, each
-matcher fixtured first, and hold two rules. The launch hooks: every line that reads one of this module's
+matcher fixtured first, and hold four rules. The launch hooks: every line that reads one of this module's
 DEBUG launch-environment keys, `PROXIMITYKIT_UI_TEST_*` (the mesh manager's canned-mesh flags) or
 `PROXIMITYKIT_MESH*` (the transport's console mirror and chaos keys), sits inside an open `#if DEBUG`
 region, and each family is read at its measured floor, so a matcher that stops seeing one fails. Key
 custody: no keychain row this module writes is synchronizable, and every accessibility class it names
-is a `ThisDeviceOnly` one. In Fernlet's repository, `TestHookBoundaryTests` and
-`KeyCustodyBoundaryTests` hold the same rules over Fernlet's shipping code and not this folder.
+is a `ThisDeviceOnly` one. The purpose wall: every line that opens a raw CryptoKit primitive call
+(nine markers: signing and verifying, HKDF, HMAC, ChaChaPoly and AES-GCM) names a purpose within
+three lines above it to six below, by ``ProximityCryptographicPurpose``, a `purpose` argument, an
+authenticated-data binding or an escape-hatch comment, and at least 16 such lines are read (21 in six
+files today). The escape-hatch census: the calls that answer with a `cryptographic-domain:` comment
+instead are pinned by total, by label, by file and by documentation mention, with no legacy read path
+among them; the one hatch is the QUIC transport's X.509 certificate self-signature
+(`x509-self-signature`, over bytes X.509 fixes, under a key minted for that one signature), its
+justification beside its pin. In Fernlet's repository, `TestHookBoundaryTests`,
+`KeyCustodyBoundaryTests`, `CryptographicPurposeBoundaryTests` and
+`CryptographicEscapeHatchCensusTests` hold the same rules over Fernlet's shipping code and not this
+folder.
 
 The presence engine's own contract is held here too, by `ProximityPresenceSessionTests`, over an
 in-memory radio of the suite's own, under `.packageTest` and the engine's own posture mint: a sighting
