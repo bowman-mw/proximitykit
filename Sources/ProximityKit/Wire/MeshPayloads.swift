@@ -295,7 +295,7 @@ public nonisolated enum MeshKeyRotationCause: String, Codable, Equatable, Sendab
 /// ## The `cause` field, and why an absent one is `timer`
 ///
 /// P3 item 5 extends the frame with ``MeshKeyRotationCause``. The payload is **unsigned** — it
-/// rides the signed `FernletIdentityEnvelope`, so no signature transcript and no golden vector
+/// rides the signed `ProximityIdentityEnvelope`, so no signature transcript and no golden vector
 /// moved when the field was added; `MeshKeyRotationWireTests` pins the extended JSON instead.
 /// A frame from a build that predates the field decodes as ``MeshKeyRotationCause/timer``, which
 /// is not a guess: the 15-minute schedule is the only rotation those builds ever perform.

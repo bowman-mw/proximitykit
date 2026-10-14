@@ -27,7 +27,7 @@ public protocol ProximityInspectorRecording: AnyObject {
 
 /// The one callback a ``ProximityCoordinator`` delivers verified application payloads through.
 ///
-/// Fires only after `FernletIdentityEnvelope.verify` succeeded and the token is one the host
+/// Fires only after `ProximityIdentityEnvelope.verify` succeeded and the token is one the host
 /// dispatches (`payloads.known`) but not one of the coordinator's own session messages (identity
 /// intro/ack, heartbeat); `peer` is the handshake-verified
 /// identity when one exists, else the pending identity — receivers must apply their own
@@ -38,7 +38,7 @@ public protocol ProximityInspectorRecording: AnyObject {
 public protocol ProximityPayloadHandling: AnyObject {
     func proximityCoordinator(
         _ coordinator: ProximityCoordinator,
-        didReceive envelope: FernletIdentityEnvelope,
+        didReceive envelope: ProximityIdentityEnvelope,
         plaintext: Data,
         from peer: ProximityCoordinator.PeerIdentity?
     )
@@ -423,7 +423,7 @@ public final class ProximityCoordinator {
         inspector?.recordCoordinatorEvent("identity confirmed \(peer.fingerprint)")
     }
 
-    public func send(_ envelope: FernletIdentityEnvelope) async throws {
+    public func send(_ envelope: ProximityIdentityEnvelope) async throws {
         guard let peer = currentTransportPeer, let identity = connectedIdentity else {
             throw CoordinatorError.notConnected
         }
@@ -459,7 +459,7 @@ public final class ProximityCoordinator {
     /// hands in a human-sounding title that is nonetheless a wire token: it is folded into the
     /// envelope's canonical signing bytes AND surfaced in the RECEIVING device's Connection Inspector.
     /// The rationale, and the receiver-side plan for a localized inspector, live on
-    /// `FernletIdentityEnvelope.payloadSummary`.
+    /// `ProximityIdentityEnvelope.payloadSummary`.
     ///
     /// Throws ``CoordinatorError/notConnected`` before signing when no transport peer is connected, and
     /// from ``send(_:)`` when no identity has been confirmed: it sends to a confirmed peer only. The
@@ -475,7 +475,7 @@ public final class ProximityCoordinator {
         guard currentTransportPeer != nil else { throw CoordinatorError.notConnected }
         let (finalPayload, encryption) = try sealIfNeeded(payload, sealed: sealed)
         let sentAt = now()
-        let envelope = try FernletIdentityEnvelope.signed(
+        let envelope = try ProximityIdentityEnvelope.signed(
             identityService: identity,
             senderDisplayName: disclosedDisplayName,
             recipientFingerprint: connectedIdentity?.fingerprint,
@@ -783,7 +783,7 @@ public final class ProximityCoordinator {
     /// envelope. On a presence-heart connection it is SEALED to the intended friend's KA key and
     /// wrapped so the wire carries no cleartext identity — fail-closed: a missing/empty expected KA
     /// key throws (never falls back to unsealed), which fails the connection at the call site.
-    private func encodeIdentityEnvelopeForTransport(_ envelope: FernletIdentityEnvelope) throws -> Data {
+    private func encodeIdentityEnvelopeForTransport(_ envelope: ProximityIdentityEnvelope) throws -> Data {
         guard usesSealedIntroduction else {
             return try JSONEncoder().encode(envelope)
         }
@@ -865,7 +865,7 @@ public final class ProximityCoordinator {
     private func sendIdentityIntroduction(to peer: PeerHandle) async {
         do {
             let sentAt = now()
-            let envelope = try FernletIdentityEnvelope.signed(
+            let envelope = try ProximityIdentityEnvelope.signed(
                 identityService: identity,
                 senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
@@ -873,7 +873,7 @@ public final class ProximityCoordinator {
                 // The host's title is a frozen wire token, never localized — it is signed wire bytes,
                 // and it is rendered in the RECEIVER's Connection Inspector, so a translated sender
                 // would write its own language into a stranger's audit log. Full rationale:
-                // `FernletIdentityEnvelope.payloadSummary`. Option 1b also took the NAME out of it:
+                // `ProximityIdentityEnvelope.payloadSummary`. Option 1b also took the NAME out of it:
                 // the summary is the one field a receiver renders verbatim, so interpolating the
                 // local name here would have disclosed it in the very frame that withholds it.
                 payloadSummary: PayloadSummary(title: vocabulary.session.identityIntroduction.summaryTitle),
@@ -896,7 +896,7 @@ public final class ProximityCoordinator {
         guard let unwrapped = unwrapInboundEnvelopeData(message) else { return }
 
         do {
-            let envelope = try JSONDecoder().decode(FernletIdentityEnvelope.self, from: unwrapped.data)
+            let envelope = try JSONDecoder().decode(ProximityIdentityEnvelope.self, from: unwrapped.data)
 
             // On a sealed-introduction connection an identity intro/ack MUST arrive sealed. A PLAIN
             // identity envelope (a forger sending their own intro to bait a cleartext ack) is
@@ -994,7 +994,7 @@ public final class ProximityCoordinator {
 
     /// Trust gate on a decoded (not yet verified) envelope: a revoked key hard-fails the session
     /// with an audit entry, a blocked key is dropped silently (no signal back to the sender).
-    private func isRejectedByTrustPolicy(_ envelope: FernletIdentityEnvelope) -> Bool {
+    private func isRejectedByTrustPolicy(_ envelope: ProximityIdentityEnvelope) -> Bool {
         if trustPolicy?.isRevokedProximitySigningKey(envelope.senderSigningPublicKey) == true {
             let fingerprint = IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
             trustPolicy?.recordSessionAudit(ProximitySessionAudit(
@@ -1014,7 +1014,7 @@ public final class ProximityCoordinator {
     }
 
     /// Byte/inspector/audit bookkeeping for an envelope that passed `verify`.
-    private func recordVerifiedInbound(_ envelope: FernletIdentityEnvelope, byteCount: Int) async {
+    private func recordVerifiedInbound(_ envelope: ProximityIdentityEnvelope, byteCount: Int) async {
         recordEnvelope(envelope, direction: .received, byteCount: byteCount, signatureVerified: true)
         bytesReceived += byteCount
         await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
@@ -1038,7 +1038,7 @@ public final class ProximityCoordinator {
     /// future peer, not an attack — park it and keep the session alive. Never dispatched to the
     /// payload handler, never `fail()`.
     private func dispatchVerified(
-        _ envelope: FernletIdentityEnvelope,
+        _ envelope: ProximityIdentityEnvelope,
         plaintext: Data,
         from peer: PeerHandle,
         cameFromSealedWrapper: Bool
@@ -1080,13 +1080,13 @@ public final class ProximityCoordinator {
     ///   peer mid-session;
     /// - **the signing key matches** the identity the handshake verified, so a second peer on the
     ///   same transport cannot name someone else;
-    /// - **the envelope disclosed a name at all** (``FernletIdentityEnvelope/disclosedSenderDisplayName(in:)``),
+    /// - **the envelope disclosed a name at all** (``ProximityIdentityEnvelope/disclosedSenderDisplayName(in:)``),
     ///   which an introduction and a pre-commit peer's frames do not.
     ///
     /// The state is re-emitted with the named identity because `.connected(peer:)`'s associated
     /// value is what every surface renders; leaving it holding the withheld identity would adopt
     /// the name into a property nothing observes.
-    private func adoptDisclosedDisplayName(from envelope: FernletIdentityEnvelope) {
+    private func adoptDisclosedDisplayName(from envelope: ProximityIdentityEnvelope) {
         guard let peer = connectedPeerIdentity, peer.isDisplayNameWithheld,
               peer.signingPublicKey == envelope.senderSigningPublicKey,
               let disclosed = envelope.disclosedSenderDisplayName(in: identity.namespace) else { return }
@@ -1155,13 +1155,13 @@ public final class ProximityCoordinator {
     private func sendIdentityAcknowledgement(to peer: PeerHandle) async {
         do {
             let sentAt = now()
-            let envelope = try FernletIdentityEnvelope.signed(
+            let envelope = try ProximityIdentityEnvelope.signed(
                 identityService: identity,
                 senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadTypeToken: vocabulary.session.identityAcknowledge.payloadType,
                 // The host's frozen title — signed wire bytes, rendered in the receiver's Inspector.
-                // See `FernletIdentityEnvelope.payloadSummary`.
+                // See `ProximityIdentityEnvelope.payloadSummary`.
                 payloadSummary: PayloadSummary(title: vocabulary.session.identityAcknowledge.summaryTitle),
                 payload: try await makeIdentityRangingPayload(),
                 createdAt: sentAt,
@@ -1184,7 +1184,7 @@ public final class ProximityCoordinator {
     }
 
     private func handleHeartbeat(
-        _ envelope: FernletIdentityEnvelope,
+        _ envelope: ProximityIdentityEnvelope,
         plaintext: Data,
         from peer: PeerHandle
     ) async {
@@ -1257,13 +1257,13 @@ public final class ProximityCoordinator {
                 sentAt: now,
                 responseTo: heartbeatID
             )
-            let envelope = try FernletIdentityEnvelope.signed(
+            let envelope = try ProximityIdentityEnvelope.signed(
                 identityService: identity,
                 senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadTypeToken: vocabulary.session.heartbeat.payloadType,
                 // The host's frozen title — signed wire bytes, rendered in the receiver's Inspector.
-                // See `FernletIdentityEnvelope.payloadSummary`.
+                // See `ProximityIdentityEnvelope.payloadSummary`.
                 payloadSummary: PayloadSummary(title: vocabulary.session.heartbeat.replyTitle),
                 payload: try JSONEncoder().encode(payload),
                 createdAt: now,
@@ -1281,7 +1281,7 @@ public final class ProximityCoordinator {
     }
 
     private func recordEnvelope(
-        _ envelope: FernletIdentityEnvelope,
+        _ envelope: ProximityIdentityEnvelope,
         direction: ProximityInspectorEnvelope.Direction,
         byteCount: Int,
         signatureVerified: Bool?
@@ -1361,7 +1361,7 @@ public final class ProximityCoordinator {
     /// salvageable in it, so the caller fails the whole session (matching the sibling fail-closed
     /// branches in `handleInbound` and `unwrapInboundEnvelopeData`).
     private func sealedIntroductionSenderMatches(
-        _ envelope: FernletIdentityEnvelope,
+        _ envelope: ProximityIdentityEnvelope,
         cameFromSealedWrapper: Bool
     ) -> Bool {
         guard usesSealedIntroduction else { return true }
@@ -1370,7 +1370,7 @@ public final class ProximityCoordinator {
     }
 
     private func handleIdentityEnvelope(
-        _ envelope: FernletIdentityEnvelope,
+        _ envelope: ProximityIdentityEnvelope,
         plaintext: Data,
         from peer: PeerHandle,
         cameFromSealedWrapper: Bool
@@ -1460,7 +1460,7 @@ public final class ProximityCoordinator {
     /// `namespace`'s peer-name policy, or its fingerprint when it withheld one (Option 1b). Never the
     /// policy's floor for a withheld name, which would persist a name nobody chose and hide who the
     /// row is about.
-    private static func auditName(of envelope: FernletIdentityEnvelope, in namespace: ProximityNamespace) -> String {
+    private static func auditName(of envelope: ProximityIdentityEnvelope, in namespace: ProximityNamespace) -> String {
         envelope.disclosedSenderDisplayName(in: namespace) ?? IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
     }
 
@@ -1685,13 +1685,13 @@ public final class ProximityCoordinator {
                 sentAt: sentAt,
                 responseTo: nil
             )
-            let envelope = try FernletIdentityEnvelope.signed(
+            let envelope = try ProximityIdentityEnvelope.signed(
                 identityService: identity,
                 senderDisplayName: disclosedDisplayName,
                 recipientFingerprint: peer.advertisedFingerprint,
                 payloadTypeToken: vocabulary.session.heartbeat.payloadType,
                 // The host's frozen title — signed wire bytes, rendered in the receiver's Inspector.
-                // See `FernletIdentityEnvelope.payloadSummary`.
+                // See `ProximityIdentityEnvelope.payloadSummary`.
                 payloadSummary: PayloadSummary(title: vocabulary.session.heartbeat.pingTitle),
                 payload: try JSONEncoder().encode(payload),
                 createdAt: sentAt,

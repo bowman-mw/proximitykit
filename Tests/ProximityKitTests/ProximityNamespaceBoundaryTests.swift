@@ -40,7 +40,7 @@
 //   5. `package` is declared in ProximityKit code only on an exact per-file list of the doors a named
 //      later step reshapes or closes, each row with that step, which is empty: no line declares it
 //      (the presence radio's doors closed at plan step A1.1, behind its public presence engine);
-//   6. no type that left ProximityKit for FernletSocial or the app, or was renamed in it (96 names:
+//   6. no type that left ProximityKit for FernletSocial or the app, or was renamed in it (97 names:
 //      the heart dead-drop's, presence's, moderation's (the report relay's among them), closeness's
 //      and friend state's types, the parked chat payload, the clothing shop's, the activity manager's
 //      with its payloads and the two domain types its signing extends, the live-session chat's with
@@ -50,11 +50,12 @@
 //      deleted support layout and camera's copy vault, the sealed-backup escrow's, the Live Activity
 //      reaper and its attributes, the app's since plan step A0.6, the recipe-share manager, its
 //      diagnostics ring and its wire types, FernletSocial's since plan step A0.7, the three public
-//      values plan step A0.7 renamed, and the nine recipe-named types of the pair session's mechanism
-//      plan step A1.0 renamed with pair names, so no compatibility alias brings a recipe name back) is
-//      declared, extended or aliased in ProximityKit code again, and no renamed public member's old
-//      name (`recipeShare`, the namespace's pair-session radio, `Radios.pair` since plan step A1.0) is
-//      named in its code at all.
+//      values plan step A0.7 renamed, the nine recipe-named types of the pair session's mechanism
+//      plan step A1.0 renamed with pair names, so no compatibility alias brings a recipe name back,
+//      and the signed identity envelope's Fernlet name, `ProximityIdentityEnvelope` since plan step
+//      A1.1, renamed before the package's first tag) is declared, extended or aliased in ProximityKit
+//      code again, and no renamed public member's old name (`recipeShare`, the namespace's
+//      pair-session radio, `Radios.pair` since plan step A1.0) is named in its code at all.
 //
 // And ProximityKit's target in its package's manifest (the package root's `Package.swift`:
 // `FernletKit/Package.swift` in the Fernlet repository, the root's own in ProximityKit's) depends on
@@ -778,13 +779,14 @@ import Testing
     /// public values were renamed in place for the one-to-one send, so their old names are refused here
     /// too, against a compatibility alias, as are (plan step A1.0) the old names of the nine
     /// recipe-named types of the pair session's mechanism, renamed with pair names before the package
-    /// left Fernlet's tree. Rules 2 to 4 cannot see one come back: a feature
-    /// re-declared here under its old name, with no Fernlet string, no registry label and no domain
-    /// type of its own, compiles clean and passes them and every other test, and two declarations of
-    /// one name in two modules the app imports compile until a caller names it. So each name is
-    /// refused as a type declared here (a class, struct, enum, actor or protocol, nested or not), an
-    /// extension, or an alias's name or target, module-qualified or not. The list has no exit step: it
-    /// only grows, as each step adds the types it moves out.
+    /// left Fernlet's tree, and (plan step A1.1) the signed identity envelope's Fernlet name, renamed
+    /// `ProximityIdentityEnvelope` before the package's first tag. Rules 2 to 4 cannot see one come
+    /// back: a feature re-declared here under its old name, with no Fernlet string, no registry label
+    /// and no domain type of its own, compiles clean and passes them and every other test, and two
+    /// declarations of one name in two modules the app imports compile until a caller names it. So each
+    /// name is refused as a type declared here (a class, struct, enum, actor or protocol, nested or
+    /// not), an extension, or an alias's name or target, module-qualified or not. The list has no exit
+    /// step: it only grows, as each step adds the types it moves out.
     /// Only code counts: comments and literals may name a moved type freely, as the docs that say where
     /// it went do. The same matcher over types that stay (``declarationFloorNames``) must find each of
     /// them, so a matcher gone blind cannot pass the module vacuously.
@@ -947,7 +949,10 @@ import Testing
     /// `ProximityPairTransfer`, `ProximityPairDiscoveryGate`, `ProximityPairAdvertisedName`,
     /// `ProximityPairAdvertisement`, `ProximityPairDialHello`, `ProximityPairPosture`,
     /// `ProximityPairRadioSession`, `NetworkPairSession` and the radio's private `PairTransferClaim`, so
-    /// no compatibility alias brings a recipe name back.
+    /// no compatibility alias brings a recipe name back. Renamed in place, since plan step A1.1: the
+    /// signed identity envelope every transfer travels in, `FernletIdentityEnvelope`, named
+    /// `ProximityIdentityEnvelope` before the package's first tag, after which a rename would break its
+    /// public API, so no alias brings the Fernlet name back.
     static let movedTypeNames = [
         "HeartDropService", "HeartDropOutbox", "HeartDropDedupStore", "HeartDropPeerBundleCache",
         "HeartDropSealer", "HeartDropSidecarSeal", "HeartDropStorageScope", "HeartDropSidecarFormatCensus",
@@ -976,7 +981,8 @@ import Testing
         "SharedSavedRecipePayload", "PendingProximityRecipeShare",
         "RecipeShareTransfer", "RecipeShareDiscoveryGate", "RecipeShareAdvertisedName", "RecipeShareAdvertisement",
         "RecipeShareDialHello", "RecipeSharePosture", "RecipeShareRadioSession", "NetworkRecipeShareSession",
-        "RecipeShareTransferClaim"
+        "RecipeShareTransferClaim",
+        "FernletIdentityEnvelope"
     ]
 
     /// Every public member renamed in place, by its old name, which ProximityKit code names nowhere:

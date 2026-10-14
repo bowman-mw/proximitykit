@@ -204,7 +204,7 @@ nonisolated enum MeshRoutedContentDigest {
 /// its own hash, when the item expires, and the slice itself.
 ///
 /// **Signed by the origin only.** A custodian forwards this exact object — the same decoded
-/// fields, the same `signature` — inside its OWN `FernletIdentityEnvelope`; there is no factory
+/// fields, the same `signature` — inside its OWN `ProximityIdentityEnvelope`; there is no factory
 /// that re-signs someone else's chunk, and ``MeshChunkVerifier`` resolves the signing key from
 /// ``originFingerprint`` via the admission ledger, never from the envelope's sender. A
 /// since-departed origin's chunk still verifies (leaving is not a retraction); a quorum-REMOVED

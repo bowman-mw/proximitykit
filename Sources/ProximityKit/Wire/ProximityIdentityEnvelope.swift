@@ -1,7 +1,7 @@
-// FernletIdentityEnvelope.swift
-// Fernlet/Proximity
+// ProximityIdentityEnvelope.swift
+// ProximityKit/Wire
 //
-// Wire envelope for all peer-to-peer transfers between Fernlet devices.
+// Wire envelope for all peer-to-peer transfers between devices.
 // Every envelope is Ed25519-signed over a deterministic canonical JSON encoding.
 
 import Foundation
@@ -17,7 +17,7 @@ import Foundation
 // type `nonisolated, Sendable` (matching the wire types it carries — PayloadEncryption/PayloadSummary)
 // makes decode + signature verification safe from any isolation domain. The two members that touch
 // the `@MainActor` IdentityService/ReplayCache (`verify`, `signed`) stay `@MainActor` explicitly.
-/// The signed wire envelope EVERY peer-to-peer transfer between Fernlet devices travels in:
+/// The signed wire envelope EVERY peer-to-peer transfer between devices travels in:
 /// sender keys + display name, an optional recipient fingerprint, the (possibly sealed) payload,
 /// and an Ed25519 signature over deterministic canonical bytes.
 ///
@@ -32,7 +32,7 @@ import Foundation
 /// an envelope from a NEWER build still decodes, re-encodes byte-identically, and verifies — a
 /// token outside the host's `payloads.known` is parked and never dispatched, fail-closed. Value type,
 /// `nonisolated`/`Sendable`; only `verify`/`signed` touch main-actor state.
-public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable {
+public nonisolated struct ProximityIdentityEnvelope: Codable, Equatable, Sendable {
     public let schemaVersion: Int                 // 1
     public let envelopeID: UUID                   // for replay protection + Inspector log correlation
     public let senderSigningPublicKey: Data       // Ed25519 raw, 32 B
@@ -183,7 +183,7 @@ public nonisolated struct FernletIdentityEnvelope: Codable, Equatable, Sendable 
 //   * `verify` accepts BOTH v1 (legacy `.iso8601`/`.sortedKeys` bytes) and v2 (new serializer),
 //     so a not-yet-updated in-field Apple peer is never cut off.
 
-extension FernletIdentityEnvelope {
+extension ProximityIdentityEnvelope {
     /// Schema version stamped onto newly-signed envelopes (new cross-platform canonical serializer).
     public static let currentSchemaVersion = 2
     /// The pre-WI-6 schema version, still accepted on verify for in-field peers.
@@ -194,7 +194,7 @@ extension FernletIdentityEnvelope {
 
 // MARK: - Verification
 
-extension FernletIdentityEnvelope {
+extension ProximityIdentityEnvelope {
     /// The distinct ways `verify` rejects an envelope.
     ///
     /// Every case means "drop the envelope"; `replayDetected` doubles as the ``ReplayCache``'s
@@ -296,7 +296,7 @@ extension FernletIdentityEnvelope {
 
 // MARK: - Signed factory
 
-extension FernletIdentityEnvelope {
+extension ProximityIdentityEnvelope {
     /// Creates a signed envelope under a raw payload token, a token the host's vocabulary names: the
     /// engine's own session messages, the coordinator's per-connection send and a host's typed view
     /// all sign through it. `signature` is computed over the canonical bytes of all other fields,
@@ -314,8 +314,8 @@ extension FernletIdentityEnvelope {
         payload: Data,
         createdAt: Date = Date(),
         expiresAt: Date? = nil
-    ) throws -> FernletIdentityEnvelope {
-        var envelope = FernletIdentityEnvelope(
+    ) throws -> ProximityIdentityEnvelope {
+        var envelope = ProximityIdentityEnvelope(
             schemaVersion: currentSchemaVersion,
             envelopeID: envelopeID,
             senderSigningPublicKey: identityService.localSigningPublicKey,

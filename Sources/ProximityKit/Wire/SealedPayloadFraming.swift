@@ -3,7 +3,7 @@ import Compression
 
 /// How a sealed payload body is framed inside the AEAD (wire2, bitchat adoptions Increment 2,
 /// Docs/Plan-Bitchat-Adoptions-2026-07-25.md). Threaded through `IdentityService.seal/open` and
-/// `FernletIdentityEnvelope.verify`; derived at call sites from the peer's advertised
+/// `ProximityIdentityEnvelope.verify`; derived at call sites from the peer's advertised
 /// capabilities, never from the bytes alone.
 public nonisolated enum SealedPayloadFormat: Equatable, Sendable {
     /// Pre-wire2 behavior: the plaintext is sealed as-is.

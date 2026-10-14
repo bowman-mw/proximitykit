@@ -1,5 +1,5 @@
 // ReplayCache.swift
-// Fernlet/Proximity
+// ProximityKit/Identity
 //
 // Rolling 24-hour cache of seen envelope IDs for replay-attack prevention.
 // The dateProvider is injectable so tests can simulate clock advancement.
@@ -8,7 +8,7 @@ import Foundation
 
 /// Rolling 24-hour cache of seen envelope IDs, the live-radio replay-attack defense.
 ///
-/// ``FernletIdentityEnvelope/verify(identityService:replayCache:sealedPayloadFormat:)`` records
+/// ``ProximityIdentityEnvelope/verify(identityService:replayCache:sealedPayloadFormat:)`` records
 /// every accepted envelope here and throws `.replayDetected` on a duplicate ID or an envelope
 /// whose `createdAt` predates the retention window (the flush-and-replay defense). Each radio
 /// manager owns one instance shared across its coordinators. Bounded at `maxEntries` with
@@ -35,11 +35,11 @@ public final class ReplayCache {
         let now = dateProvider()
         let cutoff = now.addingTimeInterval(-retentionInterval)
         guard createdAt >= cutoff else {
-            throw FernletIdentityEnvelope.VerifyError.replayDetected
+            throw ProximityIdentityEnvelope.VerifyError.replayDetected
         }
         purgeIfNeeded()
         if seen[envelopeID] != nil {
-            throw FernletIdentityEnvelope.VerifyError.replayDetected
+            throw ProximityIdentityEnvelope.VerifyError.replayDetected
         }
         seen[envelopeID] = now
     }

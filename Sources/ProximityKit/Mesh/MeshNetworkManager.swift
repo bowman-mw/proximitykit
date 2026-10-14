@@ -2136,7 +2136,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// A feature-module inbound handler. Receives exactly what the core switch cases consume: the
     /// verified envelope, the decrypted plaintext, and the transport-verified peer identity.
     public typealias MeshPayloadHandler = @MainActor (
-        _ envelope: FernletIdentityEnvelope,
+        _ envelope: ProximityIdentityEnvelope,
         _ plaintext: Data,
         _ peer: ProximityCoordinator.PeerIdentity?
     ) -> Void
@@ -2191,7 +2191,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// is the rule.
     public func proximityCoordinator(
         _ coordinator: ProximityCoordinator,
-        didReceive envelope: FernletIdentityEnvelope,
+        didReceive envelope: ProximityIdentityEnvelope,
         plaintext: Data,
         from peer: ProximityCoordinator.PeerIdentity?
     ) {
@@ -2284,7 +2284,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// payload type and the reason, never a key, and carries `held` so a cell can read it per rig.
     private func attributableSlot(
         for coordinator: ProximityCoordinator,
-        envelope: FernletIdentityEnvelope,
+        envelope: ProximityIdentityEnvelope,
         credited peer: ProximityCoordinator.PeerIdentity?,
         type token: String
     ) -> PeerSlot? {
@@ -10398,7 +10398,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// with a merely-pending identity. Feature payloads are for session members, not candidates.
     private func dispatchRegistryPayload(
         _ token: String,
-        envelope: FernletIdentityEnvelope,
+        envelope: ProximityIdentityEnvelope,
         plaintext: Data,
         peer: ProximityCoordinator.PeerIdentity?,
         slot: PeerSlot?
@@ -11370,7 +11370,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         return true
     }
 
-    private func handleVerifyChallenge(_ envelope: FernletIdentityEnvelope, plaintext: Data, slot: PeerSlot?) {
+    private func handleVerifyChallenge(_ envelope: ProximityIdentityEnvelope, plaintext: Data, slot: PeerSlot?) {
         guard let slot,
               let payload = try? JSONDecoder().decode(VerifyChallengePayload.self, from: plaintext) else { return }
         // Only honor a challenge quoting the QR THIS device is displaying right now — a
@@ -11443,7 +11443,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         }
     }
 
-    private func handleVerifyResponse(_ envelope: FernletIdentityEnvelope, plaintext: Data, slot: PeerSlot?) {
+    private func handleVerifyResponse(_ envelope: ProximityIdentityEnvelope, plaintext: Data, slot: PeerSlot?) {
         guard let slot,
               let pending = pendingQRVerifications[slot.id],
               let payload = try? JSONDecoder().decode(VerifyResponsePayload.self, from: plaintext),
@@ -12598,7 +12598,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             finalPayload = payloadData
             encryption = .none
         }
-        guard let envelope = try? FernletIdentityEnvelope.signed(
+        guard let envelope = try? ProximityIdentityEnvelope.signed(
             identityService: identity,
             senderDisplayName: committed ? displayName : "",
             recipientFingerprint: fingerprint,

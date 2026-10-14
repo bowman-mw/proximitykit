@@ -62,7 +62,7 @@ public nonisolated struct ProximitySessionAudit: Equatable, Sendable {
     /// any handshake, the transport's display hint), or `nil`.
     public let peerDisplayName: String?
     /// The payload token of the envelope the event concerns, exactly as it was sent or arrived
-    /// (`FernletIdentityEnvelope.payloadTypeToken`), a token the host does not know included; `nil`
+    /// (`ProximityIdentityEnvelope.payloadTypeToken`), a token the host does not know included; `nil`
     /// where the event names no decoded envelope.
     public let payloadType: String?
     /// What happened, as an English diagnostic line; never localized.

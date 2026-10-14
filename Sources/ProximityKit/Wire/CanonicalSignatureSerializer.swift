@@ -1,5 +1,5 @@
 // CanonicalSignatureSerializer.swift
-// Fernlet/Proximity
+// ProximityKit/Wire
 //
 // Deterministic, cross-platform-stable canonical byte serializer for Ed25519 signing (WI-6).
 //
@@ -218,10 +218,10 @@ nonisolated func canonicalUTF8Ordered(_ lhs: String, _ rhs: String) -> Bool {
 
 // MARK: - Identity envelope
 
-/// Canonical signing bytes for a `FernletIdentityEnvelope` (schema v2+). The `signature` field is
+/// Canonical signing bytes for a `ProximityIdentityEnvelope` (schema v2+). The `signature` field is
 /// excluded entirely (it is the output of signing these bytes). The domain is the host namespace's
 /// `purposes.signature.identityEnvelopeV2` (plan step A0.2.4).
-public nonisolated func canonicalBytes(for envelope: FernletIdentityEnvelope,
+public nonisolated func canonicalBytes(for envelope: ProximityIdentityEnvelope,
                                        in purposes: ProximityNamespace.Purposes) -> Data {
     var writer = CanonicalByteWriter()
     writer.appendLengthPrefixed(purposes.signature.identityEnvelopeV2.data)
@@ -263,7 +263,7 @@ private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ 
 /// cross-stack divergence this whole serializer exists to eliminate (see the WHY THIS EXISTS header).
 /// The failure mode is a `signatureInvalid` on a legitimately signed envelope, reproducible only on
 /// a device set to the other language — no crash, no log, just a peer that silently cannot connect.
-/// The receiver-side localization plan is documented on `FernletIdentityEnvelope.payloadSummary`.
+/// The receiver-side localization plan is documented on `ProximityIdentityEnvelope.payloadSummary`.
 private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ summary: PayloadSummary) {
     writer.appendString(summary.title)
     writer.appendOptional(summary.subtitle)
@@ -742,7 +742,7 @@ private nonisolated func makeLegacyCanonicalSignatureEncoder() -> JSONEncoder {
 
 /// Legacy (schema v1) canonical bytes for an envelope. `try?`/`?? Data()` keeps the untrusted
 /// verify path non-throwing; an empty result simply fails the signature check.
-public nonisolated func legacyCanonicalBytes(for envelope: FernletIdentityEnvelope) -> Data {
+public nonisolated func legacyCanonicalBytes(for envelope: ProximityIdentityEnvelope) -> Data {
     var copy = envelope
     copy.signature = Data()
     return (try? makeLegacyCanonicalSignatureEncoder().encode(copy)) ?? Data()

@@ -1,13 +1,13 @@
 // PayloadSummary.swift
 // ProximityKit/Wire
 //
-// The sender's disclosure summary every envelope carries (`FernletIdentityEnvelope.payloadSummary`),
+// The sender's disclosure summary every envelope carries (`ProximityIdentityEnvelope.payloadSummary`),
 // and the date interval it may name: generic wire types that name no payload type, capability or
 // app, declared beside the envelope. Their JSON is wire, in every envelope frame and in a schema-v1
 // envelope's signed bytes, and `CanonicalSignatureSerializer` writes every field into the schema-v2
 // signed bytes, so the strings a sender puts in a summary are wire tokens (the banner on
 // `PayloadSummary` says why they never localize). `ProximityVocabularyGoldenTests` pins the JSON, one
-// schema-v1 envelope and the decode bounds; `FernletIdentityEnvelopeTests.goldenEnvelopeHex` pins the
+// schema-v1 envelope and the decode bounds; `ProximityIdentityEnvelopeTests.goldenEnvelopeHex` pins the
 // schema-v2 bytes.
 //
 // `nonisolated` + `Sendable` against ProximityKit's `.defaultIsolation(MainActor.self)`, like every

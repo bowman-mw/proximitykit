@@ -32,7 +32,7 @@ struct ReplayCacheTests {
 
         // The newest IDs are retained — replaying any of them is still detected.
         for id in newer {
-            #expect(throws: FernletIdentityEnvelope.VerifyError.replayDetected) {
+            #expect(throws: ProximityIdentityEnvelope.VerifyError.replayDetected) {
                 try cache.recordIfNew(envelopeID: id, createdAt: now)
             }
         }

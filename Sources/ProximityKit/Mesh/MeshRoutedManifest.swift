@@ -116,7 +116,7 @@ nonisolated struct MeshRecipientKeyWrap: Codable, Equatable, Sendable {
 /// stops mattering, **who it is for**, and one ``MeshRecipientKeyWrap`` per destination.
 ///
 /// **Signed by the origin only.** Relays and custodians forward this exact object — the same
-/// decoded fields, the same `signature` — inside their OWN `FernletIdentityEnvelope`; there is no
+/// decoded fields, the same `signature` — inside their OWN `ProximityIdentityEnvelope`; there is no
 /// factory that re-signs someone else's manifest, and ``MeshRoutedManifestVerifier`` resolves the
 /// signing key from ``originFingerprint`` via the admission ledger, never from the envelope's sender.
 /// A since-departed origin's manifest still verifies: leaving is not a retraction (membership and
