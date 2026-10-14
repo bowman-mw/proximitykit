@@ -389,8 +389,12 @@ own is also cancelled in an `isolated deinit`, and every record-drop path (stop,
 disconnect, stale/parked sweeps, slot eviction) runs the dropped ``ProximityCoordinator``'s own
 `cancel()` so ranging and the Live Activity anchor stop with it; the mesh manager additionally
 kicks an evicted peer's link (`MeshTransportSession.disconnectPeer`) so no zombie link
-survives a slot (`Tests/FernletTests/MemoryLifecycleTests` + `MemoryLifecycleBoundaryTests` are
-the enforcement; see Docs/Memory-Leak-Review-2026-08-17.md). Framework delegate callbacks
+survives a slot (this module's own `ProximityMemoryLifecycleTests` holds its code to the four
+static disciplines, ML1-ML4: stored tasks cancelled in a deinit, observers removed, observation
+tracking in ``ObservationLoop`` alone, every `Task` in a file holding an `unowned` host pinned or
+marked; in Fernlet's repository `Tests/FernletTests/MemoryLifecycleTests` holds the behaviour and
+`MemoryLifecycleBoundaryTests` the same disciplines over Fernlet's code; see
+Docs/Memory-Leak-Review-2026-08-17.md). Framework delegate callbacks
 (NearbyInteraction; the retired MultipeerConnectivity radio's did too) transfer non-Sendable objects across the main-actor
 hop via documented `nonisolated(unsafe)` locals. Signing inputs come from the deterministic
 binary serializer in `CanonicalSignatureSerializer.swift` (domain-tagged per signed type,
@@ -484,11 +488,12 @@ inherits all three:
   unreachable. Those spawns stay plain `Task { … }` and carry a `// host-pin: timer — <reason>`
   marker instead.
 
-`MemoryLifecycleBoundaryTests` rule ML4 fails any unmarked `Task` construction in a file holding an
-`unowned` host, or holding or taking a `FernletMeshHost` (a stored property or a parameter); rule ML5
-fails a test that builds a manager or a composition over an inline host expression. A host's ML5 holds
-the host's tests; in this module's own tests `PackageTestTreeWallTests` holds the same rule over its two
-holders, the mesh manager and the pair session.
+Rule ML4 fails any unmarked `Task` construction in a file holding an `unowned` host: in this module's
+code its own `ProximityMemoryLifecycleTests` holds its two holders, the mesh manager and the pair
+session, and a host's ML4 holds the host's code (Fernlet's `MemoryLifecycleBoundaryTests` also every file
+holding or taking a `FernletMeshHost`, a stored property or a parameter). Rule ML5 fails a test that
+builds a manager or a composition over an inline host expression. A host's ML5 holds the host's tests;
+in this module's own tests `PackageTestTreeWallTests` holds the same rule over its two holders.
 `ProximityManagerDeallocationTests` measures HP2 directly, with the beacon loop armed.
 
 ### Localization: nothing on the wire is display copy
@@ -991,8 +996,9 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoundaryTests`), the
 platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
 (`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`), the tests' own
-hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`) and the source walls
-over this module's own code (`ProximitySourceWallTests`): twenty-four suites, 197 tests. The
+hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`), the source walls
+over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
+(`ProximityMemoryLifecycleTests`): twenty-five suites, 203 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1131,8 +1137,11 @@ matcher fixtured first, and hold four rules. The launch hooks: every line that r
 DEBUG launch-environment keys, `PROXIMITYKIT_UI_TEST_*` (the mesh manager's canned-mesh flags) or
 `PROXIMITYKIT_MESH*` (the transport's console mirror and chaos keys), sits inside an open `#if DEBUG`
 region, and each family is read at its measured floor, so a matcher that stops seeing one fails. Key
-custody: no keychain row this module writes is synchronizable, and every accessibility class it names
-is a `ThisDeviceOnly` one. The purpose wall: every line that opens a raw CryptoKit primitive call
+custody: no keychain row this module writes is synchronizable, every accessibility class it names is a
+`ThisDeviceOnly` one, and no line of its code constructs an ``IdentityService`` or delegates to one of
+its initializers outside `Identity/IdentityService.swift`, read as code through the walls' lexer: its
+host door, ``ProximityHost/makeProximityIdentity()``, has no default, so every identity a manager holds
+is built in its host's code, under the host's custody. The purpose wall: every line that opens a raw CryptoKit primitive call
 (nine markers: signing and verifying, HKDF, HMAC, ChaChaPoly and AES-GCM) names a purpose within
 three lines above it to six below, by ``ProximityCryptographicPurpose``, a `purpose` argument, an
 authenticated-data binding or an escape-hatch comment, and at least 16 such lines are read (21 in six
@@ -1144,6 +1153,18 @@ justification beside its pin. In Fernlet's repository, `TestHookBoundaryTests`,
 `KeyCustodyBoundaryTests`, `CryptographicPurposeBoundaryTests` and
 `CryptographicEscapeHatchCensusTests` hold the same rules over Fernlet's shipping code and not this
 folder.
+
+The memory-lifecycle wall, `ProximityMemoryLifecycleTests`, is one of this target's suites as well, on
+the `proximitykit` line, so the static memory-lifecycle disciplines travel with this module's code. It
+reads every Swift file of this module through the walls' walker at its file floor, each
+matcher fixtured first, and holds four disciplines, each at a measured floor of the files it applies
+to. ML1: a file that stores a `Task` handle cancels it in a `deinit` or `isolated deinit` (six do, with
+no exemption). ML2: a block-based `NotificationCenter` observer is removed (one file registers one). ML3:
+`withObservationTracking` is used in ``ObservationLoop``'s file and nowhere else. ML4: in a file holding
+an `unowned` ``ProximityHost`` (the mesh manager's and the pair session's), every `Task` construction
+goes through the file's one `spawnHostPinned(_:)` or carries a `// host-pin:` marker of a known kind
+with its reason. In Fernlet's repository, `MemoryLifecycleBoundaryTests` holds the same rules over
+Fernlet's shipping code and not this folder.
 
 The presence engine's own contract is held here too, by `ProximityPresenceSessionTests`, over an
 in-memory radio of the suite's own, under `.packageTest` and the engine's own posture mint: a sighting

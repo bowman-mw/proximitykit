@@ -3,11 +3,12 @@
 //
 // ProximityKit plan step A1.1: the walls over ProximityKit's own code whose rules a host also holds over
 // its shipping code, held in this module's tests so they travel with the package. No compiler checks
-// any of these rules: a launch hook read outside `#if DEBUG`, a keychain row that syncs, or a raw
-// CryptoKit call that names no purpose compiles clean and passes every other test. This suite reads
-// every Swift file of the module as text, through `PackageRoot` and the package's walker
-// (TestSupport/PackageSwiftFiles.swift), at the walk's floor, and holds four rules, each matcher held to
-// its samples:
+// any of these rules: a launch hook read outside `#if DEBUG`, a keychain row that syncs, an identity
+// built outside its host's custody, or a raw CryptoKit call that names no purpose compiles clean and
+// passes every other test. This suite reads every Swift file of the module as text, through
+// `PackageRoot` and the package's walker (TestSupport/PackageSwiftFiles.swift), at the walk's floor (the
+// identity rule reads it as code, through the walls' lexer, TestSupport/SwiftSourceLexer.swift), and
+// holds four rules, each matcher held to its samples:
 //
 //   the launch hooks (TH1)  every line of ProximityKit's code that reads one of its DEBUG
 //        launch-environment keys, `PROXIMITYKIT_UI_TEST_*` (the mesh manager's canned-mesh flags) or
@@ -17,7 +18,10 @@
 //   key custody  no keychain row ProximityKit writes syncs through iCloud Keychain
 //        (`synchronizable: true` nowhere in its code), and every accessibility class it names is a
 //        `ThisDeviceOnly` one: a host that syncs a key, or keeps one a backup restores, writes that row
-//        itself;
+//        itself; and ProximityKit builds no identity of its own (no construction of `IdentityService`
+//        anywhere in its code, and no delegation to one of its initializers outside the file that declares
+//        it): its host door has no default, so every identity a manager holds is built in the host's code,
+//        under the host's custody;
 //   the purpose wall  every line of ProximityKit's code that opens a raw primitive call (nine CryptoKit
 //        markers: signing and verifying, HKDF, HMAC, ChaChaPoly and AES-GCM) names a purpose within an
 //        asymmetric window, three lines above it to six below, so a new primitive call cannot rely on a
@@ -37,9 +41,9 @@ import Foundation
 import Testing
 
 /// ProximityKit's code reads its launch hooks only inside `#if DEBUG`, each family still read, writes no
-/// synchronizable keychain row and names no accessibility class that is not `ThisDeviceOnly`, names a
-/// purpose at every raw cryptographic call, and answers that demand with no escape hatch but the one
-/// pinned: twelve cells, two of them the matchers' samples.
+/// synchronizable keychain row and names no accessibility class that is not `ThisDeviceOnly`, builds no
+/// identity of its own, names a purpose at every raw cryptographic call, and answers that demand with no
+/// escape hatch but the one pinned: thirteen cells, two of them the matchers' samples.
 @Suite struct ProximitySourceWallTests {
 
     // MARK: - The cells: the launch hooks
@@ -173,6 +177,46 @@ import Testing
         #expect(Self.bareAccessibilityTokens(in: "let a = kSecAttrAccessibleAlways").count == 1)
         #expect(Self.bareAccessibilityTokens(in: "let a = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly").isEmpty)
         #expect(Self.bareAccessibilityTokens(in: "let a = kSecAttrAccessibleWhenUnlockedThisDeviceOnly").isEmpty)
+    }
+
+    /// **No identity of its own.** No line of ProximityKit's code constructs an `IdentityService`
+    /// (``identityConstructionLines(in:)``), and none delegates to one of its initializers
+    /// (``identityDelegationLines(in:)``) outside ``identityDeclarationFile``, whose delegations are the
+    /// identity's own API: over every Swift file of the module at the walk's floor, read as lexed code
+    /// (`SwiftSourceLexer`), so a comment or a string that spells a construction is not one; an exact set,
+    /// the empty one. Its host door, `ProximityHost.makeProximityIdentity()`, has no default, so every
+    /// identity a manager holds is built in its host's code, under the host's own custody (a host that
+    /// escrows a key beside the identity's rows builds every identity with that participant), which the
+    /// host's own wall holds. The declaration file is among the files read, so the exemption names a real
+    /// file; both matchers are held to their samples first
+    /// (``expectTheIdentityMatchersSeeTheirSamplesAndNoNeighbour()``).
+    @Test func proximityKitBuildsNoIdentityOfItsOwn() throws {
+        Self.expectTheIdentityMatchersSeeTheirSamplesAndNoNeighbour()
+        let files = try PackageSwiftFiles.sources()
+        #expect(files.count >= PackageSwiftFiles.sourceFloor, """
+            the identity scan read \(files.count) ProximityKit files (floor \(PackageSwiftFiles.sourceFloor)): \
+            the walk is broken, not the module clean
+            """)
+        let declared = files.contains { $0.path == Self.identityDeclarationFile }
+        #expect(declared, """
+            the identity's declaration file, \(Self.identityDeclarationFile), is not among the \(files.count) \
+            files read: the one file whose delegations are the identity's own API moved or was renamed; \
+            update identityDeclarationFile
+            """)
+        var homes: [String] = []
+        // R2: bounded by the module's file count.
+        for file in files {
+            let code = SwiftSourceLexer.lex(file.text).code
+            let delegations = file.path == Self.identityDeclarationFile ? [] : Self.identityDelegationLines(in: code)
+            guard !(Self.identityConstructionLines(in: code) + delegations).isEmpty else { continue }
+            homes.append(file.path)
+        }
+        #expect(homes.isEmpty, """
+            ProximityKit constructs an IdentityService in \(homes): it builds none. Its host door, \
+            `ProximityHost.makeProximityIdentity()`, has no default, so a host answers it with an identity \
+            built under the host's own custody; add no initializer or factory of the identity outside \
+            \(Self.identityDeclarationFile), and spell any other type's `init(namespace:)` with its type name.
+            """)
     }
 
     // MARK: - The cells: the purpose wall
@@ -463,6 +507,98 @@ import Testing
             }
         }
         return hits
+    }
+
+    /// ProximityKit's file that declares the identity, by its path under the module: the one place its
+    /// initializers may delegate to one another. A delegating initializer there is the identity's own API,
+    /// and every call of it is still read where it is made.
+    static let identityDeclarationFile = "Identity/IdentityService.swift"
+
+    /// An argument list whose first label is one of the identity's initializer's three
+    /// (`namespace:`, `keychainService:`, `provisioningParticipant:`).
+    private static let identityFirstLabel = #"\(\s*(?:namespace|keychainService|provisioningParticipant)\s*:"#
+
+    /// Matcher: the 1-based lines of lexed `code` (comments removed, literals emptied) that construct
+    /// an identity: a call of the type (`IdentityService(…)`, `IdentityService.init(…)`), or an implicit
+    /// initializer (`.init(…)`, `Self(…)`, `Self.init(…)`) under one of the identity's three labels
+    /// first, which no other type of the module is built with implicitly, so a construction cannot hide
+    /// behind type inference.
+    static func identityConstructionLines(in code: String) -> [Int] {
+        let pattern = #"(?<![A-Za-z0-9_])IdentityService\s*(?:\.\s*init\s*)?\("#
+            + #"|(?<![A-Za-z0-9_.])(?:Self\s*(?:\.\s*init\s*)?|\.\s*init\s*)"# + identityFirstLabel
+        return lines(matching: pattern, in: code)
+    }
+
+    /// Matcher: the 1-based lines of lexed `code` on which an initializer delegates under one of the
+    /// identity's three labels first (`self.init(namespace:`, …), read only where the code names
+    /// `IdentityService`, as an extension that holds a convenience initializer of the identity does:
+    /// another type's delegation to its own `init(namespace:)` or `init(keychainService:)`, in a file
+    /// whose code never names the identity, is not one.
+    static func identityDelegationLines(in code: String) -> [Int] {
+        guard !lines(matching: #"(?<![A-Za-z0-9_])IdentityService(?![A-Za-z0-9_])"#, in: code).isEmpty else {
+            return []
+        }
+        return lines(matching: #"(?<![A-Za-z0-9_.])self\s*\.\s*init\s*"# + identityFirstLabel, in: code)
+    }
+
+    /// The 1-based lines of `code` on which `pattern` matches, or `[-1]`, which no sample expects and
+    /// no file passes, when the pattern does not compile.
+    private static func lines(matching pattern: String, in code: String) -> [Int] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [-1] }
+        let text = code as NSString
+        return regex.matches(in: code, range: NSRange(location: 0, length: text.length)).map {
+            text.substring(to: $0.range.location).count(where: { $0 == "\n" }) + 1
+        }
+    }
+
+    /// The construction matcher reads every way a construction is spelled and none of the nearest code
+    /// that builds no identity (another type's initializer under the same label, another type's own
+    /// delegation, a host factory's call, a static read); the delegation matcher reads a convenience
+    /// initializer of the identity delegating under its first label or under another initializer's,
+    /// and not another type's delegation in code that never names the identity, even when a comment
+    /// does, nor code that names it and delegates nothing. Each sample is lexed first, as the files are.
+    static func expectTheIdentityMatchersSeeTheirSamplesAndNoNeighbour() {
+        let constructions = [
+            "let id = IdentityService(namespace: .host)", "let id = IdentityService.init(namespace: n)",
+            "let id: IdentityService = .init(namespace: n)", "return Self(namespace: n, keychainService: s)",
+            "return Self.init(namespace: n)", "let id: IdentityService = .init(keychainService: s)",
+            "let id: IdentityService = .init(provisioningParticipant: nil)"
+        ]
+        let notConstructions = [
+            "let tag = IdentityService.fingerprint(of: key)", "let identity: IdentityService",
+            "/// IdentityService(namespace:)", #"let s = "IdentityService(namespace: .host)""#,
+            "let id = IdentityService.appIdentity()", "self.init(namespace: .host, keychainService: service)",
+            "let radio = NetworkMeshSession(namespace: namespace)",
+            "let lock = LockService(keychainService: service)",
+            "self.init(\n    keychainService: keychainService,\n    sealedContentKeyServices: services\n)"
+        ]
+        let delegations = [
+            "extension IdentityService {\n    convenience init(service: String) {\n        self.init(namespace: .host, keychainService: service)\n    }\n}",
+            "extension IdentityService {\n    convenience init(service: String) {\n        self.init(keychainService: service)\n    }\n}"
+        ]
+        let notDelegations = [
+            "final class Radio {\n    convenience init() {\n        self.init(namespace: .host)\n    }\n}",
+            "/// IdentityService\nconvenience init(service: String) {\n    self.init(keychainService: service)\n}",
+            "extension IdentityService {\n    static let shared = appIdentity()\n}"
+        ]
+        // R2: bounded by the construction samples.
+        for sample in constructions {
+            #expect(identityConstructionLines(in: SwiftSourceLexer.lex(sample).code) == [1], "missed: \(sample)")
+        }
+        // R2: bounded by their neighbours.
+        for neighbour in notConstructions {
+            #expect(identityConstructionLines(in: SwiftSourceLexer.lex(neighbour).code).isEmpty,
+                    "read a construction in: \(neighbour)")
+        }
+        // R2: bounded by the delegation samples.
+        for sample in delegations {
+            #expect(identityDelegationLines(in: SwiftSourceLexer.lex(sample).code) == [3], "missed: \(sample)")
+        }
+        // R2: bounded by their neighbours.
+        for neighbour in notDelegations {
+            #expect(identityDelegationLines(in: SwiftSourceLexer.lex(neighbour).code).isEmpty,
+                    "read a delegation in: \(neighbour)")
+        }
     }
 
     // MARK: - The purpose wall
