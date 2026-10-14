@@ -31,7 +31,10 @@
 //      seam's every import sits in its `#if` branch, never in its `#else`; a whole-file seam's file
 //      opens with its `#if` and closes with its `#endif`, and holds no other `#if`. And no `#if` or
 //      `#elseif` tests the platform with `os(…)` but a seam row's own guard: a platform branch is
-//      policy the iOS run never executes and the macOS build compiles;
+//      policy the iOS run never executes and the macOS build compiles. And no file names a refused
+//      module at all, whatever row is written: `CloudKit`, the cloud half of the S3 pair, since a
+//      CloudKit call from inside ProximityKit would put the peer identities and payloads it holds on a
+//      server without its host's seal;
 //   2. no file names a source of the device's or its user's name (`UIDevice`, `Host.current`, `NSHost`,
 //      `hostName`, `NSFullUserName` and `NSUserName`, the BSD account calls and record fields
 //      (`getlogin`, `getpwuid`, `pw_name`, `pw_gecos`), the SystemConfiguration, CoreServices and BSD
@@ -71,10 +74,10 @@
 import Foundation
 import Testing
 
-/// ProximityKit imports only neutral modules and its declared platform seams, branches on the platform
-/// only in their guards, reads no device name, computes no platform directory and defaults no fact only
-/// its host may state, and every channel-ready door of its own asks its host for each connection's
-/// ranging provider: five cells, the first three rules exact both ways over rows that are all permanent,
+/// ProximityKit imports only neutral modules and its declared platform seams, and never CloudKit,
+/// branches on the platform only in their guards, reads no device name, computes no platform directory
+/// and defaults no fact only its host may state, and every channel-ready door of its own asks its host
+/// for each connection's ranging provider: five cells, the first three rules exact both ways over rows that are all permanent,
 /// and their readers fixtured both ways.
 @Suite struct ProximityPlatformNeutralityTests {
 
@@ -203,6 +206,21 @@ import Testing
                 guarded: .wholeFile("os(iOS)"), exit: nil)
     ]
 
+    /// The modules no ProximityKit file may import or test for with `canImport`, whatever row is
+    /// written, each with its reason, which W1 names when one is used: none of them may also be a
+    /// baseline module or a seam row's module. `CloudKit` is the cloud half of the S3 pair, which no
+    /// compiler wall can hold, since an SDK framework needs no package edge (in the Fernlet repository,
+    /// its grep wall holds the modules that ride ProximityKit to the same rule, and CloudKitSync to
+    /// importing none of them).
+    static let refusedModules: [String: String] = [
+        "CloudKit": """
+            ProximityKit holds transport-verified peer identities and unsealed peer payloads, so a CloudKit \
+            call from inside it would put them on a server without its host's seal; a host that syncs \
+            injects its own transport (Fernlet's heart dead-drop takes `HeartDropTransporting`). The \
+            CloudKit half of the S3 pair, never even a seam row
+            """
+    ]
+
     /// Every source of the device's name within a module's reach: UIKit's `UIDevice`, Foundation's
     /// `Host.current`, `NSHost` and `hostName`, and its `NSFullUserName()` and `NSUserName()`, which on a
     /// Mac return the person's own full and short account names, and the BSD routes to the same two
@@ -277,21 +295,28 @@ import Testing
     /// `#if` from its first code line to its last. A platform framework enters ProximityKit only as a
     /// row with its guard and, unless it is a permanent mechanism seam, the step that removes it. And
     /// no `#if` or `#elseif` names `os(…)` but a seam row's own guard in that row's file, so no branch
-    /// holds a platform answer the iOS run never executes and the macOS build compiles.
+    /// holds a platform answer the iOS run never executes and the macOS build compiles. A module of
+    /// ``refusedModules`` is named nowhere, whatever row is written, with its reason
+    /// (``expectNoRefusedModule(_:)``, before and apart from the unlisted check).
     @Test func proximityKitImportsOnlyNeutralModulesAndItsDeclaredSeams() throws {
         let sources = try ProximityNamespaceBoundaryTests.proximitySources()
         #expect(sources.count >= Self.minimumFilesWalked, "walked only \(sources.count) ProximityKit files")
         var named: Set<String> = []
         var imported: Set<String> = []
         var branches: Set<String> = []
+        var refused: [(module: String, site: String)] = []
         // R2: bounded by the module's files.
         for source in sources {
-            let uses = try Self.moduleUses(in: source.lexed.code).filter { !Self.baselineModules.contains($0.module) }
+            let all = try Self.moduleUses(in: source.lexed.code)
+            refused += all.filter { Self.refusedModules[$0.module] != nil }
+                .map { (module: $0.module, site: "\(source.path):\($0.line)") }
+            let uses = all.filter { !Self.baselineModules.contains($0.module) }
             named.formUnion(uses.map { Self.key(source.path, $0.module) })
             imported.formUnion(uses.filter(\.isImport).map { Self.key(source.path, $0.module) })
             branches.formUnion(try Self.platformConditions(in: source.lexed.code).map { Self.key(source.path, $0) })
             Self.expectPlacement(of: uses, in: source)
         }
+        Self.expectNoRefusedModule(refused)
         let unlisted = named.subtracting(Self.seamRows.map { Self.key($0.path, $0.module) }).sorted()
         #expect(unlisted.isEmpty, """
             ProximityKit names a module that is neither a neutral baseline module nor a declared seam: \
@@ -335,6 +360,19 @@ import Testing
                 \(row.path) imports \(row.module) outside `#if \(condition)` (after its `#else`, or under \
                 another condition or none) on line(s) \(misplaced)
                 """)
+        }
+    }
+
+    /// W1's refusals: no module of ``refusedModules`` is also a baseline module or a seam row's module,
+    /// and none is named in ProximityKit's code, where `refused` lists every import of one and every
+    /// `canImport` of one (`<path>:<line>`); each failure names the module's reason.
+    static func expectNoRefusedModule(_ refused: [(module: String, site: String)]) {
+        // R2: bounded by the refused modules.
+        for (module, reason) in refusedModules.sorted(by: { $0.key < $1.key }) {
+            let doubled = baselineModules.contains(module) || seamRows.contains { $0.module == module }
+            #expect(!doubled, "`\(module)` is refused and also a baseline module or a seam row: delete it from one")
+            let sites = refused.filter { $0.module == module }.map(\.site)
+            #expect(sites.isEmpty, "ProximityKit names `\(module)` at \(sites): \(reason)")
         }
     }
 

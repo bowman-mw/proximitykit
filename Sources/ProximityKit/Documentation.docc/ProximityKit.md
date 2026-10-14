@@ -24,7 +24,8 @@ edge; its session mode is its own (``ProximitySessionMode``), which Fernlet conv
 `ProximityMode` it persists, so it has no `FernletDomainModel` edge. `ProximityNamespaceBoundaryTests`
 pins the empty list, so none of `FernletCrypto`, `FernletDomainModel`, `FernletFoundation` and
 `PrivateMediaStore` can come back unseen. It sits on the *protected* side of the S3 privacy wall: the walled `AIProviders` / `CloudKitSync` targets can never
-import it (nor it them, nor `FernletSocial`, whose heart dead-drop gets its CloudKit transport
+import it (nor it them: its manifest names no dependency, and its own platform wall refuses CloudKit by
+name; nor `FernletSocial`, whose heart dead-drop gets its CloudKit transport
 injected app-side through FernletDomainModel's `HeartDropTransporting` seam and so only ever hands
 ciphertext + rotating day tags outward). Its one seam back to app state is the
 ``ProximityHost`` protocol, which `FernletStore` conforms to via an app-side adapter; the
@@ -568,7 +569,8 @@ shown for one that sanitizes to nothing). Two apps that share a family speak one
 still never share a key, a file or a log stream. What names a format rather than an app stays this
 module's: the QR host `verify`, its query key `d` and version 1, the `FPT2`, `FGK2`, `FMGM2` and
 `FMRI1` markers, the column byte `0x03`, the `corrupt` and `chunk` extensions, and each keychain
-row's accessibility and synchronizable class, which the key-custody walls read in this module's code.
+row's accessibility and synchronizable class, which this module's own source walls
+(`ProximitySourceWallTests`) hold to `ThisDeviceOnly` and never synchronizable in its code.
 
 **Labels are the host's literals; roles are this module's.** A label is a `StaticString` source
 literal handed to a group initializer, to
@@ -946,10 +948,11 @@ leaves the set's string catalogs (`FernletFoundation`'s and `FernletDomainModel`
 build is the compiler half, which refuses any symbol native macOS lacks wherever it stands outside its
 guard. `ProximityPlatformNeutralityTests`, one of this module's own tests on the `proximitykit` CI line
 (see "Its tests"), is the source half: it holds this module's imports to a neutral baseline and the
-two seams above, and its platform branches (`#if os(…)`) to the NearbyInteraction file's guard,
-refuses the device-name sources, platform-directory APIs and host-fact defaults it lists (its rows for
-them are empty), and holds this module's two channel-ready doors to their host's ranging provider and
-`NIRangingSession` to its own file. Fernlet's `ProximityPlatformBoundaryTests`, on the s3-grep CI line,
+two seams above, refuses CloudKit by name whatever row is written (the cloud half of the S3 pair,
+which no compiler wall can hold), holds its platform branches (`#if os(…)`) to the NearbyInteraction
+file's guard, refuses the device-name sources, platform-directory APIs and host-fact defaults it lists
+(its rows for them are empty), and holds this module's two channel-ready doors to their host's ranging
+provider and `NIRangingSession` to its own file. Fernlet's `ProximityPlatformBoundaryTests`, on the s3-grep CI line,
 holds its own channel-ready door, presence's heart door in `FernletSocial`, to the same rule, and pins
 that the gate runs, neither skipped nor tolerated in CI and on by default in the pre-push hook.
 
@@ -988,8 +991,8 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoundaryTests`), the
 platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
 (`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`), the tests' own
-hygiene (`PackageTestHygieneTests`) and their tree walls (`PackageTestTreeWallTests`): twenty-three
-suites, 185 tests. The
+hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`) and the source walls
+over this module's own code (`ProximitySourceWallTests`): twenty-four suites, 191 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1120,6 +1123,17 @@ both scopes on it (`PackageTestHost` the one double). ML5: no test builds a ``Me
 call. And no test file is a home of either determinism digest, which a host's acceptance batteries pin.
 In Fernlet's repository, Fernlet's own walls (`ProximityAuditBridgeTests`, the store isolation walls,
 ML5 and the batteries' digest homes) hold the same rules over Fernlet's trees and not this folder.
+
+The source walls, `ProximitySourceWallTests`, are one of this target's suites as well, on the
+`proximitykit` line, so the rules a host holds over its shipping code hold this module's code wherever
+it lives. They read every Swift file of this module through the walls' walker at its file floor, each
+matcher fixtured first, and hold two rules. The launch hooks: every line that reads one of this module's
+DEBUG launch-environment keys, `PROXIMITYKIT_UI_TEST_*` (the mesh manager's canned-mesh flags) or
+`PROXIMITYKIT_MESH*` (the transport's console mirror and chaos keys), sits inside an open `#if DEBUG`
+region, and each family is read at its measured floor, so a matcher that stops seeing one fails. Key
+custody: no keychain row this module writes is synchronizable, and every accessibility class it names
+is a `ThisDeviceOnly` one. In Fernlet's repository, `TestHookBoundaryTests` and
+`KeyCustodyBoundaryTests` hold the same rules over Fernlet's shipping code and not this folder.
 
 The presence engine's own contract is held here too, by `ProximityPresenceSessionTests`, over an
 in-memory radio of the suite's own, under `.packageTest` and the engine's own posture mint: a sighting
@@ -1686,7 +1700,8 @@ behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroduction
 switched on by the launch-environment keys `PROXIMITYKIT_MESH_CONSOLE_LOG`,
 `PROXIMITYKIT_MESH_CHAOS` and `PROXIMITYKIT_MESH_CHAOS_BARRED` (the module's own names, as are the
 `PROXIMITYKIT_UI_TEST_MESH_*` flags ``MeshNetworkManager`` `injectUITestStateIfNeeded()` seeds a
-canned mesh from).
+canned mesh from), every read of them held inside `#if DEBUG` by this module's own
+`ProximitySourceWallTests`.
 They exist so the rejection matrix above can be *observed on a real radio* rather than only
 enumerated at tier 1 — the runbook's Lane C, two Simulators on one Mac. **Three** Simulators run on
 the same lane and form a **full mesh** (3/3 runs, 2026-09-02): every node reaches `slots total=2

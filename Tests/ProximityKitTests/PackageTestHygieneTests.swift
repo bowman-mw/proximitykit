@@ -420,6 +420,13 @@ import Testing
             hosts and audit installs its matchers and samples spell are data in literals it reads as text \
             and never runs; I9 reads its code, comments dropped and literals emptied, and refuses a needle \
             there as anywhere
+            """),
+        (file: "ProximitySourceWallTests.swift",
+         invariant: """
+            the source walls' own file: the keychain writes, accessibility classes and launch-hook reads \
+            its matcher samples spell are data in literals it reads as text and never runs, and it reads \
+            ProximityKit's sources only as text through the walls' walker; I9 reads its code, comments \
+            dropped and literals emptied, and refuses a needle there as anywhere
             """)
     ]
 
@@ -919,14 +926,16 @@ import Testing
 
     /// The MEASURED row count (rule I2). MEASURED at ProximityKit plan step A1.1.13 (2026-10-14): the 21
     /// suites the package held at A1.1.10 and this one. RAISED at A1.1.14 (2026-10-14): 22 → 23, for the
-    /// package's NEW `PackageTestTreeWallTests`. A suite added, moved out or deleted changes it in the same
-    /// commit, argued and measured; a deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 23
+    /// package's NEW `PackageTestTreeWallTests`. RAISED at A1.1.15 (2026-10-14): 23 → 24, for the
+    /// package's NEW `ProximitySourceWallTests`. A suite added, moved out or deleted changes it in the
+    /// same commit, argued and measured; a deletion lowers it only with the retirement argued.
+    static let measuredInventoryRows = 24
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
-    /// `PackageTestTreeWallTests`' 6. A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 185
+    /// `PackageTestTreeWallTests`' 6. RAISED at A1.1.15 (2026-10-14): 185 → 191, for
+    /// `ProximitySourceWallTests`' 6. A test added or removed changes it in the same commit.
+    static let measuredDeclaredTests = 191
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three
