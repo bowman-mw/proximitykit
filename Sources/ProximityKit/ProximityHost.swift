@@ -137,7 +137,8 @@ public protocol ProximityHost: AnyObject {
     /// replaced, in the cells that test one.
     ///
     /// Read once, at construction: ``MeshNetworkManager`` and ``ProximityPairSession`` here,
-    /// and FernletSocial's `PresenceManager`, each keep their own copy, build the radio they own by
+    /// and FernletSocial's `PresenceManager` (through the presence engine it builds,
+    /// ``ProximityPresenceSession``), each keep their own copy, build the radio they own by
     /// default from it and check against it the identity they own (``makeProximityIdentity()``'s when
     /// they are handed none), so no later read reaches back to the host; FernletSocial's mesh features
     /// read the copy their composition's host holder keeps the same way. The extension below also

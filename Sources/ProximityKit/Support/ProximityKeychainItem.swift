@@ -13,8 +13,8 @@
 // ProximityKit plan step A1.1: the add, the match and the delete reach the keychain through one
 // backend, `ProximityKeychainBackend`, handed each query dictionary exactly as its builder spells it.
 // The system keychain is the backend every shipping build has; a Debug build also holds the slot
-// through which ProximityKit's own package tests, unhosted and so without a keychain, install an
-// in-memory store.
+// through which ProximityKit's own package tests, unhosted and so without a keychain they may use,
+// install an in-memory store.
 
 import Foundation
 import Security
@@ -27,9 +27,10 @@ import Synchronization
 /// dictionary to `SecItemAdd`, `SecItemCopyMatching` or `SecItemDelete` exactly as the funnel's members
 /// call them, so every row's bytes and every status are the system keychain's. The only other
 /// conformer is the in-memory store ProximityKit's own package tests install, in a Debug build, through
-/// ``ProximityKeychainItem/installBackend(_:)``: that bundle runs unhosted, where the system keychain
-/// answers `errSecMissingEntitlement` (-34018) on the simulator and would reach the developer's own
-/// keychain on a Mac.
+/// ``ProximityKeychainItem/installBackend(_:)``: that bundle runs unhosted, so on the simulator the
+/// system keychain answers every call `errSecMissingEntitlement` (-34018), and on a Mac a package test
+/// must not reach the system keychain whatever it answers (Apple's TN3137 gives -34018 for a process
+/// without keychain entitlements).
 ///
 /// Each requirement is synchronous and `nonisolated`, like the call it stands for, and the protocol
 /// refines `Sendable` because one value serves every caller in the process, main-actor managers and
@@ -108,9 +109,9 @@ nonisolated protocol ProximityKeychainBackend: Sendable {
 /// shipping build has, and calls `SecItemAdd`, `SecItemCopyMatching` and `SecItemDelete` with that
 /// dictionary unchanged, so the rows and the statuses are the system keychain's. A Debug build also
 /// holds one slot, filled only by ProximityKit's own package tests through ``installBackend(_:)``
-/// with an in-memory store, because their unhosted bundle has no keychain. The slot is this type's
-/// one piece of shared state, a `Mutex` it owns; with nothing installed, which is every shipping
-/// process and Fernlet's hosted tests, ``backend`` is the system keychain.
+/// with an in-memory store, because their unhosted bundle has no keychain it may use. The slot is
+/// this type's one piece of shared state, a `Mutex` it owns; with nothing installed, which is every
+/// shipping process and Fernlet's hosted tests, ``backend`` is the system keychain.
 nonisolated enum ProximityKeychainItem {
 
     /// Which synchronizable variant of an item a query should match.
@@ -390,7 +391,7 @@ nonisolated enum ProximityKeychainItem {
     /// Installs the backend every later keychain call goes to, replacing any installed before it.
     ///
     /// For ProximityKit's own package tests alone: their bundle runs unhosted, with no keychain
-    /// entitlement on the simulator and the developer's own keychain on a Mac, so its installer puts an
+    /// entitlement on the simulator and no keychain it may touch on a Mac, so its installer puts an
     /// in-memory store here once, before the bundle's first keychain call. No shipping code installs a
     /// backend, and Fernlet's hosted tests install none, so they exercise the system keychain. The door
     /// is compiled in a Debug build only: a Release build has no way to install one, and its ``backend``

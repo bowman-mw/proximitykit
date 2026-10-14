@@ -381,9 +381,9 @@ public final class ProximityPairSession {
     /// The seam a unit test builds this session through: `makeRadio` supplies the radio.
     ///
     /// The production default is the QUIC radio on the profile's row and nothing in shipping code
-    /// passes a factory — the counterpart of `PresenceManager.makeSession` for a session that owns
-    /// its radio from construction rather than from `start()`. It is an **optional closure resolved
-    /// in the body** rather than a default argument because `NetworkPairSession` is
+    /// passes a factory — the counterpart of ``ProximityPresenceSession``'s internal `makeRadio` for a
+    /// session that owns its radio from construction rather than from `start()`. It is an **optional
+    /// closure resolved in the body** rather than a default argument because `NetworkPairSession` is
     /// `@MainActor` and a main-actor type cannot be a default-argument value.
     ///
     /// `identity` is the same seam `PresenceManager` and `MeshNetworkManager` already take (owner-calls

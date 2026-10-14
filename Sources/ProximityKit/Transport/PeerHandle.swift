@@ -60,10 +60,11 @@ public nonisolated struct PeerHandle: Hashable, Identifiable, Sendable {
     /// A *hint*, not an identity: it is peer-supplied, unauthenticated, and not unique. Two current
     /// readers use it for more than display and are named here so the next transport does not
     /// silently drop them — `ProximityCoordinator.shouldInviteDiscoveredPeer` uses it as the
-    /// last-resort inviter tie-break when neither side advertises a session id, and
-    /// `PresenceManager` compares it against its own ephemeral names to filter its own ghost
-    /// advertisements. Plan §7.2/§17.1 re-home both onto explicit fields when the QUIC transport
-    /// lands; until then the value must keep arriving with the same shape it has today.
+    /// last-resort inviter tie-break when neither side advertises a session id, and ProximityKit's
+    /// presence engine (``ProximityPresenceSession``) compares it against the posture instance names
+    /// it has worn to drop this device's own ghost advertisements. Plan §7.2/§17.1 re-home both onto
+    /// explicit fields when the QUIC transport lands; until then the value must keep arriving with the
+    /// same shape it has today.
     public let displayHint: String
 
     /// The peer's advertisement record, verbatim. Five keys are read anywhere in the app —

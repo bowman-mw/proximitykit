@@ -8,9 +8,10 @@ import os
 /// The pair session's radio, as the surface ``ProximityPairSession`` actually drives.
 ///
 /// The seam the recipe radio's owner once did not have. `MeshNetworkManager` has held its radio
-/// behind `MeshTransportSession` since P2 item 8 and `PresenceManager` behind ``PresenceRadioSession``
-/// since P9 item 2; the recipe manager constructed its session inline, which is why not one of its
-/// advertise, dial, admission or stand-down decisions was reachable without starting a real radio.
+/// behind `MeshTransportSession` since P2 item 8 and presence behind ``PresenceRadioSession`` since
+/// P9 item 2 (held, since plan step A1.1, by ``ProximityPresenceSession``); the recipe manager
+/// constructed its session inline, which is why not one of its advertise, dial, admission or
+/// stand-down decisions was reachable without starting a real radio.
 /// Everything the session asks of a radio is here and nothing else is: no browse internals, no
 /// tunnels, no framework type.
 ///

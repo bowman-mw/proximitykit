@@ -8,6 +8,10 @@ import Foundation
 ///
 /// The radio's own per-peer channel conforms, and nothing else needs to: a host never makes one, it
 /// is handed one. Main-actor, like the transport it refines.
+///
+/// Its `disconnect()`, which a coordinator calls as it begins and as it ends, only marks the channel
+/// idle: the tunnel, and the one of the radio's four tunnel slots it holds, stay until the host ends
+/// it with ``ProximityPresenceSession/disconnectPeer(_:)``, the session stops or the far side closes it.
 @MainActor
 public protocol ProximityPeerChannel: PeerTransport {
 
@@ -58,6 +62,17 @@ public protocol ProximityPeerChannel: PeerTransport {
 /// host that never asks advertises one name for as long as the radio is up, which is the linkability
 /// the posture exists to remove.
 ///
+/// Each tag is an opaque token the host derives and rotates with the posture's epoch (a tag that does
+/// not rotate is a stable identifier on the air whatever the posture does). It must be non-empty,
+/// contain no `,`, and be short, as Fernlet's 12 base64 characters are: the record holds two chunks of
+/// at most 240 bytes, so tags past about 36 of that size are dropped silently, last in sorted order,
+/// and a receiver believes at most 64 per record. A dial's `helloTag` must keep the hello within 256
+/// bytes, or the tunnel ends through ``onPeerDisconnected`` after its connection opened.
+///
+/// The session holds its hooks strongly, so a host that owns it captures itself weakly in them; and a
+/// host keeps one session for as long as it advertises, because the names self-exclusion remembers
+/// die with the session.
+///
 /// `@MainActor`, like the radio it drives. Building one starts nothing.
 @MainActor
 public final class ProximityPresenceSession {
@@ -69,7 +84,7 @@ public final class ProximityPresenceSession {
     // MARK: Hooks
 
     /// A presence advertisement appeared or changed, with its tags: called only for a record of this
-    /// version under a name this session never wore.
+    /// version under none of the last ``maxRememberedInstanceNames`` names this session wore.
     public var onPeerDiscovered: ((PeerHandle, Set<String>) -> Void)?
     /// A peer left the browse results.
     public var onPeerLost: ((PeerHandle) -> Void)?
@@ -78,7 +93,8 @@ public final class ProximityPresenceSession {
     public var resolveDialer: ((String) -> PeerHandle?)?
     /// A tunnel came up: its channel, live, for the host to build a coordinator over.
     public var onPeerChannelReady: ((any ProximityPeerChannel) -> Void)?
-    /// A tunnel went down, with a diagnostic reason. Never called for a tunnel the host ended.
+    /// A tunnel went down, with a diagnostic reason. Never called for a tunnel the host ended, with
+    /// ``disconnectPeer(_:)`` or ``stop()``.
     public var onPeerDisconnected: ((PeerHandle, String) -> Void)?
     /// The radio's listener or browser failed after it started, in frozen diagnostic English.
     public var onTransportError: ((String) -> Void)?
@@ -144,9 +160,11 @@ public final class ProximityPresenceSession {
     ///
     /// - Parameter now: The host's clock reading.
     /// - Returns: The epoch of the posture now worn.
-    /// - Throws: Whatever the mint throws. A failed mint leaves **no** posture rather than a stale
-    ///   one, so a running radio keeps the registration it has and a later ``start(tags:)`` or
-    ///   ``republish(tags:)`` advertises nothing until a mint succeeds; how often to retry is the host's.
+    /// - Throws: Whatever the mint throws: this module's internal errors or the system's, none of
+    ///   which a host matches; it logs one (`String(describing:)`). A failed mint leaves **no**
+    ///   posture rather than a stale one, so a running radio keeps the registration it has and a later
+    ///   ``start(tags:)`` or ``republish(tags:)`` advertises nothing until a mint succeeds; how often to
+    ///   retry is the host's.
     public func rotatePosture(at now: Date) throws -> UInt64 {
         let epoch = IdentityService.presenceEpoch(at: now)
         if let posture, posture.epoch == epoch { return epoch }
@@ -165,13 +183,16 @@ public final class ProximityPresenceSession {
 
     /// Brings a fresh radio up under the worn posture, advertising `tags` as the presence record.
     ///
-    /// The radio's hooks are wired to this session's before it starts. A session whose radio is
-    /// already up ignores the call.
+    /// The radio's hooks are wired to this session's before it starts. A session that holds a radio
+    /// ignores the call: one that is up, or one still held after a start that threw, until ``stop()``
+    /// drops it. A host retrying a failed start calls ``stop()`` first.
     ///
     /// - Parameter tags: The host's own tags for the posture's epoch.
-    /// - Throws: `MeshTransportError.tlsIdentityUnavailable` with no posture worn (nothing to
-    ///   advertise under), or whatever the radio's start throws, refusing an unsound namespace
-    ///   first; the radio stays held, so ``stop()`` stands it down.
+    /// - Throws: With no posture worn (nothing to advertise under), before any radio is built; or
+    ///   whatever the radio's start throws, an unsound namespace's ``ProximityNamespaceError`` first,
+    ///   after which the radio stays held, so ``stop()`` stands it down. ``ProximityNamespaceError``
+    ///   is the one a host can match: the others are this module's internal errors or the network
+    ///   framework's, which a host logs (`String(describing:)`).
     public func start(tags: Set<String>) throws {
         guard radio == nil else { return }
         guard let posture else { throw MeshTransportError.tlsIdentityUnavailable }
@@ -195,6 +216,9 @@ public final class ProximityPresenceSession {
     }
 
     /// Stands the radio down and drops it, with the posture. The own-name ring survives.
+    ///
+    /// Every tunnel ends with the radio, without a call to ``onPeerDisconnected`` and without a
+    /// `.disconnected` state on a channel it handed up: a host ends its own connections first.
     public func stop() {
         radio?.stop()
         radio = nil
@@ -204,7 +228,11 @@ public final class ProximityPresenceSession {
     // MARK: - Tunnels
 
     /// Opens a tunnel to a browsed peer, claiming `helloTag`, one of the host's own advertised tags,
-    /// in the dial hello; the channel arrives through ``onPeerChannelReady``. A no-op with no radio up.
+    /// in the dial hello; the channel arrives through ``onPeerChannelReady``.
+    ///
+    /// A dial may come to nothing, with neither ``onPeerChannelReady`` nor ``onPeerDisconnected``
+    /// called: with no radio up, to a peer no longer browsed, to one that already has a tunnel, or
+    /// with the radio's four tunnels up. A host that waits for a channel arms a timeout of its own.
     ///
     /// - Parameters:
     ///   - peer: A peer this session reported through ``onPeerDiscovered``.
@@ -213,7 +241,8 @@ public final class ProximityPresenceSession {
         radio?.dial(peer, helloTag: helloTag)
     }
 
-    /// Ends a peer's tunnel at the host's request, without a call to ``onPeerDisconnected``.
+    /// Ends a peer's tunnel at the host's request, freeing its slot, without a call to
+    /// ``onPeerDisconnected``; the channel handed up for it is told it ended.
     ///
     /// - Parameter peer: The peer whose tunnel ends.
     public func disconnectPeer(_ peer: PeerHandle) {

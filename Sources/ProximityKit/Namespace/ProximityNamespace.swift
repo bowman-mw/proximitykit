@@ -48,8 +48,8 @@ import Foundation
 /// outside `Namespace/` and naming none of FernletCrypto's purposes, holds what is left of Fernlet
 /// in it (the `fernlet` literals, Fernlet's domain types) and its `package` doors to exact per-file
 /// lists, each row naming the plan step that removes it (those lists are the one place the numbers
-/// live), and refuses a declaration, extension or alias of any type that left it for FernletSocial or
-/// the app.
+/// live, and all three are empty: rule 5's, the `package` doors', since plan step A1.1.3), and
+/// refuses a declaration, extension or alias of any type that left it for FernletSocial or the app.
 ///
 /// **Total, judged once, and refused at run time.** ``init(family:installation:)`` never throws or
 /// traps: it runs every soundness rule once and records the verdict in ``soundness``. A host that

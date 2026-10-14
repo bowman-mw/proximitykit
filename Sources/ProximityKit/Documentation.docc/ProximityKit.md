@@ -538,8 +538,10 @@ naming the step that removes it; both lists are empty. Beside it the
 host supplies two things this module used to take from Fernlet's own modules, the install binding
 the sealed mesh stores seal under and the sink audit lines go to, and two mechanisms were copied in
 rather than shared: the column seal and the keychain item. This module holds no instance of the
-namespace or the binding and offers no default for either: no global, no slot, no `@TaskLocal`. The
-audit sink alone lives in one process-wide slot, ``ProximityAudit`` (see "The audit sink" below).
+namespace or the binding and offers no default for either: no global, no slot, no `@TaskLocal`. Of
+what the host supplies, the audit sink alone lives in one process-wide slot, ``ProximityAudit`` (see
+"The audit sink" below); the only other slot, the keychain funnel's backend, exists in a Debug build
+alone, and only this module's own package tests fill it (see "The keychain mechanism").
 
 **What the namespace holds.** Its ``ProximityNamespace/Family`` is what every interoperating app
 shares: the 39 protocol labels and the host's declared feature salts as
@@ -677,7 +679,7 @@ hand it:
 
 | Reader | How it reads the namespace |
 | --- | --- |
-| ``MeshNetworkManager``, ``ProximityPairSession``, and `FernletSocial`'s `PresenceManager` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their radio from it (the pair session from it and its profile, which it checks against it), take their default identity from ``ProximityHost/makeProximityIdentity()``, and hand the namespace, or its `family.purposes`, to every reader they call. The identity they hold, handed to them or built by their host, is compared with it once, in `init`, and one of another namespace never starts their radio. |
+| ``MeshNetworkManager``, ``ProximityPairSession``, and `FernletSocial`'s `PresenceManager` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their radio from it (the presence manager through the engine it builds for it, ``ProximityPresenceSession``; the pair session from it and its profile, which it checks against it), take their default identity from ``ProximityHost/makeProximityIdentity()``, and hand the namespace, or its `family.purposes`, to every reader they call. The identity they hold, handed to them or built by their host, is compared with it once, in `init`, and one of another namespace never starts their radio. |
 | ``IdentityService`` | Takes it in ``IdentityService/init(namespace:keychainService:provisioningParticipant:)`` (a `nil` service means the namespace's identity service) and keeps it with its ``IdentityService/purposes``: it signs, seals, opens and wraps under its own labels and keeps its four device rows under the namespace's accounts. Its `sign` and `verify` take only a ``ProximityCryptographicPurpose`` and treat a label by its role, and `sign` refuses a verify-only or non-signature label. ``IdentityService/pairSecret(with:purpose:)`` derives only under a feature salt its namespace's family declares (`family.purposes.feature`). Under an unsound namespace it refuses to provision and to wrap a group key, and so derives no pair secret. |
 | Builders: envelopes, admission tokens, membership records and messages, the removal quorum, key advertisements, routed items, chunks and receipts, the verify QR | Sign under their signing identity's ``IdentityService/purposes``. |
 | Verifiers: the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
@@ -694,7 +696,7 @@ hand it:
 | The name display: ``PeerNameDisplay/personName(_:fingerprint:in:)``, with `FernletConnections`' placeholders (`shown`, `firstName`) and `FernletSocial`'s `PresenceManager.firstName(of:in:)` over it | Take `in namespace:` last, sanitize under its peer-name cap and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
 | The peer-name coercion: `ProximityDisplayName.peerDisplayName(_:in:)`, ``FernletIdentityEnvelope/sanitizedSenderDisplayName(in:)`` and ``FernletIdentityEnvelope/disclosedSenderDisplayName(in:)``, `ProximityPairAdvertisedName.publishable(_:in:)`, and over them `FernletSocial`'s chat store (`SessionMessageStore.receiveIncoming(…in:)`) and incoming-photo coercion | Take `in namespace:` last and read `installation.peerNames`: a peer's sanitized name keeps at most the cap and reads as the floor when nothing displayable is left, and the advertised recipe name is capped the same way. The managers pass their own namespace (the mesh manager also to its descriptor coercion, a mesh name under the cap), the coordinator its identity's, and `FernletSocial`'s features their composition's. `ProximityDisplayName.sanitized(_:maxLength:)` is FernletDomainModel's `ItemNameModeration.sanitizedName` copied scalar for scalar; only `FernletSocial`'s activities still use the original. |
 | Storage scopes: ``MeshSessionStorageScope``, ``MeshRoutedStorageScope`` | Carry the namespace and the install binding (`init(namespace:directory:keychainService:installBinding:)`, ``MeshSessionStorageScope/production(for:directory:installBinding:)`` on the root the host states); the two stores read their file names, seal-key accounts and column-seal labels off `scope.namespace`. |
-| Closures that cross an actor | Capture the `Sendable` value when they are made, as `FernletSocial`'s `PresenceManager`'s radio factory does. |
+| Closures that cross an actor | Capture the `Sendable` value when they are made, as ``ProximityPresenceSession``'s radio factory and posture mint, set in its `init`, do. |
 
 **What pins it.** `ProximityNamespaceGoldenTests`, on the crypto-goldens CI line, holds every value
 `.fernlet` carries to the literal Fernlet shipped (64 rows, its two declared feature salts among
@@ -810,11 +812,11 @@ system keychain, `ProximityKeychainItem.SystemKeychain`, is the only backend a s
 calls `SecItemAdd`, `SecItemCopyMatching` and `SecItemDelete` with that dictionary unchanged, so every
 row and every status is the keychain's. A Debug build also holds one `Mutex` slot and its internal
 door, `installBackend(_:)`, which nothing in a host calls: only this module's own package tests, whose
-unhosted bundle has no keychain, install an in-memory store through it (see "Its tests"). A Release
-build has neither the slot nor the door. This module's own package tests hold the door's one caller to
-their installer and its declaration to the `#if DEBUG` branch (`ProximityKeychainDoorTests`, see "Its
-tests"). No CI step compiles a Release build; ProximityKit's door suite pins the text of the `#if DEBUG`
-/ `#else` region, so the Release branch can only break where the Debug one does. Fernlet's
+unhosted bundle has no keychain it may use, install an in-memory store through it (see "Its tests").
+A Release build has neither the slot nor the door. This module's own package tests hold the door's one
+caller to their installer and its declaration to the `#if DEBUG` branch (`ProximityKeychainDoorTests`,
+see "Its tests"). No CI step compiles a Release build; ProximityKit's door suite pins the text of the
+`#if DEBUG` / `#else` region, so the Release branch can only break where the Debug one does. Fernlet's
 `KeyCustodyBoundaryTests` holds that no file of Fernlet's names the door, and holds the funnel on the
 system keychain in Fernlet's hosted tests, where the golden's live round trip and the key-custody walls
 read real rows.
@@ -952,7 +954,7 @@ checks them; plan step P0.2 and A1's device lanes prove them on hardware.
 
 | Topic | What a Mac host owes |
 | --- | --- |
-| Keychain | Every query this module issues sets `kSecUseDataProtectionKeychain` (``ProximityKeychainItem``). On macOS that keychain needs the host signed with entitlements a provisioning profile authorizes (Apple's TN3137). Without them `SecItem` returns `errSecMissingEntitlement` (-34018), and identity provisioning throws ``IdentityError/keychainReadFailed(_:)`` and fails closed. A bare `swift test` runner is the same case, which is why this module's own tests run against an in-memory store instead ("Its tests"); a host has no such door. |
+| Keychain | Every query this module issues sets `kSecUseDataProtectionKeychain` (``ProximityKeychainItem``). On macOS that keychain needs the host signed with entitlements a provisioning profile authorizes (Apple's TN3137). Without them `SecItem` returns `errSecMissingEntitlement` (-34018), and identity provisioning throws ``IdentityError/keychainReadFailed(_:)`` and fails closed. This module's own tests never reach a Mac's keychain, whatever it would answer them: they run against an in-memory store ("Its tests"); a host has no such door. |
 | Local network | `NSLocalNetworkUsageDescription`, and `NSBonjourServices` listing its namespace's service types (Fernlet's are in `App/Fernlet/Info.plist`); when sandboxed, `com.apple.security.network.client` and `com.apple.security.network.server`, because the radios both listen and dial. |
 | Routed access gate | ``MeshNetworkManager``'s gate starts ``MeshRoutedAccessGate/closed``, and its three facts are iOS-shaped. A Mac host answers each in the same meaning, `protectedDataAvailable` (the user's session is unlocked and the host's keys are readable), `appIsForeground` (the app is active) and `duressActive` (its own lock's duress session, or `false`), and pushes them through ``MeshNetworkManager/applyRoutedAccessGate(_:now:)`` on every change; otherwise nothing routed is ever decrypted. |
 | Lifecycle | macOS never suspends a process, while Fernlet's run policy (the app's) leans on iOS suspension, so a Mac host stops or holds the radios itself. App Nap can stretch the mesh radio's 1 s poll and its 30 s heartbeat past the 90 s QUIC idle reap, so a Mac host holds a user-initiated `ProcessInfo` activity while a session is live. |
@@ -982,9 +984,9 @@ platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
 (`ProximityKeychainDoorTests`) and the presence engine (`ProximityPresenceSessionTests`): twenty-one
 suites, 173 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
-the simulator's `xctest` agent, so no keychain entitlement reaches it (a `SecItem` call returns
-`errSecMissingEntitlement`, and on a Mac it would reach the developer's own keychain) and no app
-installs a ``ProximityAuditSink`` (with none installed, this module drops every audit line). Its
+the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
+call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
+app installs a ``ProximityAuditSink`` (with none installed, this module drops every audit line). Its
 keychain is therefore an in-memory store its test support installs as this module's keychain backend,
 and its audit sink one its test support installs too, both described below.
 It builds in Swift 6 language mode with no default isolation; with the three upcoming features it
@@ -1012,7 +1014,10 @@ account and synchronizable flag, a duplicate add refused, a synchronizable add u
 `ThisDeviceOnly` class refused, single-row reads and enumerations, one-row and
 whole-service deletes, the any, synced and device-only matches, and, on demand, a service that answers
 `errSecInteractionNotAllowed`, as a keychain does before the first unlock, which no simulator can be made
-to return. `PackageTestEnvironment` (`PackageTestEnvironment.swift`) installs it through the funnel's
+to return. Where the keychain promises no order (an enumeration, or a single-row read under
+`kSecAttrSynchronizableAny` that matches both variants) the store answers in its own order, by account
+and then the device-only variant first; a suite must not rely on that order.
+`PackageTestEnvironment` (`PackageTestEnvironment.swift`) installs it through the funnel's
 Debug-only door once, lazily, by a `static let` the first read runs: Swift Testing has no bundle-level
 set-up, so whatever reaches the keychain reads `PackageTestEnvironment.keychain` first, and its every
 call reaches the store, never a keychain. The store's file is the one package file that imports
@@ -1021,8 +1026,10 @@ resolves it) and holds this module's identity and two seal keys to it, on `.test
 `.packageTest`'s: an identity provisions, reads its public keys back and wipes; each seal key mints,
 reads back the same key and wipes; an unreadable service defers or refuses and is never minted over,
 while an absent one mints; scopes on two services never see each other's rows; and the synced and
-device-only variants of one account stay apart. The bundle runs natively on a Mac too
-(`swift build --product FernletKitPackageTests`, then `swift test --skip-build`), touching no keychain.
+device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
+built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
+`swift test --skip-build`), against its in-memory store; the suites added since have run only on the
+simulator.
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
 `PackageTestEnvironment.audit` installs through ``ProximityAudit/install(_:)`` once, lazily, as it

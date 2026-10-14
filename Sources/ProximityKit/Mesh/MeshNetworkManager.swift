@@ -10701,7 +10701,8 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// `fernlet-recipe` — and unlike `sid`, a per-launch random UUID, a proximity display name is
     /// stable across launches and locations, so a passive Bonjour scanner could link sightings of
     /// one person. A peer learns our name only inside the signed identity introduction, after a
-    /// connection. Same hygiene rule as `PresenceManager.discoveryInfo()`.
+    /// connection. Same hygiene rule as the presence record, which carries the version and its host's
+    /// tags alone (``ProximityPresenceSession``).
     ///
     /// `meshName`/`memberCount` STAY: advertising an open mesh to nearby devices is the product
     /// behaviour of open mode, and closed mode already suppresses all three (that toggle is the
