@@ -983,8 +983,8 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 (`PackageTestSupportTests`), the test keychain (`PackageKeychainStoreTests`), the test host and
 audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoundaryTests`), the
 platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
-(`ProximityKeychainDoorTests`) and the presence engine (`ProximityPresenceSessionTests`): twenty-one
-suites, 173 tests. The
+(`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`) and the tests' own
+hygiene (`PackageTestHygieneTests`): twenty-two suites, 179 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1043,7 +1043,7 @@ its scope admits: those whose context holds the capture's context pairs (a rig's
 capture built `markedOnly`, those logged inside its own `marking(_:)`, for a line that names no rig.
 The bundle's host is `PackageTestHost` (`PackageTestHost.swift`), a ``ProximityHost`` built from this
 module's public API alone that states all thirteen requirements itself, since nothing in the target
-extends ``ProximityHost``: the namespace it is handed, `.packageTest` by default; a scratch root,
+extends ``ProximityHost`` (`PackageTestHygieneTests` holds that): the namespace it is handed, `.packageTest` by default; a scratch root,
 `PackageTestHost-<UUID>` directly under the temporary directory and never Application Support, which
 nothing creates until a store opens and `tearDown()` removes; both storage scopes on that root, under
 its namespace and a sixteen-byte `PinnedInstallBinding` read with no keychain, on `.test.` services of
@@ -1078,10 +1078,8 @@ The platform wall, `ProximityPlatformNeutralityTests` (see "Platforms"), is one 
 suites too, on the `proximitykit` line, so it also travels with the package. It walks this module's
 sources with the namespace wall's walk, through `PackageRoot`, reads its two channel-ready doors by
 their paths under the package root, and reads code through the same copy of the lexer, its readers
-fixtured in a cell of their own. Its platform-directory needles are also Fernlet's selector wall's
-location needles for this target (what an unhosted test may not reach), so while the module is in
-Fernlet's repository `CIGateSelectorBoundaryTests` holds Fernlet's copy of the list equal to this
-suite's, line for line. A host's own doors and its Mac build are its own walls' to hold: Fernlet's
+fixtured in a cell of their own. Its platform-directory needles are also this target's hygiene
+suite's location needles (what an unhosted test may not reach). A host's own doors and its Mac build are its own walls' to hold: Fernlet's
 `ProximityPlatformBoundaryTests` holds presence's heart door and pins the native macOS build.
 
 The keychain door's wall, `ProximityKeychainDoorTests` (see "The keychain mechanism"), is one of this
@@ -1090,6 +1088,21 @@ own files through `PackageRoot` and their code through the same copy of the lexe
 funnel's Debug-only door declared once, in its `#if DEBUG` branch, whose whole text it pins, and named
 by this target's installer alone, its readers fixtured first. A host's own walls hold that the host
 names the door nowhere: Fernlet's `KeyCustodyBoundaryTests`.
+
+The tests' own hygiene, `PackageTestHygieneTests`, is one of this target's suites too, on the
+`proximitykit` line, so the rules that keep these tests runnable unhosted travel with them. It reads
+every Swift file of this target through `PackageRoot` and the walls' walker
+(`TestSupport/PackageSwiftFiles.swift`), which each cell that reads through it holds to a file floor, and
+holds four rules, each reader fixtured both ways. Nothing reaches what the unhosted bundle cannot serve
+(rule I9): a keychain call outside a file listed with the structure that keeps it behind the
+installer's read, a raw `SecItem` call anywhere, a store or its production scope, a production or
+process-shared location, or a path of a host repository, each excused only by an exact allowlisted line
+with its invariant; a wall file, the suite's own first, is read as code, so the needles it holds in its
+literals are data and a needle in its code is refused. Every import travels with the package (rule
+I11): this module, Foundation, Testing, Combine, simd and Synchronization, and Security in the keychain
+store's file alone. The target's own inventory, `Tests/ProximityKitTests.tsv` beside this target's
+folder, is the tree: every suite's file and its declared tests, the row count and the tests' sum
+measured, which CI's test-count floor reads. And nothing extends ``ProximityHost``.
 
 The presence engine's own contract is held here too, by `ProximityPresenceSessionTests`, over an
 in-memory radio of the suite's own, under `.packageTest` and the engine's own posture mint: a sighting
@@ -1106,9 +1119,10 @@ target to that target's namespace, and the source walls' lexer, each copy held t
 its own target. The test bindings are a replacement, not a twin: this target's bind to
 `.packageTest` and Fernlet's to `.fernlet`, so `CIGateSelectorBoundaryTests` holds each declaration of
 this target's to one of Fernlet's with that one token read across, and lets the extensions both declare
-live nowhere else. CI names its suites `ProximityKitTests/<Suite>`;
+live nowhere else. CI names its suites `ProximityKitTests/<Suite>`. In Fernlet's repository,
 `Tests/suite-inventory.tsv` and `CIGateSelectorBoundaryTests` hold every suite to one target, one file
-and its lines, and refuse what this bundle cannot serve and an import of the closure.
+and its lines, and hold its rows to this target's own inventory, while this target's hygiene suite
+refuses what the bundle cannot serve and an import of the closure.
 
 Every other ProximityKit suite still runs in the app's `FernletTests`. `ProximityNamespaceSoundnessTests`
 needs neither a host nor an audit sink, and it runs in this module's

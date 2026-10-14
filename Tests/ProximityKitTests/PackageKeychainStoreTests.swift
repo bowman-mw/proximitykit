@@ -348,7 +348,7 @@ import Testing
     }
 
     /// Bytes as lowercase hex, read through Foundation's `ContiguousBytes`, so a key needs no CryptoKit
-    /// import here (`CIGateSelectorBoundaryTests`' rule I11 holds the package's imports).
+    /// import here (rule I11, `PackageTestHygieneTests`, holds the package's imports).
     private static func hex(_ bytes: some ContiguousBytes) -> String {
         bytes.withUnsafeBytes { Data($0) }.map { String(format: "%02x", $0) }.joined()
     }

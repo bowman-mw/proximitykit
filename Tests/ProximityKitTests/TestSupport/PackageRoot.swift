@@ -23,7 +23,7 @@ import Foundation
 ///
 /// **What it reads.** It only locates the root. A package suite reads only `Package.swift`,
 /// `Sources/ProximityKit/**` and `Tests/**` under it, never a path above it: the invariant
-/// `CIGateSelectorBoundaryTests.packageHazardAllowlist` states for this file's one line that reads the
+/// `PackageTestHygieneTests.packageHazardAllowlist` states for this file's one line that reads the
 /// compiler's path of its own source.
 ///
 /// **Concurrency.** `url` is an immutable `let` resolved once on first touch; safe from any isolation.

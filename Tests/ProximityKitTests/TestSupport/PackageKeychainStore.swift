@@ -181,8 +181,8 @@ final class PackageKeychainStore: ProximityKeychainBackend {
     }
 
     /// The device-only class ProximityKit's stores write their rows under,
-    /// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, for a suite that does not import Security (a
-    /// package file outside `TestSupport/` may not: `CIGateSelectorBoundaryTests`' rule I11).
+    /// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, for a suite that does not import Security (no
+    /// package file but this one may: rule I11, `PackageTestHygieneTests`).
     static var deviceOnly: CFString {
         kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     }

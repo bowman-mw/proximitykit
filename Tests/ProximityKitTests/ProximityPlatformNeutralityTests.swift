@@ -232,10 +232,8 @@ import Testing
     /// directory among them), the three Foundation functions, the search-path call, an app-group or
     /// ubiquity container, and the lookups by a search-path directory by their first label (`FileManager`'s
     /// two and `URL`'s initializer). A path spelled in a literal is not code a lexed reader sees, since
-    /// the lexer empties literals: the needles hold the APIs, not every string. In the Fernlet repository,
-    /// Fernlet's `ProximityPlatformBoundaryTests` keeps the same list, which its selector wall
-    /// (`CIGateSelectorBoundaryTests`) reads as this target's location needles and holds equal to this
-    /// declaration, line for line.
+    /// the lexer empties literals: the needles hold the APIs, not every string. This target's
+    /// `PackageTestHygieneTests` (rule I9) reads this list as the package tests' location needles.
     static let directoryNeedles: [Needle] = [
         .identifier("applicationSupportDirectory"), .identifier("documentDirectory"),
         .identifier("documentsDirectory"), .identifier("cachesDirectory"), .identifier("libraryDirectory"),

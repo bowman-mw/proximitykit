@@ -16,8 +16,8 @@ import ProximityKit
 ///
 /// **Every requirement stated here.** The protocol's thirteen requirements, the two storage scopes it
 /// would default included, are this class's own members, and nothing in the package's tests extends
-/// `ProximityHost` (Fernlet's tests declare their defaults in such an extension, and
-/// `CIGateSelectorBoundaryTests`' rule T3 refuses a second one):
+/// `ProximityHost` (Fernlet's tests declare their defaults in such an extension, and this target's
+/// `PackageTestHygieneTests` refuses one):
 /// - the namespace it is handed, `.packageTest` unless a cell hands it another;
 /// - the display name it is handed, `"Tester"` by default, and the fallback name `"Test device"`;
 /// - its own blocked, revoked and trusted sets, which ``isBlockedFingerprint(_:)``,
