@@ -969,8 +969,9 @@ Every other ProximityKit suite still runs in the app's `FernletTests` until A1 b
 in place of `.fernlet`, a host double, an audit sink, an answer for the keychain and a package-rooted
 file locator. `ProximityNamespaceSoundnessTests` needs none of them, but it stays there, on the
 crypto-goldens line beside Fernlet's goldens, with its five framing byte pins over a literal namespace,
-and moves with the package at A1 (an owner decision), once the mesh-message spelling helper its file
-declares, which three staying suites build their fixtures with, has a file of its own.
+and moves with the package at A1 (an owner decision). The mesh-message spelling helper it builds its
+fixtures with, which three staying suites use too, has a file of its own
+(`ProximityNamespaceMeshMessagesSpelling.swift`), so the suite's file declares nothing they need.
 
 ## Topics
 
