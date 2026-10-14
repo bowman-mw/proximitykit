@@ -830,7 +830,9 @@ line, so one install at launch reaches all of them. Fernlet's sink is `FernletAu
 check, so the unit tests, hosted in the app, see every line in `FernletAuditLog`'s capture registry
 exactly as they did when this module named `FernletAuditLog` itself. `ProximityAuditBridgeTests` is
 the canary for that install: every test asserting that an event was not logged would pass vacuously
-without it.
+without it. This module's own package tests run unhosted, with no app to install a sink, so their test
+support installs one of its own (see "Its tests"); `ProximityAuditBridgeTests` also holds that the
+app's install and that one are the only two.
 
 **What is left.** The vocabulary and the session rules are the host's: every group
 of the vocabulary is read off the namespace its reader holds (the reader table above), the radios
@@ -968,13 +970,14 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 `MeshEpochKeyringTests`, `MeshEpochAcceptanceTests`, `MeshFrameReplayWindowTests`), the routed drain plan
 (`MeshRoutedDrainPlanTests`), the commit detector and the ranging fallback
 (`NearbyRangingSessionTests`), the replay cache (`ReplayCacheTests`), the test support's own facts
-(`PackageTestSupportTests`) and the test keychain (`PackageKeychainStoreTests`): sixteen suites, 146
-tests. The
+(`PackageTestSupportTests`), the test keychain (`PackageKeychainStoreTests`) and the test host and
+audit sink (`PackageTestHostTests`): seventeen suites, 150 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (a `SecItem` call returns
-`errSecMissingEntitlement`, and on a Mac it would reach the developer's own keychain) and no
-``ProximityAuditSink`` is installed (every audit line is dropped). Its keychain is therefore an
-in-memory store its test support installs as this module's keychain backend, described below.
+`errSecMissingEntitlement`, and on a Mac it would reach the developer's own keychain) and no app
+installs a ``ProximityAuditSink`` (with none installed, this module drops every audit line). Its
+keychain is therefore an in-memory store its test support installs as this module's keychain backend,
+and its audit sink one its test support installs too, both described below.
 It builds in Swift 6 language mode with no default isolation; with the three upcoming features it
 declares, that is every upcoming feature Fernlet's own tests use, though they build in Swift 5 mode.
 It declares this module as its one dependency, and its files import nothing else of the package,
@@ -1011,6 +1014,38 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. The bundle runs natively on a Mac too
 (`swift build --product FernletKitPackageTests`, then `swift test --skip-build`), touching no keychain.
 
+The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
+`PackageTestEnvironment.audit` installs through ``ProximityAudit/install(_:)`` once, lazily, as it
+installs the keychain store: it hands each line, in line, to every capture registered at that moment,
+each under a token of its own, so parallel suites never replace one another's. A suite reads lines
+through a `PackageAuditCapture`, which registers as it is built, so the sink is installed before any
+capture reads and a check that a line was not logged is never vacuous, and which keeps only the lines
+its scope admits: those whose context holds the capture's context pairs (a rig's own label) and, for a
+capture built `markedOnly`, those logged inside its own `marking(_:)`, for a line that names no rig.
+The bundle's host is `PackageTestHost` (`PackageTestHost.swift`), a ``ProximityHost`` built from this
+module's public API alone that states all thirteen requirements itself, since nothing in the target
+extends ``ProximityHost``: the namespace it is handed, `.packageTest` by default; a scratch root,
+`PackageTestHost-<UUID>` directly under the temporary directory and never Application Support, which
+nothing creates until a store opens and `tearDown()` removes; both storage scopes on that root, under
+its namespace and a sixteen-byte `PinnedInstallBinding` read with no keychain, on `.test.` services of
+its own (`org.example.pktest.mesh-session.test.<UUID>` and `org.example.pktest.mesh-routed.test.<UUID>`);
+a fresh identity per call, every one on its one `.test.` service,
+`org.example.pktest.identity.test.<UUID>`; a fresh `PackageTrustPolicy` per call, answering from the
+host's own blocked, revoked and trusted sets and keeping its audits; a fresh ``NoopRangingProvider`` per
+call; and the temporary-message, heart and photo routed rows on its namespace's tokens, in the shapes
+and with the caps Fernlet's rows have, none under the reserved control token. Its initializer reads
+`PackageTestEnvironment.keychain` and `PackageTestEnvironment.audit` first. `PackageTestHostTests`
+holds both: a line reaches the capture scoped to it and no other, and a stopped capture keeps nothing
+more; the host's root and services are scratch of its own, and two hosts share none; the host states
+its rows, its policy and its radio itself; and a ``MeshNetworkManager`` built over it, unhosted,
+provisions its identity into the in-memory store and logs no line, while one whose identity service
+the store answers as unreadable logs its failure. So a suite in this target can build a manager over
+`PackageTestHost` and read this module's audit lines, a line's absence included. Fernlet's store
+isolation walls (`MeshRoutedStoreIsolationTests`, whose scratch-root needle holds the host as one of
+the doubles, and `MeshSessionStoreIsolationTests`) and its acceptance batteries' test-tree scans read
+this target's folder too, and `ProximityAuditBridgeTests` holds the installer to the one install of a
+sink in either test target.
+
 Six helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
 mesh-message spelling helper, the test namespace and the epoch fixtures, whose one mint binds in each
@@ -1021,8 +1056,8 @@ live nowhere else. CI names its suites `ProximityKitTests/<Suite>`;
 `Tests/suite-inventory.tsv` and `CIGateSelectorBoundaryTests` hold every suite to one target, one file
 and its lines, and refuse what this bundle cannot serve and an import of the closure.
 
-Every other ProximityKit suite still runs in the app's `FernletTests` until A1 brings a host double and
-an audit sink. `ProximityNamespaceSoundnessTests` needs neither, so it runs in this module's
+Every other ProximityKit suite still runs in the app's `FernletTests`. `ProximityNamespaceSoundnessTests`
+needs neither a host nor an audit sink, and it runs in this module's
 test target, still on the crypto-goldens line beside Fernlet's goldens: its five framing byte pins are
 over a literal namespace that belongs to no app, and it imports this module plainly, not `@testable`,
 so it sees only what a host sees. The mesh-message spelling helper it builds its fixtures with
