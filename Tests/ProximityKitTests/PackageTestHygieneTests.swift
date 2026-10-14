@@ -51,23 +51,15 @@ import Testing
 
     /// I9's readers read their samples: the needle reader holds a keychain type however it is constructed
     /// or reached, a seal key's wipe, a raw `SecItem` call but not a status that spells it inside its name,
-    /// and every platform directory but the temporary ones; the structure reader passes a keychain file
-    /// that keeps its kind's structure and names each way one breaks it; and a wall file's literal is
-    /// data while the same needle in its code is read.
+    /// every platform directory but the temporary ones, and each location call by itself; the structure
+    /// reader passes a keychain file that keeps its kind's structure and names each way one breaks it; and
+    /// a wall file's literal is data while the same needle in its code is read, and a literal of it that
+    /// starts with a repository folder is refused.
     @Test func theHazardReadersReadTheirSamples() {
         Self.expectTheNeedleReaderFixtured()
         Self.expectTheSuiteKeychainFileReaderFixtured()
         Self.expectTheInstallerAndSupportTypeReadersFixtured()
-        let literal = PackageSwiftFiles.File(path: "W.swift", text: "let sample = \"_ = UserDefaults.standard\"\n")
-        let literalProblems = Self.wallFileProblems(literal, invariant: "")
-        #expect(literalProblems.isEmpty, "a wall file's literal was read as code: \(literalProblems)")
-        let code = PackageSwiftFiles.File(path: "W.swift", text: "func f() { _ = UserDefaults.standard }\n")
-        let codeProblems = Self.wallFileProblems(code, invariant: "")
-        #expect(codeProblems.contains { $0.contains("(a wall file, read as code)") },
-                "a wall file's code needle was not read: \(codeProblems)")
-        let quiet = PackageSwiftFiles.File(path: "W.swift", text: "let x = 1\n")
-        #expect(Self.wallFileProblems(quiet, invariant: "").contains { $0.contains("spells no needle in its text") },
-                "a wall file that spells no needle was not named")
+        Self.expectTheWallFileReaderFixtured()
     }
 
     /// **I11.** Every module a package file imports (``importedModules(in:)``, read over its code) is in
@@ -405,8 +397,10 @@ import Testing
     /// literals emptied), each line against every needle, and refuses a needle there as anywhere; no
     /// allowlist row and no keychain structure applies to it. A listed file that is gone, or that spells no
     /// needle in its text and so needs no exemption, is a failure, and so is a file on both this list and
-    /// ``packageKeychainFiles``. The repository-path needles carry a quote, so they never match lexed code:
-    /// a wall file may spell a path in a literal, which it reads through `PackageRoot`.
+    /// ``packageKeychainFiles``. The repository-path needles carry a quote, which lexed code never holds,
+    /// so a wall file's literals are read at their start instead (``packageRepoPathFolders``): one that
+    /// starts with a repository folder is refused, as the quoted needle refuses it on any other file's
+    /// line, and a wall file reads a file through `PackageRoot` as every package file does.
     static let packageWallFiles: [(file: String, invariant: String)] = [
         (file: "PackageTestHygieneTests.swift",
          invariant: """
@@ -505,15 +499,30 @@ import Testing
         return (problems, allowed)
     }
 
+    /// The repository folders a quoted repository-path needle of ``packageHazards`` names, each with its
+    /// reason: the needle without its quote. A wall file's lexed code holds no quote, so its literals are
+    /// read against these at their start (``wallFileProblems(_:invariant:)``).
+    static let packageRepoPathFolders: [(folder: String, reason: String)] = packageHazards
+        .filter { $0.needle.hasPrefix("\"") }
+        .map { (folder: String($0.needle.dropFirst()), reason: $0.reason) }
+
     /// One wall file's I9 problems (``packageWallFiles``): every line of its lexed code (comments dropped,
-    /// literals emptied) holds no needle, and its text spells at least one, or it needs no exemption.
+    /// literals emptied) holds no needle, no literal of it starts with a repository folder
+    /// (``packageRepoPathFolders``), and its text spells at least one needle, or it needs no exemption.
     static func wallFileProblems(_ file: PackageSwiftFiles.File, invariant: String) -> [String] {
         var problems: [String] = []
+        let lexed = SwiftSourceLexer.lex(file.text)
         // R2: bounded by the file's line count × the needle list.
-        for line in SwiftSourceLexer.lex(file.text).code.components(separatedBy: "\n") {
+        for line in lexed.code.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             for hazard in packageHazardNeedles(onLine: trimmed) {
                 problems.append("I9: \(file.path) (a wall file, read as code): `\(trimmed)` holds `\(hazard.needle)`: \(hazard.reason)")
+            }
+        }
+        // R2: bounded by the file's literals × the folder list.
+        for literal in lexed.literals {
+            for path in packageRepoPathFolders where literal.text.hasPrefix(path.folder) {
+                problems.append("I9: \(file.path):\(literal.line) (a wall file, its literal read at its start): `\(literal.text.prefix(80))` starts with `\(path.folder)`: \(path.reason)")
             }
         }
         let spells = file.text.components(separatedBy: "\n").contains { !packageHazardNeedles(onLine: $0).isEmpty }
@@ -1310,9 +1319,23 @@ import Testing
     // MARK: - The readers' samples
 
     /// The needle reader (rule I9): it holds a keychain type however it is constructed or reached, a seal
-    /// key's wipe, a raw `SecItem` call but not a status that spells it inside its name, and every
-    /// platform directory but the temporary ones.
+    /// key's wipe, a raw `SecItem` call but not a status that spells it inside its name, every platform
+    /// directory but the temporary ones, and each of the four location calls on a line that holds that
+    /// call's needle and no other, so a call needle the platform wall's list loses fails here.
     private static func expectTheNeedleReaderFixtured() {
+        let calls: [(line: String, needle: String)] = [
+            (line: "let u = try FileManager.default.url(for: directory, in: mask, appropriateFor: nil, create: false)",
+             needle: "url(for:"),
+            (line: "let all = FileManager.default.urls(for: directory, in: mask)", needle: "urls(for:"),
+            (line: "let u = try URL(for: directory, in: mask, appropriateFor: nil, create: false)", needle: "URL(for:"),
+            (line: "let c = FileManager.default.url(forUbiquityContainerIdentifier: nil)",
+             needle: "url(forUbiquityContainerIdentifier:")
+        ]
+        // R2: bounded by the fixed list.
+        for call in calls {
+            let read = packageHazardNeedles(onLine: call.line).map(\.needle)
+            #expect(read == [call.needle], "I9 read \(read) on `\(call.line)`, not its one location call")
+        }
         let hazardous = [
             "let id = IdentityService.init(namespace: ns)", "let s: MeshSessionStore = .init(scope: scope)",
             "MeshSessionSealKey.wipe(service: service)", "MeshRoutedSealKey.wipe(service: service)",
@@ -1330,6 +1353,37 @@ import Testing
                      "return matched.isEmpty ? errSecItemNotFound : errSecSuccess"] {
             #expect(packageHazardNeedles(onLine: line).isEmpty, "I9 holds a needle on `\(line)`")
         }
+    }
+
+    /// The wall-file reader (rule I9): a needle in a literal is data and the same needle in code is read;
+    /// a literal that starts with each repository folder is refused at its start, while one that only
+    /// names a folder inside its text is not; and a file that spells no needle is named.
+    private static func expectTheWallFileReaderFixtured() {
+        let literal = PackageSwiftFiles.File(path: "W.swift", text: "let sample = \"_ = UserDefaults.standard\"\n")
+        let literalProblems = wallFileProblems(literal, invariant: "")
+        #expect(literalProblems.isEmpty, "a wall file's literal was read as code: \(literalProblems)")
+        let code = PackageSwiftFiles.File(path: "W.swift", text: "func f() { _ = UserDefaults.standard }\n")
+        let codeProblems = wallFileProblems(code, invariant: "")
+        #expect(codeProblems.contains { $0.contains("(a wall file, read as code)") },
+                "a wall file's code needle was not read: \(codeProblems)")
+        let quotedPaths = [
+            "let t = try String(contentsOfFile: \"Tests/ProximityKitTests.tsv\", encoding: .utf8)",
+            "let a = \"App/Fernlet/FernletApp.swift\"", "let d = \"Docs/FileIndex.md\"",
+            "let w = \".github/workflows/s3-wall.yml\"", "let k = \"FernletKit/Package.swift\"",
+            "let s = \"Scripts/spm-wall-check.sh\""
+        ]
+        // R2: bounded by the fixed list.
+        for line in quotedPaths {
+            let problems = wallFileProblems(PackageSwiftFiles.File(path: "W.swift", text: line + "\n"), invariant: "")
+            #expect(problems.contains { $0.contains("(a wall file, its literal read at its start)") },
+                    "a wall file's literal repository path was not read: \(line)")
+        }
+        let inside = PackageSwiftFiles.File(path: "W.swift", text: "let n = \"reads Tests/x through PackageRoot\"\n")
+        #expect(!wallFileProblems(inside, invariant: "").contains { $0.contains("its literal read at its start") },
+                "a literal that only names a folder inside its text was refused")
+        let quiet = PackageSwiftFiles.File(path: "W.swift", text: "let x = 1\n")
+        #expect(wallFileProblems(quiet, invariant: "").contains { $0.contains("spells no needle in its text") },
+                "a wall file that spells no needle was not named")
     }
 
     /// The structure reader's problems for a fixture `source` read as a listed file of `kind` (rule I9).

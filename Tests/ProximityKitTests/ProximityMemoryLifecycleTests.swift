@@ -152,8 +152,10 @@ import Testing
     /// Each matcher trips on a planted token and passes its near-misses: a stored task handle (but not a
     /// SwiftUI `@State` one), a deinit that cancels, a block observer (but not a selector one) and its
     /// removal, an observation-tracking call (but not prose about one), an `unowned` host (but not a
-    /// strongly held one), every spelling of a `Task` construction (but not a declaration, a yield or a
-    /// documentation line), and the host-pin markers' kinds, reasons and strays.
+    /// strongly held one, and an `unowned var` or a host under another name as much as the module's
+    /// spelling), every spelling of a `Task` construction (but not a declaration, a yield or a
+    /// documentation line), and the host-pin markers' kinds (a marker of no kind on a `Task` line is a
+    /// bad kind, never an exemption), reasons and strays.
     @Test func theLifecycleMatchersTripOnPlantedTokens() {
         let taskHolder = "final class X {\n    @ObservationIgnored private var job: Task<Void, Never>?\n}\n"
         let stateHolder = "struct V: View {\n    @State private var job: Task<Void, Never>?\n}\n"
@@ -190,6 +192,12 @@ import Testing
         #expect(Self.facts(for: "n.swift", source: emptyReason).hostPin.reasonlessMarkers == [3], "a reasonless marker must trip")
         let strayKind = host + "        // host-pin: whatever — not a kind\n        let x = 1\n"
         #expect(Self.facts(for: "o.swift", source: strayKind).hostPin.strayMarkers.isEmpty == false, "only `scoped` may sit off a Task line")
+        let pinned = Self.facts(for: "p.swift", source: host + "        Task {   // host-pin: pinned — x\n        }\n").hostPin
+        #expect(pinned.badKinds == ["2: pinned"], "a Task line's marker of no kind must trip as a bad kind: \(pinned)")
+        // R2: bounded by the two spellings.
+        for holder in ["    unowned var host: any ProximityHost\n", "    private unowned let owner: any ProximityHost\n"] {
+            #expect(Self.facts(for: "q.swift", source: holder).holdsUnownedHost, "ML4 skipped an unowned host: \(holder)")
+        }
     }
 
     // MARK: - Floors and the one home

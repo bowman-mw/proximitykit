@@ -1069,10 +1069,13 @@ import Testing
     /// Fernlet's source walls read through, which Fernlet's `SwiftSourceLexerTests` holds to the same
     /// fixtures).
     ///
-    /// Each fixture is a form the module or the test tree writes, chosen where a looser reading goes
-    /// wrong: a quote in a comment, a comment inside a comment, an escaped quote, a literal inside an
-    /// interpolation, a raw literal holding quotes and a `\(` that is text, and a multi-line literal,
-    /// whose line breaks the code must keep so every later line number stays true.
+    /// Each fixture is a form Swift reads, chosen where a looser reading goes wrong: a quote in a comment,
+    /// a comment inside a comment, an escaped quote, a literal inside an interpolation, a raw literal
+    /// holding quotes and a `\(` that is text, a multi-line literal, whose line breaks the code must keep
+    /// so every later line number stays true, and regex literals whose bodies would open a comment or a
+    /// literal (an extended one holding `/*`, a multi-line one holding a quote and a short closing
+    /// delimiter, a bare one holding an escaped `/` before a `*` and a quote), beside the divisions, the
+    /// compound assignment and the operator reference that are code.
     @Test func theLexerTellsCodeCommentsAndLiteralsApartAsSwiftDoes() {
         let commented = SwiftSourceLexer.lex(#"let a = "x" // "not a literal""#)
         #expect(commented.literals == [SwiftSourceLexer.Literal(line: 1, text: "x")])
@@ -1091,6 +1094,15 @@ import Testing
         #expect(multiline.literals.map(\.line) == [1, 4])
         #expect(multiline.literals.first?.text == "\n    one \"two\"\n    ")
         #expect(multiline.code == "let g = \"\n\n\"\nlet h = \"\"")
+        let extended = SwiftSourceLexer.lex("let r = #/a/*/#\nimport CloudKit")
+        #expect(extended.code == "let r = \"\"\nimport CloudKit")
+        let hashed = SwiftSourceLexer.lex("let r = ##/\n  \" /#\n/##\nlet s = \"q\"")
+        #expect(hashed.literals == [SwiftSourceLexer.Literal(line: 4, text: "q")])
+        #expect(hashed.code == "let r = \"\n\n\"\nlet s = \"\"")
+        let bare = SwiftSourceLexer.lex(#"let r = /a\/*"/"# + "\nimport CloudKit")
+        #expect(bare.code == "let r = \"\"\nimport CloudKit")
+        let operators = "let q = a / b / c, w = a/b/c\nx /= 2.0/1.0\nlet v = [1.0].reduce(0, /)"
+        #expect(SwiftSourceLexer.lex(operators).code == operators)
     }
 
     // MARK: The sweep

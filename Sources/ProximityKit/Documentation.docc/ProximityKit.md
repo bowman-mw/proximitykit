@@ -1110,7 +1110,8 @@ holds four rules, each reader fixtured both ways. Nothing reaches what the unhos
 installer's read, a raw `SecItem` call anywhere, a store or its production scope, a production or
 process-shared location, or a path of a host repository, each excused only by an exact allowlisted line
 with its invariant; a wall file, the suite's own first, is read as code, so the needles it holds in its
-literals are data and a needle in its code is refused. Every import travels with the package (rule
+literals are data and a needle in its code is refused, and so is a literal of it that starts with a
+host repository's folder. Every import travels with the package (rule
 I11): this module, Foundation, Testing, Combine, simd and Synchronization, and Security in the keychain
 store's file alone. The target's own inventory, `Tests/ProximityKitTests.tsv` beside this target's
 folder, is the tree: every suite's file and its declared tests, the row count and the tests' sum
@@ -1139,7 +1140,7 @@ DEBUG launch-environment keys, `PROXIMITYKIT_UI_TEST_*` (the mesh manager's cann
 region, and each family is read at its measured floor, so a matcher that stops seeing one fails. Key
 custody: no keychain row this module writes is synchronizable, every accessibility class it names is a
 `ThisDeviceOnly` one, and no line of its code constructs an ``IdentityService`` or delegates to one of
-its initializers outside `Identity/IdentityService.swift`, read as code through the walls' lexer: its
+its initializers, its own file included, read as code through the walls' lexer: its
 host door, ``ProximityHost/makeProximityIdentity()``, has no default, so every identity a manager holds
 is built in its host's code, under the host's custody. The purpose wall: every line that opens a raw CryptoKit primitive call
 (nine markers: signing and verifying, HKDF, HMAC, ChaChaPoly and AES-GCM) names a purpose within

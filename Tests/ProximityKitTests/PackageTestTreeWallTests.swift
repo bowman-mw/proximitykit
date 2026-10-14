@@ -86,7 +86,8 @@ import Testing
     /// installBinding:)` wherever a scope is expected (read over lexed code); and no hand-built
     /// `MeshSessionStorageScope(…)` names a production directory or keychain service
     /// (``productionArgumentNeedles``). No construction floor: the package's tests build no session store
-    /// today, and a suite that does is held here.
+    /// today, and a suite that does is held here. The hand-built scopes the last refusal reads are floored
+    /// (``minimumHandBuiltScopes``), so a scope reader that stops seeing them fails.
     @Test func everyPackageSessionStoreIsOnAScopeOfItsOwn() throws {
         let files = try PackageSwiftFiles.tests()
         #expect(files.count >= PackageSwiftFiles.testFloor, """
@@ -95,11 +96,14 @@ import Testing
             store or a host double there is unseen
             """)
         var problems: [String] = []
+        var scopes = 0
         // R2: bounded by the package's file count.
         for file in files where file.path != Self.wallFile {
             problems += Self.storeProblems(in: file, of: .session)
+            scopes += Self.constructionArguments(of: StoreFamily.session.scope + "(", in: file.text).count
         }
         #expect(problems.isEmpty, "\(problems.joined(separator: "\n"))")
+        Self.expectHandBuiltScopes(scopes, of: .session)
     }
 
     /// **The routed store wall and the scratch-root needle.** The session wall's refusals over the routed
@@ -109,8 +113,9 @@ import Testing
     /// `ProximityHost`'s default scopes, the namespace's production rows on whatever root it states, so
     /// on a scratch root of its own it would seal its files under the production keys, which any wipe in
     /// the process deletes, while spelling neither a construction nor a `.production` the needles above
-    /// could see. At least ``minimumHostDoubles`` doubles must be read, so a broken reader cannot pass on
-    /// an empty read.
+    /// could see. At least ``minimumHostDoubles`` doubles must be read, over every package test file, this
+    /// one included, so a broken reader cannot pass on an empty read; and at least
+    /// ``minimumHandBuiltScopes`` hand-built routed scopes.
     @Test func everyPackageRoutedStoreAndHostDoubleIsOnAScopeOfItsOwn() throws {
         let files = try PackageSwiftFiles.tests()
         #expect(files.count >= PackageSwiftFiles.testFloor, """
@@ -120,12 +125,16 @@ import Testing
             """)
         var problems: [String] = []
         var doubles: [HostDouble] = []
+        var scopes = 0
         // R2: bounded by the package's file count.
-        for file in files where file.path != Self.wallFile {
-            problems += Self.storeProblems(in: file, of: .routed)
+        for file in files {
             doubles += try Self.hostDoubles(in: SwiftSourceLexer.lex(file.text).code)
+            guard file.path != Self.wallFile else { continue }
+            problems += Self.storeProblems(in: file, of: .routed)
+            scopes += Self.constructionArguments(of: StoreFamily.routed.scope + "(", in: file.text).count
         }
         #expect(problems.isEmpty, "\(problems.joined(separator: "\n"))")
+        Self.expectHandBuiltScopes(scopes, of: .routed)
         #expect(doubles.count >= Self.minimumHostDoubles, "read only \(doubles.count) host doubles — scanner broken?")
         let unscoped = Self.unscopedRootedDoubles(doubles)
         #expect(unscoped.isEmpty, """
@@ -141,20 +150,25 @@ import Testing
     /// shorthand scanner sees `.production(for:directory:installBinding:)` in every place a scope goes:
     /// an argument, a typed binding wrapped across lines, a host's computed property, a `return`. The
     /// type-prefixed scanner sees its own type's spelling on one line and broken before the `.`, and not
-    /// its twin's. Neither reads another type's `.production`, nor a production read through a value. The
-    /// host-double reader reads a file-scope double with what the top level of its body states, and no
-    /// class that is no host, a nested class, or one in a comment or a literal.
+    /// its twin's. Neither reads another type's `.production`, nor a production read through a value. Each
+    /// family's problems name its own store built without `scope:` and its own scope built on a production
+    /// directory or on its own production services, and neither its twin's store nor its twin's service.
+    /// The host-double reader reads a file-scope double with what the top level of its body states, and
+    /// no class that is no host, a nested class, or one in a comment or a literal.
     @Test func theStoreScopeScannersSeeEverySpellingAndOnlyThose() throws {
         Self.expectTheProductionScopeScannersFixtured()
+        Self.expectTheStoreProblemsFixtured()
         try Self.expectTheScratchRootReaderFixtured()
     }
 
     /// **ML5, the package's half.** No package test file but this one builds one of ProximityKit's two
     /// `unowned` host holders, a mesh manager or a pair session, over a host expression that is itself a
     /// call (``inlineHostPattern``): the host dies at the end of the expression, so the holder is born
-    /// with a dangling `unowned` host (invariant HP0). Read over each file's text at the walk's floor,
-    /// the matcher held to its samples first. Known narrowness, as the host's ML5: a multi-line call
-    /// with its host label on a line of its own is not matched.
+    /// with a dangling `unowned` host (invariant HP0). Read over each file's whole text at the walk's
+    /// floor, so a call broken across lines is read, the matcher held to its samples first. Known
+    /// narrowness, as the host's ML5: a host expression that does not open with a name or a dotted name
+    /// called in place (`store: (makeHost())`, `store: hosts[0].make()`, a closure called where it
+    /// stands), and a holder built through an alias or a factory of its own, are not read.
     @Test func packageTestsNeverBuildAManagerOverAnInlineHost() throws {
         Self.expectTheInlineHostMatcherFixtured()
         let files = try PackageSwiftFiles.tests()
@@ -400,6 +414,58 @@ import Testing
             }
         }
         return problems
+    }
+
+    /// Fewer hand-built scopes of a family than this in the package's tests, and the scope reader is
+    /// broken or the folder went dark, not the tree clean: two of each, `PackageTestHost`'s and
+    /// `PackageKeychainStoreTests`' fixture scopes, MEASURED at ProximityKit plan step A1.1.18
+    /// (2026-10-14).
+    static let minimumHandBuiltScopes = 2
+
+    /// Expects `count`, the hand-built scopes of `family` a store wall read, at ``minimumHandBuiltScopes``
+    /// or more.
+    static func expectHandBuiltScopes(_ count: Int, of family: StoreFamily) {
+        #expect(count >= minimumHandBuiltScopes, """
+            the store walls read only \(count) hand-built \(family.scope)(…) constructions in the package's \
+            tests (floor \(minimumHandBuiltScopes)): the scope reader is broken, or the family's scope name \
+            drifted
+            """)
+    }
+
+    /// Each family's store problems on its samples, both families read over each: its own store built
+    /// without `scope:` is named and with one is not; its own scope built on the production sidecar
+    /// directory, on its own production service or on a namespace's is named; and neither family names
+    /// the other's store, scope or service, so a drifted name or a swapped service in a family's table
+    /// fails here.
+    private static func expectTheStoreProblemsFixtured() {
+        let session = "let c = MeshSessionStorageScope(directory: d, keychainService: "
+        let routed = "let c = MeshRoutedStorageScope(directory: d, keychainService: "
+        let layout = "(directory: ProximitySupportLayout.defaultDirectory, keychainService: s)"
+        let samples: [(source: String, session: String?, routed: String?)] = [
+            ("let s = MeshSessionStore(directory: d)", "constructs MeshSessionStore without `scope:`", nil),
+            ("let s = MeshRoutedStore(directory: d)", nil, "constructs MeshRoutedStore without `scope:`"),
+            ("let s = MeshSessionStore(directory: d, scope: s)", nil, nil),
+            ("let s = MeshRoutedStore(directory: d, scope: s)", nil, nil),
+            ("let c = MeshSessionStorageScope" + layout, "builds a mesh-session scope on the production sidecar directory", nil),
+            ("let c = MeshRoutedStorageScope" + layout, nil, "builds a routed scope on the production sidecar directory"),
+            (session + "\"com.fernlet.mesh-session\")", "builds a mesh-session scope on the production keychain service", nil),
+            (routed + "\"com.fernlet.mesh-routed\")", nil, "builds a routed scope on the production keychain service"),
+            (session + "\"com.fernlet.mesh-routed\")", nil, nil),
+            (routed + "\"com.fernlet.mesh-session\")", nil, nil),
+            (session + "installation.keychain.meshSessionSealKey.service)",
+             "builds a mesh-session scope on a namespace's production keychain service", nil),
+            (routed + "installation.keychain.meshRoutedSealKey.service)",
+             nil, "builds a routed scope on a namespace's production keychain service")
+        ]
+        // R2: bounded by the fixed list × the two families.
+        for sample in samples {
+            let file = PackageSwiftFiles.File(path: "S.swift", text: sample.source + "\n")
+            for (family, expected) in [(StoreFamily.session, sample.session), (StoreFamily.routed, sample.routed)] {
+                let problems = storeProblems(in: file, of: family)
+                let named = expected.map { text in problems.count == 1 && problems.allSatisfy { $0.contains(text) } }
+                #expect(named ?? problems.isEmpty, "the \(family.kind) wall read \(problems) on `\(sample.source)`")
+            }
+        }
     }
 
     /// The argument text of every `name…)` construction in `source`, matched by depth so nested
@@ -665,8 +731,13 @@ import Testing
 
     /// ML5's package half: one of ProximityKit's two `unowned` host holders built over a host expression
     /// that is itself a call. `MeshNetworkManager(store: makeHost(), …)` and
-    /// `ProximityPairSession(host: makeHost(), …)` trip; the same over a host held in a `let` pass.
-    static let inlineHostPattern = #"MeshNetworkManager\(\s*store:\s*\w+\(|ProximityPairSession\(\s*host:\s*\w+\("#
+    /// `ProximityPairSession(host: makeHost(), …)` trip, and so do each spelled `.init(`, an implicit
+    /// `.init(store: …)` or `.init(host: …)` whatever type it builds (no type is spelled there), a
+    /// qualified call (`Fixtures.host()`) and a call after `try` or `await`; the same over a host held in
+    /// a `let` pass, as does an initializer's delegation over the host it was given
+    /// (`self.init(store: store, …)`).
+    static let inlineHostPattern = #"(?:MeshNetworkManager(?:\s*\.\s*init)?\(\s*store:|ProximityPairSession(?:\s*\.\s*init)?\(\s*host:"#
+        + #"|(?<![A-Za-z0-9_])\.\s*init\(\s*(?:store|host):)\s*(?:(?:try[?!]?|await)\s+)*[\w.]+\("#
 
     /// ML5's matcher over one source, as 1-based line numbers. Shared by the scan and its samples.
     static func inlineHostViolations(in source: String) -> [Int] {
@@ -678,16 +749,31 @@ import Testing
         }
     }
 
-    /// The inline-host matcher reads both holders built over a call and neither built over a held host.
+    /// The inline-host matcher reads both holders built over a call, in every spelling it names (a call
+    /// broken across lines, `.init(` spelled or implicit, a qualified host call, a call after `try` or
+    /// `await`), each on the line the construction opens, and neither built over a held host.
     private static func expectTheInlineHostMatcherFixtured() {
-        #expect(inlineHostViolations(in: "let bare = MeshNetworkManager(store: makeTestStore(), transport: t)\n") == [1],
-                "ML5 missed a manager built over an inline host")
-        #expect(inlineHostViolations(in: "let held = MeshNetworkManager(store: host)\n").isEmpty,
-                "ML5 read a manager built over a held host")
-        #expect(inlineHostViolations(in: "let pair = ProximityPairSession(host: makeHost(), profile: p)\n") == [1],
-                "ML5 missed a pair session built over an inline host")
-        #expect(inlineHostViolations(in: "let pair = ProximityPairSession(host: host, profile: p)\n").isEmpty,
-                "ML5 read a pair session built over a held host")
+        let inline = [
+            "let bare = MeshNetworkManager(store: makeTestStore(), transport: t)\n",
+            "let pair = ProximityPairSession(host: makeHost(), profile: p)\n",
+            "let wrapped = MeshNetworkManager(\n    store: makeHost(),\n    transport: t\n)\n",
+            "let spelled = MeshNetworkManager.init(store: makeHost(), transport: t)\n",
+            "let implicit: MeshNetworkManager = .init(store: makeHost(), transport: t)\n",
+            "let qualified = MeshNetworkManager(store: Fixtures.host(), transport: t)\n",
+            "let tried = MeshNetworkManager(store: try makeHost(), transport: t)\n",
+            "let awaited: ProximityPairSession = .init(host: await makeHost(), profile: p)\n"
+        ]
+        let held = [
+            "let held = MeshNetworkManager(store: host)\n", "let pair = ProximityPairSession(host: host, profile: p)\n",
+            "let spelled = MeshNetworkManager.init(store: host)\n", "self.init(store: store, transport: nil)\n"
+        ]
+        // R2: bounded by the two fixed lists.
+        for sample in inline {
+            #expect(inlineHostViolations(in: sample) == [1], "ML5 missed a holder built over an inline host: \(sample)")
+        }
+        for sample in held {
+            #expect(inlineHostViolations(in: sample).isEmpty, "ML5 read a holder built over a held host: \(sample)")
+        }
     }
 
     // MARK: - The digest homes

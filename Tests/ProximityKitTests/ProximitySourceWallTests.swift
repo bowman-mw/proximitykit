@@ -19,9 +19,9 @@
 //        (`synchronizable: true` nowhere in its code), and every accessibility class it names is a
 //        `ThisDeviceOnly` one: a host that syncs a key, or keeps one a backup restores, writes that row
 //        itself; and ProximityKit builds no identity of its own (no construction of `IdentityService`
-//        anywhere in its code, and no delegation to one of its initializers outside the file that declares
-//        it): its host door has no default, so every identity a manager holds is built in the host's code,
-//        under the host's custody;
+//        anywhere in its code, and no delegation to one of its initializers, the file that declares it
+//        included): its host door has no default, so every identity a manager holds is built in the host's
+//        code, under the host's custody;
 //   the purpose wall  every line of ProximityKit's code that opens a raw primitive call (nine CryptoKit
 //        markers: signing and verifying, HKDF, HMAC, ChaChaPoly and AES-GCM) names a purpose within an
 //        asymmetric window, three lines above it to six below, so a new primitive call cannot rely on a
@@ -181,15 +181,15 @@ import Testing
 
     /// **No identity of its own.** No line of ProximityKit's code constructs an `IdentityService`
     /// (``identityConstructionLines(in:)``), and none delegates to one of its initializers
-    /// (``identityDelegationLines(in:)``) outside ``identityDeclarationFile``, whose delegations are the
-    /// identity's own API: over every Swift file of the module at the walk's floor, read as lexed code
-    /// (`SwiftSourceLexer`), so a comment or a string that spells a construction is not one; an exact set,
-    /// the empty one. Its host door, `ProximityHost.makeProximityIdentity()`, has no default, so every
-    /// identity a manager holds is built in its host's code, under the host's own custody (a host that
-    /// escrows a key beside the identity's rows builds every identity with that participant), which the
-    /// host's own wall holds. The declaration file is among the files read, so the exemption names a real
-    /// file; both matchers are held to their samples first
-    /// (``expectTheIdentityMatchersSeeTheirSamplesAndNoNeighbour()``).
+    /// (``identityDelegationLines(in:)``), the identity's own file included, which holds its one
+    /// designated initializer and no delegation: over every Swift file of the module at the walk's floor,
+    /// read as lexed code (`SwiftSourceLexer`), so a comment or a string that spells a construction is not
+    /// one; an exact set, the empty one. Its host door, `ProximityHost.makeProximityIdentity()`, has no
+    /// default, so every identity a manager holds is built in its host's code, under the host's own
+    /// custody (a host that escrows a key beside the identity's rows builds every identity with that
+    /// participant), which the host's own wall holds. A convenience initializer or factory of the
+    /// identity, in its own file or any other, would build one past that door, and fails here. Both
+    /// matchers are held to their samples first (``expectTheIdentityMatchersSeeTheirSamplesAndNoNeighbour()``).
     @Test func proximityKitBuildsNoIdentityOfItsOwn() throws {
         Self.expectTheIdentityMatchersSeeTheirSamplesAndNoNeighbour()
         let files = try PackageSwiftFiles.sources()
@@ -197,25 +197,20 @@ import Testing
             the identity scan read \(files.count) ProximityKit files (floor \(PackageSwiftFiles.sourceFloor)): \
             the walk is broken, not the module clean
             """)
-        let declared = files.contains { $0.path == Self.identityDeclarationFile }
-        #expect(declared, """
-            the identity's declaration file, \(Self.identityDeclarationFile), is not among the \(files.count) \
-            files read: the one file whose delegations are the identity's own API moved or was renamed; \
-            update identityDeclarationFile
-            """)
         var homes: [String] = []
         // R2: bounded by the module's file count.
         for file in files {
             let code = SwiftSourceLexer.lex(file.text).code
-            let delegations = file.path == Self.identityDeclarationFile ? [] : Self.identityDelegationLines(in: code)
-            guard !(Self.identityConstructionLines(in: code) + delegations).isEmpty else { continue }
+            guard !(Self.identityConstructionLines(in: code) + Self.identityDelegationLines(in: code)).isEmpty else {
+                continue
+            }
             homes.append(file.path)
         }
         #expect(homes.isEmpty, """
             ProximityKit constructs an IdentityService in \(homes): it builds none. Its host door, \
             `ProximityHost.makeProximityIdentity()`, has no default, so a host answers it with an identity \
-            built under the host's own custody; add no initializer or factory of the identity outside \
-            \(Self.identityDeclarationFile), and spell any other type's `init(namespace:)` with its type name.
+            built under the host's own custody; add no initializer or factory of the identity, in its own \
+            file or any other, and spell any other type's `init(namespace:)` with its type name.
             """)
     }
 
@@ -289,18 +284,25 @@ import Testing
         }
     }
 
-    /// **No legacy read path.** `legacy-read` is absent from ``pinnedByLabel`` and from every hatch in
-    /// ProximityKit's code. Deliberately redundant with ``everyEscapeHatchLabelIsPinnedAtItsOwnCount()``,
-    /// which already fails a legacy reader as "1 found, 0 pinned": that wall lives in the absence of a
-    /// key, and absence is repaired by typing `"legacy-read": 1`, a one-line edit that reads as a count
-    /// update in a diff. This cell cannot be satisfied that way, so restoring a legacy reader means
-    /// deleting a test whose name says what is being done.
+    /// **No legacy read path.** No label that names a legacy read (``isLegacy(_:)``: `legacy-read`, or any
+    /// spelling or qualification of it) is in ``pinnedByLabel`` or on any hatch in ProximityKit's code.
+    /// Deliberately redundant with ``everyEscapeHatchLabelIsPinnedAtItsOwnCount()``, which already fails
+    /// a legacy reader as "1 found, 0 pinned": that wall lives in the absence of a key, and absence is
+    /// repaired by typing `"legacy-read": 1`, or a respelled label and its pin, a one-line edit that
+    /// reads as a count update in a diff. This cell cannot be satisfied that way, so restoring a legacy
+    /// reader means deleting a test whose name says what is being done. The family reader is held to its
+    /// samples first.
     @Test func noLegacyReadPathExistsInProximityKit() throws {
-        #expect(Self.pinnedByLabel["legacy-read"] == nil, """
-            `legacy-read` is back in pinnedByLabel. The pin is not the place to re-authorize a legacy read \
-            path — take it to the owner.
+        #expect(Self.isLegacy("legacy-read") && Self.isLegacy("Legacy-Read (v1 envelope)")
+                && Self.hatches(in: "// cryptographic-domain: legacy-read (v1 envelope)\n", path: "l.swift")
+                    .map { Self.isLegacy($0.label) } == [true]
+                && !Self.isLegacy("x509-self-signature"), "the legacy reader missed a respelled label or read a foreign one")
+        let pinned = Self.pinnedByLabel.keys.filter(Self.isLegacy).sorted()
+        #expect(pinned.isEmpty, """
+            A legacy label is back in pinnedByLabel: \(pinned). The pin is not the place to re-authorize a \
+            legacy read path — take it to the owner.
             """)
-        let legacy = try Self.hatchScan().hatches.filter { !$0.isProse && $0.label == "legacy-read" }
+        let legacy = try Self.hatchScan().hatches.filter { !$0.isProse && Self.isLegacy($0.label) }
         let sites = legacy.map { "  \($0.printed)" }.joined(separator: "\n")
         #expect(legacy.isEmpty, """
             \(legacy.count) legacy read path(s) have come back:
@@ -509,23 +511,21 @@ import Testing
         return hits
     }
 
-    /// ProximityKit's file that declares the identity, by its path under the module: the one place its
-    /// initializers may delegate to one another. A delegating initializer there is the identity's own API,
-    /// and every call of it is still read where it is made.
-    static let identityDeclarationFile = "Identity/IdentityService.swift"
-
     /// An argument list whose first label is one of the identity's initializer's three
     /// (`namespace:`, `keychainService:`, `provisioningParticipant:`).
     private static let identityFirstLabel = #"\(\s*(?:namespace|keychainService|provisioningParticipant)\s*:"#
 
     /// Matcher: the 1-based lines of lexed `code` (comments removed, literals emptied) that construct
-    /// an identity: a call of the type (`IdentityService(…)`, `IdentityService.init(…)`), or an implicit
-    /// initializer (`.init(…)`, `Self(…)`, `Self.init(…)`) under one of the identity's three labels
-    /// first, which no other type of the module is built with implicitly, so a construction cannot hide
-    /// behind type inference.
+    /// an identity: a call of the type (`IdentityService(…)`, `IdentityService.init(…)`), or of its
+    /// metatype (`IdentityService.self.init(…)`), or an implicit initializer (`.init(…)`, `Self(…)`,
+    /// `Self.init(…)`) or one through a metatype value (`make.init(…)`, any lowercase name but `self`)
+    /// under one of the identity's three labels first, which no other type of the module is built with
+    /// either way, so a construction cannot hide behind type inference or a metatype.
     static func identityConstructionLines(in code: String) -> [Int] {
         let pattern = #"(?<![A-Za-z0-9_])IdentityService\s*(?:\.\s*init\s*)?\("#
+            + #"|(?<![A-Za-z0-9_])IdentityService\s*\.\s*self\s*\.\s*init\s*\("#
             + #"|(?<![A-Za-z0-9_.])(?:Self\s*(?:\.\s*init\s*)?|\.\s*init\s*)"# + identityFirstLabel
+            + #"|(?<![A-Za-z0-9_.])(?!self\b)[a-z_][A-Za-z0-9_]*\s*\.\s*init\s*"# + identityFirstLabel
         return lines(matching: pattern, in: code)
     }
 
@@ -551,9 +551,10 @@ import Testing
         }
     }
 
-    /// The construction matcher reads every way a construction is spelled and none of the nearest code
-    /// that builds no identity (another type's initializer under the same label, another type's own
-    /// delegation, a host factory's call, a static read); the delegation matcher reads a convenience
+    /// The construction matcher reads every way a construction is spelled, through the metatype and a
+    /// metatype value too, and none of the nearest code that builds no identity (another type's
+    /// initializer under the same label, another type's own delegation, a metatype value built under
+    /// another label, a host factory's call, a static read); the delegation matcher reads a convenience
     /// initializer of the identity delegating under its first label or under another initializer's,
     /// and not another type's delegation in code that never names the identity, even when a comment
     /// does, nor code that names it and delegates nothing. Each sample is lexed first, as the files are.
@@ -562,14 +563,15 @@ import Testing
             "let id = IdentityService(namespace: .host)", "let id = IdentityService.init(namespace: n)",
             "let id: IdentityService = .init(namespace: n)", "return Self(namespace: n, keychainService: s)",
             "return Self.init(namespace: n)", "let id: IdentityService = .init(keychainService: s)",
-            "let id: IdentityService = .init(provisioningParticipant: nil)"
+            "let id: IdentityService = .init(provisioningParticipant: nil)",
+            "let id = IdentityService.self.init(namespace: n)", "let id = make.init(namespace: n)"
         ]
         let notConstructions = [
             "let tag = IdentityService.fingerprint(of: key)", "let identity: IdentityService",
             "/// IdentityService(namespace:)", #"let s = "IdentityService(namespace: .host)""#,
             "let id = IdentityService.appIdentity()", "self.init(namespace: .host, keychainService: service)",
             "let radio = NetworkMeshSession(namespace: namespace)",
-            "let lock = LockService(keychainService: service)",
+            "let lock = LockService(keychainService: service)", "let radio = radioType.init(name: n)",
             "self.init(\n    keychainService: keychainService,\n    sealedContentKeyServices: services\n)"
         ]
         let delegations = [
@@ -678,34 +680,56 @@ import Testing
 
     /// The purpose matcher trips on a planted call and passes its near-misses: a call with no purpose
     /// word in reach is reported; one whose `purpose:` argument sits below it, or whose escape hatch sits
-    /// above it, is not; the window reaches six lines below a call but not four above it; a call that
-    /// names only a host registry's type is reported; and a line naming a purpose with no call is no call.
+    /// above it, is not; the window reaches six lines below a call but not seven, and three above it but
+    /// not four; a call that names only a host registry's type is reported; a line naming a purpose with
+    /// no call is no call; and every marker opens a call by itself (``expectEveryMarkerOpensItsBareCall()``).
     static func expectThePurposeMatcherTripsOnPlantedCalls() {
-        let bare = "let s = try key.signature(for: bytes)\n"
+        let call = "let s = try key.signature(for: bytes)\n"
         let argumentBelow = "let s = try identity.sign(\n    key.signature(for: bytes),\n    purpose: label)\n"
         let hatchAbove = "// cryptographic-domain: x509-self-signature\nlet s = try key.signature(for: tbs)\n"
-        let sixBelow = "let s = try key.signature(for: bytes)\n" + String(repeating: "let a = 1\n", count: 5)
-            + "let p = purpose\n"
-        let fourAbove = "let p = purpose\n" + String(repeating: "let a = 1\n", count: 3)
-            + "let s = try key.signature(for: bytes)\n"
+        let filler = { (count: Int) in String(repeating: "let a = 1\n", count: count) }
         let hostRegistryOnly = "let s = try key.signature(for: FernletCryptoPurpose.Signature.probe.signingBytes(bytes))\n"
-        let noCall = "let p = purpose\n"
+        let named = { (source: String) in CryptoScan.primitiveCalls(in: source).map(\.namesAPurpose) }
 
-        let bareNamed = CryptoScan.primitiveCalls(in: bare).map(\.namesAPurpose)
-        let argumentNamed = CryptoScan.primitiveCalls(in: argumentBelow).map(\.namesAPurpose)
-        let hatchNamed = CryptoScan.primitiveCalls(in: hatchAbove).map(\.namesAPurpose)
-        let sixBelowNamed = CryptoScan.primitiveCalls(in: sixBelow).map(\.namesAPurpose)
-        let fourAboveNamed = CryptoScan.primitiveCalls(in: fourAbove).map(\.namesAPurpose)
-        let hostNamed = CryptoScan.primitiveCalls(in: hostRegistryOnly).map(\.namesAPurpose)
-        let noCallLines = CryptoScan.primitiveCalls(in: noCall).map(\.line)
+        #expect(named(call) == [false], "a raw call with no purpose word in reach must be reported")
+        #expect(named(argumentBelow) == [true], "a call whose `purpose:` argument sits below it names a purpose")
+        #expect(named(hatchAbove) == [true], "an escape hatch above a call answers the wall")
+        #expect(named(call + filler(5) + "let p = purpose\n") == [true], "the window reaches six lines below a call")
+        #expect(named(call + filler(6) + "let p = purpose\n") == [false], "the window does not reach seven lines below a call")
+        #expect(named("let p = purpose\n" + filler(2) + call) == [true], "the window reaches three lines above a call")
+        #expect(named("let p = purpose\n" + filler(3) + call) == [false], "the window does not reach four lines above a call")
+        #expect(named(hostRegistryOnly) == [false], "a host registry's type is no purpose ProximityKit holds")
+        #expect(CryptoScan.primitiveCalls(in: "let p = purpose\n").isEmpty, "a line naming a purpose with no primitive call is no call")
+        expectEveryMarkerOpensItsBareCall()
+    }
 
-        #expect(bareNamed == [false], "a raw call with no purpose word in reach must be reported")
-        #expect(argumentNamed == [true], "a call whose `purpose:` argument sits below it names a purpose")
-        #expect(hatchNamed == [true], "an escape hatch above a call answers the wall")
-        #expect(sixBelowNamed == [true], "the window reaches six lines below a call")
-        #expect(fourAboveNamed == [false], "the window does not reach four lines above a call")
-        #expect(hostNamed == [false], "a host registry's type is no purpose ProximityKit holds")
-        #expect(noCallLines.isEmpty, "a line naming a purpose with no primitive call is no call")
+    /// Each primitive marker opens a call by itself: a bare call of each, holding that marker and no
+    /// other, reads as one call that names no purpose, and the samples are the marker list exactly, so a
+    /// marker the list loses, or one it gains without a sample, fails here (the call floor alone would
+    /// let all but the commonest markers go).
+    static func expectEveryMarkerOpensItsBareCall() {
+        let samples: [(marker: String, line: String)] = [
+            (marker: "signature(for:", line: "let s = try k.signature(for: d)"),
+            (marker: "isValidSignature(", line: "let ok = p.isValidSignature(s, for: d)"),
+            (marker: "hkdfDerivedSymmetricKey",
+             line: "let k = s.hkdfDerivedSymmetricKey(using: SHA256.self, salt: x, sharedInfo: y, outputByteCount: 32)"),
+            (marker: "HKDF<", line: "let k = HKDF<SHA256>.deriveKey(inputKeyMaterial: m, salt: x, info: y, outputByteCount: 32)"),
+            (marker: "HMAC<", line: "let c = HMAC<SHA256>.authenticationCode(for: d, using: k)"),
+            (marker: "ChaChaPoly.seal", line: "let b = try ChaChaPoly.seal(m, using: k)"),
+            (marker: "ChaChaPoly.open", line: "let m = try ChaChaPoly.open(b, using: k)"),
+            (marker: "AES.GCM.seal", line: "let b = try AES.GCM.seal(m, using: k)"),
+            (marker: "AES.GCM.open", line: "let m = try AES.GCM.open(b, using: k)")
+        ]
+        #expect(samples.count == CryptoScan.primitiveMarkers.count
+                && samples.map(\.marker).sorted() == CryptoScan.primitiveMarkers.sorted(),
+                "the bare samples name \(samples.map(\.marker)), not the marker list \(CryptoScan.primitiveMarkers)")
+        // R2: bounded by the fixed list.
+        for sample in samples {
+            let held = CryptoScan.primitiveMarkers.filter(sample.line.contains)
+            #expect(held == [sample.marker], "`\(sample.line)` holds \(held), not its marker alone")
+            #expect(CryptoScan.primitiveCalls(in: sample.line + "\n").map(\.namesAPurpose) == [false],
+                    "a bare `\(sample.marker)` call must be reported")
+        }
     }
 
     // MARK: - The escape-hatch census
@@ -730,6 +754,12 @@ import Testing
     /// this label must be another foreign signature format, not a transcript of ProximityKit's own that
     /// skipped its purpose.
     static let pinnedByLabel: [String: Int] = ["x509-self-signature": 1]
+
+    /// Whether a hatch label names a legacy read, however it is spelled or qualified (`legacy-read`,
+    /// `Legacy-Read`, `legacy-read (v1 envelope)`): the census refuses the family, not one spelling of it.
+    static func isLegacy(_ label: String) -> Bool {
+        label.lowercased().contains("legacy")
+    }
 
     /// The number of distinct files holding a hatch in ProximityKit's code, MEASURED at ProximityKit plan
     /// step A1.1.16 (2026-10-14): one, `Transport/EphemeralMeshTLSIdentity.swift`.
