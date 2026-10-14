@@ -94,8 +94,10 @@ public protocol ProximityHost: AnyObject {
     /// The app's `FernletStore` derives both halves from seams other walls already enforce
     /// (`MeshSessionStoreIsolationTests`). The default below is the namespace's production scope on
     /// the root the host states, so a host that keeps more than one installation's files in one
-    /// process, or a test double on a root of its own that opens a store, answers this itself
-    /// (`MeshRoutedStoreIsolationTests` holds every test double that states its root to that).
+    /// process, or a test double on a root of its own that opens a store, answers this itself (this
+    /// module's own `PackageTestTreeWallTests` holds every test double of its package tests that states
+    /// its root to that, and in the Fernlet repository `MeshRoutedStoreIsolationTests` every one of
+    /// Fernlet's tests).
     var meshSessionStorage: MeshSessionStorageScope { get }
 
     /// This host's sealed ROUTED-CONTENT scope (network migration P5 item 3): the directory holding

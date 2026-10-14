@@ -59,8 +59,8 @@ import Testing
         #expect(violations.isEmpty, """
             ML1: these ProximityKit files store a Task<…> handle but cancel none in a deinit / isolated \
             deinit. Add `isolated deinit { <handle>?.cancel() }`, the pattern MeshNetworkManager, \
-            ProximityPairSession, ProximityCoordinator and the three network sessions use; ProximityKit's \
-            code holds no exemption from this rule:
+            ProximityPairSession and the three network sessions use (or a plain `deinit`, as \
+            ProximityCoordinator does); ProximityKit's code holds no exemption from this rule:
             \(violations.joined(separator: "\n"))
             """)
     }
@@ -204,8 +204,9 @@ import Testing
 
     /// Files of the module that store a `Task<…>` handle, MEASURED at ProximityKit plan step A1.1.17
     /// (2026-10-14): six, the coordinator, the mesh manager, the pair session and the three network
-    /// sessions, each cancelling in its `isolated deinit`. A wall that finds fewer has stopped looking; a
-    /// new holder raises the count and is held to ML1.
+    /// sessions, each cancelling in its deinit (the coordinator's a plain `deinit`, the other five
+    /// `isolated deinit`). A wall that finds fewer has stopped looking; a new holder raises the count
+    /// and is held to ML1.
     static let minimumTaskHolderFiles = 6
 
     /// Files of the module with a block-based observer, MEASURED at ProximityKit plan step A1.1.17

@@ -281,9 +281,13 @@ nonisolated enum EphemeralMeshTLSIdentity {
                 + MeshCertificateDER.subjectPublicKeyInfo(x963PublicKey: publicKey)
         )
         // The transcript below is the DER TBSCertificate itself, and X.509 fixes it exactly: a
-        // Fernlet domain prefix would produce bytes no TLS stack can parse. What makes that safe is
-        // scope rather than a domain — this key signs nothing else, exists for one session, and is
-        // thrown away with it — and nothing in Fernlet ever verifies the result: peer
+        // domain prefix would produce bytes no TLS stack can parse. This key signs one other thing:
+        // it is the QUIC listener's TLS identity, so the TLS 1.3 stack (the only version QUIC runs)
+        // signs every handshake's server CertificateVerify with it. That content cannot be these
+        // bytes: RFC 8446 §4.4.3 opens it with 64 spaces (0x20), a context string and a zero byte,
+        // where a DER TBSCertificate opens with its SEQUENCE tag (0x30), so TLS's own prefix keeps
+        // the two uses apart. The key lives for one radio session (the presence radio's for one
+        // epoch), is never persisted, and nothing in ProximityKit ever verifies the result: peer
         // authentication is the signed identity introduction exchanged over the connection.
         // cryptographic-domain: x509-self-signature
         let signature = try privateKey.signature(for: Data(tbs)).derRepresentation

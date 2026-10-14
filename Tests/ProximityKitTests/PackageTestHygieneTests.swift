@@ -17,7 +17,7 @@
 //   I11  every module a file imports travels with the package;
 //   the target's own inventory, ProximityKitTests.tsv beside the target's folder under the package
 //        root's `Tests`, is the tree: each suite's file and its declared tests (I1, I2, I4, I7), the
-//        table CI's test-count floor reads;
+//        table the package repository's CI test-count floor reads;
 //   and nothing extends `ProximityHost`, whose thirteen requirements `PackageTestHost` states itself.
 //
 // In the Fernlet repository, Fernlet's selector wall (`CIGateSelectorBoundaryTests`) holds its own rows

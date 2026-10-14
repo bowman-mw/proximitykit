@@ -307,10 +307,11 @@ import Testing
         #expect(legacy.isEmpty, """
             \(legacy.count) legacy read path(s) have come back:
             \(sites)
-            ProximityKit reads no format older than its current one: the crypto standardization round \
-            deleted its legacy wire readers (four, in its mesh manager and its identity). A path that opens \
-            older bytes is a deliberate reversal of that, not a fix — take it to the owner before making \
-            this test pass.
+            ProximityKit holds no `legacy-read` hatch: the crypto standardization round deleted its legacy \
+            wire readers (four, in its mesh manager and its identity), and the two legacy formats a family \
+            may still accept (`ProximityNamespace.LegacyV1`'s identity envelope and admission token) verify \
+            under verify-only namespace labels, never through a hatch. A hatch that opens older bytes is a \
+            deliberate reversal of that, not a fix — take it to the owner before making this test pass.
             """)
     }
 
@@ -356,9 +357,10 @@ import Testing
     /// The mesh family is matched WITHOUT a trailing underscore (`PROXIMITYKIT_MESH`, not
     /// `PROXIMITYKIT_MESH_`), so a bare future `PROXIMITYKIT_MESH` cannot slip past the prefix. That is
     /// safe against double-counting because ``hookReads(for:source:)`` records one read per LINE however
-    /// many tokens match, to the first family in this list it names, and it is deliberate that
-    /// `PROXIMITYKIT_UI_TEST_MESH_*`, three real flags, score to `PROXIMITYKIT_UI_TEST_` rather than to the
-    /// mesh family.
+    /// many tokens match, to the first family in this list it names. No key's name holds the other
+    /// family's token (`PROXIMITYKIT_UI_TEST_MESH_*`, three real flags, hold `MESH` but not
+    /// `PROXIMITYKIT_MESH`), so the order decides only a line that names both families; the matcher's
+    /// samples hold that such a flag scores to `PROXIMITYKIT_UI_TEST_` alone.
     static let hookTokens = ["PROXIMITYKIT_UI_TEST_", "PROXIMITYKIT_MESH"]
 
     /// Each family's floor, its measured lines, MEASURED at ProximityKit plan step A1.1.15 (2026-10-14):
@@ -411,7 +413,9 @@ import Testing
     ///
     /// Comment stripping is load-bearing: the keys' doc comments name them as prose (the transport's
     /// console mirror's and chaos keys' among them), and a wall that counted those would be satisfied by
-    /// documentation while real reads shipped.
+    /// documentation while real reads shipped. Its one known narrowness, which the Fernlet repository's
+    /// `TestHookBoundaryTests` reader shares: a line that opens with `/*` is skipped whole, so code after
+    /// a `*/` on that same line is not read.
     static func hookReads(for path: String, source: String) -> [HookRead] {
         var reads: [HookRead] = []
         var regions: [Bool] = []          // one entry per open `#if`; true when it is a DEBUG region
@@ -744,15 +748,19 @@ import Testing
     /// raw signature over a transcript it does not define, and its justification is that the format is
     /// somebody else's. QUIC's listener must present a certificate, and X.509 fixes exactly what a
     /// certificate's self-signature covers, the DER `TBSCertificate`: a domain prefix there would produce
-    /// bytes no TLS stack can parse, so there is no domain to bind. What makes it safe is scope rather than
-    /// a domain: the key is a P-256 pair minted at session start, used for this one signature and nothing
-    /// else, never persisted, and thrown away with the session, so there is no second use for the first to
-    /// be confused with, which is what domain separation buys. Nor is it a trust decision: nothing in
+    /// bytes no TLS stack can parse, so there is no domain of ProximityKit's to bind. The key is a P-256
+    /// pair minted for one radio session (the presence radio's for one epoch), never persisted and thrown
+    /// away with it, and it has exactly one other use: it is the QUIC listener's TLS identity, so the
+    /// TLS 1.3 stack (the only version QUIC runs) signs every handshake's server CertificateVerify with
+    /// it. What makes the two uses safe together is TLS's own separation: RFC 8446 §4.4.3 opens the
+    /// CertificateVerify content with 64 spaces (0x20), a context string and a zero byte, where a DER
+    /// `TBSCertificate` opens with its SEQUENCE tag (0x30), so no bytes one use signs can be bytes the
+    /// other signs, which is what domain separation buys. Nor is it a trust decision: nothing in
     /// ProximityKit verifies this signature (the transport's certificate validator accepts any
     /// certificate), and peer authentication is the signed identity introduction exchanged over the
     /// connection, with the TLS-exporter-bound channel introduction on top of it. A future hatch claiming
     /// this label must be another foreign signature format, not a transcript of ProximityKit's own that
-    /// skipped its purpose.
+    /// skipped its purpose, and a new use of this key outside TLS must show the same separation.
     static let pinnedByLabel: [String: Int] = ["x509-self-signature": 1]
 
     /// Whether a hatch label names a legacy read, however it is spelled or qualified (`legacy-read`,

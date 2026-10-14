@@ -210,8 +210,9 @@ import Testing
     /// written, each with its reason, which W1 names when one is used: none of them may also be a
     /// baseline module or a seam row's module. `CloudKit` is the cloud half of the S3 pair, which no
     /// compiler wall can hold, since an SDK framework needs no package edge (in the Fernlet repository,
-    /// its grep wall holds the modules that ride ProximityKit to the same rule, and CloudKitSync to
-    /// importing none of them).
+    /// its grep wall holds FernletProximityUI, FernletConnections and FernletSocial, the modules that ride
+    /// ProximityKit, to the same rule, and CloudKitSync to importing none of ProximityKit,
+    /// FernletConnections and FernletSocial).
     static let refusedModules: [String: String] = [
         "CloudKit": """
             ProximityKit holds transport-verified peer identities and unsealed peer payloads, so a CloudKit \

@@ -1125,9 +1125,9 @@ import Testing
     }
 
     /// `file`'s path under the module root, read off the path's own `Sources/ProximityKit/` component
-    /// (its last) so a symlinked checkout (`/tmp` and `/private/tmp`) resolves alike, inside the Fernlet
-    /// repository and at ProximityKit's own root; the full path if the file is somehow outside it, which
-    /// then matches no allowlist row and fails loudly. Every row above names its file by this path.
+    /// (its last) so a symlinked checkout names its files alike, inside the Fernlet repository and at
+    /// ProximityKit's own root; the full path if the file is somehow outside it, which then matches no
+    /// allowlist row and fails loudly. Every row above names its file by this path.
     static func relativePath(of file: URL) -> String {
         let path = file.path
         guard let range = path.range(of: "/" + moduleRoot + "/", options: .backwards) else { return path }

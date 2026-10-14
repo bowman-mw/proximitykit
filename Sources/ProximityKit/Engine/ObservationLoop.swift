@@ -24,9 +24,10 @@ import Observation
 /// the pin (``MemoryLifecycleTests`` covers both).
 ///
 /// Public, as settled mechanism: it is the one sanctioned home of `withObservationTracking` in the
-/// shipping tree (`MemoryLifecycleBoundaryTests` rule ML3), so a host's manager that watches the
-/// coordinators it owns uses it rather than hand-rolling a loop. Main-actor, like the managers it
-/// serves.
+/// shipping tree (rule ML3: this module's own `ProximityMemoryLifecycleTests` holds its code to this
+/// one home, and in the Fernlet repository `MemoryLifecycleBoundaryTests` holds Fernlet's shipping
+/// code to no use at all), so a host's manager that watches the coordinators it owns uses it rather
+/// than hand-rolling a loop. Main-actor, like the managers it serves.
 @MainActor
 public enum ObservationLoop {
 

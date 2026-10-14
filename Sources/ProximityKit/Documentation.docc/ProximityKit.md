@@ -1111,11 +1111,11 @@ installer's read, a raw `SecItem` call anywhere, a store or its production scope
 process-shared location, or a path of a host repository, each excused only by an exact allowlisted line
 with its invariant; a wall file, the suite's own first, is read as code, so the needles it holds in its
 literals are data and a needle in its code is refused, and so is a literal of it that starts with a
-host repository's folder. Every import travels with the package (rule
-I11): this module, Foundation, Testing, Combine, simd and Synchronization, and Security in the keychain
-store's file alone. The target's own inventory, `Tests/ProximityKitTests.tsv` beside this target's
-folder, is the tree: every suite's file and its declared tests, the row count and the tests' sum
-measured, which CI's test-count floor reads. And nothing extends ``ProximityHost``.
+host repository's folder. Every import travels with the package (rule I11): this module, Foundation,
+Testing, Combine, simd and Synchronization, and Security in the keychain store's file alone. The
+target's own inventory, `Tests/ProximityKitTests.tsv` beside this target's folder, is the tree: every
+suite's file and its declared tests, the row count and the tests' sum measured, which the test-count
+floor of CI in ProximityKit's own repository reads. And nothing extends ``ProximityHost``.
 
 The tests' tree walls, `PackageTestTreeWallTests`, are one of this target's suites as well, on the
 `proximitykit` line, so the walls that keep these tests from harming one another in one process travel
@@ -1140,18 +1140,19 @@ DEBUG launch-environment keys, `PROXIMITYKIT_UI_TEST_*` (the mesh manager's cann
 region, and each family is read at its measured floor, so a matcher that stops seeing one fails. Key
 custody: no keychain row this module writes is synchronizable, every accessibility class it names is a
 `ThisDeviceOnly` one, and no line of its code constructs an ``IdentityService`` or delegates to one of
-its initializers, its own file included, read as code through the walls' lexer: its
-host door, ``ProximityHost/makeProximityIdentity()``, has no default, so every identity a manager holds
-is built in its host's code, under the host's custody. The purpose wall: every line that opens a raw CryptoKit primitive call
-(nine markers: signing and verifying, HKDF, HMAC, ChaChaPoly and AES-GCM) names a purpose within
-three lines above it to six below, by ``ProximityCryptographicPurpose``, a `purpose` argument, an
+its initializers, its own file included, read as code through the walls' lexer: its host door,
+``ProximityHost/makeProximityIdentity()``, has no default, so every identity a manager holds is built in
+its host's code, under the host's custody. The purpose wall: every line that opens a raw CryptoKit
+primitive call (nine markers: signing and verifying, HKDF, HMAC, ChaChaPoly and AES-GCM) names a purpose
+within three lines above it to six below, by ``ProximityCryptographicPurpose``, a `purpose` argument, an
 authenticated-data binding or an escape-hatch comment, and at least 16 such lines are read (21 in six
 files today). The escape-hatch census: the calls that answer with a `cryptographic-domain:` comment
 instead are pinned by total, by label, by file and by documentation mention, with no legacy read path
 among them; the one hatch is the QUIC transport's X.509 certificate self-signature
-(`x509-self-signature`, over bytes X.509 fixes, under a key minted for that one signature), its
-justification beside its pin. In Fernlet's repository, `TestHookBoundaryTests`,
-`KeyCustodyBoundaryTests`, `CryptographicPurposeBoundaryTests` and
+(`x509-self-signature`, over bytes X.509 fixes, under the radio's ephemeral TLS key, whose only other
+signatures are its listener's TLS 1.3 CertificateVerify messages, which TLS itself prefixes so that no
+bytes one use signs can be bytes the other signs), its justification beside its pin. In Fernlet's
+repository, `TestHookBoundaryTests`, `KeyCustodyBoundaryTests`, `CryptographicPurposeBoundaryTests` and
 `CryptographicEscapeHatchCensusTests` hold the same rules over Fernlet's shipping code and not this
 folder.
 

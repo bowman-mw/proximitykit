@@ -47,10 +47,11 @@ nonisolated enum PresencePostureError: Error, Equatable {
 ///   on every device, so not even its length encodes anything.
 /// - ``tlsIdentity`` — one ``EphemeralMeshTLSIdentity/Minted``, minted through the module's single
 ///   certificate path. There is no second crypto path here and no new cryptographic purpose: the
-///   key pair is generated, used to self-sign, and thrown away by machinery that already exists
-///   (its one escape-hatch marker, `x509-self-signature`, is already censused). It is anchored to
-///   `IdentityService.presenceEpochStart(at:)` and **never to the instant the mint happens** — see
-///   below.
+///   key pair is generated, used to self-sign its certificate and, as the presence listener's TLS
+///   identity, to sign each handshake's CertificateVerify, and thrown away by machinery that already
+///   exists (its one escape-hatch marker, `x509-self-signature`, is already censused, and its
+///   justification covers both signatures). It is anchored to `IdentityService.presenceEpochStart(at:)`
+///   and **never to the instant the mint happens** — see below.
 ///
 /// ## Why the certificate is minted at the epoch's START
 ///

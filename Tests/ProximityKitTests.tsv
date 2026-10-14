@@ -1,8 +1,10 @@
 # ProximityKitTests.tsv: every suite of ProximityKit's package test target, the folder `Tests/ProximityKitTests` under
 # the package root, beside which this file sits; the file under that folder whose column-0 line declares the suite;
 # and its declared tests. Held to the tree by ProximityKitTests/PackageTestHygieneTests (theInventoryIsTheTree):
-# I1 its format, I2 its row count, I4 each suite's home, I7 each row's declared tests and their sum. CI's test-count
-# floor reads it: the floor is at least the cells' sum, and every suite named here runs at least one case.
+# I1 its format, I2 its row count, I4 each suite's home, I7 each row's declared tests and their sum. In the package's
+# own repository, CI's test-count floor (Scripts/test-count-floor.py) reads it: the floor is at least the cells' sum
+# and the suite count its rows', and in each xcodebuild lane's result bundle every suite named here runs at least one
+# case and no other suite runs.
 # Columns, tab-separated: suite (the type Swift Testing reports); file (relative to the test target's folder);
 # cells (the suite's @Test attributes, summed over every file of the folder, an extension's included; a
 # parameterized test is one). Rows sorted by suite. A suite added, moved, renamed or deleted edits its row, and the
