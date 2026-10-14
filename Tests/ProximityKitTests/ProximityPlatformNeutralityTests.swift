@@ -385,15 +385,23 @@ import Testing
         }
     }
 
-    /// Every import and `canImport` of a ``refusedModules`` module in `files`' raw text, whole-line `//`
-    /// comments dropped (``rawCode(_:)``), as `<path>:<line>`. The refusal's second read, beside the
-    /// lexed one: a construct the lexer misreads as a comment or a literal cannot hide a refused import
-    /// from text read line by line, the reading Fernlet's grep wall gave this rule before it moved here.
+    /// Every import of a ``refusedModules`` module in `files`' raw text, at a line's start or after a `;`,
+    /// and every `canImport` of one on an `#if` or `#elseif` line, whole-line `//` comments dropped
+    /// (``rawCode(_:)``), as `<path>:<line>`. The refusal's second read, beside the lexed one: a construct
+    /// the lexer misreads as a comment or a literal cannot hide a refused import from text read line by
+    /// line, the reading Fernlet's grep wall gave this rule before it moved here. It drops no other
+    /// comment and no literal: a `canImport` counts only on a condition line, anywhere on it, so prose
+    /// that names one after code, in a `/* … */` or in a string elsewhere is not read, while an import's
+    /// text at a line's start or after a `;` is refused wherever it stands, in a multi-line literal or
+    /// comment too.
     static func rawRefusedUses(in files: [PackageSwiftFiles.File]) throws -> [(module: String, site: String)] {
         var refused: [(module: String, site: String)] = []
         // R2: bounded by the module's files.
         for file in files {
-            refused += try moduleUses(in: rawCode(file.text)).filter { refusedModules[$0.module] != nil }
+            let code = rawCode(file.text)
+            let conditions = conditionLines(in: code)
+            refused += try moduleUses(in: code)
+                .filter { refusedModules[$0.module] != nil && ($0.isImport || conditions.contains($0.line)) }
                 .map { (module: $0.module, site: "\(file.path):\($0.line)") }
         }
         return refused
@@ -405,6 +413,12 @@ import Testing
         source.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces).hasPrefix("//") ? "" : $0 }
             .joined(separator: "\n")
+    }
+
+    /// The 1-based lines of `code` that open with `#if` or `#elseif`, where a `canImport` is a condition.
+    static func conditionLines(in code: String) -> Set<Int> {
+        let lines = code.components(separatedBy: "\n").enumerated()
+        return Set(lines.filter { ["if", "elseif"].contains(directive(of: $0.element)) }.map { $0.offset + 1 })
     }
 
     /// The lines on which `uses` imports `module` anywhere but in the branch of `#if <condition>`.
@@ -516,9 +530,10 @@ import Testing
                 "an import under another condition is outside this guard")
     }
 
-    /// The refusal's raw read: a refused import and a refused `canImport` are read in the raw text by
-    /// their lines, after a regex literal holding `/*`, and a whole-line comment naming a refused
-    /// `canImport` is not; a module no row refuses is not reported.
+    /// The refusal's raw read: a refused import and a refused `canImport` on an `#if` and an `#elseif`
+    /// line are read in the raw text by their lines, after a regex literal holding `/*`, and a whole-line
+    /// comment, a trailing comment and a string naming a refused `canImport` are not; a module no row
+    /// refuses is not reported.
     static func expectTheRawRefusalReaderFixtured() throws {
         let file = PackageSwiftFiles.File(path: "Raw.swift", text: """
             func slashes(_ s: String) -> Bool { s.contains(#/a/*/#) }
@@ -526,10 +541,12 @@ import Testing
             // #if canImport(CloudKit)
             import UIKit
             #if canImport(CloudKit)
+            #elseif canImport(CloudKit)
             #endif
+            let note = "canImport(CloudKit)" // canImport(CloudKit)
             """)
         let sites = try rawRefusedUses(in: [file])
-        #expect(sites.map(\.site) == ["Raw.swift:2", "Raw.swift:5"], "the raw read found \(sites)")
+        #expect(sites.map(\.site) == ["Raw.swift:2", "Raw.swift:5", "Raw.swift:6"], "the raw read found \(sites)")
         #expect(sites.allSatisfy { $0.module == "CloudKit" }, "the raw read reported a module no row refuses: \(sites)")
     }
 

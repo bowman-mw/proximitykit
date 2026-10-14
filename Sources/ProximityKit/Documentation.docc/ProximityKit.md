@@ -1008,8 +1008,8 @@ and its audit sink one its test support installs too, both described below.
 It builds in Swift 6 language mode with no default isolation; with the three upcoming features it
 declares, that is every upcoming feature Fernlet's own tests use, though they build in Swift 5 mode.
 It declares this module as its one dependency, and its files import nothing else of the package,
-whose other modules hold Fernlet's values and do not travel (this module depends on none of them). CI runs it on the iOS
-simulator; a macOS lane is A1's.
+whose other modules hold Fernlet's values and do not travel (this module depends on none of them). Fernlet's CI runs it on
+the iOS simulator; the package repository's CI has a macOS lane (`swift test`) beside its iOS simulator lane.
 
 Its test support lives in `TestSupport/`. The suites compute under a namespace of their own,
 `.packageTest` (`PackageTestNamespace.swift`), built from this module's public API alone out of
@@ -1044,8 +1044,9 @@ reads back the same key and wipes; an unreadable service defers or refuses and i
 while an absent one mints; scopes on two services never see each other's rows; and the synced and
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
-`swift test --skip-build`), against its in-memory store; the suites added since have run only on the
-simulator.
+`swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
+Mac too, all twenty-five passing `swift test` with this module and its tests laid out as in the package
+repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
 `PackageTestEnvironment.audit` installs through ``ProximityAudit/install(_:)`` once, lazily, as it

@@ -1074,8 +1074,12 @@ import Testing
     /// holding quotes and a `\(` that is text, a multi-line literal, whose line breaks the code must keep
     /// so every later line number stays true, and regex literals whose bodies would open a comment or a
     /// literal (an extended one holding `/*`, a multi-line one holding a quote and a short closing
-    /// delimiter, a bare one holding an escaped `/` before a `*` and a quote), beside the divisions, the
-    /// compound assignment and the operator reference that are code.
+    /// delimiter, a bare one holding an escaped `/` before a `*` and a quote, and bare ones right after
+    /// `return`, `in` and `try?` with no blank, the first before an import), beside the `/`s that are
+    /// code: operators declared with names that start with one (`func /(`, `func /=(` and
+    /// `infix operator /+/`), a `/` whose closing `/` would open a comment, which Swift reads as no regex
+    /// literal, so a later literal is read where it stands, the divisions, the compound assignment, the
+    /// operator reference, and divisions after a member named `in` and after a name ending in it.
     @Test func theLexerTellsCodeCommentsAndLiteralsApartAsSwiftDoes() {
         let commented = SwiftSourceLexer.lex(#"let a = "x" // "not a literal""#)
         #expect(commented.literals == [SwiftSourceLexer.Literal(line: 1, text: "x")])
@@ -1101,7 +1105,19 @@ import Testing
         #expect(hashed.code == "let r = \"\n\n\"\nlet s = \"\"")
         let bare = SwiftSourceLexer.lex(#"let r = /a\/*"/"# + "\nimport CloudKit")
         #expect(bare.code == "let r = \"\"\nimport CloudKit")
-        let operators = "let q = a / b / c, w = a/b/c\nx /= 2.0/1.0\nlet v = [1.0].reduce(0, /)"
+        let keyword = SwiftSourceLexer.lex(#"func f() -> Regex<Substring> { return/a\/*/ }"# + "\nimport CloudKit")
+        #expect(keyword.code == #"func f() -> Regex<Substring> { return"" }"# + "\nimport CloudKit")
+        let tight = SwiftSourceLexer.lex(#"let k = s.map { c in/a"/ }, r = try?/b"/.wholeMatch(in: s)"#)
+        #expect(tight.code == #"let k = s.map { c in"" }, r = try?"".wholeMatch(in: s)"#)
+        #expect(tight.literals.isEmpty)
+        let declared = "static func /(l: V, r: V) -> V { V(v: l.v/r.v) }\n"
+            + "static func /=(l: inout V, r: V) { l.v = l.v/r.v }\ninfix operator /+/ : MultiplicationPrecedence"
+        #expect(SwiftSourceLexer.lex(declared).code == declared)
+        let closing = SwiftSourceLexer.lex("let y = /x//\"c\nlet z = (/x/*c*/)\nlet w = \"q\"")
+        #expect(closing.code == "let y = /x\nlet z = (/x)\nlet w = \"\"")
+        #expect(closing.literals == [SwiftSourceLexer.Literal(line: 3, text: "q")])
+        let operators = "let q = a / b / c, w = a/b/c\nx /= 2.0/1.0\nlet v = [1.0].reduce(0, /)\n"
+            + "let m = k.in/b/c, n = margin/b/c"
         #expect(SwiftSourceLexer.lex(operators).code == operators)
     }
 

@@ -24,12 +24,20 @@
 /// otherwise read as code: a `//`, a `/*` or a quote inside one would open a comment or a literal and
 /// blank or misread the code after it. An extended regex literal (`#/…/#`, any number of `#`, line
 /// breaks allowed) is read wherever it stands. A bare one (`/…/`) is read where Swift reads one: a `/`
-/// after no operand that does not start the operator `/` or `/=` with nothing bound after it (`a / b`,
-/// `x /= y`, the only operators valid Swift starts with a `/`), its body closing at the first unescaped
-/// `/` on its line, neither ending in a space or a tab nor followed by a comment's opening. The one bare
-/// form Swift reads that it reads as operators is a body opening with `=` and a blank where an
-/// expression starts (`/= x/`), which neither tree writes. It reads UTF-8 bytes, because every delimiter
-/// it looks for is ASCII and no byte of a multi-byte UTF-8 sequence is.
+/// after no operand (white space, an opening bracket, `,`, `;`, `:`, a block comment's end, or, with no
+/// blank, a keyword Swift reads an expression or a pattern after, as in `return/a/`), unless it starts
+/// the operator `/` or `/=` with nothing bound after it (`a / b`, `x /= y`, `reduce(0, /)`) or names an
+/// operator after `func` or `operator` on its line (`static func /(`, `infix operator /+/`), its body
+/// closing at the first unescaped `/` on its line, which neither ends the body in a space or a tab nor
+/// opens a comment with the byte after it. The valid Swift it is known to read otherwise, none of which
+/// either tree writes: a bare body opening, where an expression starts, with `,`, `;`, `:`, `]` or `}`,
+/// or with `=` and then a space or one of those (`/,x/`, `/= x/`), which it reads as the operator `/` or
+/// `/=` and code; a bare regex right after a prefix operator (`~/a/`), or after `yield` in a `_read` or
+/// `_modify` accessor, which it reads as code; and a use of a custom operator whose name starts with a
+/// `/`, which Swift allows, spaced as an infix one (`a /^ b`) or, as a prefix `/`, before an unbalanced
+/// `)` (`(/x)/2`), or the declaration of one whose name starts the line after its `func` or `operator`,
+/// which it reads as a regex up to the next `/` on that line. It reads UTF-8 bytes, because every
+/// delimiter it looks for is ASCII and no byte of a multi-byte UTF-8 sequence is.
 enum SwiftSourceLexer {
 
     /// One outermost string literal.
@@ -90,6 +98,18 @@ private struct SwiftByteLexer {
 
     /// The ASCII operator characters, which run on from a `/` into one operator.
     private static let operatorCharacters = Array("/=-+!*%<>&|^~?".utf8)
+
+    /// The keywords Swift reads an expression or a pattern after, so a `/` right after one, with no
+    /// blank, follows no operand (`return/a/` is a regex literal, as `return /a/` is): each a reserved
+    /// word, or `await`, which Swift 6 reads as the keyword there too. `try` counts with its `?` or `!`.
+    private static let expressionKeywords: Set<String> = [
+        "return", "throw", "try", "await", "in", "case", "where", "if", "guard", "while", "switch", "repeat",
+        "catch"
+    ]
+
+    /// The keywords whose declaration a `/` after them names (`func /(`, `operator /+/`): an operator's
+    /// name, never a regex literal.
+    private static let declarationKeywords: Set<String> = ["func", "operator"]
 
     let bytes: [UInt8]
     var index = 0
@@ -214,18 +234,19 @@ private struct SwiftByteLexer {
 
     /// The index just past a bare regex literal opening at `index` (`/…/`), or nil when the `/` is an
     /// operator. A `/` after no operand (``opensOperand()``) opens one unless it starts an operator bound
-    /// to nothing after it (``startsAnUnboundOperator()``). Its body runs to the first unescaped `/` on
-    /// its line, which neither ends the body in a space or a tab nor is followed by a comment's opening:
-    /// Swift reads an operator or the comment then.
+    /// to nothing after it (``startsAnUnboundOperator()``) or names one being declared
+    /// (``namesADeclaredOperator()``). Its body runs to the first unescaped `/` on its line, and Swift
+    /// reads no regex literal when that `/` ends the body in a space or a tab or opens a comment with the
+    /// byte after it (`/a//`, `/a/*`): an operator then, or the comment.
     private func bareRegexEnd() -> Int? {
-        guard opensOperand(), !startsAnUnboundOperator() else { return nil }
+        guard opensOperand(), !startsAnUnboundOperator(), !namesADeclaredOperator() else { return nil }
         var position = index + 1
         var escaped = false
         // R2: bounded by the line's remaining bytes; each pass consumes at least one.
         while let byte = at(position), byte != .newline {
             if byte == .slash {
                 let blank = !escaped && (bytes[position - 1] == .space || bytes[position - 1] == .tab)
-                return blank || opensComment(at: position + 1) ? nil : position + 1
+                return blank || opensComment(at: position) ? nil : position + 1
             }
             escaped = byte == .backslash
             if escaped, at(position + 1) == .newline { return nil }
@@ -235,17 +256,50 @@ private struct SwiftByteLexer {
     }
 
     /// Whether the `/` at `index` follows no operand, as Swift reads it: it starts the source, or white
-    /// space, `(`, `[`, `{`, `,`, `;`, `:` or a block comment's end precedes it.
+    /// space, `(`, `[`, `{`, `,`, `;`, `:` or a block comment's end precedes it (Swift's left-unbound
+    /// test), or one of ``expressionKeywords`` ends right before it, `try` with its `?` or `!` too.
     private func opensOperand() -> Bool {
         guard index > 0 else { return true }
         if Self.operandOpeners.contains(bytes[index - 1]) { return true }
-        return bytes[index - 1] == .slash && index > 1 && bytes[index - 2] == .star
+        if bytes[index - 1] == .slash && index > 1 && bytes[index - 2] == .star { return true }
+        let marked = bytes[index - 1] == .question || bytes[index - 1] == .exclamation
+        let word = Self.keyword(endingAt: marked ? index - 1 : index, in: bytes)
+        return marked ? word == "try" : Self.expressionKeywords.contains(word)
+    }
+
+    /// Whether the `/` at `index` names an operator being declared: one of ``declarationKeywords`` ends
+    /// the code before it on its line, spaces, tabs and comments between (`static func /(`,
+    /// `infix operator /+/ :`), where Swift reads the operator's name.
+    private func namesADeclaredOperator() -> Bool {
+        var end = code.count
+        // R2: bounded by the code read so far.
+        while end > 0, code[end - 1] == .space || code[end - 1] == .tab { end -= 1 }
+        return Self.declarationKeywords.contains(Self.keyword(endingAt: end, in: code))
+    }
+
+    /// The word that ends just before `end` in `text` (letters, digits, `_`, `$` and any non-ASCII
+    /// byte), or "" when none does or a `.` makes it a member's name (`k.in`), which no keyword is.
+    private static func keyword(endingAt end: Int, in text: [UInt8]) -> String {
+        var start = end
+        // R2: bounded by `end`.
+        while start > 0, isIdentifierByte(text[start - 1]) { start -= 1 }
+        guard start < end, start == 0 || text[start - 1] != .period else { return "" }
+        return String(decoding: text[start..<end], as: UTF8.self)
+    }
+
+    /// Whether `byte` can belong to a Swift name: an ASCII letter or digit, `_`, `$`, or any byte of a
+    /// multi-byte UTF-8 sequence.
+    private static func isIdentifierByte(_ byte: UInt8) -> Bool {
+        switch byte {
+        case 0x30...0x39, 0x41...0x5A, 0x61...0x7A, .underscore, .dollar, 0x80...: return true
+        default: return false
+        }
     }
 
     /// Whether the `/` at `index` starts the operator `/` or `/=` bound to nothing after it (white space,
     /// a closing bracket, `,`, `;`, `:`, a comment or the end), as in `a / b`, `x /= y` and
-    /// `reduce(0, /)`: the only operators valid Swift starts with a `/`, which a regex literal never is
-    /// there, while any other run of operator characters after no operand opens one.
+    /// `reduce(0, /)`: an operator there in all but the body openings the type's doc lists, while any
+    /// other run of operator characters after no operand opens a regex literal where one closes.
     private func startsAnUnboundOperator() -> Bool {
         let end = operatorEnd()
         let named = end == index + 1 || (end == index + 2 && bytes[index + 1] == .equals)
@@ -336,12 +390,17 @@ private extension UInt8 {
     static let tab: UInt8 = 0x09
     static let newline: UInt8 = 0x0A
     static let space: UInt8 = 0x20
+    static let exclamation: UInt8 = 0x21
     static let quote: UInt8 = 0x22
     static let hash: UInt8 = 0x23
+    static let dollar: UInt8 = 0x24
     static let leftParenthesis: UInt8 = 0x28
     static let rightParenthesis: UInt8 = 0x29
     static let star: UInt8 = 0x2A
+    static let period: UInt8 = 0x2E
     static let slash: UInt8 = 0x2F
     static let equals: UInt8 = 0x3D
+    static let question: UInt8 = 0x3F
     static let backslash: UInt8 = 0x5C
+    static let underscore: UInt8 = 0x5F
 }
