@@ -17,15 +17,15 @@ I set up the CI and the code walls before the code arrives, so they check it as 
 
 The workflow is `.github/workflows/ci.yml`. It runs on every pull request into `main` and every
 push to `main`. It picks the newest Xcode 26 or later on the runner and stops if Swift is older
-than 6.2. Then it runs four walls. Each wall is a Python script in `Scripts/` that uses only the
+than 6.2. Then it runs five walls. Each wall is a Python script in `Scripts/` that uses only the
 standard library. You can run one locally with `python3 Scripts/<name>.py`. It exits with an error
 when it finds a violation.
 
 - `power-of-10-scan.py` checks the Power of 10 rules that a line scanner can decide. That means no
-  `while true`, no function longer than 60 lines of code, no force unwraps or traps, no mutable
-  globals, no `try?` that drops an error, and only simple `#if` conditions. Unsafe pointers are
-  allowed only at the two seams in `power-of-10-allowlist.json`, and each entry says why its seam
-  is safe.
+  `while true` (in the tests too), no function longer than 60 lines of code, no force unwraps or
+  traps, no mutable globals, no `try?` that drops an error, and only simple `#if` conditions.
+  Unsafe pointers are allowed only at the two seams in `power-of-10-allowlist.json`, and each entry
+  says why its seam is safe. Functions average at least one `guard` or assertion each.
 - `doc-coverage-scan.py` checks that every struct, class, protocol, enum and actor in `Sources/`
   has a `///` doc comment.
 - `no-tracking-scan.py` checks that no file imports a tracking, analytics, advertising or
@@ -33,11 +33,19 @@ when it finds a violation.
   client, and that the package has no dependencies.
 - `local-link-scan.py` checks that the local network API appears only in the three radio files in
   `Sources/ProximityKit/Transport/`.
+- `manifest-scan.py` checks that `Package.swift` has no unsafe flags and no warnings setting, and
+  that it exists once the sources do.
 
 The walls are ports of the checks that guard this code in the Fernlet repository today. The code
 will arrive later with its git history from the Fernlet repository. Until then there is no
-`Package.swift`, and CI runs the walls only. Once the package is here, CI also builds it and runs
-its tests on macOS, builds it for the iOS Simulator, and runs the tests on an iPhone 17 simulator.
+`Package.swift`, and CI runs the walls only. Once the package is here, CI also builds and tests it,
+and every warning fails the build. The warnings setting lives on the build commands, never in
+`Package.swift`, as in the Fernlet repository. CI then:
+
+- builds the package with `swift build`, and the library alone in Release with
+  `swift build -c release`, because the tests only build in Debug;
+- runs the tests on macOS twice, once with `swift test` and once with `xcodebuild test`;
+- builds the package for the iOS Simulator, and runs the tests on an iPhone 17 simulator.
 
 ## License
 

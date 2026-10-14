@@ -1,4 +1,4 @@
-# ProximityKit CI: on every pull request into main and every push to main, the four walls, then the
+# ProximityKit CI: on every pull request into main and every push to main, the five walls, then the
 # package build and tests.
 #
 # The walls are the Python scripts in Scripts/ (Python 3, standard library only). Each one runs
@@ -9,7 +9,14 @@
 #   * doc-coverage-scan.py: every struct, class, protocol, enum and actor carries a /// comment;
 #   * no-tracking-scan.py: no tracking SDK in Sources/ or Tests/, no HTTP client in Sources/, and no
 #     package dependency in Package.swift or Package.resolved;
-#   * local-link-scan.py: Network.framework's local-link API only in the three radio files.
+#   * local-link-scan.py: Network.framework's local-link API only in the three radio files;
+#   * manifest-scan.py: Package.swift carries no unsafe flags and no warnings setting, and exists
+#     once the sources do.
+#
+# Once Package.swift exists, every build leg treats warnings as errors (Power of 10 rule 10, set on
+# the command line and never in the manifest): a Debug and a Release build with SwiftPM, the tests
+# on macOS through both SwiftPM and Xcode, an iOS Simulator build, and the tests on an iPhone 17
+# simulator. The two xcodebuild test legs write result bundles to $RUNNER_TEMP.
 #
 # The code arrives later with its git history from the Fernlet repository. Until Package.swift
 # exists, the build and test steps are skipped with a notice and the job is the walls alone.
@@ -109,14 +116,15 @@ jobs:
             fi
           done
 
-      # Runs on every push and pull request, before and after the code arrives. All four scripts
+      # Runs on every push and pull request, before and after the code arrives. All five scripts
       # run even when one fails, so a single run reports every wall that broke.
       - name: Walls
         run: |
           set -uo pipefail
           python3 --version
           status=0
-          for wall in power-of-10-scan.py doc-coverage-scan.py no-tracking-scan.py local-link-scan.py; do
+          for wall in power-of-10-scan.py doc-coverage-scan.py no-tracking-scan.py \
+                      local-link-scan.py manifest-scan.py; do
             echo "::group::$wall"
             if python3 "Scripts/$wall"; then
               echo "$wall: clean"
@@ -153,22 +161,57 @@ jobs:
             echo "::notice title=No test target::The package declares no test target, so the test steps are skipped."
           fi
 
-      - name: Build for macOS (swift build)
+      # Power of 10 rule 10, warnings are errors, holds on every build leg below, set on the command
+      # line as the Fernlet repository sets it on its strict build: `-Xswiftc -warnings-as-errors` on
+      # the SwiftPM legs, and on the xcodebuild legs that build's three overrides,
+      # SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES.
+      # Fernlet's strict build applies the same overrides to this package when it consumes a tag, so
+      # a warning that reached a tag would fail Fernlet's build; these legs fail first. Never put the
+      # setting in Package.swift (`.treatAllWarnings`, or `-warnings-as-errors` through
+      # `unsafeFlags`): the Fernlet repository measured a manifest warnings setting colliding with
+      # the `-suppress-warnings` Xcode gives package targets and failing its whole build, and
+      # PackageDescription documents that unsafe flags make a product ineligible for use by other
+      # packages, which is what this package is for. Scripts/manifest-scan.py holds the manifest.
+      - name: Build for macOS (swift build, warnings are errors)
         if: steps.package.outputs.present == 'true'
-        run: swift build
+        run: swift build -Xswiftc -warnings-as-errors
 
+      # The one Release compile, of the library alone (`swift build` builds no test target): the
+      # package's tests need a Debug build, because ProximityKit's keychain test door (the backend
+      # slot its own tests fill with an in-memory store) exists only under `#if DEBUG`, so the test
+      # target cannot compile in Release. This leg compiles the Release arm of every `#if DEBUG`,
+      # which no other leg builds.
+      - name: Compile the Release build for macOS (swift build -c release)
+        if: steps.package.outputs.present == 'true'
+        run: swift build -c release -Xswiftc -warnings-as-errors
+
+      # The tests run on macOS twice, on purpose. `swift test` is SwiftPM's own build and runner, the
+      # path a developer using the package takes. `xcodebuild test` below is Xcode's build system,
+      # the one that builds this package inside an app, and it writes a result bundle with the
+      # per-suite counts, as the iOS test leg does.
       - name: Test on macOS (swift test)
         if: steps.describe.outputs.tests == 'true'
-        run: swift test
+        run: swift test -Xswiftc -warnings-as-errors
+
+      - name: Test on macOS (xcodebuild test)
+        if: steps.describe.outputs.tests == 'true'
+        run: |
+          xcodebuild test -scheme ProximityKit -destination 'platform=macOS' \
+            -resultBundlePath "$RUNNER_TEMP/macos-test.xcresult" \
+            SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES
 
       - name: Build for the iOS Simulator (xcodebuild)
         if: steps.package.outputs.present == 'true'
-        run: xcodebuild build -scheme ProximityKit -destination 'generic/platform=iOS Simulator'
+        run: |
+          xcodebuild build -scheme ProximityKit -destination 'generic/platform=iOS Simulator' \
+            SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES
 
-      # iPhone 17 is the one simulator the iOS tests run on, pinned the way the Fernlet repository
-      # pins its test lines: if the image drops the device, fail in seconds and name the fix. There
-      # is no fallback to another device, because a silent device change is the failure a pinned
-      # device exists to rule out.
+      # iPhone 17 is the one simulator the iOS tests run on. The package has no appearance baselines,
+      # so the pin is not about rendering: it keeps one named device, so that every run's per-suite
+      # counts and timings compare with the last run's and with the Fernlet repository's measured
+      # lines, which run on the same device. If the image drops it, the step fails in seconds and
+      # names the fix. There is no fallback to another device, because a silent device change is
+      # the failure a pinned device exists to rule out.
       - name: Resolve the iPhone 17 simulator
         if: steps.describe.outputs.tests == 'true'
         run: |
@@ -185,4 +228,7 @@ jobs:
 
       - name: Test on the iOS Simulator (iPhone 17)
         if: steps.describe.outputs.tests == 'true'
-        run: xcodebuild test -scheme ProximityKit -destination "$PROXIMITYKIT_DESTINATION"
+        run: |
+          xcodebuild test -scheme ProximityKit -destination "$PROXIMITYKIT_DESTINATION" \
+            -resultBundlePath "$RUNNER_TEMP/ios-test.xcresult" \
+            SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES

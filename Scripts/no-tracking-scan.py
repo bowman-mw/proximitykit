@@ -37,8 +37,11 @@ and only ever more: Swift 6 access-level imports (`internal import X`), scoped i
 (`import struct X.Y`) and `;`-separated imports are read too.
 
 Before the import: the code arrives later with its git history from the Fernlet repository.
-Once Sources/ProximityKit exists, a scan that reads zero Swift files under Sources/ fails instead
-of passing over nothing; until then an empty tree passes.
+Each root has its own floor, as each root does in Fernlet's scan. Once Sources/ProximityKit
+exists, a scan that reads zero Swift files under Sources/ fails instead of passing over nothing,
+and once Tests/ProximityKitTests exists, so does one that reads zero under Tests/: NT-SDK and
+NT-SYMBOL read the tests, and an emptied test folder must not pass them vacuously. Until then an
+empty tree passes.
 """
 import json
 import os
@@ -47,7 +50,8 @@ import sys
 
 SOURCE_ROOT = "Sources"
 TEST_ROOT = "Tests"
-IMPORT_ROOT = os.path.join("Sources", "ProximityKit")   # the floor starts once this exists
+IMPORT_ROOT = os.path.join("Sources", "ProximityKit")   # the Sources/ floor starts once this exists
+TEST_IMPORT_ROOT = os.path.join("Tests", "ProximityKitTests")   # the Tests/ floor starts once this exists
 PLIST_FAMILY = (".plist", ".entitlements", ".xcprivacy")
 
 # Module names that may never be imported, by any file. Matched ONLY as an `import` declaration or a
@@ -202,6 +206,7 @@ def resolved_pins(path):
 def main():
     repo = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     imported = os.path.isdir(os.path.join(repo, IMPORT_ROOT))
+    tests_imported = os.path.isdir(os.path.join(repo, TEST_IMPORT_ROOT))
     findings = []
 
     def report(check, path, number, detail, text=""):
@@ -266,6 +271,7 @@ def main():
             report("NT-RESOLVED", resolved, 0, f"pins {name} ({where}); the dependency allowlist is empty")
 
     vacuous = imported and not source_swift
+    vacuous_tests = tests_imported and not test_swift
     for line in findings:
         print(line)
     print(f"\nSwift files scanned: {len(source_swift)} under {SOURCE_ROOT}/, {len(test_swift)} under "
@@ -277,8 +283,13 @@ def main():
         print(f"no Swift files under {SOURCE_ROOT}/ although {IMPORT_ROOT} exists: refusing to pass vacuously",
               file=sys.stderr)
     elif not imported:
-        print(f"{IMPORT_ROOT} does not exist yet; the file floor waits for it", file=sys.stderr)
-    sys.exit(1 if findings or vacuous else 0)
+        print(f"{IMPORT_ROOT} does not exist yet; the {SOURCE_ROOT}/ file floor waits for it", file=sys.stderr)
+    if vacuous_tests:
+        print(f"no Swift files under {TEST_ROOT}/ although {TEST_IMPORT_ROOT} exists: refusing to pass vacuously",
+              file=sys.stderr)
+    elif not tests_imported:
+        print(f"{TEST_IMPORT_ROOT} does not exist yet; the {TEST_ROOT}/ file floor waits for it", file=sys.stderr)
+    sys.exit(1 if findings or vacuous or vacuous_tests else 0)
 
 
 if __name__ == "__main__":

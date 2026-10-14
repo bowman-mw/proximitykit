@@ -5,7 +5,7 @@ Ported from Scripts/power-of-10-scan.py in the Fernlet repository
 (https://github.com/bowman-mw/fernlet), where this code lived and was held to Gerard Holzmann's
 Power of 10 rules as that repository's Docs/Power-of-10-Swift.md adapts them to Swift. The
 tokenizer, the body finder and every check are copied unchanged. What is this repository's own:
-the roots, the test-code policy and the pre-import mode, all described below.
+the roots, the test-code policy, the pre-import mode and the density floor, all described below.
 
 Scans Swift for the checks that a line-level tokenizer can decide, and exits 1 on any violation
 not covered by Scripts/power-of-10-allowlist.json. The enforced baseline is ZERO for every
@@ -27,13 +27,14 @@ Roots:
     Tests/    Test code, under the standard's test exemption: "Test code is exempt from R4/R5/R7
               (tests trap on purpose)". So R4-LENGTH, R5-FORCE, R5-TRAP and R7-SWALLOW never
               fire there, the R7-DISCARD review list skips tests, and test bodies stay out of the
-              density ratio (TEST_EXEMPT_RULES). R6 and R8 are enforced in tests exactly as in
-              shipping code. R2-WHILE-TRUE and R9-UNSAFE are reported in tests under --advisory
-              only (TEST_ADVISORY_RULES): Fernlet's scanner never scanned test code, and its
-              tests poll with `while true` and copy key bytes out through `withUnsafeBytes`, so
-              enforcing those two in tests would ask the imported suites for allowlist entries
-              the shipping code does not need. Deleting a rule ID from TEST_ADVISORY_RULES is the
-              whole change when tests should be held to it.
+              density ratio (TEST_EXEMPT_RULES). R2-WHILE-TRUE, R6 and R8 are enforced in tests
+              exactly as in shipping code: a test loop needs a bound too, and the package's own
+              suites hold no `while true` (none at the split). R9-UNSAFE is reported in tests
+              under --advisory only (TEST_ADVISORY_RULES): Fernlet's scanner never scanned test
+              code, and tests copy key bytes out through `withUnsafeBytes` (one such line in the
+              package's suites at the split), so enforcing it in tests would ask for allowlist
+              entries the shipping code does not need. Deleting a rule ID from
+              TEST_ADVISORY_RULES is the whole change when tests should be held to it.
 
 Before the import:
     The code arrives later with its git history from the Fernlet repository. Until
@@ -56,6 +57,8 @@ Checks (IDs match the Fernlet repository's Docs/Power-of-10-Swift.md):
     R5-DENSITY     enforced floor: (guard + assert + precondition) / logic functions (func / init /
                    deinit / subscript bodies with >= 3 code lines; computed vars and closures
                    excluded) must not drop below DENSITY_FLOOR (a ratchet; raise it, never lower it).
+                   Fernlet's floor is 0.68. This repository's is 1.0: ProximityKit's sources measure
+                   1366/1342 = 1.018 at the split, so the floor sits just below what they hold.
     R6-FILE-VAR    enforced: `var` at file scope (a mutable global).
     R6-STATIC-VAR  enforced: STORED `static var` (a mutable global in a namespace); allowlist.
     R7-SWALLOW     enforced: bare-statement `try?` / `_ = try?` (error swallowed, result unused).
@@ -80,7 +83,7 @@ import os
 import re
 import sys
 
-DENSITY_FLOOR = 0.68          # ratchet (the standard's R5 section); only ever raise it
+DENSITY_FLOOR = 1.0           # ratchet (the standard's R5 section); only ever raise it
 MAX_BODY_LINES = 60           # NASA rule 4: one printed page
 
 SHIPPING_ROOTS = ("Sources",)
@@ -90,8 +93,9 @@ IMPORT_ROOT = os.path.join("Sources", "ProximityKit")   # the held checks start 
 # The standard's test exemption: tests trap on purpose. Never reported for test code.
 TEST_EXEMPT_RULES = ("R4-LENGTH", "R5-FORCE", "R5-TRAP", "R7-SWALLOW", "R7-DISCARD")
 # Rules the standard keeps for tests but Fernlet's scanner never enforced there: in test code they
-# are review signals, printed with --advisory, and never fail the scan.
-TEST_ADVISORY_RULES = ("R2-WHILE-TRUE", "R9-UNSAFE")
+# are review signals, printed with --advisory, and never fail the scan. R2-WHILE-TRUE left this list
+# once the package's suites were measured at zero hits; R9-UNSAFE stays (one hit there).
+TEST_ADVISORY_RULES = ("R9-UNSAFE",)
 
 ALLOWED_IF_TOKENS = ("DEBUG", "canImport", "os", "targetEnvironment", "swift", "compiler", "arch")
 

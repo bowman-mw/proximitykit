@@ -1,0 +1,10 @@
+# SwiftPM's build folder, and the state SwiftPM and Xcode keep per package.
+.build/
+.swiftpm/
+
+# xcodebuild output: result bundles, and a DerivedData folder placed inside the clone.
+*.xcresult
+DerivedData/
+
+# macOS Finder metadata.
+.DS_Store
