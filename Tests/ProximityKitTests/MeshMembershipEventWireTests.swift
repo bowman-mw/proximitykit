@@ -24,7 +24,11 @@
 // Fernlet repository's FernletTests file of the same name, this holds only
 // `MeshInventoryDigestTests`, with its name and tests unchanged, and the fixtures the package's
 // copied suites read (`MeshMembershipEventFixtures` and `extension MeshInventoryDigestPayload`);
-// its other suites stay there, so what this header says of them is not held here.
+// and, since ProximityKit plan step A1.3 (batch D: the cells of that repository's tests that read this
+// module's sources, copied before it deletes its in-tree copy of the module), the half of
+// `MeshLegacyGoodbyeInteropTests.noShippingSourceEmitsAGoodbye` that reads ProximityKit's code, under
+// its suite's and its test's names; its other suites, and that cell's other half (Fernlet's own roots),
+// stay there, so what this header says of them is not held here.
 
 import Foundation
 import Testing
@@ -282,5 +286,54 @@ extension MeshInventoryDigestPayload {
             sentAt: payload.sentAt,
             signature: payload.signature
         )
+    }
+}
+
+// MARK: - Legacy goodbye interop
+
+/// The legacy goodbye: parsed, never emitted, and never a departure (plan §8.2, §8.3). Of the
+/// original's four cells this holds the grep-wall's half that reads ProximityKit's code; the three
+/// behaviour cells, which read Fernlet's namespace and payload types, stay in Fernlet's copy.
+@Suite(.serialized)
+struct MeshLegacyGoodbyeInteropTests {
+
+    /// No shipping code path emits it any more. A grep-wall rather than a behavioural test,
+    /// because "did not send" is otherwise only visible with two radios in a room.
+    ///
+    /// **Not vacuous.** The original walks every shipping root of Fernlet's and throws on an empty one;
+    /// this half walks every Swift file of the module through ``PackageSwiftFiles/sources()``, at the
+    /// walk's floor, and also holds the needle's stem, `sendEnvelope(`, to some line of it, so a sender
+    /// renamed out from under the needle reddens rather than leaving it matching nothing, and the token
+    /// the wall is about to a case of the module's roles (`case sessionGoodbye`).
+    @Test func noShippingSourceEmitsAGoodbye() throws {
+        let files = try PackageSwiftFiles.sources()
+        #expect(files.count >= PackageSwiftFiles.sourceFloor, """
+            the goodbye grep-wall read \(files.count) Swift files under \(PackageSwiftFiles.sourceFolder), \
+            below its floor \(PackageSwiftFiles.sourceFloor): the walk is broken, not the module clean
+            """)
+        var offenders: [String] = []
+        var senders = 0
+        // R2: bounded by the module's file list × each file's lines.
+        for file in files {
+            for line in file.text.components(separatedBy: .newlines) where line.contains("sendEnvelope(") {
+                senders += 1
+                if line.contains("sendEnvelope(.sessionGoodbye") { offenders.append(file.path) }
+            }
+        }
+        #expect(
+            offenders.isEmpty,
+            """
+            \(offenders.count) shipping source file(s) still EMIT `.sessionGoodbye`. It is parsed,
+            never emitted (plan §8.3): membership ends via a signed departure or removal record,
+            and an unsigned goodbye can only mean the link went away:
+            \(offenders.sorted().joined(separator: "\n"))
+            """
+        )
+        #expect(senders >= 1, """
+            no line of the module calls `sendEnvelope(`, the stem of the wall's needle: the sender was \
+            renamed or moved, and the wall now matches nothing
+            """)
+        #expect(files.contains { $0.text.contains("case sessionGoodbye") },
+                "the goodbye is no longer a case of the module's roles, so the wall speaks of no frame")
     }
 }

@@ -116,9 +116,18 @@ jobs:
     # repository's tree with them: swift test "Test run with 557 tests in 69 suites passed"; the
     # inventory 69 rows declaring 557 tests. The swift test lane passed at these floors and refused
     # MIN_TESTS 558. ARITHMETIC CHECK: 514 + 43 = 557 and 60 + 9 = 69.
+    # RAISED 557 -> 575 and 69 -> 82 at plan step A1.3's batch D (mesh) on a Mac, 2026-10-15 (the same
+    # Xcode and Swift), for the 13 suites holding the 18 cells of the Fernlet repository's mesh tests
+    # that read this module's sources (the P3, P5 to P9 batteries', the key advertisement's, the legacy
+    # goodbye's and the name withholding's), copied before Fernlet deletes its in-tree copy, over this
+    # repository's tree with them and the routed track's copies: swift test "Test run with 575 tests in
+    # 82 suites passed"; the inventory 82 rows declaring 575 tests. The swift test lane passed at these
+    # floors and refused MIN_TESTS 576 and MIN_SUITES 83; the xcodebuild lanes were not run for this
+    # note, and the batch's last commit measures every lane. ARITHMETIC CHECK: 557 + 18 = 575 and
+    # 69 + 13 = 82.
     env:
-      MIN_TESTS: 557
-      MIN_SUITES: 69
+      MIN_TESTS: 575
+      MIN_SUITES: 82
     steps:
       - uses: actions/checkout@v4
 
