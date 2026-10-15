@@ -968,7 +968,7 @@ checks them; plan step P0.2 and A1's device lanes prove them on hardware.
 
 | Topic | What a Mac host owes |
 | --- | --- |
-| Keychain | Every query this module issues sets `kSecUseDataProtectionKeychain` (``ProximityKeychainItem``). On macOS that keychain needs the host signed with entitlements a provisioning profile authorizes (Apple's TN3137). Without them `SecItem` returns `errSecMissingEntitlement` (-34018), and identity provisioning throws ``IdentityError/keychainReadFailed(_:)`` and fails closed. This module's own tests never reach a Mac's keychain, whatever it would answer them: they run against an in-memory store ("Its tests"); a host has no such door. |
+| Keychain | Every query this module issues sets `kSecUseDataProtectionKeychain` (``ProximityKeychainItem``). On macOS that keychain needs the host signed with entitlements a provisioning profile authorizes (Apple's TN3137). Without them `SecItem` returns `errSecMissingEntitlement` (-34018), and identity provisioning fails closed: it throws ``IdentityError/keychainReadFailed(_:)`` when a read is refused, or ``IdentityError/keychainWriteFailed`` when the write of a new identity is. The package repository's example app, signed to run locally on a Mac that never held its identity, measured the latter at plan step A1.2 (the signing key's row refused with -34018). This module's own tests never reach a Mac's keychain, whatever it would answer them: they run against an in-memory store ("Its tests"); a host has no such door. |
 | Local network | `NSLocalNetworkUsageDescription`, and `NSBonjourServices` listing its namespace's service types (Fernlet's are in `App/Fernlet/Info.plist`); when sandboxed, `com.apple.security.network.client` and `com.apple.security.network.server`, because the radios both listen and dial. |
 | Routed access gate | ``MeshNetworkManager``'s gate starts ``MeshRoutedAccessGate/closed``, and its three facts are iOS-shaped. A Mac host answers each in the same meaning, `protectedDataAvailable` (the user's session is unlocked and the host's keys are readable), `appIsForeground` (the app is active) and `duressActive` (its own lock's duress session, or `false`), and pushes them through ``MeshNetworkManager/applyRoutedAccessGate(_:now:)`` on every change; otherwise nothing routed is ever decrypted. |
 | Lifecycle | macOS never suspends a process, while Fernlet's run policy (the app's) leans on iOS suspension, so a Mac host stops or holds the radios itself. App Nap can stretch the mesh radio's 1 s poll and its 30 s heartbeat past the 90 s QUIC idle reap, so a Mac host holds a user-initiated `ProcessInfo` activity while a session is live. |
@@ -3348,7 +3348,9 @@ A ``ProximityPairSession`` is a one-to-one connection between two devices, drive
 namespace's pair-session rows, `family.radios.pair`), the TXT `mode` it advertises and
 believes, and the area its own audit events go under. Fernlet's recipe profile is
 `FernletConnections`' `ProximityPairProfile.recipeShare(in:)`, and Fernlet's recipe share,
-`FernletSocial`'s `ProximityRecipeShareManager`, is its owner. The session owns its radio, this
+`FernletSocial`'s `ProximityRecipeShareManager`, is its owner. Outside Fernlet, the package
+repository's example app, `Examples/ProximityPing`, builds one from this module's public API alone,
+on a namespace of its own, and trades a sealed ping and pong over it. The session owns its radio, this
 device's identity cache and a replay cache; holds at most one verified pairing, under the two-device
 cap's four layers; builds each pairing's ``ProximityCoordinator`` over its host's ranging provider and
 a trust policy it retains, begun in friend mode and committed at the proximity gate with no user step;

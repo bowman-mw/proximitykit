@@ -11,25 +11,33 @@ package that makes no internet request and ships no bundle gives them nothing to
 Usage: Scripts/no-tracking-scan.py
 Prints one line per violation and a summary to stderr; exits 1 on any violation.
 
+The example apps under Examples/ (plan step A1.2) are hosts of the package, built from its public
+API alone, and a reader copies from them, so they are held like the package's own code: NT-SDK,
+NT-SYMBOL and NT-HTTP read their Swift files, NT-SYMBOL their Info.plist, and NT-PACKAGE their
+Xcode projects.
+
 Checks:
-    NT-SDK       No Swift file under Sources/ or Tests/ imports a tracking, analytics,
+    NT-SDK       No Swift file under Sources/, Tests/ or Examples/ imports a tracking, analytics,
                  advertising, attribution or crash-telemetry SDK (BANNED_SDK_MODULES), as an
                  `import` declaration or a `canImport(...)` condition. Matched as imports only,
                  because several SDK names are ordinary words ("Adjust servings", "Branch").
                  Test code is included on purpose: an SDK linked "only for tests" is still a
                  dependency, and one a contributor can promote later.
-    NT-SYMBOL    No Swift or plist-family file under Sources/ or Tests/ names a tracking
+    NT-SYMBOL    No Swift or plist-family file under Sources/, Tests/ or Examples/ names a tracking
                  identifier (BANNED_TRACKING_SYMBOLS). These have one meaning each, so they are
                  matched at identifier boundaries anywhere in the file, comments included.
-    NT-HTTP      No Swift file under Sources/ names an HTTP-client API or a process-wide session
-                 configuration in code (HTTP_CLIENT_MARKERS, FORBIDDEN_SESSION_CONFIGURATIONS).
-                 ProximityKit makes no internet request, so this family's permit set is empty and
-                 URLSession is banned outright. Comment-only lines are skipped, so prose that
-                 explains the ban passes; a trailing comment does not hide a call.
+    NT-HTTP      No Swift file under Sources/ or Examples/ names an HTTP-client API or a
+                 process-wide session configuration in code (HTTP_CLIENT_MARKERS,
+                 FORBIDDEN_SESSION_CONFIGURATIONS). ProximityKit makes no internet request, and
+                 neither does an example of it, so this family's permit set is empty and URLSession
+                 is banned outright. Comment-only lines are skipped, so prose that explains the ban
+                 passes; a trailing comment does not hide a call.
     NT-PACKAGE   Package.swift, when present, declares no package dependency. The allowlist is
                  exact and empty, so any `.package(` call in code fails, whichever kind it is
                  (url, path or registry id). A banned SDK name or tracking symbol anywhere in the
-                 manifest fails too.
+                 manifest fails too. An example's Xcode project (a .pbxproj under Examples/)
+                 declares no remote package (`XCRemoteSwiftPackageReference`), and its one local
+                 package is this one (`relativePath = ../..;`).
     NT-RESOLVED  Package.resolved, when present, pins no package.
 
 The import matcher reads more than the one in Fernlet's S3BoundaryTests.importedModules(in:),
@@ -41,7 +49,8 @@ its own floor, as each root does in Fernlet's scan. Once Sources/ProximityKit ex
 reads zero Swift files under Sources/ fails instead of passing over nothing, and once
 Tests/ProximityKitTests exists, so does one that reads zero under Tests/: NT-SDK and NT-SYMBOL read
 the tests, and an emptied test folder must not pass them vacuously. A tree without them, as this
-repository's was until then, passes empty.
+repository's was until then, passes empty. Examples/ has a floor of its own on the same terms: once
+Examples/ProximityPing exists, a scan that reads zero Swift files under Examples/ fails.
 """
 import json
 import os
@@ -50,6 +59,8 @@ import sys
 
 SOURCE_ROOT = "Sources"
 TEST_ROOT = "Tests"
+EXAMPLE_ROOT = "Examples"   # the example apps: hosts of the package, held like its own code
+EXAMPLE_APP_ROOT = os.path.join("Examples", "ProximityPing")   # the Examples/ floor starts once this exists
 IMPORT_ROOT = os.path.join("Sources", "ProximityKit")   # the Sources/ floor starts once this exists
 TEST_IMPORT_ROOT = os.path.join("Tests", "ProximityKitTests")   # the Tests/ floor starts once this exists
 PLIST_FAMILY = (".plist", ".entitlements", ".xcprivacy")
@@ -207,6 +218,7 @@ def main():
     repo = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     imported = os.path.isdir(os.path.join(repo, IMPORT_ROOT))
     tests_imported = os.path.isdir(os.path.join(repo, TEST_IMPORT_ROOT))
+    example_present = os.path.isdir(os.path.join(repo, EXAMPLE_APP_ROOT))
     findings = []
 
     def report(check, path, number, detail, text=""):
@@ -216,11 +228,13 @@ def main():
 
     source_swift = files_under(os.path.join(repo, SOURCE_ROOT), (".swift",))
     test_swift = files_under(os.path.join(repo, TEST_ROOT), (".swift",))
+    example_swift = files_under(os.path.join(repo, EXAMPLE_ROOT), (".swift",))
     plist_family = (files_under(os.path.join(repo, SOURCE_ROOT), PLIST_FAMILY)
-                    + files_under(os.path.join(repo, TEST_ROOT), PLIST_FAMILY))
+                    + files_under(os.path.join(repo, TEST_ROOT), PLIST_FAMILY)
+                    + files_under(os.path.join(repo, EXAMPLE_ROOT), PLIST_FAMILY))
 
-    # NT-SDK and NT-SYMBOL: every Swift file, tests included.
-    for path in source_swift + test_swift:
+    # NT-SDK and NT-SYMBOL: every Swift file, tests and examples included.
+    for path in source_swift + test_swift + example_swift:
         for number, line in enumerate(read_lines(path), start=1):
             sdks = banned_sdks(line)
             if sdks:
@@ -234,8 +248,8 @@ def main():
             if symbols:
                 report("NT-SYMBOL", path, number, "declares tracking key " + ", ".join(symbols), line)
 
-    # NT-HTTP: shipping code holds no HTTP client at all.
-    for path in source_swift:
+    # NT-HTTP: shipping code and the examples hold no HTTP client at all.
+    for path in source_swift + example_swift:
         for number, line in enumerate(read_lines(path), start=1):
             markers = http_markers(line)
             if markers:
@@ -257,6 +271,15 @@ def main():
         if symbols:
             report("NT-PACKAGE", manifest, 0, "names tracking symbol " + ", ".join(symbols))
 
+    # NT-PACKAGE for the examples: an example's Xcode project depends on this package by its local path
+    # and on nothing else.
+    for path in files_under(os.path.join(repo, EXAMPLE_ROOT), (".pbxproj",)):
+        for number, line in enumerate(read_lines(path), start=1):
+            if "XCRemoteSwiftPackageReference" in line:
+                report("NT-PACKAGE", path, number, "an example declares a remote package dependency", line)
+            if line.strip().startswith("relativePath =") and line.strip() != "relativePath = ../..;":
+                report("NT-PACKAGE", path, number, "an example's local package is not this package", line)
+
     # NT-RESOLVED: nothing pinned.
     resolved = os.path.join(repo, "Package.resolved")
     if os.path.isfile(resolved):
@@ -272,10 +295,12 @@ def main():
 
     vacuous = imported and not source_swift
     vacuous_tests = tests_imported and not test_swift
+    vacuous_examples = example_present and not example_swift
     for line in findings:
         print(line)
     print(f"\nSwift files scanned: {len(source_swift)} under {SOURCE_ROOT}/, {len(test_swift)} under "
-          f"{TEST_ROOT}/; plist-family files: {len(plist_family)}; Package.swift "
+          f"{TEST_ROOT}/, {len(example_swift)} under {EXAMPLE_ROOT}/; plist-family files: {len(plist_family)}; "
+          f"Package.swift "
           f"{'checked' if os.path.isfile(manifest) else 'absent'}; Package.resolved "
           f"{'checked' if os.path.isfile(resolved) else 'absent'}; violations: {len(findings)}",
           file=sys.stderr)
@@ -289,7 +314,12 @@ def main():
               file=sys.stderr)
     elif not tests_imported:
         print(f"{TEST_IMPORT_ROOT} does not exist yet; the {TEST_ROOT}/ file floor waits for it", file=sys.stderr)
-    sys.exit(1 if findings or vacuous or vacuous_tests else 0)
+    if vacuous_examples:
+        print(f"no Swift files under {EXAMPLE_ROOT}/ although {EXAMPLE_APP_ROOT} exists: refusing to pass "
+              f"vacuously", file=sys.stderr)
+    elif not example_present:
+        print(f"{EXAMPLE_APP_ROOT} does not exist; the {EXAMPLE_ROOT}/ file floor waits for it", file=sys.stderr)
+    sys.exit(1 if findings or vacuous or vacuous_tests or vacuous_examples else 0)
 
 
 if __name__ == "__main__":

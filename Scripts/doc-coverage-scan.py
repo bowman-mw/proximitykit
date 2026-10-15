@@ -3,11 +3,12 @@
 
 Ported from Scripts/doc-coverage-scan.py in the Fernlet repository
 (https://github.com/bowman-mw/fernlet), where this code lived under the same rule. The matcher
-is copied unchanged; the root and the pre-import floor are this repository's.
+is copied unchanged; the roots and the pre-import floor are this repository's.
 
 Usage: Scripts/doc-coverage-scan.py [<root or file> ...]
-With no arguments, scans Sources/ (relative to the repo root, which is resolved from this
-script's location). Test code is not held to the rule.
+With no arguments, scans Sources/ and Examples/ (relative to the repo root, which is resolved from
+this script's location). Examples/ holds the example apps (plan step A1.2), hosts a reader copies
+from, so their types are documented as the package's are. Test code is not held to the rule.
 
 Prints one line per undocumented declaration (path:line:TypeName: decl) and a
 TOTAL to stderr; exits 1 if any are found. The enforced baseline is zero: every
@@ -27,7 +28,7 @@ import os
 import re
 import sys
 
-SOURCE_ROOTS = ("Sources",)
+SOURCE_ROOTS = ("Sources", "Examples")
 IMPORT_ROOT = os.path.join("Sources", "ProximityKit")   # the floor starts once this exists
 
 DECL_RE = re.compile(

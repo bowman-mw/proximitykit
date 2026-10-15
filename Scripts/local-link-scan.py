@@ -9,10 +9,13 @@ from that file unchanged, and the permitted files are its permittedLocalLinkFile
 Usage: Scripts/local-link-scan.py
 Prints one line per violation and a summary to stderr; exits 1 on any violation.
 
-What counts: a Swift file under Sources/ that names one of LOCAL_LINK_MARKERS in code, at an
-identifier boundary. Comment-only lines are skipped (the radio files and their neighbours
-document the API at length); a trailing comment does not hide a call. Test code is out of scope,
-as it was in Fernlet, where the rule covered shipping code.
+What counts: a Swift file under Sources/ or Examples/ that names one of LOCAL_LINK_MARKERS in
+code, at an identifier boundary. Comment-only lines are skipped (the radio files and their
+neighbours document the API at length); a trailing comment does not hide a call. Test code is out
+of scope, as it was in Fernlet, where the rule covered shipping code. The example apps under
+Examples/ (plan step A1.2) are hosts that reach the radios only through the package's public API,
+so no file there is permitted: an example that opened a connection of its own would no longer show
+what the package does.
 
 The rule is pinned in both directions:
   * a file outside PERMITTED_LOCAL_LINK_FILES that names the API is a new local-network
@@ -32,6 +35,9 @@ import os
 import sys
 
 SOURCE_ROOT = "Sources"
+# The example apps: hosts of the package, which reach the radios only through its public API, so no
+# file there may name the local-link API at all (none is on PERMITTED_LOCAL_LINK_FILES).
+EXAMPLE_ROOT = "Examples"
 IMPORT_ROOT = os.path.join("Sources", "ProximityKit")   # the held checks start once this exists
 
 # Network.framework's local-link surface: the TN3213 API the radios are built on (NetworkConnection,
@@ -104,7 +110,8 @@ def main():
     findings = []
     holders = set()
 
-    files = swift_files(os.path.join(repo, SOURCE_ROOT))
+    source_files = swift_files(os.path.join(repo, SOURCE_ROOT))
+    files = source_files + swift_files(os.path.join(repo, EXAMPLE_ROOT))
     for path in files:
         rel = os.path.relpath(path, repo).replace(os.sep, "/")
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -127,11 +134,11 @@ def main():
                 findings.append(f"LL-STALE {rel}: a permitted radio file no longer names a local-link API "
                                 f"(the markers went stale, or the radio moved); coverage dropped")
 
-    vacuous = imported and not files
+    vacuous = imported and not source_files
     for line in findings:
         print(line)
-    print(f"\nSwift files scanned under {SOURCE_ROOT}/: {len(files)}; files naming a local-link API: "
-          f"{len(holders)} ({len(holders & permitted)} of {len(permitted)} permitted); "
+    print(f"\nSwift files scanned under {SOURCE_ROOT}/ and {EXAMPLE_ROOT}/: {len(files)}; files naming a "
+          f"local-link API: {len(holders)} ({len(holders & permitted)} of {len(permitted)} permitted); "
           f"violations: {len(findings)}", file=sys.stderr)
     if vacuous:
         print(f"no Swift files under {SOURCE_ROOT}/ although {IMPORT_ROOT} exists: refusing to pass vacuously",
