@@ -102,9 +102,16 @@ jobs:
     # 0 failed, 0 skipped, the same 59 suites by name, 552 cases with arguments expanded; the inventory
     # 59 rows declaring 513 tests. Each lane passed at these floors and refused MIN_TESTS 514.
     # ARITHMETIC CHECK: 508 + 5 = 513 and 58 + 1 = 59.
+    # RAISED 513 -> 514 and 59 -> 60 on a Mac, 2026-10-15 (the same Xcode, Swift and simulator), for
+    # the pair session's new suite, ProximityPairSessionTests, and its one test, over this
+    # repository's tree with it and with ExampleNamespaceTests: swift test "Test run with 514 tests in
+    # 60 suites passed"; the macOS and the iOS result bundle each totalTestCount 514, 0 failed, 0
+    # skipped, the same 60 suites by name, 553 cases with arguments expanded; the inventory 60 rows
+    # declaring 514 tests. Each lane passed at these floors and refused MIN_TESTS 515. ARITHMETIC
+    # CHECK: 513 + 1 = 514 and 59 + 1 = 60.
     env:
-      MIN_TESTS: 513
-      MIN_SUITES: 59
+      MIN_TESTS: 514
+      MIN_SUITES: 60
     steps:
       - uses: actions/checkout@v4
 

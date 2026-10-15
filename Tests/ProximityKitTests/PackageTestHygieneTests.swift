@@ -302,6 +302,9 @@ import Testing
             invariant: packageKeychainSuiteInvariant),
         PackageKeychainFile(
             file: "PackageTestHostTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "ProximityPairSessionTests.swift", kind: .suite,
             invariant: packageKeychainSuiteInvariant)
     ]
 
@@ -1024,9 +1027,11 @@ import Testing
     /// package's NEW `ProximityMemoryLifecycleTests`. RAISED at plan step A1 (2026-10-14): 25 → 58, for
     /// the 33 suites copied from Fernlet's tests (the split's first batch), each run on macOS and the iOS
     /// simulator. RAISED at plan step A1.2 (2026-10-15): 58 → 59, for the NEW `ExampleNamespaceTests`,
-    /// which holds the example app's namespace apart. A suite added, moved out or deleted changes it in
-    /// the same commit, argued and measured; a deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 59
+    /// which holds the example app's namespace apart. RAISED at the pair radio's rediscovery fix
+    /// (2026-10-15): 59 → 60, for the package's NEW `ProximityPairSessionTests`. A suite added, moved out
+    /// or deleted changes it in the same commit, argued and measured; a deletion lowers it only with the
+    /// retirement argued.
+    static let measuredInventoryRows = 60
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -1035,9 +1040,10 @@ import Testing
     /// purpose wall and the escape-hatch census add to `ProximitySourceWallTests`. RAISED at A1.1.17
     /// (2026-10-14): 197 → 203, for `ProximityMemoryLifecycleTests`' 5 and the identity-construction cell
     /// `ProximitySourceWallTests` gains. RAISED at plan step A1 (2026-10-14): 203 → 508, for the copied
-    /// suites' 305. RAISED at plan step A1.2 (2026-10-15): 508 → 513, for `ExampleNamespaceTests`' 5. A
-    /// test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 513
+    /// suites' 305. RAISED at plan step A1.2 (2026-10-15): 508 → 513, for `ExampleNamespaceTests`' 5.
+    /// RAISED at the pair radio's rediscovery fix (2026-10-15): 513 → 514, for
+    /// `ProximityPairSessionTests`' 1. A test added or removed changes it in the same commit.
+    static let measuredDeclaredTests = 514
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

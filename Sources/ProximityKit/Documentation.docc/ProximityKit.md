@@ -995,12 +995,13 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 (`PackageTestSupportTests`), the test keychain (`PackageKeychainStoreTests`), the test host and
 audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoundaryTests`), the
 platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
-(`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`), the tests' own
+(`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`), the pair
+session over its own radio (`ProximityPairSessionTests`), the tests' own
 hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`), the source walls
 over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
 (`ProximityMemoryLifecycleTests`); thirty-three suites copied from Fernlet's tests, described
 below; and, in the package repository, the example app's namespace held apart
-(`ExampleNamespaceTests`, plan step A1.2): fifty-nine suites, 513 tests. The
+(`ExampleNamespaceTests`, plan step A1.2): sixty suites, 514 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1053,7 +1054,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all fifty-nine passing `swift test` with this module and its tests laid out as in the package
+Mac too, all sixty passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
@@ -1752,7 +1753,12 @@ carrying a picture clears ``MeshTransferStreamTable/bulkFloorBytes`` and takes a
 exactly as a friend photo does on the mesh, so it cannot park the pairing's control stream behind
 itself. And every `report` it makes is a START failure: a per-dial miss, a refused hello and a failed
 transfer are audited and nothing more, because the owner's transport-error hook stands the whole
-radio down.
+radio down. A resume owes the owner a sighting of every record it browses: the owner forgets a peer
+whose disconnect it hears, and a peer whose failure was one-sided (it refused the hello, so it never
+paired and never re-minted) comes back to the resumed browser under an unchanged record, so the first
+sighting of each record after a resume is announced whether or not it changed. Announcing on change
+alone left such a peer out of the picker, and refused its dial, until a refresh
+(`ProximityPairSessionTests`).
 
 Internal to the module, DEBUG-only, and listed here so they are never mistaken for production
 behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroductionChaosBehaviour`,
