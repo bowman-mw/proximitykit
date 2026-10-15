@@ -3,9 +3,11 @@
 // The source walls' small Swift lexer, which reads a file's code apart from its comments and string
 // literals as the compiler does. A twin (ProximityKit plan step A1.1): the same file at Tests/FernletTests
 // and FernletKit/Tests/ProximityKitTests/TestSupport, held identical but for its imports by
-// CIGateSelectorBoundaryTests.everyTwinMatchesItsOriginal(), because ProximityKit's namespace, platform
-// and keychain-door walls, its tests' hygiene, its tree walls, its source walls' identity rule, and the
-// continuation task-host wall and the feature golden's recipe-copy scan copied from Fernlet's tests
+// CIGateSelectorBoundaryTests.everyTwinMatchesItsOriginal() (this package's copy differs from those two
+// in this header only, which since plan step A1.3 also names the readers copied here), because
+// ProximityKit's namespace, platform and keychain-door walls, its tests' hygiene, its tree walls, its
+// source walls' identity rule, and the continuation task-host wall and the feature golden's recipe-copy
+// scan copied from Fernlet's tests
 // (ProximityNamespaceBoundaryTests, ProximityPlatformNeutralityTests, ProximityKeychainDoorTests and,
 // since ProximityKit plan step A1.1.13, PackageTestHygieneTests, since A1.1.14, PackageTestTreeWallTests,
 // since A1.1.17, ProximitySourceWallTests and, since plan step A1.3, MeshContinuationTaskHostWallTests

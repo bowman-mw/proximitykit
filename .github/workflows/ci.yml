@@ -123,8 +123,8 @@ jobs:
     # repository's tree with them and the routed track's copies: swift test "Test run with 575 tests in
     # 82 suites passed"; the inventory 82 rows declaring 575 tests. The swift test lane passed at these
     # floors and refused MIN_TESTS 576 and MIN_SUITES 83; the xcodebuild lanes were not run for this
-    # note, and the batch's last commit measures every lane. ARITHMETIC CHECK: 557 + 18 = 575 and
-    # 69 + 13 = 82.
+    # note, and the batch's last commit measures the macOS lanes and the builds. ARITHMETIC CHECK:
+    # 557 + 18 = 575 and 69 + 13 = 82.
     # RAISED 575 -> 583 and 82 -> 88 at plan step A1.3's batch D (session) on a Mac, 2026-10-15 (the
     # same Xcode and Swift), for batch D's session copies: six suites holding the eight cells of the
     # Fernlet repository's session, continuation and photo-review suites of the same names that read
@@ -133,8 +133,9 @@ jobs:
     # SessionMessageTests 1 each), over this repository's tree with them and the routed and mesh
     # tracks' copies: the Walls step passed, and swift test "Test run with 583 tests in 88 suites
     # passed", its floor passed; the inventory 88 rows declaring 583 tests. The xcodebuild lanes were
-    # not run for this note; the batch's last commit measures every lane. swift test's floor refused
-    # MIN_TESTS 584 and MIN_SUITES 89. ARITHMETIC CHECK: 575 + 8 = 583 and 82 + 6 = 88.
+    # not run for this note; the batch's last commit measures the macOS lanes and the builds. swift
+    # test's floor refused MIN_TESTS 584 and MIN_SUITES 89. ARITHMETIC CHECK: 575 + 8 = 583 and
+    # 82 + 6 = 88.
     # RAISED 583 -> 618 and 88 -> 98 at plan step A1.3's batch D (pair) on a Mac, 2026-10-15 (the same
     # Xcode and Swift), for the ten suites holding the 35 cells of the Fernlet repository's pair-session,
     # presence, identity, golden, wipe, audit-bridge, transport and localization tests that read this

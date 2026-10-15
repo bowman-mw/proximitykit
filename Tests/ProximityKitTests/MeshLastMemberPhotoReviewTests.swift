@@ -49,7 +49,8 @@ import Testing
 /// and the SwiftUI presenter — so both are pinned by reading the shipping source. Since plan step
 /// A0.5.11 the live list, its answers, the promotion and the purge are the session photos'
 /// (`MeshSessionPhotos.swift`), told each moment by the mesh's session observer; the teardown and
-/// the start stay the manager's.
+/// the start stay the manager's. This copy holds the manager's half; the app-side half (the presenter
+/// and the session photos) stays in the Fernlet repository.
 @Suite
 struct LastMemberPhotoReviewSourceWallTests {
 

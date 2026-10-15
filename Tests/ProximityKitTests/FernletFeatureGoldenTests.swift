@@ -44,12 +44,20 @@ struct FernletFeatureGoldenTests {
     /// **31e.** The recipe copy is its frozen templates in its home, and no ProximityKit file holds
     /// one of the forty as a literal (lexed as Swift reads it, each interpolation read as `\(…)`), so
     /// none comes back to the pair session. The list's own size is held first, so a template dropped
-    /// from it cannot shrink what the scan looks for. The Fernlet repository's original also reads the
-    /// templates off their home, FernletSocial's recipe-share manager, as a set equal to this list,
-    /// and holds every event and status to the sentence it renders; that half stays there.
+    /// from it cannot shrink what the scan looks for, and so is the reader's own witness (ProximityKit
+    /// plan step A1.3's review, beyond the original): a sample line holding one template, interpolated,
+    /// lexes and normalizes to exactly that template, so a lexer or a normalizer that stopped reading a
+    /// literal as Swift does reddens here rather than letting the scan pass over nothing. The Fernlet
+    /// repository's original also reads the templates off their home, FernletSocial's recipe-share
+    /// manager, as a set equal to this list, and holds every event and status to the sentence it
+    /// renders; that half stays there.
     @Test func theRecipeCopyIsItsFrozenTemplatesInItsHome() throws {
         let frozen = Set(Self.frozenRecipeCopyTemplates)
         #expect(Self.frozenRecipeCopyTemplates.count == 40 && frozen.count == 40, "the frozen list holds \(frozen.count) templates")
+        let sample = SwiftSourceLexer.lex(#"let s = "Connect timeout: \(peer.name) did not answer.""#).literals
+        #expect(Set(sample.map { Self.normalizingInterpolations($0.text) }).intersection(frozen)
+                    == [#"Connect timeout: \(…) did not answer."#],
+                "the reader no longer turns \(sample.map(\.text)) into its frozen template")
         var strays: [String] = []
         let sources = try PackageSwiftFiles.sources()
         // R2: bounded by ProximityKit's file list.

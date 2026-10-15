@@ -41,9 +41,10 @@ import Testing
 // MARK: - The walls
 
 /// The mechanical halves of "no second reconnect path", "no epoch on the routed path" and "item 12
-/// inherits a clean seam" — grep-walls over the manager's own source and, for the retired
-/// transports, over the FernletSocial feature file that holds each routed family's send, budget and
-/// projection handler or ledger judge.
+/// inherits a clean seam" — grep-walls over the manager's own source, and for the parked text payload
+/// over every file of the module. Here they read only this module: the original also reads, for the
+/// retired transports, the FernletSocial feature file that holds each routed family's send, budget and
+/// projection handler or ledger judge, and that half stays in the Fernlet repository.
 @MainActor
 @Suite(.serialized)
 struct MeshRoutedDrainWallTests {
@@ -551,7 +552,7 @@ struct MeshRoutedDrainWallTests {
     /// sealing set are FernletDomainModel's and FernletConnections', so the Fernlet repository keeps the
     /// rawValue and sealing checks, with the scan over FernletSocial at its floor of 15 files.
     @Test func theLegacyTextPayloadTypeIsParkedNotDeleted() throws {
-        let kit = try Self.moduleSources()
+        let kit = try MeshP7Acceptance.sources()
         #expect(kit.count >= 120,
                 "the registration scan read only \(kit.count) ProximityKit files")
         let registrations = [
@@ -560,7 +561,7 @@ struct MeshRoutedDrainWallTests {
         ]
         // R2: bounded by the two spellings.
         for needle in registrations {
-            let homes = Set(Self.homes(of: needle, in: kit)).sorted()
+            let homes = Set(MeshP7Acceptance.homes(of: needle, in: kit)).sorted()
             #expect(homes.isEmpty, "while NOTHING registers a handler for it: `\(needle)` is in \(homes)")
         }
     }
@@ -760,33 +761,5 @@ struct MeshRoutedDrainWallTests {
         let production = "MeshRoutedStorageScope" + "." + "production"
         #expect(source.contains("MeshRoutedStore(scope: store.meshRoutedStorage)"))
         #expect(source.contains(production) == false)
-    }
-
-    /// Every `.swift` file of ProximityKit's source folder, as `(name, code-only source)`, in path
-    /// order: the package's walker (``PackageSwiftFiles/sources()``) in place of the Fernlet
-    /// repository's `MeshP7Acceptance.sources(under:)`, read the same way, whole-line comments removed.
-    /// The caller holds the read to its floor.
-    private static func moduleSources() throws -> [(name: String, code: String)] {
-        var sources: [(name: String, code: String)] = []
-        // R2: bounded by the module's own file list.
-        for file in try PackageSwiftFiles.sources() {
-            sources.append((
-                URL(fileURLWithPath: file.path).lastPathComponent,
-                MeshRoutedSourceScan.codeOnly(file.text)
-            ))
-        }
-        return sources
-    }
-
-    /// The name of every file that spells `needle`, once per occurrence: the Fernlet repository's
-    /// `MeshP7Acceptance.homes(of:in:)`, copied.
-    private static func homes(of needle: String, in sources: [(name: String, code: String)]) -> [String] {
-        var homes: [String] = []
-        // R2: bounded by the file list.
-        for source in sources {
-            let count = source.code.components(separatedBy: needle).count - 1
-            homes.append(contentsOf: Array(repeating: source.name, count: count))
-        }
-        return homes
     }
 }

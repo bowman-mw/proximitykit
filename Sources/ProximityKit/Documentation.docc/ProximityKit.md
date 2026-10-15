@@ -1227,9 +1227,11 @@ P5 and P6 batteries' honesty pins over the manager and the session machine, the 
 P8 battery's raises, the P9 battery's posture, presence, recipe and Multipeer retirement source walls,
 the key advertisement set's merge-door, construction-site and retired-field walls, the legacy
 goodbye's grep-wall and the name-withholding subscriber's wiring. A zero-list among them also holds a
-positive home (the goodbye's sender stem, the key set's own doors, the schema's record of the retired
-field), so a walk that read nothing cannot pass; the P7, P8 and P9 copies share `MeshP7Acceptance`,
-the module's walker and home list.
+positive home (the goodbye's sender stem, at four fifths of its calls in code, the key set's own doors,
+the schema's record of the retired field), so a walk that read nothing cannot pass; and, beyond their
+original, the two goodbye walls hold every code spelling of the goodbye's role to its four homes, so a
+goodbye sent through another door than the one their needle names fails too. The P7, P8 and P9 copies
+and the drain's parked-text cell share `MeshP7Acceptance`, the module's walker and home list.
 
 Of its session, continuation and photo-review suites these are eight cells in six suites: the scene
 events' one raiser each, inside its public door, and neither door reading the gate
@@ -1246,20 +1248,22 @@ sentence (`RoutedShareRefusalCopyTests`).
 Of its pair-session, presence, identity, golden, wipe, audit-bridge, transport and localization tests
 these are thirty-five cells in ten suites: the pair and presence radios' source walls (their tasks'
 cancellation guards, the withdrawn registration's republish, the retired radio gone from the pair
-session and every file extending it, the ALPN the session binds, the discovery gate as its one door
-and the advertised name's byte cap), the identity's fail-closed read, the namespace golden's source
-pins (the radios' log subsystem, the mesh radio's heartbeat and channel binding) and its keychain-copy
-walk, the feature golden's recipe-copy stray scan and the pair session's recipe constants, the
-identity holders' wipe seams, the audit bridge's scan for a host's own log, transport neutrality over
-this module, and the localization wall's rules over it with the fixtures that prove its matchers fire.
-Where a Fernlet cell also read Fernlet's own files or values, the copy says in its doc comment what
-stays there.
+session and every file extending it, the ALPN the session binds, the discovery gate as its one door and
+the advertised name's byte cap), the identity's fail-closed read, the namespace golden's source pins
+(the radios' log subsystem, the mesh radio's heartbeat and channel binding) and its keychain-copy walk,
+the feature golden's recipe-copy stray scan, with a witness of its own reader, and the pair session's
+recipe constants, the identity holders' wipe seams, the audit bridge's scan for a host's own log,
+transport neutrality over this module, and the localization wall's rules over it with the fixtures that
+prove its matchers fire. Where a Fernlet cell also read Fernlet's own files or values, the copy says in
+its doc comment what stays there.
 
 Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
 mesh-message spelling helper, the test namespace, the epoch fixtures, whose one mint binds in each
 target to that target's namespace, and the source walls' lexer, each copy held to the same fixtures in
-its own target. The test bindings are a replacement, not a twin: this target's bind to
+its own target (the package repository's lexer differs from Fernlet's two in its header only, which also
+names the package suites that read through it). The test bindings are a replacement, not a twin: this
+target's bind to
 `.packageTest` and Fernlet's to `.fernlet`, so `CIGateSelectorBoundaryTests` holds each declaration of
 this target's to one of Fernlet's with that one token read across, and lets the extensions both declare
 live nowhere else. CI names its suites `ProximityKitTests/<Suite>`. In Fernlet's repository,

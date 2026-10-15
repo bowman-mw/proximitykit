@@ -376,14 +376,14 @@ import Testing
     /// plan step A1.3's batch D (the routed track), when the routed source walls copied from Fernlet's tests
     /// brought 33; 89 since its mesh track, when the cells of Fernlet's mesh tests that read this module's
     /// sources brought 13; 97 since its session track, when the session copies brought 8; 121 since its pair
-    /// track, when the pair copies brought 24. The rows spell a needle the per-file rule does not cover: the
-    /// soundness suite's storage cell, which reads `URL.applicationSupportDirectory` as a value; the
-    /// package's file locator's one read of its own source's path; the routed store isolation walls' suite,
-    /// whose own name spells the store's; the namespace and platform walls' needles inside literals
-    /// (``packageNamespaceWallLines``, ``packagePlatformWallLines``); and the copied suites' reads of a
-    /// keychain-reaching type's statics and their source walls' needles inside literals
-    /// (``packageCopiedStaticLines``, ``packageCopiedSourceTextLines``, ``packageCopiedRoutedWallLines``),
-    /// each set under one invariant.
+    /// track, when the pair copies brought 24; 122 since its review, when the goodbye walls' home list
+    /// brought 1. The rows spell a needle the per-file rule does not cover: the soundness suite's storage
+    /// cell, which reads `URL.applicationSupportDirectory` as a value; the package's file locator's one read
+    /// of its own source's path; the routed store isolation walls' suite, whose own name spells the store's;
+    /// the namespace and platform walls' needles inside literals (``packageNamespaceWallLines``,
+    /// ``packagePlatformWallLines``); and the copied suites' reads of a keychain-reaching type's statics and
+    /// their source walls' needles inside literals (``packageCopiedStaticLines``,
+    /// ``packageCopiedSourceTextLines``, ``packageCopiedRoutedWallLines``), each set under one invariant.
     static let packageHazardAllowlist: [(file: String, line: String, invariant: String)] = [
         (file: "ProximityNamespaceSoundnessTests.swift",
          line: "for base in [URL.applicationSupportDirectory, scratch] {",
@@ -477,7 +477,8 @@ import Testing
 
     /// The copied suites' lines that spell a needle inside a source wall's literal, each exact as trimmed
     /// (rule I9; ProximityKit plan step A1, the split's first batch of copied suites, and plan step A1.3's
-    /// batch D, the cells of Fernlet's tests that read this module's sources).
+    /// batch D, the mesh, session and pair copies of the cells of Fernlet's tests that read this module's
+    /// sources; the routed copies' rows are ``packageCopiedRoutedWallLines``).
     static let packageCopiedSourceTextLines: [(file: String, line: String)] = [
         (file: "MeshRoutedCustodyHandoffTests.swift",
          line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift")"#),
@@ -496,6 +497,8 @@ import Testing
          line: #""fingerprint", "Keychain", "KeychainItem", "SecItem", "kSecAttrService","#),
         (file: "PresenceEpochPostureTests.swift",
          line: #""UserDefaults", "FileManager", "write(to:", "JSONSidecarFile","#),
+        // Plan step A1.3, batch D's mesh copies: the halves of the Fernlet repository's mesh tests that read
+        // this module's sources.
         (file: "MeshNameWithholdingTests.swift",
          line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift")"#),
         (file: "MeshP5AcceptanceTests.swift",
@@ -522,6 +525,8 @@ import Testing
          line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift"))"#),
         (file: "MeshP9AcceptanceTests.swift",
          line: #"MeshNetworkManager.init no longer defaults its radio to \"#),
+        (file: "MeshMembershipEventWireTests.swift",
+         line: #"(file: "Mesh/MeshNetworkManager.swift", line: "case .sessionGoodbye:"),"#),
         // Plan step A1.3, batch D's session copies: the halves of the Fernlet repository's session,
         // continuation and photo-review cells that read this module's sources.
         (file: "MeshContinuationDriverTests.swift",

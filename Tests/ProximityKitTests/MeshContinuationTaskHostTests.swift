@@ -42,7 +42,9 @@ import Testing
 ///
 /// P9 item 5 added cell (g): the mesh's door was only half the claim, and the other half — the
 /// coordinator's DEFAULT anchor, which the 1:1 paths take — is now the no-op too, so the app raises
-/// no proximity Live Activity anywhere.
+/// no proximity Live Activity anywhere. This copy holds the mesh's and the coordinator's half; the
+/// app-side half (the framework's home, the host, the feed, the funnel and the plist) stays in the
+/// Fernlet repository.
 struct MeshContinuationTaskHostWallTests {
 
     /// Cell (g)'s one permitted home for the proximity Live Activity's attributes type, by file name:

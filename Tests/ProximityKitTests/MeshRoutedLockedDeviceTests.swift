@@ -229,7 +229,7 @@ extension MeshRoutedLockedDeviceTests {
     /// exists at all.
     ///
     /// Two halves. **The pin** (``routedPlaintextSeams``) counts every occurrence of the nine
-    /// qualified spellings across `FernletKit/Sources/ProximityKit` — the whole module, not just
+    /// qualified spellings across this module's folder — the whole module, not just
     /// `Mesh/`, because `MeshRoutedContentKeyWrapper` and its `unwrap` are internal to all of it, so
     /// a decrypt under `HeartSharing/` or `Messaging/` would otherwise be invisible — and requires
     /// each to stand at its recorded number. **The containment half**

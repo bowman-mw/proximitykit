@@ -64,7 +64,8 @@ import Testing
 
 /// **Pass 1's wall.** The two session-state raises have one home each in ProximityKit, the app
 /// reaches them through one public pair spoken in one file, and the app reaches the session machine
-/// no other way.
+/// no other way. This copy holds the ProximityKit half; the app-side half stays in the Fernlet
+/// repository.
 struct MeshContinuationRaiseWallTests {
 
     /// The one file in ProximityKit allowed to raise either scene event.

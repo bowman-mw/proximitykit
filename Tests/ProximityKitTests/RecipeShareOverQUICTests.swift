@@ -88,8 +88,9 @@ struct RecipeShareOverQUICTests {
     ///
     /// Vacuous by design since the deletion round (2026-09-22): the framework is gone from the tree,
     /// so these needles can no longer match anything. Kept anyway — they cost nothing and they are
-    /// the per-manager half of the tree-wide wall (`TransportNeutralityBoundaryTests`, in the Fernlet
-    /// repository; the package's platform wall refuses the framework's import in this module).
+    /// the per-manager half of the tree-wide wall (`TransportNeutralityBoundaryTests`, whose half over
+    /// this module this target holds too; the package's platform wall also refuses the framework's
+    /// import in this module).
     @Test func theManagerNoLongerNamesTheRetiredRadio() throws {
         let source = try Self.managerSource()
         let code = MeshRoutedSourceScan.codeOnly(source)

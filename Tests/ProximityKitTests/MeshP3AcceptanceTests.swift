@@ -50,9 +50,17 @@ struct MeshP3InteropAcceptanceTests {
     /// never emitted" is half of the acceptance line.
     ///
     /// **Not vacuous.** The walk reads at least ``PackageSwiftFiles/sourceFloor`` files; the needle's
-    /// stem, `sendEnvelope(`, is still spelled on some line of them, so a sender renamed out from under
-    /// the needle reddens rather than leaving it matching nothing; and the token the wall is about is
-    /// still a case (`case sessionGoodbye`), so "never emitted" is said of a live frame.
+    /// stem, `sendEnvelope(`, is still called on at least
+    /// ``MeshLegacyGoodbyeInteropTests/goodbyeSenderCallFloor`` code lines of them, so a sender renamed
+    /// out from under the needle reddens rather than leaving it matching nothing; and the token the wall
+    /// is about is still a case in code (`case sessionGoodbye`), so "never emitted" is said of a live
+    /// frame.
+    ///
+    /// **Beyond the original** (ProximityKit plan step A1.3's review): the needle cannot see a goodbye
+    /// written through `writeMembershipFrame(_:_:to:)` or held in a variable, and neither can the
+    /// Fernlet repository's original, so every code spelling of `.sessionGoodbye` is also held to its
+    /// four homes, the receive switch's one case among them
+    /// (``MeshLegacyGoodbyeInteropTests/goodbyeShapeProblems(in:)``).
     @Test func theGoodbyeGrepWallStillHolds() throws {
         let files = try PackageSwiftFiles.sources()
         #expect(files.count >= PackageSwiftFiles.sourceFloor, """
@@ -60,20 +68,14 @@ struct MeshP3InteropAcceptanceTests {
             below its floor \(PackageSwiftFiles.sourceFloor): the walk is broken, not the module clean
             """)
         var offenders: [String] = []
-        var senders = 0
         // R2: bounded by the module's file list × each file's lines.
         for file in files {
-            for line in file.text.components(separatedBy: .newlines) where line.contains("sendEnvelope(") {
-                senders += 1
-                if line.contains("sendEnvelope(.sessionGoodbye") { offenders.append(file.path) }
+            for line in file.text.components(separatedBy: .newlines) where line.contains("sendEnvelope(.sessionGoodbye") {
+                offenders.append(file.path)
             }
         }
         #expect(offenders.isEmpty, "still emitting `.sessionGoodbye`: \(offenders.sorted())")
-        #expect(senders >= 1, """
-            no line of the module calls `sendEnvelope(`, the stem of the wall's needle: the sender was \
-            renamed or moved, and the wall now matches nothing
-            """)
-        #expect(files.contains { $0.text.contains("case sessionGoodbye") },
-                "the goodbye is no longer a case of the module's roles, so the wall speaks of no frame")
+        let problems = MeshLegacyGoodbyeInteropTests.goodbyeShapeProblems(in: files)
+        #expect(problems.isEmpty, "\(problems.joined(separator: "\n"))")
     }
 }

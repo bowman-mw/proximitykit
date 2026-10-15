@@ -362,7 +362,7 @@ struct MeshRoutedStoreIsolationTests {
     /// The registry scanners themselves, fixtured — the matcher is the wall.
     ///
     /// Every fixture here drives a **shared** value, never a literal re-typed beside its own
-    /// assertion: the construction cases run `MeshSessionStoreIsolationTests.constructionArguments`,
+    /// assertion: the construction cases run `PackageTestTreeWallTests.constructionArguments(of:in:)`,
     /// and the needle cases run `Self.routedTokenNeedles`, the dictionary
     /// `noShippingCodeBranchesOnARoutedTypeToken` scans with. So deleting `"typeToken =="` from that
     /// dictionary, or widening `"fernlet.mesh.routed-type."`'s empty allowlist to admit any file,

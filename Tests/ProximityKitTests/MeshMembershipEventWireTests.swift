@@ -302,9 +302,19 @@ struct MeshLegacyGoodbyeInteropTests {
     ///
     /// **Not vacuous.** The original walks every shipping root of Fernlet's and throws on an empty one;
     /// this half walks every Swift file of the module through ``PackageSwiftFiles/sources()``, at the
-    /// walk's floor, and also holds the needle's stem, `sendEnvelope(`, to some line of it, so a sender
-    /// renamed out from under the needle reddens rather than leaving it matching nothing, and the token
-    /// the wall is about to a case of the module's roles (`case sessionGoodbye`).
+    /// walk's floor, and holds the needle's stem, `sendEnvelope(`, to ``goodbyeSenderCallFloor`` calls
+    /// on the module's code lines, so a sender renamed out from under the needle reddens rather than
+    /// leaving it matching nothing, and the token the wall is about to a case of the module's roles
+    /// (`case sessionGoodbye`), read in code.
+    ///
+    /// **Beyond the original** (ProximityKit plan step A1.3's review). The needle sees a goodbye only
+    /// when it is spelled `sendEnvelope(.sessionGoodbye`, never one written through
+    /// `writeMembershipFrame(_:_:to:)`, whose role reaches
+    /// `sendEnvelopeReportingResult(_:encodable:via:sealed:)` as `meshToken(type)`, nor one held in a
+    /// variable; the Fernlet repository's original has the same blind spot. So every code spelling of
+    /// `.sessionGoodbye` is also held to its four homes
+    /// (``goodbyeRoleCodeLines``): the receive switch's one `case .sessionGoodbye:` in the manager, and
+    /// three lines that declare the role and its token rather than send it.
     @Test func noShippingSourceEmitsAGoodbye() throws {
         let files = try PackageSwiftFiles.sources()
         #expect(files.count >= PackageSwiftFiles.sourceFloor, """
@@ -312,12 +322,10 @@ struct MeshLegacyGoodbyeInteropTests {
             below its floor \(PackageSwiftFiles.sourceFloor): the walk is broken, not the module clean
             """)
         var offenders: [String] = []
-        var senders = 0
         // R2: bounded by the module's file list × each file's lines.
         for file in files {
-            for line in file.text.components(separatedBy: .newlines) where line.contains("sendEnvelope(") {
-                senders += 1
-                if line.contains("sendEnvelope(.sessionGoodbye") { offenders.append(file.path) }
+            for line in file.text.components(separatedBy: .newlines) where line.contains("sendEnvelope(.sessionGoodbye") {
+                offenders.append(file.path)
             }
         }
         #expect(
@@ -329,11 +337,68 @@ struct MeshLegacyGoodbyeInteropTests {
             \(offenders.sorted().joined(separator: "\n"))
             """
         )
-        #expect(senders >= 1, """
-            no line of the module calls `sendEnvelope(`, the stem of the wall's needle: the sender was \
-            renamed or moved, and the wall now matches nothing
-            """)
-        #expect(files.contains { $0.text.contains("case sessionGoodbye") },
-                "the goodbye is no longer a case of the module's roles, so the wall speaks of no frame")
+        let problems = Self.goodbyeShapeProblems(in: files)
+        #expect(problems.isEmpty, "\(problems.joined(separator: "\n"))")
+    }
+
+    /// The fewest calls of the module's role sender, `sendEnvelope(`, the goodbye walls hold its code
+    /// lines to (whole-line comments dropped, the sender's own declaration not counted): four fifths of
+    /// the 11 the module made at ProximityKit plan step A1.3's review, so a sender renamed, or most of
+    /// its calls moved behind another door, reddens the walls rather than leaving their needle
+    /// matching little or nothing.
+    static let goodbyeSenderCallFloor = 9
+
+    /// Every code line of the module that spells `.sessionGoodbye`, by its path under
+    /// ``PackageSwiftFiles/sourceFolder`` and its trimmed text, as measured at ProximityKit plan step
+    /// A1.3's review: the receive switch's one case in the manager, the role's token row, the interop
+    /// rule's role and the vocabulary's initializer. None of them sends; a line that sends the role by
+    /// any door or through any variable spells it a fifth time, and fails.
+    static let goodbyeRoleCodeLines: [(file: String, line: String)] = [
+        (file: "Mesh/MeshMembershipEvents.swift", line: "static let payloadType = MeshPayloadRole.sessionGoodbye"),
+        (file: "Mesh/MeshNetworkManager.swift", line: "case .sessionGoodbye:"),
+        (file: "Mesh/MeshPayloadRole.swift", line: "case .sessionGoodbye: return mesh.sessionGoodbye"),
+        (file: "Namespace/ProximityNamespace+Vocabulary.swift", line: "self.sessionGoodbye = sessionGoodbye")
+    ]
+
+    /// What the goodbye walls hold beyond the original's needle, over the module's Swift files, each
+    /// read code-only (``MeshRoutedSourceScan/codeOnly(_:)``): the sender's calls at their floor, the
+    /// role still a case, and `.sessionGoodbye` spelled only on ``goodbyeRoleCodeLines``. This suite's
+    /// cell and `MeshP3InteropAcceptanceTests.theGoodbyeGrepWallStillHolds` both read through it.
+    ///
+    /// - Parameter files: The module's Swift files, as ``PackageSwiftFiles/sources()`` returns them.
+    /// - Returns: One sentence per problem; empty when the walls hold.
+    static func goodbyeShapeProblems(in files: [PackageSwiftFiles.File]) -> [String] {
+        var senders = 0
+        var roleCase = false
+        var spelled: [String] = []
+        // R2: bounded by the module's file list × each file's lines.
+        for file in files {
+            for raw in MeshRoutedSourceScan.codeOnly(file.text).components(separatedBy: .newlines) {
+                let line = raw.trimmingCharacters(in: .whitespaces)
+                if line.contains("sendEnvelope("), !line.contains("func sendEnvelope(") { senders += 1 }
+                if line.contains("case sessionGoodbye") { roleCase = true }
+                if line.contains(".sessionGoodbye") { spelled.append("\(file.path): \(line)") }
+            }
+        }
+        var problems: [String] = []
+        if senders < goodbyeSenderCallFloor {
+            problems.append("""
+                the module's code calls `sendEnvelope(`, the stem of the goodbye walls' needle, \(senders) \
+                times, below the floor of \(goodbyeSenderCallFloor): the sender was renamed or moved, and \
+                the needle now matches little or nothing
+                """)
+        }
+        if !roleCase {
+            problems.append("the goodbye is no longer a case of the module's roles, so the wall speaks of no frame")
+        }
+        let homes = goodbyeRoleCodeLines.map { "\($0.file): \($0.line)" }.sorted()
+        if spelled.sorted() != homes {
+            problems.append("""
+                the module's code spells `.sessionGoodbye` on \(spelled.sorted()), not only on its homes \
+                \(homes): a goodbye written through another door or held in a variable is still EMITTED, \
+                and a home that moved is re-pointed here with its reason
+                """)
+        }
+        return problems
     }
 }
