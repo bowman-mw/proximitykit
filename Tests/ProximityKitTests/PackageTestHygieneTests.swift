@@ -63,8 +63,8 @@ import Testing
     }
 
     /// **I11.** Every module a package file imports (``importedModules(in:)``, read over its code) is in
-    /// ``packageImportAllowlist``, or, for ``packageSecurityImportFile``, in ``packageSecurityImports``,
-    /// over every Swift file of the target at the walk's floor, the reader held to its samples first.
+    /// ``packageImportAllowlist``, over every Swift file of the target at the walk's floor, the reader
+    /// held to its samples first.
     @Test func everyPackageTestImportTravelsWithThePackage() throws {
         Self.expectTheImportReaderFixtured()
         let files = try PackageSwiftFiles.tests()
@@ -862,33 +862,25 @@ import Testing
     /// no other package, so dependency validation already refuses a package test that imports one, and this
     /// rule names the refusal for what it is. A host's modules hold the host's own values (its crypto
     /// purposes' labels, its payload types' tokens), so a package test that imported one could pin a host's
-    /// byte and could not travel.
+    /// byte and could not travel. Every system module here travels with the package, on every platform it
+    /// builds for. CryptoKit, Observation and Security joined at plan step A1 for the suites copied from
+    /// Fernlet's tests: the TLS identity's certificate mint and parse (`SecCertificate…`), the channel
+    /// introduction harness's `Curve25519` keys and the observation loop's `@Observable` fixture. Security
+    /// names no keychain call by itself: rule I9 refuses a raw `SecItem` call in every file, so a file that
+    /// imports Security still reaches the keychain only through ProximityKit's funnel and the in-memory
+    /// store, whose own file imports it to read the funnel's query dictionaries by their Security keys.
     static let packageImportAllowlist: Set<String> = [
-        "ProximityKit", "Foundation", "Testing", "Combine", "simd", "Synchronization"
+        "ProximityKit", "Foundation", "Testing", "Combine", "CryptoKit", "Observation", "Security", "simd",
+        "Synchronization"
     ]
 
-    /// The one package file that may also import ``packageSecurityImports`` (rule I11), by its exact path:
-    /// the package tests' in-memory keychain store, which answers ProximityKit's keychain funnel by the
-    /// Security keys of the query dictionaries it is handed (`kSecClass`, `kSecAttrService`,
-    /// `kSecMatchLimit`, …) and with Security's statuses. A store renamed or moved fails I11 rather than
-    /// taking the allowance with it.
-    static let packageSecurityImportFile = "TestSupport/PackageKeychainStore.swift"
-
-    /// The modules ``packageSecurityImportFile`` may import besides ``packageImportAllowlist`` (rule
-    /// I11): Security, a system module, so it travels with the package; held to that one file, so a suite
-    /// or any other support file reads the keychain through ProximityKit and the store and never spells a
-    /// keychain query of its own.
-    static let packageSecurityImports: Set<String> = ["Security"]
-
-    /// I11's problems over the package's files: each module a file imports that its allowance lacks.
+    /// I11's problems over the package's files: each module a file imports that the allowlist lacks.
     static func packageImportProblems(in files: [PackageSwiftFiles.File]) -> [String] {
         var problems: [String] = []
         // R2: bounded by the package's file count × each file's imports.
         for file in files {
-            let allowed = file.path == packageSecurityImportFile
-                ? packageImportAllowlist.union(packageSecurityImports) : packageImportAllowlist
-            for module in importedModules(in: file.text) where !allowed.contains(module) {
-                problems.append("I11: \(file.path) imports `\(module)`; a file there may import only \(allowed.sorted()) (a host's module does not travel with ProximityKit's tests, and Security is the keychain store's alone)")
+            for module in importedModules(in: file.text) where !packageImportAllowlist.contains(module) {
+                problems.append("I11: \(file.path) imports `\(module)`; a file there may import only \(packageImportAllowlist.sorted()) (a host's module does not travel with ProximityKit's tests)")
             }
         }
         return problems

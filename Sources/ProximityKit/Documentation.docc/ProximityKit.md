@@ -1036,8 +1036,8 @@ and then the device-only variant first; a suite must not rely on that order.
 `PackageTestEnvironment` (`PackageTestEnvironment.swift`) installs it through the funnel's
 Debug-only door once, lazily, by a `static let` the first read runs: Swift Testing has no bundle-level
 set-up, so whatever reaches the keychain reads `PackageTestEnvironment.keychain` first, and its every
-call reaches the store, never a keychain. The store's file is the one package file that imports
-Security, to read those dictionaries. `PackageKeychainStoreTests` holds the store installed (the funnel
+call reaches the store, never a keychain. The store's file imports Security to read those dictionaries.
+`PackageKeychainStoreTests` holds the store installed (the funnel
 resolves it) and holds this module's identity and two seal keys to it, on `.test.` services of
 `.packageTest`'s: an identity provisions, reads its public keys back and wipes; each seal key mints,
 reads back the same key and wipes; an unreadable service defers or refuses and is never minted over,
@@ -1113,8 +1113,10 @@ process-shared location, or a path of a host repository, each excused only by an
 with its invariant; a wall file, the suite's own first, is read as code, so the needles it holds in its
 literals are data and a needle in its code is refused, and so is a literal of it that starts with a
 host repository's folder. Every import travels with the package (rule I11): this module, Foundation,
-Testing, Combine, simd and Synchronization, and Security in the keychain store's file alone. The
-target's own inventory, `Tests/ProximityKitTests.tsv` beside this target's folder, is the tree: every
+Testing, Combine, CryptoKit, Observation, Security, simd and Synchronization; a file that imports
+Security still reaches the keychain only through this module's funnel, since rule I9 refuses a raw
+`SecItem` call in every file. The target's own inventory, `Tests/ProximityKitTests.tsv` beside this
+target's folder, is the tree: every
 suite's file and its declared tests, the row count and the tests' sum measured, which the test-count
 floor of CI in ProximityKit's own repository reads. And nothing extends ``ProximityHost``.
 

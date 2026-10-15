@@ -51,12 +51,15 @@
 # test-count floor's declared pin, held against the floor literals in .github/workflows/ci.yml.
 /Tests/ProximityKitTests.tsv                                           @bowman-mw
 
-# What every wall reads through (a blind lexer, locator or walker passes every wall vacuously), the
-# installer (the audit sink and the in-memory keychain store) and the store it installs, and the
-# test namespace the goldens compute under.
+# What every wall reads through (a blind lexer, locator or walker passes every wall vacuously), and
+# the source-scan helper the source walls copied from Fernlet's tests read ProximityKit's code
+# through (a blind `codeOnly` passes them vacuously too), the installer (the audit sink and the
+# in-memory keychain store) and the store it installs, and the test namespace the goldens compute
+# under.
 /Tests/ProximityKitTests/TestSupport/SwiftSourceLexer.swift            @bowman-mw
 /Tests/ProximityKitTests/TestSupport/PackageRoot.swift                 @bowman-mw
 /Tests/ProximityKitTests/TestSupport/PackageSwiftFiles.swift           @bowman-mw
+/Tests/ProximityKitTests/TestSupport/MeshRoutedSourceScan.swift        @bowman-mw
 /Tests/ProximityKitTests/TestSupport/PackageTestEnvironment.swift      @bowman-mw
 /Tests/ProximityKitTests/TestSupport/PackageKeychainStore.swift        @bowman-mw
 /Tests/ProximityKitTests/TestSupport/PackageTestNamespace.swift        @bowman-mw
