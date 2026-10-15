@@ -117,13 +117,12 @@ struct PresenceEpochPostureTests {
         let randomHalves = names.map { String($0.dropFirst(prefixLength)) }
         #expect(Set(randomHalves).count == randomHalves.count, "the random halves are not reused either")
 
-        // No name spells the epoch index it was minted at. (The prefix/suffix pair that used to
-        // stand here could not fire: names asserted equal-length and distinct above can never be
-        // one another's prefix or suffix. The exact non-derivability claim is the cell below.)
-        for (index, name) in names.enumerated() {
-            #expect(!name.contains(String(epochs[index])), "the name spells its epoch index in decimal")
-            #expect(!name.contains(String(epochs[index], radix: 16)), "the name spells its epoch index in hex")
-        }
+        // "No name spells the epoch index it was minted at" is NOT asserted over these names: they
+        // are sixteen random hex digits, so a `contains` check for the six-digit hex epoch (`1e8480`)
+        // would go red about once in 360,000 runs with the property intact (11 positions × 16⁻⁶ per
+        // name, four names; the seven-digit decimal adds 10 × 16⁻⁷). The claim is made exactly by
+        // `theNameIsAFunctionOfItsEntropyAloneAndNeverOfTheEpoch` below, under fixed entropy — the
+        // same reason the prefix/suffix pair that once stood here was removed.
     }
 
     // MARK: - Non-derivability, made exactly rather than probabilistically

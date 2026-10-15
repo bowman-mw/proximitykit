@@ -1000,8 +1000,12 @@ session over its own radio (`ProximityPairSessionTests`), the tests' own
 hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`), the source walls
 over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
 (`ProximityMemoryLifecycleTests`); thirty-three suites copied from Fernlet's tests, described
-below; and, in the package repository, the example app's namespace held apart
-(`ExampleNamespaceTests`, plan step A1.2): sixty suites, 514 tests. The
+below, and, copied at plan step A1.3 and described after them, the source walls of nine of its routed
+suites, thirteen suites holding the cells of its mesh tests, six holding those of its session,
+continuation and photo-review suites and ten holding those of its pair-session, presence, identity,
+golden, wipe, audit-bridge, transport and localization tests that read this module's sources; and, in
+the package repository, the example app's namespace held apart (`ExampleNamespaceTests`, plan step
+A1.2): ninety-eight suites, 618 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1054,7 +1058,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all sixty passing `swift test` with this module and its tests laid out as in the package
+Mac too, all ninety-eight passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
@@ -1203,11 +1207,63 @@ its header. Their fixtures keep the file names they have in Fernlet's tests, the
 written against join `PackageTestBindings.swift`, and the helper the source-reading cells share is
 `TestSupport/MeshRoutedSourceScan.swift`.
 
+Before Fernlet deletes its in-tree copy of this module (plan step A1.3), every cell of its tests that
+reads this module's sources is copied here too, so no check is lost when those files leave its tree
+(batch D). Each copy keeps its suite's and its test's names, in a file named as its original's, and
+holds only those cells, read through `PackageRoot` and the walls' walker (`PackageSwiftFiles`); where
+the original's verdict also read Fernlet's code, docs or bundle, or swept this module beside one of
+Fernlet's modules, the copy holds the half that reads this module, at the same counts, and Fernlet
+keeps the rest; and every walk or zero-list is held to a floor on the files it read.
+
+Of its routed suites these are forty-three source walls in nine suites: the drain's walls
+(`MeshRoutedDrainWallTests`), the routed store's witnesses, one ack-stage table, one type registry and
+no per-type branch (`MeshRoutedStoreIsolationTests`), the locked device's plaintext seams, custody
+doors and keychain classes (`MeshRoutedLockedDeviceTests`), the store's growth sites and admission
+doors (`MeshRoutedCapacityTests`), and one wall each of the custody evidence, the parked-set drop, the
+key advertisement's frame, the pre-store refusal budget and the item seal.
+
+Of its mesh tests these are eighteen cells in thirteen suites: the P3 battery's goodbye grep-wall, the
+P5 and P6 batteries' honesty pins over the manager and the session machine, the P7 battery's and the
+P8 battery's raises, the P9 battery's posture, presence, recipe and Multipeer retirement source walls,
+the key advertisement set's merge-door, construction-site and retired-field walls, the legacy
+goodbye's grep-wall and the name-withholding subscriber's wiring. A zero-list among them also holds a
+positive home (the goodbye's sender stem, at four fifths of its calls in code, the key set's own doors,
+the schema's record of the retired field), so a walk that read nothing cannot pass; and, beyond their
+original, the two goodbye walls hold every code spelling of the goodbye's role to its four homes, so a
+goodbye sent through another door than the one their needle names fails too. The P7, P8 and P9 copies
+and the drain's parked-text cell share `MeshP7Acceptance`, the module's walker and home list.
+
+Of its session, continuation and photo-review suites these are eight cells in six suites: the scene
+events' one raiser each, inside its public door, and neither door reading the gate
+(`MeshContinuationRaiseWallTests`); the mesh's channel-ready door seating the no-op foreground
+anchor, the coordinator defaulting to it, and no file of this module naming ActivityKit, a Live
+Activity request or the proximity attributes type (`MeshContinuationTaskHostWallTests`); the routed
+refusal read before the decrypt and the open before the canonical write
+(`MeshHeldSessionPhotoTests`); the leave telling the session observer after its teardown and a new
+search telling it a session begins (`LastMemberPhotoReviewSourceWallTests`); the transcript
+generation's one writer and its three callers, each before its observer moment
+(`SessionMessageTests`); and a refused share leaving this module as its frozen token, never a
+sentence (`RoutedShareRefusalCopyTests`).
+
+Of its pair-session, presence, identity, golden, wipe, audit-bridge, transport and localization tests
+these are thirty-five cells in ten suites: the pair and presence radios' source walls (their tasks'
+cancellation guards, the withdrawn registration's republish, the retired radio gone from the pair
+session and every file extending it, the ALPN the session binds, the discovery gate as its one door and
+the advertised name's byte cap), the identity's fail-closed read, the namespace golden's source pins
+(the radios' log subsystem, the mesh radio's heartbeat and channel binding) and its keychain-copy walk,
+the feature golden's recipe-copy stray scan, with a witness of its own reader, and the pair session's
+recipe constants, the identity holders' wipe seams, the audit bridge's scan for a host's own log,
+transport neutrality over this module, and the localization wall's rules over it with the fixtures that
+prove its matchers fire. Where a Fernlet cell also read Fernlet's own files or values, the copy says in
+its doc comment what stays there.
+
 Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
 mesh-message spelling helper, the test namespace, the epoch fixtures, whose one mint binds in each
 target to that target's namespace, and the source walls' lexer, each copy held to the same fixtures in
-its own target. The test bindings are a replacement, not a twin: this target's bind to
+its own target (the package repository's lexer differs from Fernlet's two in its header only, which also
+names the package suites that read through it). The test bindings are a replacement, not a twin: this
+target's bind to
 `.packageTest` and Fernlet's to `.fernlet`, so `CIGateSelectorBoundaryTests` holds each declaration of
 this target's to one of Fernlet's with that one token read across, and lets the extensions both declare
 live nowhere else. CI names its suites `ProximityKitTests/<Suite>`. In Fernlet's repository,

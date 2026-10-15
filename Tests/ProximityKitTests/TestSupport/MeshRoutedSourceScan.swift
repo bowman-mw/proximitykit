@@ -3,13 +3,15 @@
 //
 // ProximityKit plan step A1, the split's first batch of copied suites: the source-scan helpers the
 // copied source-reading cells read ProximityKit's code through, copied verbatim from the Fernlet
-// repository's FernletTests (its `MeshRoutedStoreIsolationTests.swift`, which also holds the store
-// isolation wall this package does not copy, so the helper takes a file of its own here). Each
-// copied cell hands it a source it read through `PackageRoot`.
+// repository's FernletTests (its `MeshRoutedStoreIsolationTests.swift`, whose store isolation wall the
+// package did not copy then, so the helper takes a file of its own here; since plan step A1.3's batch D
+// the package's file of that name holds 11 of that suite's cells, its source walls). Each copied cell
+// hands it a source it read through `PackageRoot`.
 
 import Foundation
 
-/// Source-scan helpers shared by the routed walls. A free enum rather than a static on a suite,
+/// Source-scan helpers shared by the routed walls and, since plan step A1.3's batch D, by the mesh,
+/// session and pair copies of Fernlet's source walls too. A free enum rather than a static on a suite,
 /// because the suites that need it are not all main-actor isolated.
 enum MeshRoutedSourceScan {
 

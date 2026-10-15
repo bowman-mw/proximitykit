@@ -162,8 +162,12 @@ wall, the platform wall (which also keeps CloudKit out), the keychain door's wal
 hygiene and their tree walls, the source walls over ProximityKit's code (launch hooks read only in
 Debug builds, keychain rows that never sync, a purpose named beside every raw cryptographic call, and
 the one escape hatch counted), the memory-lifecycle wall, and the example app's namespace held apart.
-`.github/CODEOWNERS` puts every wall, the files they read through, the label registry, the example's
-namespace and its copy, the keychain funnel and the byte formats under the owner's review.
+The source walls copied from the Fernlet repository's tests, which read ProximityKit's code there
+before it moved, run on every test lane too.
+`.github/CODEOWNERS` puts the package's own walls, the files they read through, the label registry,
+the example's namespace and its copy, the keychain funnel and the byte formats under the owner's
+review, and of the source walls copied from the Fernlet repository's tests the five whose originals
+that repository's CODEOWNERS owns; the other copies are not under it.
 
 ## History
 

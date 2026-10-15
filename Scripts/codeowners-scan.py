@@ -53,6 +53,11 @@ REQUIRED_PATTERNS = (
     "/Tests/ProximityKitTests/PackageTestTreeWallTests.swift",
     "/Tests/ProximityKitTests/ProximitySourceWallTests.swift",
     "/Tests/ProximityKitTests/ProximityMemoryLifecycleTests.swift",
+    # The two walls copied from the Fernlet repository's tests (its plan step A1.3) whose originals
+    # that repository's CODEOWNERS wall requires: the localization wall and the identity's
+    # fail-closed read.
+    "/Tests/ProximityKitTests/IdentityProvisioningReadTests.swift",
+    "/Tests/ProximityKitTests/LocalizationBoundaryTests.swift",
     # The suite that holds the example app's namespace sound and apart from the package tests', and
     # its twin of the example's namespace file equal to that file byte for byte (plan step A1.2).
     "/Tests/ProximityKitTests/ExampleNamespaceTests.swift",

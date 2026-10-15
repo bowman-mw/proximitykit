@@ -109,9 +109,51 @@ jobs:
     # skipped, the same 60 suites by name, 553 cases with arguments expanded; the inventory 60 rows
     # declaring 514 tests. Each lane passed at these floors and refused MIN_TESTS 515. ARITHMETIC
     # CHECK: 513 + 1 = 514 and 59 + 1 = 60.
+    # RAISED 514 -> 557 and 60 -> 69 at plan step A1.3's batch D, the routed track, on a Mac, 2026-10-15
+    # (the same Xcode and Swift), for the 43 source walls of nine routed suites copied from the Fernlet
+    # repository's tests (MeshRoutedDrainWallTests 19, MeshRoutedStoreIsolationTests 11,
+    # MeshRoutedLockedDeviceTests 6, MeshRoutedCapacityTests 2 and five suites of one), over this
+    # repository's tree with them: swift test "Test run with 557 tests in 69 suites passed"; the
+    # inventory 69 rows declaring 557 tests. The swift test lane passed at these floors and refused
+    # MIN_TESTS 558. ARITHMETIC CHECK: 514 + 43 = 557 and 60 + 9 = 69.
+    # RAISED 557 -> 575 and 69 -> 82 at plan step A1.3's batch D (mesh) on a Mac, 2026-10-15 (the same
+    # Xcode and Swift), for the 13 suites holding the 18 cells of the Fernlet repository's mesh tests
+    # that read this module's sources (the P3, P5 to P9 batteries', the key advertisement's, the legacy
+    # goodbye's and the name withholding's), copied before Fernlet deletes its in-tree copy, over this
+    # repository's tree with them and the routed track's copies: swift test "Test run with 575 tests in
+    # 82 suites passed"; the inventory 82 rows declaring 575 tests. The swift test lane passed at these
+    # floors and refused MIN_TESTS 576 and MIN_SUITES 83; the xcodebuild lanes were not run for this
+    # note, and the batch's last commit measures the macOS lanes and the builds. ARITHMETIC CHECK:
+    # 557 + 18 = 575 and 69 + 13 = 82.
+    # RAISED 575 -> 583 and 82 -> 88 at plan step A1.3's batch D (session) on a Mac, 2026-10-15 (the
+    # same Xcode and Swift), for batch D's session copies: six suites holding the eight cells of the
+    # Fernlet repository's session, continuation and photo-review suites of the same names that read
+    # this module's sources (MeshContinuationRaiseWallTests 2, MeshContinuationTaskHostWallTests 2, and
+    # LastMemberPhotoReviewSourceWallTests, MeshHeldSessionPhotoTests, RoutedShareRefusalCopyTests and
+    # SessionMessageTests 1 each), over this repository's tree with them and the routed and mesh
+    # tracks' copies: the Walls step passed, and swift test "Test run with 583 tests in 88 suites
+    # passed", its floor passed; the inventory 88 rows declaring 583 tests. The xcodebuild lanes were
+    # not run for this note; the batch's last commit measures the macOS lanes and the builds. swift
+    # test's floor refused MIN_TESTS 584 and MIN_SUITES 89. ARITHMETIC CHECK: 575 + 8 = 583 and
+    # 82 + 6 = 88.
+    # RAISED 583 -> 618 and 88 -> 98 at plan step A1.3's batch D (pair) on a Mac, 2026-10-15 (the same
+    # Xcode and Swift), for the ten suites holding the 35 cells of the Fernlet repository's pair-session,
+    # presence, identity, golden, wipe, audit-bridge, transport and localization tests that read this
+    # module's sources (LocalizationBoundaryTests 16, RecipeShareOverQUICTests 4,
+    # ProximityNamespaceGoldenTests 3, TransportNeutralityBoundaryTests 3, FernletFeatureGoldenTests 2,
+    # PresenceOverQUICTests 2, RecipeShareTransferTests 2 and three suites of one), over this
+    # repository's tree with them and the routed, mesh and session tracks' copies, this workflow's
+    # steps run as written but the iOS simulator's test leg: swift test "Test run with 618 tests in 98
+    # suites passed"; the macOS result bundle totalTestCount 618, 0 failed, 0 skipped, the same 98
+    # suites by name, 657 cases with arguments expanded; the Release build, the iOS simulator build
+    # and the example app's macOS and iOS simulator builds passed with warnings as errors; the
+    # inventory 98 rows declaring 618 tests. The iOS simulator's test leg was not run for this raise.
+    # swift test and the macOS bundle passed at these floors and each refused MIN_TESTS 619; swift
+    # test and the Walls step's declared floor refused MIN_SUITES 99. ARITHMETIC CHECK: 583 + 35 = 618
+    # and 88 + 10 = 98.
     env:
-      MIN_TESTS: 514
-      MIN_SUITES: 60
+      MIN_TESTS: 618
+      MIN_SUITES: 98
     steps:
       - uses: actions/checkout@v4
 
