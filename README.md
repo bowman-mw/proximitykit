@@ -99,6 +99,13 @@ xcodebuild build -project Examples/ProximityPing/ProximityPing.xcodeproj -scheme
   with `errSecMissingEntitlement` (-34018), the screen shows `keychainWriteFailed`, and the app
   does not start its radio.
 
+The package's tests hold the example's namespace apart (`ExampleNamespaceTests`, on every test
+lane). It is sound, shares no label, radio value or keychain row with the tests' own namespace, and
+nothing signed under either verifies under the other. The suite compiles a copy of the example's
+namespace file, `Tests/ProximityKitTests/TestSupport/PingNamespace.swift`, because a test target
+cannot import an app, and holds the copy equal to the original byte for byte: edit the example's file
+and copy it over in the same commit.
+
 ## Walls and CI
 
 The workflow is `.github/workflows/ci.yml`. It runs on every pull request into `main` and every
@@ -154,9 +161,9 @@ Other walls are suites in the package's own tests, so they run on every test lan
 wall, the platform wall (which also keeps CloudKit out), the keychain door's wall, the tests' own
 hygiene and their tree walls, the source walls over ProximityKit's code (launch hooks read only in
 Debug builds, keychain rows that never sync, a purpose named beside every raw cryptographic call, and
-the one escape hatch counted), and the memory-lifecycle wall. `.github/CODEOWNERS` puts every wall,
-the files they read through, the label registry, the keychain funnel and the byte formats under the
-owner's review.
+the one escape hatch counted), the memory-lifecycle wall, and the example app's namespace held apart.
+`.github/CODEOWNERS` puts every wall, the files they read through, the label registry, the example's
+namespace and its copy, the keychain funnel and the byte formats under the owner's review.
 
 ## History
 

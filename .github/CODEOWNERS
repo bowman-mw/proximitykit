@@ -64,6 +64,13 @@
 /Tests/ProximityKitTests/TestSupport/PackageKeychainStore.swift        @bowman-mw
 /Tests/ProximityKitTests/TestSupport/PackageTestNamespace.swift        @bowman-mw
 
+# The example app's namespace, its twin in the package tests and the suite that holds the example's
+# labels, radios and rows disjoint from the package tests' (plan step A1.2): the example's label
+# registry, owned as the package's own is.
+/Examples/ProximityPing/ProximityPing/PingNamespace.swift              @bowman-mw
+/Tests/ProximityKitTests/TestSupport/PingNamespace.swift               @bowman-mw
+/Tests/ProximityKitTests/ExampleNamespaceTests.swift                   @bowman-mw
+
 # The manifest the namespace wall and the no-tracking wall pin (dependencies: [] both ways).
 /Package.swift                                                         @bowman-mw
 

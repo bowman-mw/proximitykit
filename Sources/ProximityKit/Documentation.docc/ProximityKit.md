@@ -998,8 +998,9 @@ platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
 (`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`), the tests' own
 hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`), the source walls
 over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
-(`ProximityMemoryLifecycleTests`); and thirty-three suites copied from Fernlet's tests, described
-below: fifty-eight suites, 508 tests. The
+(`ProximityMemoryLifecycleTests`); thirty-three suites copied from Fernlet's tests, described
+below; and, in the package repository, the example app's namespace held apart
+(`ExampleNamespaceTests`, plan step A1.2): fifty-nine suites, 513 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1024,6 +1025,12 @@ everywhere. The call shapes the suites moved from `FernletTests` were written ag
 reads one of this module's sources names it relative to the package root through `PackageRoot`
 (`PackageRoot.swift`), which walks up from its own file to the first folder holding both `Package.swift`
 and `Sources/ProximityKit`: `FernletKit/` in Fernlet's repository, the root of ProximityKit's own.
+`PingNamespace.swift` is a byte-for-byte twin of the package repository's example app's namespace file,
+`.proximityPing` (`Examples/ProximityPing`), compiled here because a test target cannot import an app:
+`ExampleNamespaceTests` holds that namespace sound and sharing no label, radio value or keychain row
+with `.packageTest`, an envelope signed under either refused under the other, every example signature
+refused under every `.packageTest` label that binds a domain, and the twin equal to the example's file.
+The package cannot name Fernlet's namespace, so `.packageTest` stands in for "another app's" there.
 
 The bundle's keychain is `PackageKeychainStore` (`PackageKeychainStore.swift`), an in-memory store
 that answers the keychain funnel's query dictionaries as the keychain does: rows keyed by service,
@@ -1046,7 +1053,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all fifty-eight passing `swift test` with this module and its tests laid out as in the package
+Mac too, all fifty-nine passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which

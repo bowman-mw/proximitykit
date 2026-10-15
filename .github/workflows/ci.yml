@@ -95,9 +95,16 @@ jobs:
     # 547 cases with four parameterized tests' 43 arguments expanded; the inventory 58 rows declaring
     # 508 tests. Each lane passed at these floors and refused MIN_TESTS 509. ARITHMETIC CHECK:
     # 203 + 305 = 508 and 25 + 33 = 58.
+    # RAISED 508 -> 513 and 58 -> 59 at plan step A1.2 on a Mac, 2026-10-15 (the same Xcode, Swift and
+    # simulator), for ExampleNamespaceTests, the suite that holds the example app's namespace sound and
+    # apart from the package tests' (5 tests), over this repository's tree with it: swift test "Test run
+    # with 513 tests in 59 suites passed"; the macOS and the iOS result bundle each totalTestCount 513,
+    # 0 failed, 0 skipped, the same 59 suites by name, 552 cases with arguments expanded; the inventory
+    # 59 rows declaring 513 tests. Each lane passed at these floors and refused MIN_TESTS 514.
+    # ARITHMETIC CHECK: 508 + 5 = 513 and 58 + 1 = 59.
     env:
-      MIN_TESTS: 508
-      MIN_SUITES: 58
+      MIN_TESTS: 513
+      MIN_SUITES: 59
     steps:
       - uses: actions/checkout@v4
 

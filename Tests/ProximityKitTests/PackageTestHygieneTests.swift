@@ -295,6 +295,9 @@ import Testing
                 names the type
                 """),
         PackageKeychainFile(
+            file: "ExampleNamespaceTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
             file: "PackageKeychainStoreTests.swift", kind: .suite,
             invariant: packageKeychainSuiteInvariant),
         PackageKeychainFile(
@@ -385,8 +388,9 @@ import Testing
          invariant: """
             PackageRoot only locates the package root: from its own source's path it walks up to the \
             first folder holding Package.swift and Sources/ProximityKit, reading, writing and creating \
-            nothing; a package suite reads only Package.swift, Sources/ProximityKit/** and Tests/** \
-            under that root, by a path relative to it
+            nothing; a package suite reads only Package.swift, Sources/ProximityKit/**, Tests/** and the \
+            example app's namespace file, Examples/ProximityPing/ProximityPing/PingNamespace.swift, under \
+            that root, by a path relative to it
             """)
     ] + packageNamespaceWallLines.map {
         (file: packageNamespaceWallFile, line: $0, invariant: packageNamespaceWallInvariant)
@@ -1019,9 +1023,10 @@ import Testing
     /// package's NEW `ProximitySourceWallTests`. RAISED at A1.1.17 (2026-10-14): 24 → 25, for the
     /// package's NEW `ProximityMemoryLifecycleTests`. RAISED at plan step A1 (2026-10-14): 25 → 58, for
     /// the 33 suites copied from Fernlet's tests (the split's first batch), each run on macOS and the iOS
-    /// simulator. A suite added, moved out or deleted changes it in the same commit, argued and measured;
-    /// a deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 58
+    /// simulator. RAISED at plan step A1.2 (2026-10-15): 58 → 59, for the NEW `ExampleNamespaceTests`,
+    /// which holds the example app's namespace apart. A suite added, moved out or deleted changes it in
+    /// the same commit, argued and measured; a deletion lowers it only with the retirement argued.
+    static let measuredInventoryRows = 59
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -1030,8 +1035,9 @@ import Testing
     /// purpose wall and the escape-hatch census add to `ProximitySourceWallTests`. RAISED at A1.1.17
     /// (2026-10-14): 197 → 203, for `ProximityMemoryLifecycleTests`' 5 and the identity-construction cell
     /// `ProximitySourceWallTests` gains. RAISED at plan step A1 (2026-10-14): 203 → 508, for the copied
-    /// suites' 305. A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 508
+    /// suites' 305. RAISED at plan step A1.2 (2026-10-15): 508 → 513, for `ExampleNamespaceTests`' 5. A
+    /// test added or removed changes it in the same commit.
+    static let measuredDeclaredTests = 513
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three
