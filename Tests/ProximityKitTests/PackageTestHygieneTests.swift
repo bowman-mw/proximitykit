@@ -375,10 +375,11 @@ import Testing
     /// at A1.1.13; 43 since plan step A1, when the suites copied from Fernlet's tests brought 20; 76 since
     /// plan step A1.3's batch D (the routed track), when the routed source walls copied from Fernlet's tests
     /// brought 33; 89 since its mesh track, when the cells of Fernlet's mesh tests that read this module's
-    /// sources brought 13. The rows spell a needle the per-file rule does not cover: the soundness suite's
-    /// storage cell, which reads `URL.applicationSupportDirectory` as a value; the package's file locator's
-    /// one read of its own source's path; the routed store isolation walls' suite, whose own name spells the
-    /// store's; the namespace and platform walls' needles inside literals (``packageNamespaceWallLines``,
+    /// sources brought 13; 97 since its session track, when the session copies brought 8. The rows spell a
+    /// needle the per-file rule does not cover: the soundness suite's storage cell, which reads
+    /// `URL.applicationSupportDirectory` as a value; the package's file locator's one read of its own
+    /// source's path; the routed store isolation walls' suite, whose own name spells the store's; the
+    /// namespace and platform walls' needles inside literals (``packageNamespaceWallLines``,
     /// ``packagePlatformWallLines``); and the copied suites' reads of a keychain-reaching type's statics and
     /// their source walls' needles inside literals (``packageCopiedStaticLines``,
     /// ``packageCopiedSourceTextLines``, ``packageCopiedRoutedWallLines``), each set under one invariant.
@@ -462,12 +463,13 @@ import Testing
     /// What makes every line of ``packageCopiedSourceTextLines`` safe in the unhosted bundle (rule I9).
     static let packageCopiedSourceTextInvariant = """
         the needle stands only inside a literal a copied source wall reads as text and never runs: the \
-        package-relative path of a ProximityKit source the wall reads through PackageRoot, a needle it \
-        looks for in that source's code (PresenceEpochPostureTests' and \
+        package-relative path of a ProximityKit source the wall reads through PackageRoot, the name of a \
+        ProximityKit source file the wall expects a walk of the module's sources to read or a home list \
+        to find a needle in, a needle it looks for in that source's code (PresenceEpochPostureTests' and \
         MeshP9EphemeralPostureAcceptanceTests' lists of what a posture must never reach, the retry \
-        planner's forbidden types, the presence clock's two calls), the file name a home list expects a \
-        needle in, or a failure message; the code around it only reads and matches text, so the line \
-        reaches no keychain, opens no store and reads, writes and creates nothing at any location
+        planner's forbidden types, the presence clock's two calls), or a failure message; the code around \
+        it only reads and matches text, so the line reaches no keychain, opens no store and reads, writes \
+        and creates nothing at any location
         """
 
     /// The copied suites' lines that spell a needle inside a source wall's literal, each exact as trimmed
@@ -516,7 +518,25 @@ import Testing
         (file: "MeshP9AcceptanceTests.swift",
          line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift"))"#),
         (file: "MeshP9AcceptanceTests.swift",
-         line: #"MeshNetworkManager.init no longer defaults its radio to \"#)
+         line: #"MeshNetworkManager.init no longer defaults its radio to \"#),
+        // Plan step A1.3, batch D's session copies: the halves of the Fernlet repository's session,
+        // continuation and photo-review cells that read this module's sources.
+        (file: "MeshContinuationDriverTests.swift",
+         line: #"private static let manager = "MeshNetworkManager.swift""#),
+        (file: "MeshContinuationTaskHostTests.swift",
+         line: #"private static let expectedHomes = ["ProximityCoordinator.swift", "MeshNetworkManager.swift", "ProximityPairSession.swift"]"#),
+        (file: "MeshContinuationTaskHostTests.swift",
+         line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift"))"#),
+        (file: "MeshContinuationTaskHostTests.swift",
+         line: #"let coordinatorPath = "Sources/ProximityKit/Engine/ProximityCoordinator.swift""#),
+        (file: "MeshHeldSessionPhotoTests.swift",
+         line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift")"#),
+        (file: "MeshLastMemberPhotoReviewTests.swift",
+         line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift")"#),
+        (file: "RoutedShareRefusalCopyTests.swift",
+         line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift")"#),
+        (file: "SessionMessageTests.swift",
+         line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift"))"#)
     ]
 
     /// What makes every line of ``packageCopiedRoutedWallLines`` safe in the unhosted bundle (rule I9).
@@ -1152,9 +1172,13 @@ import Testing
     /// A1.3's batch D, the routed track (2026-10-15): 60 → 69, for the nine routed suites whose
     /// ProximityKit source walls are copied from Fernlet's tests. RAISED at plan step A1.3's batch D,
     /// mesh (2026-10-15): 69 → 82, for the 13 suites holding the cells of Fernlet's mesh tests that read
-    /// this module's sources. A suite added, moved out or deleted changes it in the same commit, argued
-    /// and measured; a deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 82
+    /// this module's sources. RAISED at plan step A1.3's batch D, session (2026-10-15): 82 → 88, for the
+    /// six suites of batch D's session copies, each holding the cells of the Fernlet suite of its name
+    /// that read ProximityKit's sources (`LastMemberPhotoReviewSourceWallTests`,
+    /// `MeshContinuationRaiseWallTests`, `MeshContinuationTaskHostWallTests`, `MeshHeldSessionPhotoTests`,
+    /// `RoutedShareRefusalCopyTests`, `SessionMessageTests`). A suite added, moved out or deleted changes
+    /// it in the same commit, argued and measured; a deletion lowers it only with the retirement argued.
+    static let measuredInventoryRows = 88
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -1168,8 +1192,10 @@ import Testing
     /// `ProximityPairSessionTests`' 1. RAISED at plan step A1.3's batch D, the routed track (2026-10-15):
     /// 514 → 557, for the 43 routed source walls copied from Fernlet's tests. RAISED at plan step A1.3's
     /// batch D, mesh (2026-10-15): 557 → 575, for the 18 cells of Fernlet's mesh tests that read this
-    /// module's sources. A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 575
+    /// module's sources. RAISED at plan step A1.3's batch D, session (2026-10-15): 575 → 583, for batch
+    /// D's session copies' 8 (2 + 2 + 1 + 1 + 1 + 1). A test added or removed changes it in the same
+    /// commit.
+    static let measuredDeclaredTests = 583
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

@@ -1001,9 +1001,10 @@ hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests
 over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
 (`ProximityMemoryLifecycleTests`); thirty-three suites copied from Fernlet's tests, described
 below, and, copied at plan step A1.3 and described after them, the source walls of nine of its routed
-suites and thirteen suites holding the cells of its mesh tests that read this module's sources; and,
-in the package repository, the example app's namespace held apart (`ExampleNamespaceTests`, plan
-step A1.2): eighty-two suites, 575 tests. The
+suites, thirteen suites holding the cells of its mesh tests and six holding those of its session,
+continuation and photo-review suites that read this module's sources; and, in the package repository,
+the example app's namespace held apart (`ExampleNamespaceTests`, plan step A1.2): eighty-eight
+suites, 583 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1056,7 +1057,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all eighty-two passing `swift test` with this module and its tests laid out as in the package
+Mac too, all eighty-eight passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
@@ -1228,6 +1229,18 @@ goodbye's grep-wall and the name-withholding subscriber's wiring. A zero-list am
 positive home (the goodbye's sender stem, the key set's own doors, the schema's record of the retired
 field), so a walk that read nothing cannot pass; the P7, P8 and P9 copies share `MeshP7Acceptance`,
 the module's walker and home list.
+
+Of its session, continuation and photo-review suites these are eight cells in six suites: the scene
+events' one raiser each, inside its public door, and neither door reading the gate
+(`MeshContinuationRaiseWallTests`); the mesh's channel-ready door seating the no-op foreground
+anchor, the coordinator defaulting to it, and no file of this module naming ActivityKit, a Live
+Activity request or the proximity attributes type (`MeshContinuationTaskHostWallTests`); the routed
+refusal read before the decrypt and the open before the canonical write
+(`MeshHeldSessionPhotoTests`); the leave telling the session observer after its teardown and a new
+search telling it a session begins (`LastMemberPhotoReviewSourceWallTests`); the transcript
+generation's one writer and its three callers, each before its observer moment
+(`SessionMessageTests`); and a refused share leaving this module as its frozen token, never a
+sentence (`RoutedShareRefusalCopyTests`).
 
 Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the

@@ -125,9 +125,19 @@ jobs:
     # floors and refused MIN_TESTS 576 and MIN_SUITES 83; the xcodebuild lanes were not run for this
     # note, and the batch's last commit measures every lane. ARITHMETIC CHECK: 557 + 18 = 575 and
     # 69 + 13 = 82.
+    # RAISED 575 -> 583 and 82 -> 88 at plan step A1.3's batch D (session) on a Mac, 2026-10-15 (the
+    # same Xcode and Swift), for batch D's session copies: six suites holding the eight cells of the
+    # Fernlet repository's session, continuation and photo-review suites of the same names that read
+    # this module's sources (MeshContinuationRaiseWallTests 2, MeshContinuationTaskHostWallTests 2, and
+    # LastMemberPhotoReviewSourceWallTests, MeshHeldSessionPhotoTests, RoutedShareRefusalCopyTests and
+    # SessionMessageTests 1 each), over this repository's tree with them and the routed and mesh
+    # tracks' copies: the Walls step passed, and swift test "Test run with 583 tests in 88 suites
+    # passed", its floor passed; the inventory 88 rows declaring 583 tests. The xcodebuild lanes were
+    # not run for this note; the batch's last commit measures every lane. swift test's floor refused
+    # MIN_TESTS 584 and MIN_SUITES 89. ARITHMETIC CHECK: 575 + 8 = 583 and 82 + 6 = 88.
     env:
-      MIN_TESTS: 575
-      MIN_SUITES: 82
+      MIN_TESTS: 583
+      MIN_SUITES: 88
     steps:
       - uses: actions/checkout@v4
 
