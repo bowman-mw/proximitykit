@@ -1,0 +1,2703 @@
+import Combine
+import CryptoKit
+import Dispatch
+import Foundation
+import Network
+import os
+import Security
+
+// MARK: - NetworkMeshWire
+
+/// The QUIC control stream's length framing.
+///
+/// One long-lived bidirectional stream per connection carries every app frame (plan §7.1), and a
+/// stream is a byte pipe, so the frame boundaries `MCSession.send` gave for free have to be written
+/// back in. Four big-endian bytes of length, then that many bytes of payload.
+///
+/// The ceiling is ``NetworkMeshSession/maxInboundWireBytes`` — the same value the retired MC
+/// transport enforced, deliberately, so the two transports refused the same frame. Splitting them
+/// would have meant a payload that rode one radio and was dropped by the other.
+nonisolated enum NetworkMeshWire {
+
+    /// Bytes of big-endian length prefix before every payload.
+    static let headerByteCount = 4
+
+    /// The length header for a payload of `byteCount` bytes.
+    static func header(for byteCount: Int) -> Data {
+        let value = UInt32(truncatingIfNeeded: byteCount)
+        return Data([
+            UInt8((value >> 24) & 0xFF), UInt8((value >> 16) & 0xFF),
+            UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF)
+        ])
+    }
+
+    /// The payload length a header names, refusing zero, a short header, and anything past the
+    /// transport ceiling **before** a single payload byte is read.
+    ///
+    /// That ordering is the point: an attacker-supplied length is the one field that decides how
+    /// much memory the next read allocates, so it is validated against the cap first and the read
+    /// never happens for an implausible value.
+    static func payloadLength(from header: Data, ceiling: Int) throws -> Int {
+        let bytes = [UInt8](header)
+        guard bytes.count == headerByteCount else { throw MeshTransportError.invalidFrameLength }
+        let value = (UInt32(bytes[0]) << 24) | (UInt32(bytes[1]) << 16)
+            | (UInt32(bytes[2]) << 8) | UInt32(bytes[3])
+        guard value > 0, value <= UInt32(clamping: ceiling) else {
+            throw MeshTransportError.invalidFrameLength
+        }
+        return Int(value)
+    }
+}
+
+// MARK: - MeshSessionIdentityMap
+
+/// One session-stable ``PeerHandle`` identity per remote endpoint.
+///
+/// The exact rule the retired `MeshMultipeerSession` established in P2 item 3, restated for QUIC:
+/// `id` and ``PeerEndpointKey`` are minted **together, at one point, once per endpoint**, so they
+/// can never disagree, and they live outside the caches discovery prunes — a peer lost and
+/// re-browsed comes back as the same peer to every owner holding a record for it (a slot, a QR
+/// binding, a re-dial budget). Under a transport that reconnects routinely rather than
+/// exceptionally, that property matters more than it did under MC, not less.
+///
+/// Bounded oldest-first (Power of 10 rule 3). Eviction can only re-expose the pre-existing false
+/// negative — a returning device read as new — never a false positive, because an identity is
+/// minted once per distinct key.
+///
+/// **Session-scoped and memory-only**: never persisted, never advertised, never on the wire, and
+/// cleared whole at teardown. Keeping it past a stop/start would link two runs of the radio to one
+/// device, which is exactly what the per-session random Bonjour name exists to prevent.
+nonisolated struct MeshSessionIdentityMap {
+
+    /// Cap on retained identities. Four times the roster cap: an order of magnitude of headroom
+    /// over any real session while a crowded room still cannot grow the map without end.
+    static let maxTrackedEndpoints = 32
+
+    /// One endpoint's identity: the `id` every handle minted for it carries, and its endpoint key.
+    struct Identity: Equatable, Sendable {
+        /// The stable ``PeerHandle/id`` for this endpoint, for as long as the session holds it.
+        let id: UUID
+        /// The transport's opaque endpoint key, handed to every handle minted for this endpoint.
+        let endpoint: PeerEndpointKey
+    }
+
+    private var identities: [MeshLinkKey: Identity] = [:]
+    private var keysByEndpoint: [PeerEndpointKey: MeshLinkKey] = [:]
+    private var order: [MeshLinkKey] = []
+
+    /// An empty map. A session owns exactly one.
+    init() {}
+
+    /// The identity for `key`, minting one on first sight. The single mint point.
+    mutating func identity(for key: MeshLinkKey) -> Identity {
+        if let existing = identities[key] { return existing }
+        evictOldestIfFull()
+        let minted = Identity(id: UUID(), endpoint: PeerEndpointKey())
+        identities[key] = minted
+        keysByEndpoint[minted.endpoint] = key
+        order.append(key)
+        return minted
+    }
+
+    /// The endpoint behind a handle, or nil once it has aged out. Every route from an owner's
+    /// ``PeerHandle`` back to a live connection goes through here.
+    func key(for peer: PeerHandle) -> MeshLinkKey? {
+        keysByEndpoint[peer.endpoint]
+    }
+
+    /// How many endpoints this map holds an identity for — the read that lets a test assert
+    /// teardown left nothing behind instead of inferring it from a re-mint.
+    var trackedCount: Int {
+        identities.count
+    }
+
+    /// Drops every identity. Called from teardown, with everything else the radio was holding.
+    mutating func removeAll() {
+        identities.removeAll()
+        keysByEndpoint.removeAll()
+        order.removeAll()
+    }
+
+    /// Makes room for one more identity, dropping the oldest — and both directions of its mapping,
+    /// so the two can never point at different identities.
+    private mutating func evictOldestIfFull() {
+        guard order.count >= Self.maxTrackedEndpoints, let oldest = order.first else { return }
+        order.removeFirst()
+        guard let stale = identities.removeValue(forKey: oldest) else { return }
+        keysByEndpoint.removeValue(forKey: stale.endpoint)
+    }
+}
+
+// MARK: - NetworkChannelHost
+
+/// The shared radio a ``NetworkPeerChannel`` routes one peer's frames through.
+///
+/// Two QUIC radios own channels — ``NetworkMeshSession`` and ``NetworkPresenceSession`` — and the
+/// channel is identical for both: it holds a peer, publishes that peer's state and inbound frames,
+/// and hands every send back to whoever owns the connections. This protocol is exactly that
+/// hand-back, and nothing else, so the channel exists once rather than twice.
+///
+/// `AnyObject` because the channel holds its host **weakly**: the host owns the channel (memory
+/// lifecycle ML4/ML5 — a manager holds its session strongly, a session's channels point back
+/// weakly), and a strong edge here would be a retain cycle per peer.
+@MainActor
+protocol NetworkChannelHost: AnyObject {
+
+    /// Sends one frame to a peer over whatever this radio's transport provides.
+    func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws
+
+    /// Per-transfer streams open on this peer's tunnel right now, in both directions. Zero for a
+    /// radio that opens none.
+    func openTransferCount(for peer: PeerHandle) -> Int
+}
+
+// MARK: - NetworkPeerChannel
+
+/// Per-peer ``PeerTransport`` adapter over one QUIC tunnel.
+///
+/// The QUIC counterpart of `PeerChannelTransport`, and deliberately the same shape: ``NetworkMeshSession``
+/// owns the listener, the browser and the connections, and this type only routes one peer's state
+/// and data. The advertise/browse/invite/accept requirements are no-ops for the same reason they
+/// are there — the shared session owns discovery — and `disconnect` signals idle locally without
+/// tearing down the shared radio.
+///
+/// **This channel never publishes ``PeerTransportState/discovered``**, as the retired MC conformer
+/// never did either. That is a constraint, not an omission: `ProximityCoordinator.shouldInviteDiscoveredPeer`
+/// is a *second*, dormant inviter policy that compares `sessionID < remoteSID` — the opposite
+/// direction to the live one in `MeshNetworkManager.shouldInitiateInvite` (`>`) — and it wakes the
+/// moment a conformer emits a discovered state. Two policies pointing opposite ways means neither
+/// side dials. Discovery reaches the owner through ``NetworkMeshSession/onPeerDiscovered`` instead,
+/// which is where the live policy already reads it.
+///
+/// Internal, with every member: a presence host meets it as a ``ProximityPeerChannel``, which it
+/// conforms to, when ``ProximityPresenceSession`` hands a tunnel up (``ProximityPresenceSession/onPeerChannelReady``),
+/// and builds that connection's coordinator over it. Only a radio makes one.
+@MainActor
+final class NetworkPeerChannel: ProximityPeerChannel {
+
+    /// The peer this channel carries.
+    let peer: PeerHandle
+
+    private weak var host: (any NetworkChannelHost)?
+    private let stateSubject = CurrentValueSubject<PeerTransportState, Never>(.idle)
+    private let inboundSubject = PassthroughSubject<InboundPeerFrame, Never>()
+
+    var state: AnyPublisher<PeerTransportState, Never> { stateSubject.eraseToAnyPublisher() }
+    var inbound: AnyPublisher<InboundPeerFrame, Never> { inboundSubject.eraseToAnyPublisher() }
+    var connectedPeers: [PeerHandle] { [] }
+
+    init(peer: PeerHandle, host: any NetworkChannelHost) {
+        self.peer = peer
+        self.host = host
+    }
+
+    // Discovery and admission belong to the shared session, exactly as they did under MC.
+    func startAdvertising(discoveryInfo: [String: String]) async throws {}
+    func startBrowsing() async throws {}
+    func invite(_ peer: PeerHandle) async throws {}
+    func accept(_ invite: PeerPendingInvite) async throws {}
+
+    /// Sends one frame. A reliable payload at or above ``MeshTransferStreamTable/bulkFloorBytes``
+    /// takes a per-transfer stream of its own (plan §7.1); everything else rides the tunnel's
+    /// control stream or a datagram, exactly as it did before those streams existed. **No caller
+    /// above this line can tell the difference**, which is the point: `MeshNetworkManager` sends a
+    /// friend photo the same way over QUIC as it did over the retired MultipeerConnectivity radio.
+    func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws {
+        guard let host else { throw PeerTransportError.unexpectedState }
+        try await host.send(data, to: peer, mode: mode)
+    }
+
+    /// Per-transfer streams open on this peer's tunnel right now, in both directions.
+    ///
+    /// Zero on a settled tunnel. The read exists so a test can assert that a finished transfer gave
+    /// its budget slot back, rather than inferring it from a later send happening to succeed.
+    var openTransferCount: Int {
+        host?.openTransferCount(for: peer) ?? 0
+    }
+
+    func disconnect() async {
+        // Signals idle locally only — the shared radio and its other tunnels keep running.
+        stateSubject.send(.idle)
+    }
+
+    // MARK: - Called by NetworkMeshSession
+
+    /// Publishes `.connected`. Called after the owner's `begin()` has completed, matching the
+    /// ordering contract the retired MC radio set — it keeps the coordinator out of the wrong
+    /// handshake branch. A presence host calls it through ``ProximityPeerChannel`` once its
+    /// coordinator has begun.
+    func notifyConnected() {
+        stateSubject.send(.connected(peer))
+    }
+
+    /// Publishes `.disconnected` with a diagnostic reason.
+    func notifyDisconnected(reason: String = "Peer disconnected") {
+        stateSubject.send(.disconnected(reason: reason))
+    }
+
+    /// Publishes one inbound frame. The bytes are untrusted: the coordinator decodes, size-gates
+    /// and signature-verifies before anything downstream sees them.
+    func receive(_ data: Data, at receivedAt: Date) {
+        inboundSubject.send(InboundPeerFrame(
+            peer: peer,
+            data: data,
+            receivedAt: receivedAt,
+            bytesReceived: data.count
+        ))
+    }
+}
+
+// MARK: - NetworkMeshSession
+
+/// The shared Network.framework/QUIC radio: one listener, one browser, and up to
+/// ``MeshLinkTable/maxConcurrentLinks`` authenticated tunnels, multiplexed into per-peer
+/// ``NetworkPeerChannel`` channels.
+///
+/// The TN3213 counterpart of the retired `MeshMultipeerSession`, and the second `PeerTransport`
+/// conformer plan §7 called for — the only one left, since the deletion round. The mapping it was
+/// built from, MultipeerConnectivity's shape on the left: `MCNearbyServiceAdvertiser` → a
+/// `NetworkListener` over `.bonjour`; `MCNearbyServiceBrowser` → a `NetworkBrowser`; one `MCSession`
+/// with N peers → one QUIC `NetworkConnection` per peer; `.reliable` sends → a long-lived control
+/// stream; `.bestEffort` sends and heartbeats → QUIC datagrams.
+///
+/// **Every decision lives somewhere testable.** The peer cap, the per-connection state machine, the
+/// three-attempt dial budget, duplicate-tunnel suppression and the endpoint cache are
+/// ``MeshLinkTable``; the 30 s heartbeat is ``MeshHeartbeatSchedule``; the TXT vocabulary is
+/// ``MeshLinkAdvertisement``; peer identity is ``MeshSessionIdentityMap``. What is left here is the
+/// framework plumbing that asks them and acts on the answer — which is the part no unit test can
+/// reach, so it is kept as thin as it can be made.
+///
+/// **Security posture** (plan §7.2). TLS presents an ``EphemeralMeshTLSIdentity`` minted per session
+/// and thrown away with it, paired with an accept-any certificate validator — because certificate
+/// validation is *not* the authentication decision here. Authentication is the **signed channel
+/// introduction**: before a single app frame crosses in either direction, both ends exchange
+/// ``MeshChannelHello``s and then Ed25519 signatures over one ``MeshChannelIntroductionTranscript``
+/// bound to this tunnel's TLS exporter secret, and each verifies the other against the current
+/// roster. Failure tears the tunnel down; there is no degraded accept.
+///
+/// **Who the roster admits** (D-4.3 Option 1). A current member, always. A departed, removed,
+/// revoked or blocked key, never. A **stranger** holds a tunnel *provisionally* while — and only
+/// while — the owner's join doors are open, which is what
+/// ``MeshIntroductionRoster/admitsStrangersProvisionally`` carries and what `MeshNetworkManager`
+/// answers from the same posture its invitation gate has always answered from. Provisional means a
+/// tunnel and nothing more: the peer arrives at the owner as a channel, exactly as a
+/// MultipeerConnectivity peer did, and it becomes a *member* only at the three doors above this
+/// radio — the seat check at the identity introduction, the 15 cm dwell or the QR commit, and the
+/// admission grant. The signature is still required of it, so its key is proven-held before any app
+/// frame, which is more than the retired MC radio ever asked of the same peer. Plan §7.2's "reject before any app frame … non-roster
+/// member" bullet is amended by this, and only by this: a non-roster peer may reach a *tunnel*,
+/// never a *roster*.
+/// `prohibitedInterfaceTypes` is `[.cellular]` on every listener, browser and connection, always: it
+/// is what turns the serverless/no-internet claim from an aspiration into something the OS enforces.
+///
+/// **Fail closed without an authority.** ``introductionAuthority`` is the seam that supplies the
+/// mesh id, the epoch reference, the roster and the signing key; `MeshNetworkManager` attaches
+/// itself as one through ``MeshTransportSession/attachIntroductionAuthority(_:)`` when this radio is
+/// selected (P2 item 8). A session with no authority cannot authenticate anyone, so it refuses every
+/// tunnel rather than admitting one unverified — as does one whose owner wired no ``invitationGate``.
+///
+/// **The only radio.** The cutover (2026-09-21) made this the shipping default, and the deletion
+/// round (2026-09-22) took everything else with it: the MultipeerConnectivity conformer, the factory
+/// that chose between the two, and the DEBUG-only launch variable that could force the other one as
+/// a bisect path all left the tree together. This radio is what the app's own initializer builds, on
+/// every path, and there is nothing left to select. Nothing about it is persisted.
+///
+/// `@MainActor`; framework callbacks arrive `@Sendable` and hop in. Owners wire behaviour through
+/// the closure hooks, the same way they did for the retired MC session.
+@MainActor
+final class NetworkMeshSession: NetworkChannelHost {
+
+    /// The friend mesh's QUIC service type, the host namespace's `family.radios.mesh.serviceType`.
+    /// Frozen wire token: it must also appear in the app's Info.plist `NSBonjourServices` or
+    /// discovery is silently dead on device.
+    nonisolated let serviceType: String
+
+    /// ALPN for the mesh protocol, the host namespace's `family.radios.mesh.alpn`. Frozen wire token,
+    /// never localized, distinct from the DEBUG probe's `fernlet-mesh-probe-v1` so a spike build and
+    /// a shipping build cannot negotiate.
+    nonisolated let alpn: String
+
+    /// The heartbeat datagram's fixed payload, the host namespace's `family.radios.meshHeartbeat`. A
+    /// frozen wire token, never localized, and filtered out of the inbound path by byte equality so it
+    /// never reaches a decoder as an app frame.
+    nonisolated let heartbeatDatagram: Data
+
+    /// The label every tunnel's channel binding derives its TLS exporter secret under, the host
+    /// namespace's `family.purposes.keyDerivation.meshTLSExporterV1` (role `.tlsExporterLabel`).
+    /// See ``channelBindingHash(for:exporterLabel:)``.
+    nonisolated let tlsExporterLabel: ProximityCryptographicPurpose
+
+    /// The labels every tunnel's ``MeshChannelIntroductionExchange`` frames this side's transcript and
+    /// checks the peer's under, the host namespace's `family.purposes`: the radio's own copy, so the
+    /// exchange needs nothing of the namespace from its ``introductionAuthority``. The manager that
+    /// builds the radio from its namespace signs this side's introduction under the same namespace's
+    /// label.
+    nonisolated let purposes: ProximityNamespace.Purposes
+
+    /// The start of every Bonjour instance name this radio advertises, the host namespace's
+    /// `family.radios.meshInstanceNamePrefix`; 12 random lowercase hex characters follow it
+    /// (``MeshLinkAdvertisement/randomInstanceName(prefix:)``). A presentation string, never a
+    /// device's: every device of the family wears the same prefix.
+    nonisolated let instanceNamePrefix: String
+
+    /// The subject and issuer of every TLS certificate this radio mints, the host namespace's
+    /// `family.radios.tlsCommonName`. Nothing verifies it: it names the protocol, never the device.
+    nonisolated let tlsCommonName: String
+
+    /// The host namespace's ``ProximityNamespace/soundness``, the verdict it recorded when it was
+    /// built: ``start(discoveryInfo:)`` refuses to bring the radio up under an unsound namespace.
+    nonisolated let namespaceSoundness: ProximityNamespace.Soundness
+
+    /// Hard ceiling on one inbound frame, enforced before the bytes reach any channel or decoder.
+    /// Pinned to the same value the retired `MeshMultipeerSession` used, so both transports refused
+    /// identically.
+    nonisolated static let maxInboundWireBytes = SealedPayloadFraming.maxInflatedByteCount
+
+    /// The one predicate both wire directions ask: a datagram that arrives over the ceiling is
+    /// DROPPED before it reaches a channel (`receiveDatagrams`), and a frame handed to `send` over
+    /// it is REFUSED before any byte goes out. A seam rather than two inline comparisons since the
+    /// deletion round (2026-09-22): the retired MultipeerConnectivity radio's suite pinned its
+    /// drop-before-channel behaviour by driving a delegate; tier 1 cannot build a live
+    /// `Network.QUIC.Datagrams`, so on this radio the predicate is pinned as a value and the two
+    /// call sites are pinned by source needle (`NetworkMeshWireTests`), which is the honest way in.
+    nonisolated static func withinWireCeiling(_ byteCount: Int) -> Bool {
+        byteCount <= maxInboundWireBytes
+    }
+
+    /// QUIC datagram frame size requested in the parameters, and the UDP payload size beneath it.
+    /// The probe's measured values on the feasibility lane.
+    nonisolated static let datagramFrameSize = 1_024
+    /// Maximum UDP payload requested, the floor QUIC datagrams negotiate against.
+    nonisolated static let udpPayloadSize = 1_280
+
+    /// The QUIC stream id the control stream always has.
+    ///
+    /// Not a choice: RFC 9000 §2.1 assigns client-initiated bidirectional streams the ids 0, 4, 8 …
+    /// in the order they are opened, and the dialing side opens exactly one stream — the control
+    /// stream — before the signed introduction. So the listening side can name the control stream by
+    /// its id alone, and every other inbound stream is a per-transfer stream.
+    nonisolated static let controlStreamID: UInt64 = 0
+
+    /// Seconds between ticks of the single poll that drives retries and heartbeats.
+    nonisolated static let pollIntervalSeconds: TimeInterval = 1
+
+    /// Ticks the poll runs before it stops on its own — six hours at 1 Hz, the session ceiling
+    /// plan §3 sets. Bounded rather than `while true` (Power of 10 rule 2).
+    nonisolated static let maxPollTicks = 6 * 60 * 60
+
+    /// Frames one connection may deliver before its receive loop retires. Bounded for the same
+    /// reason; two orders of magnitude above the 500-message and 200-photo session caps.
+    nonisolated static let maxInboundFramesPerConnection = 20_000
+
+    /// Inbound tunnels that may be mid-introduction at once.
+    ///
+    /// A separate, smaller budget from the link table's slots on purpose: a peer that has not yet
+    /// proved who it is must never occupy a **roster** seat, because the seat would then be taken by
+    /// whoever dialed first rather than by a member. An unauthenticated connection holds one of
+    /// these instead, and takes a real slot only once ``MeshChannelIntroductionExchange`` accepts it.
+    nonisolated static let maxPendingInboundTunnels = MeshLinkTable.maxConcurrentLinks
+
+    /// Seconds an inbound connection may take to finish its signed channel introduction.
+    ///
+    /// Without it, a peer that connects and then says nothing holds one of the pending seats for as
+    /// long as the session lives, and eight silent connections keep every real member out. Two
+    /// round trips over a link-local radio is milliseconds; ten seconds is generous for a phone that
+    /// just woke, and it is swept by the same one poll that drives retries and heartbeats rather
+    /// than by a timer per connection.
+    nonisolated static let introductionDeadlineSeconds: TimeInterval = 10
+
+    /// Seconds between sweeps that re-offer a browsed peer this session holds no link to.
+    ///
+    /// Discovery announces a peer **once** — ``noteBrowsed(_:key:at:)`` fires only when an
+    /// advertisement is new or has changed — so an announcement the owner declines at that instant
+    /// is never repeated, and the pair is stranded for the life of the session even after whatever
+    /// made the owner decline has gone. That is one of the two halves of the three-node star (plan
+    /// §8.7 finding 1): the owner's link gate was shut when the third peer appeared, and nothing
+    /// ever asked it again. Five seconds is slow enough to be free next to a 1 Hz poll and fast
+    /// enough that a room converges while people are still standing in it.
+    nonisolated static let reproposeIntervalSeconds: TimeInterval = 5
+
+    /// The most ``awaitRemoteClose(of:within:)`` will wait, whatever the owner asks for.
+    ///
+    /// Long enough for QUIC to retransmit a lost final packet several times over a local link and for
+    /// a partner to verify a signature and tear down; short enough that a person who pressed "End"
+    /// on a partner who cannot answer — a suspended phone — is not kept waiting for it.
+    nonisolated static let maxRemoteCloseWaitSeconds: TimeInterval = 2
+
+    /// Milliseconds between two looks at the tunnel map while ``awaitRemoteClose(of:within:)`` waits.
+    nonisolated static let remoteClosePollMilliseconds = 50
+
+    /// The most looks one wait takes — a second bound beside the deadline, because Power of 10
+    /// rule 2 wants every loop bounded by a constant and not only by a clock that could stand still.
+    /// (A starved main actor makes each look slower, so it is the deadline that ends such a wait.)
+    nonisolated static let maxRemoteClosePolls = 60
+
+    /// Bytes of per-session salt behind ``peerLabel(for:)`` — 256 bits, drawn once per session from
+    /// the same CSPRNG this radio's instance name draws from.
+    nonisolated static let peerLabelSaltByteCount = 32
+
+    /// Characters of the salted digest one peer label carries. Long enough that two peers in one
+    /// room are never confused by eye, short enough to read off a log line.
+    nonisolated static let peerLabelLength = 12
+
+    /// The label a peer gets when this session has no salt to hide it behind — the fail-closed
+    /// direction, and the only branch of ``peerLabel(for:)`` that is not a digest. A constant
+    /// carries no peer value at all, which is strictly better than an unsalted one.
+    nonisolated static let unlabelledPeer = "unlabelled"
+
+    /// Whether Apple peer-to-peer Wi-Fi is requested. Simulators have no AWDL radio and reach each
+    /// other over infrastructure only, which is the lane the feasibility probe validated.
+    #if targetEnvironment(simulator)
+    nonisolated static let includesPeerToPeer = false
+    #else
+    nonisolated static let includesPeerToPeer = true
+    #endif
+
+    /// This radio's log, under the host namespace's `installation.logSubsystem`.
+    private let logger: Logger
+
+    // MARK: Hooks
+
+    /// A peer appeared in the browse results. The owner's dial policy reads it — this radio never
+    /// dials on its own, exactly as the MC session never invited on its own.
+    var onPeerDiscovered: ((PeerHandle) -> Void)?
+    /// A peer left the browse results.
+    var onPeerLost: ((PeerHandle) -> Void)?
+    /// A peer completed the signed channel introduction. Fires exactly once per tunnel, immediately
+    /// before ``onPeerChannelReady`` — so an owner always learns *who* a channel belongs to before
+    /// it is handed the channel, and never learns it for a tunnel that failed to authenticate.
+    var onPeerVerified: ((PeerHandle, MeshVerifiedPeer) -> Void)?
+    /// A tunnel reached ready and its channel is live.
+    var onPeerChannelReady: ((NetworkPeerChannel) -> Void)?
+    /// A tunnel went down, with a diagnostic reason.
+    var onPeerDisconnected: ((PeerHandle, String) -> Void)?
+    /// Invoked with frozen diagnostic English when the listener or browser fails to start.
+    /// Without it a missing `NSBonjourServices` entry or a declined Local Network prompt is silent.
+    var onTransportError: ((String) -> Void)?
+    /// The owner's admission gate, consulted once a peer has proved who it is and before its tunnel
+    /// takes a roster slot (``admitVerifiedInbound(_:pendingKey:)``).
+    ///
+    /// **Fail closed**, exactly like the retired MC advertiser's `shouldAcceptInvitation` (`?? false`): a
+    /// radio nobody has wired admits nobody. It runs *after* the signed channel introduction rather
+    /// than before, because there is no invitation moment here to gate — a peer dials and
+    /// authenticates — so the earliest honest question is "this verified member: do you want it?".
+    var invitationGate: ((PeerHandle) -> Bool)?
+
+    // MARK: State
+
+    /// One live or in-flight tunnel: the peer it carries, its channel, the QUIC objects once the
+    /// connection is up, and the two tasks that own its lifetime.
+    ///
+    /// `controlStream != nil` is the readiness test the whole class turns on — a connection that
+    /// never got a control stream failed to dial, one that had a stream and lost it disconnected,
+    /// and those two are charged to different budgets.
+    private struct Tunnel {
+        let peer: PeerHandle
+        let channel: NetworkPeerChannel
+        /// Which end opened this connection. The only fact about a tunnel both devices name
+        /// identically, and therefore the only one ``MeshTunnelConvergence`` can rule on.
+        let role: MeshChannelRole
+        var controlStream: Network.QUIC.Stream<QUICStream>?
+        var datagrams: Network.QUIC.Datagrams<QUICDatagram>?
+        /// The connection every per-transfer stream is opened on. Recorded at activation beside the
+        /// control stream, because a bulk frame needs the *connection* and the control stream is
+        /// the one object on a tunnel that cannot produce one.
+        var connection: NetworkConnection<QUIC>?
+        /// The identity this tunnel's peer proved in the signed channel introduction. Set once, at
+        /// activation; a tunnel with no verified peer never reaches this map.
+        var verified: MeshVerifiedPeer?
+        /// Owns the connection: cancelling it is how the connection is torn down.
+        var task: Task<Void, Never>?
+        /// Owns the inbound datagram reader.
+        var datagramTask: Task<Void, Never>?
+        /// Owns the inbound *transfer stream* acceptor on the dialing side. The listening side has
+        /// no such task: its `inboundStreams` acceptor is already running, and every stream past the
+        /// control one is routed there (see ``NetworkMeshSession/runResponder(_:pendingKey:)``).
+        var transferAcceptorTask: Task<Void, Never>?
+        /// Which frames earn a stream of their own, and how many may be open at once. Held **in**
+        /// the tunnel so a budget can never outlive the link it bounded.
+        var transfers = MeshTransferStreamTable()
+        /// Set once a heartbeat write to this tunnel's datagram flow has thrown. The one-shot latch
+        /// ``MeshHeartbeatChannel`` reads: the designed channel is tried once per tunnel, and a
+        /// tunnel that has answered "no" is never asked again. Never a reason to end the tunnel.
+        var datagramWriteFailed = false
+
+        /// Cancels every task this tunnel owns.
+        ///
+        /// One funnel rather than a list repeated at each teardown site: a tunnel gained a third
+        /// task when per-transfer streams landed, and the five call sites that had to learn about it
+        /// are exactly the shape a leak hides in.
+        func cancelTasks() {
+            task?.cancel()
+            datagramTask?.cancel()
+            transferAcceptorTask?.cancel()
+        }
+    }
+
+    /// The mesh id, epoch reference, roster and signing key the introduction needs. Nil refuses
+    /// every tunnel — see the type's discussion.
+    weak var introductionAuthority: (any MeshIntroductionAuthority)?
+
+    private var links = MeshLinkTable()
+    private var heartbeats = MeshHeartbeatSchedule()
+    private var identities = MeshSessionIdentityMap()
+    private var introductionNonces = MeshIntroductionNonceCache()
+    private var tunnels: [MeshLinkKey: Tunnel] = [:]
+    /// One inbound connection that has not yet proved who it is: the task that owns it, and when it
+    /// arrived, so the shared poll can drop one that never finishes its introduction.
+    private struct PendingInbound {
+        let startedAt: Date
+        let task: Task<Void, Never>
+    }
+
+    /// Inbound connections whose introduction has not finished. They hold no link-table slot and no
+    /// channel; a tunnel is built only once a peer is verified.
+    private var pendingInbound: [MeshLinkKey: PendingInbound] = [:]
+    private var browsedEndpoints: [MeshLinkKey: Bonjour.Endpoint] = [:]
+    private var tlsIdentity: EphemeralMeshTLSIdentity.Minted?
+    private var listener: NetworkListener<QUIC>?
+    private var browser: NetworkBrowser<Bonjour>?
+    private var listenerTask: Task<Void, Never>?
+    private var browserTask: Task<Void, Never>?
+    private var pollTask: Task<Void, Never>?
+    private var instanceName: String
+
+    /// The random salt every peer label in this session's diagnostics is taken under.
+    ///
+    /// Drawn once at construction and never again: not persisted, not advertised, not on the wire,
+    /// not derived from anything, and gone with the session. It is what makes ``peerLabel(for:)``
+    /// opaque *to a reader who holds the peer's name* — a ``MeshLinkKey`` under this radio is the
+    /// browsed Bonjour endpoint's id, which carries the peer's advertised instance name verbatim,
+    /// and an unsalted digest of it would be recomputable by anyone who can hash.
+    ///
+    /// The same shape as `NetworkPresenceSession.peerLabelSalt` and
+    /// `NetworkPairSession.peerLabelSalt`, deliberately: three radios that label peers three
+    /// different ways are three separate arguments to have to make.
+    private let peerLabelSalt: [UInt8] =
+        PresenceEpochPosture.systemEntropy(NetworkMeshSession.peerLabelSaltByteCount)
+    private var advertisedFields: [String: String] = [:]
+    private var listenerIsReady = false
+    private var listenerIsAdvertised = false
+    /// Whether ``pauseDiscovery()`` has stood the listener and browser down over a still-running
+    /// radio. Mirrors what the retired `MeshMultipeerSession.isDiscoveryPaused` did, and for the
+    /// same reason: a late state callback must not bring browsing back up behind a hold.
+    private var isDiscoveryPaused = false
+    /// When the re-propose sweep last ran. Nil until the first sweep, so the **first** poll tick
+    /// after the radio starts sweeps immediately and the interval governs every tick after it.
+    private var lastReproposedAt: Date?
+    /// Size of the last browse result set that was printed, so an unchanged set prints once.
+    private var lastBrowseSetCount = 0
+    private(set) var isRunning = false
+
+    /// Channels for every live tunnel, in no particular order.
+    var channels: [NetworkPeerChannel] { tunnels.values.map(\.channel) }
+
+    /// Peers this radio currently holds a tunnel to.
+    var connectedPeers: [PeerHandle] { tunnels.values.map(\.peer) }
+
+    /// A radio that speaks the host's wire: it advertises and browses the namespace's mesh service
+    /// type, negotiates its ALPN, beats its heartbeat, binds every tunnel's introduction under its
+    /// TLS exporter label, frames and checks that introduction under its labels and logs under its
+    /// subsystem (ProximityKit plan step A0.2.7), and names its Bonjour instances and certificates
+    /// with the namespace's mesh instance-name prefix and common name. Each value is read once,
+    /// here, with the namespace's soundness verdict; building a radio starts nothing.
+    ///
+    /// - Parameter namespace: The host's protocol identity, as its manager holds it.
+    init(namespace: ProximityNamespace) {
+        serviceType = namespace.family.radios.mesh.serviceType
+        alpn = namespace.family.radios.mesh.alpn
+        heartbeatDatagram = namespace.family.radios.meshHeartbeat
+        tlsExporterLabel = namespace.family.purposes.keyDerivation.meshTLSExporterV1
+        purposes = namespace.family.purposes
+        instanceNamePrefix = namespace.family.radios.meshInstanceNamePrefix
+        tlsCommonName = namespace.family.radios.tlsCommonName
+        namespaceSoundness = namespace.soundness
+        instanceName = MeshLinkAdvertisement.randomInstanceName(prefix: instanceNamePrefix)
+        logger = Logger(subsystem: namespace.installation.logSubsystem, category: "proximity.transport.quic")
+    }
+
+    /// Cancels every task this radio owns.
+    ///
+    /// ``stop()`` already does this, and an owner that tears down cleanly never reaches here. The
+    /// deinit exists for the owner that does not: a listener, browser, poll or per-tunnel task
+    /// outlives its session otherwise, keeping a QUIC connection and a `MeshLinkKey` closure alive
+    /// with nothing left to deliver to (memory-lifecycle rule ML1, the pattern `MeshNetworkManager`,
+    /// `PresenceManager` and `ProximityPairSession` all use).
+    isolated deinit {
+        listenerTask?.cancel()
+        browserTask?.cancel()
+        pollTask?.cancel()
+        for tunnel in tunnels.values {
+            tunnel.cancelTasks()
+        }
+        for pending in pendingInbound.values {
+            pending.task.cancel()
+        }
+    }
+
+    // MARK: - Lifecycle
+
+    /// Brings the radio up: mints this session's TLS identity and Bonjour name, starts the QUIC
+    /// listener, and starts browsing once the listener is both ready and advertised.
+    ///
+    /// Refuses first, under an unsound namespace (``namespaceSoundness``): it throws
+    /// ``ProximityNamespaceError`` and audits `mesh.quic.namespaceUnsound` (at `start`) before it
+    /// mints, listens or advertises anything.
+    func start(discoveryInfo: [String: String]) throws {
+        try ProximityNamespaceGate.refuseUnsound(
+            namespaceSoundness, event: "mesh.quic.namespaceUnsound", at: .start)
+        guard !isRunning else { return }
+        instanceName = MeshLinkAdvertisement.randomInstanceName(prefix: instanceNamePrefix)
+        advertisedFields = MeshLinkAdvertisement.publishedFields(from: discoveryInfo)
+        tlsIdentity = try EphemeralMeshTLSIdentity.mint(commonName: tlsCommonName)
+        isRunning = true
+        try startListener()
+        startPoll()
+    }
+
+    /// Republishes the TXT record. The listener is recreated rather than mutated, matching the
+    /// stop-and-recreate pattern the retired MC advertiser needed; a no-op while stopped, and a **record
+    /// only** while ``pauseDiscovery()`` is holding.
+    ///
+    /// The fields are stored before either guard on purpose: ``resumeDiscovery()`` re-mints the
+    /// listener from `advertisedFields`, so what a held radio is told here is what it advertises
+    /// when it comes back (review findings F-3/F-5).
+    func updateDiscoveryInfo(_ discoveryInfo: [String: String]) {
+        advertisedFields = MeshLinkAdvertisement.publishedFields(from: discoveryInfo)
+        // Re-minting here would put the Bonjour registration and the accept path back up behind
+        // shut doors — the silent un-pause the retired `MeshMultipeerSession` always guarded, and
+        // the reason a republish during a hold must only be remembered.
+        guard !isDiscoveryPaused else { return }
+        guard isRunning else { return }
+        cancelListener()
+        do {
+            try startListener()
+        } catch {
+            report("The QUIC listener could not be republished: \(error)")
+        }
+    }
+
+    /// "Closes" the radio: stops browsing AND advertising while KEEPING every tunnel, the link
+    /// table, the heartbeat schedule and the TLS identity — the QUIC half of
+    /// ``MeshNetworkManager/holdCommittedLinks()``, and the counterpart of the retired
+    /// `MeshMultipeerSession.pauseDiscovery()`.
+    ///
+    /// Standing the **listener** down is the only way to withdraw the Bonjour registration, and it
+    /// is the same teardown ``updateDiscoveryInfo(_:)`` already performs on a running radio with
+    /// live tunnels — so a republish and a pause disturb a tunnel equally, which is to say not at
+    /// all. An outbound tunnel is its own ``NetworkConnection`` and never went through the listener;
+    /// an inbound one is owned by its own task in `pendingInbound`/`tunnels`, not by the listener's.
+    /// What the pause does cost is the accept path: nothing new can dial in while it holds, which
+    /// is exactly the admission door the owner is closing.
+    ///
+    /// The poll keeps running: heartbeats are what hold a committed tunnel open.
+    func pauseDiscovery() {
+        guard isRunning, !isDiscoveryPaused else { return }
+        isDiscoveryPaused = true
+        cancelBrowser()
+        cancelListener()
+    }
+
+    /// Reopens a paused radio: the listener is re-minted under the same TLS identity and instance
+    /// name, and the browser follows it back up through `startBrowserWhenReady()` once the listener
+    /// is both ready and advertised. No-op unless ``pauseDiscovery()`` is holding.
+    func resumeDiscovery() {
+        guard isRunning, isDiscoveryPaused else { return }
+        isDiscoveryPaused = false
+        do {
+            try startListener()
+        } catch {
+            report("The QUIC listener could not be resumed: \(error)")
+        }
+    }
+
+    /// Tears the radio down and drops everything it was holding.
+    ///
+    /// Every session-scoped map is cleared here — links, heartbeats, identities, the endpoint
+    /// cache, the browsed endpoints, and the TLS identity. That is the privacy constraint: nothing
+    /// this radio learns survives its own stop, so nothing owes a row on the wipe ledger.
+    func stop() {
+        for tunnel in tunnels.values {
+            tunnel.cancelTasks()
+        }
+        for pending in pendingInbound.values {
+            pending.task.cancel()
+        }
+        listenerTask?.cancel()
+        browserTask?.cancel()
+        pollTask?.cancel()
+        listenerTask = nil
+        browserTask = nil
+        pollTask = nil
+        listener = nil
+        browser = nil
+        tunnels.removeAll()
+        pendingInbound.removeAll()
+        browsedEndpoints.removeAll()
+        links.removeAll()
+        heartbeats.removeAll()
+        identities.removeAll()
+        introductionNonces.removeAll()
+        tlsIdentity = nil
+        listenerIsReady = false
+        listenerIsAdvertised = false
+        lastReproposedAt = nil
+        lastBrowseSetCount = 0
+        isDiscoveryPaused = false
+        isRunning = false
+    }
+
+    // MARK: - Peer labels
+
+    /// The opaque, session-scoped label this radio names `key` by in **every** `os.Logger` line it
+    /// writes.
+    ///
+    /// The first ``peerLabelLength`` hexadecimal characters of SHA-256 over this session's random
+    /// ``peerLabelSalt`` followed by the key's bytes. The same rule, and the same three reasons, as
+    /// `NetworkPresenceSession.peerLabel(for:)`: a ``MeshLinkKey`` looks opaque and is not (under
+    /// this radio its `rawValue` is the browsed Bonjour endpoint's id, which contains the instance
+    /// name the peer advertises); an unsalted digest is recomputable by anyone holding that public
+    /// name; and the label must stay stable within the session so a sighting, a refusal and a
+    /// teardown still read as one peer's story.
+    ///
+    /// **Why the mesh radio owes this and only got it in the cutover.** Until 2026-09-21 the two
+    /// sibling radios shipped and this one was DEBUG-only, so its diagnostics logged `key.rawValue`
+    /// verbatim at `privacy: .public`. The flip made it the shipping radio without moving its log
+    /// lines, which put a nearby device's rotating identifier — and, on every teardown, the peer's
+    /// stable 16-character identity fingerprint — into the system log and therefore into a
+    /// sysdiagnose. This closes that, on the same terms the siblings already ran on.
+    ///
+    /// Not a cryptographic decision: nothing compares two of these and nothing depends on their
+    /// unforgeability. A session whose entropy draw came back empty labels every peer
+    /// ``unlabelledPeer`` rather than falling back to anything derived from the key.
+    func peerLabel(for key: MeshLinkKey) -> String {
+        guard !peerLabelSalt.isEmpty else { return Self.unlabelledPeer }
+        var hasher = SHA256()
+        hasher.update(data: Data(peerLabelSalt))
+        hasher.update(data: Data(key.rawValue.utf8))
+        let hexadecimal = PresenceEpochPosture.hexadecimal(Array(hasher.finalize()))
+        return String(hexadecimal.prefix(Self.peerLabelLength))
+    }
+
+    /// The two spellings one peer-scoped diagnostic needs: the one that is logged and the one that
+    /// is echoed.
+    ///
+    /// `logged` names the peer by ``peerLabel(for:)`` and is what goes to `os.Logger`; `echoed`
+    /// names it by the raw ``MeshLinkKey`` and is what goes to ``MeshTransportConsoleLog``, which
+    /// is an empty function outside DEBUG and silent inside it unless a launch asked for the
+    /// mirror.
+    ///
+    /// The split is the decision `noteBrowseSet` took in the cutover, generalized: the system log
+    /// is persisted, leaves the device in a sysdiagnose, and is read by nobody debugging this
+    /// radio; the console mirror is a developer transcript a Simulator lane greps, and a lane that
+    /// could not match a tunnel line against its own `browsed peers=` list could not tell a
+    /// three-node star from a three-node mesh. One helper rather than the pair spelled out at each
+    /// site, because a site that forgets which half it is writing is exactly how the raw key got
+    /// into the system log in the first place.
+    ///
+    /// - Parameters:
+    ///   - body: Everything before the peer — frozen tokens, counts, causes, capacities. Never
+    ///     peer-derived.
+    ///   - key: The link the line is about.
+    ///   - detail: Free text appended after `": "`, or `""` for none. Framework error text, never
+    ///     a peer value.
+    /// - Returns: The line to log, and the line to echo.
+    private func peerLines(
+        _ body: String,
+        key: MeshLinkKey,
+        detail: String = ""
+    ) -> (logged: String, echoed: String) {
+        let tail = detail.isEmpty ? "" : ": \(detail)"
+        return (
+            logged: "\(body) for \(peerLabel(for: key))\(tail)",
+            echoed: "\(body) for \(key.rawValue)\(tail)"
+        )
+    }
+
+    // MARK: - Dialing
+
+    /// Opens a tunnel to a discovered peer, if ``MeshLinkTable`` admits it.
+    ///
+    /// The owner's call, not this radio's: the live inviter decision is
+    /// `MeshNetworkManager.shouldInitiateInvite`, which ranks the `sid` this transport publishes
+    /// and parses. A refused dial is dropped and logged; the reason is on the admission value.
+    func dial(_ peer: PeerHandle) {
+        guard isRunning, let key = identities.key(for: peer) else { return }
+        let admission = links.admitDial(to: key, now: Date())
+        guard admission == .admit else {
+            // `notice` + console mirror, for the same reason ``noteInboundRefusal(_:key:)`` is:
+            // a refused dial and a dial nobody made are indistinguishable in a `--console-pty`
+            // transcript otherwise, and telling those two apart is the whole of a topology bug.
+            let lines = peerLines("dial refused \(admission)", key: key)
+            logger.notice("\(lines.logged, privacy: .public)")
+            MeshTransportConsoleLog.echo(lines.echoed)
+            return
+        }
+        startOutboundTunnel(to: key)
+    }
+
+    /// Frees one peer's tunnel — the QUIC counterpart of the retired MC session's targeted disconnect,
+    /// best-effort in the same way: the owner's record eviction is what actually drives teardown.
+    ///
+    /// `notifyOwner: false` is the load-bearing half. This is an eviction the owner *asked* for, and
+    /// ``endTunnel(_:cause:reason:notifyOwner:)`` fires ``onPeerDisconnected`` synchronously — so
+    /// reporting it back would re-enter the owner's disconnect path from inside its own removal
+    /// funnel. MC had the same shape and escaped the problem only because its `.notConnected`
+    /// arrived later, on a delegate callback the owner already knew to swallow. The peer's channel
+    /// still publishes `.disconnected`: the coordinator on the other end of it must see the link die.
+    func disconnectPeer(_ peer: PeerHandle) {
+        disconnectPeer(peer, cause: .ownerDecision)
+    }
+
+    /// The same eviction, with the one fact this radio cannot work out for itself.
+    ///
+    /// A ``MeshSlotEvictionCause/preCommitTimeout`` gives back the re-propose **booking** that
+    /// produced this tunnel, so the never-refilled budget is spent only by the loop it exists to
+    /// stop — an owner that keeps refusing the seat — and never by two people who did not get their
+    /// phones close enough inside the five-minute proximity gate. It is the booking that is
+    /// consumed rather than the counter, so an inbound tunnel (which books nothing) and a second
+    /// report of the same timeout give back nothing, and the refunds themselves are capped per
+    /// endpoint per session: see ``MeshLinkTable/refundRepropose(_:)``. Everything else about the
+    /// teardown is identical, and the tunnel still ends as a `localEviction`: the *reason the link
+    /// died* is unchanged, only what this side owes the endpoint afterwards.
+    func disconnectPeer(_ peer: PeerHandle, cause: MeshSlotEvictionCause) {
+        guard let key = identities.key(for: peer) else { return }
+        if cause == .preCommitTimeout { links.refundRepropose(key) }
+        endTunnel(
+            key,
+            cause: .localEviction,
+            reason: "This peer's slot was evicted locally.",
+            notifyOwner: false
+        )
+    }
+
+    /// Waits until every LIVE tunnel `peers` held when it was called has ended, or the bound passes —
+    /// whichever is first (2026-09-22). See ``MeshTransportSession/awaitRemoteClose(of:within:)``
+    /// for why a final pair's leaver waits at all.
+    ///
+    /// **It watches the tunnel, not the key.** When the far end closes an OUTBOUND link, this radio's
+    /// own tick re-dials it (``MeshLinkTable/dueRetries(now:)``) while the peer is still in the
+    /// browse table, and that puts a new in-flight tunnel under the same key within a second. A wait
+    /// that asked "is there a tunnel under this key" therefore read a partner that had already read
+    /// the termination and closed as still open, and ran to the bound every time the leaver had been
+    /// the dialer (the Simulator lanes of 2026-09-22: ≈1.5 s where the close had come in ≈50 ms).
+    /// So each live tunnel's channel instance is captured at the start, and a watched tunnel counts
+    /// as closed once it is no longer the activated tunnel under its key — whatever removed it: the
+    /// far end closing it, the link failing, or this radio retiring it (a duplicate collapse or a
+    /// replacement). The leaver calls ``stop()`` only after this returns, so the far end is by far
+    /// the common reason, and none of the others leaves a frame waiting to be read.
+    ///
+    /// A peer with no live tunnel has nothing to acknowledge and is not waited on. Bounded twice — by
+    /// the clamped deadline and by ``maxRemoteClosePolls``. The outcome is decided by the watched
+    /// tunnels' state AFTER the loop, never by which bound ended it, so a starved main actor that
+    /// looks late still answers ``MeshRemoteCloseOutcome/closed`` for a partner that closed in time
+    /// to be seen. The two console lines are the DEBUG mirror's (compiled to nothing in Release).
+    ///
+    /// - Parameters:
+    ///   - peers: The links whose far-end close would acknowledge what was just sent.
+    ///   - seconds: The most to wait, clamped between zero and ``maxRemoteCloseWaitSeconds``.
+    /// - Returns: how the wait ended.
+    func awaitRemoteClose(
+        of peers: [PeerHandle], within seconds: TimeInterval
+    ) async -> MeshRemoteCloseOutcome {
+        let bound = min(max(seconds, 0), Self.maxRemoteCloseWaitSeconds)
+        let started = Date()
+        let deadline = started.addingTimeInterval(bound)
+        let watched = watchedLiveChannels(of: peers)
+        MeshTransportConsoleLog.echo("remoteClose waiting peers=\(peers.count) live=\(watched.count)")
+        guard !watched.isEmpty else { return .nothingToWaitFor }
+        var cancelled = false
+        // R2: bounded by the poll cap as well as the deadline.
+        for _ in 0..<Self.maxRemoteClosePolls {
+            guard watched.contains(where: { isStillOpen($0) }), Date() < deadline else { break }
+            do {
+                try await Task.sleep(for: .milliseconds(Self.remoteClosePollMilliseconds))
+            } catch {
+                cancelled = true
+                break
+            }
+        }
+        let open = watched.filter { isStillOpen($0) }.count
+        let outcome: MeshRemoteCloseOutcome = open == 0 ? .closed : (cancelled ? .cancelled : .boundReached)
+        let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+        MeshTransportConsoleLog.echo("remoteClose done afterMs=\(elapsed) outcome=\(outcome.rawValue)")
+        return outcome
+    }
+
+    /// The signing key this radio's signed channel introduction proved for `peer`'s activated
+    /// tunnel, or nil when no activated tunnel is under its key (2026-09-22). See
+    /// ``MeshTransportSession/verifiedSigningPublicKey(for:)`` for why a caller asks.
+    ///
+    /// Read off `Tunnel.verified`, which activation records from an accepted
+    /// ``MeshChannelIntroductionExchange/review(_:)`` — a transcript bound to this connection's TLS
+    /// exporter, so the answer cannot have been replayed from another tunnel.
+    func verifiedSigningPublicKey(for peer: PeerHandle) -> Data? {
+        guard let key = identities.key(for: peer) else { return nil }
+        return tunnels[key]?.verified?.signingPublicKey
+    }
+
+    /// The activated tunnels `peers` hold right now, each with the channel object that carries it.
+    ///
+    /// The **channel instance** is what is watched, not the key. The link table re-dials a closed
+    /// outbound link on the next tick while the peer is still in the browse table, which opens a new
+    /// tunnel under the SAME key — and "a tunnel exists under this key" would then read the partner
+    /// that just closed as still open. Holding the channel strongly for the wait also keeps its
+    /// identity from being recycled by an allocation in between. "Activated" is read off
+    /// `Tunnel.verified`, which activation records together with the control stream; an in-flight
+    /// dial carries no frame anybody could acknowledge, so it is not waited on.
+    private func watchedLiveChannels(
+        of peers: [PeerHandle]
+    ) -> [(key: MeshLinkKey, channel: NetworkPeerChannel)] {
+        peers.compactMap { peer in
+            guard let key = identities.key(for: peer), let tunnel = tunnels[key],
+                  tunnel.verified != nil else { return nil }
+            return (key, tunnel.channel)
+        }
+    }
+
+    /// Whether the tunnel watched under `entry.key` is still the one that was live at the start, and
+    /// still activated — ``yieldSameKeyDuplicate(at:to:)`` leaves a husk under the key with the SAME
+    /// channel and no verified peer, and a husk carries nothing.
+    private func isStillOpen(_ entry: (key: MeshLinkKey, channel: NetworkPeerChannel)) -> Bool {
+        guard let tunnel = tunnels[entry.key] else { return false }
+        return tunnel.channel === entry.channel && tunnel.verified != nil
+    }
+
+    /// Hands a start failure to the owner's transport-error hook, with the same logging every other
+    /// radio failure gets. Internal so the ``MeshTransportSession`` conformance — whose
+    /// `startRadios(discoveryInfo:)` cannot throw, because the MC radio's could not — can report one.
+    func reportTransportError(_ message: String) {
+        report(message)
+    }
+
+    /// Sends one frame to a peer.
+    ///
+    /// `.bestEffort` rides a QUIC datagram when the payload fits one. A `.reliable` frame at or above
+    /// ``MeshTransferStreamTable/bulkFloorBytes`` — a friend photo, in practice — rides a stream
+    /// opened for it alone, so it cannot park the rest of the tunnel behind itself. Everything else
+    /// rides the control stream, in order, as it did under MultipeerConnectivity.
+    ///
+    /// Every fallback runs the same direction: a payload too large for a datagram, and a bulk frame
+    /// with no transfer slot free, both end up on the control stream. Delivering a frame more
+    /// reliably or more slowly than designed is always allowed; dropping it silently is not.
+    func send(_ data: Data, to peer: PeerHandle, mode: PeerDeliveryMode) async throws {
+        guard let key = identities.key(for: peer), let tunnel = tunnels[key] else {
+            throw PeerTransportError.unexpectedState
+        }
+        guard Self.withinWireCeiling(data.count) else {
+            throw PeerTransportError.sendFailed(
+                reason: MeshTransportError.oversizedFrame(byteCount: data.count).diagnosticDescription
+            )
+        }
+        if mode == .bestEffort, let datagrams = tunnel.datagrams,
+           data.count <= datagrams.parent.usableDatagramFrameSize {
+            try await sendDatagram(data, over: datagrams)
+            return
+        }
+        if mode == .reliable, let claim = claimTransferStream(key, byteCount: data.count) {
+            try await sendOverTransferStream(data, key: key, claim: claim)
+            return
+        }
+        guard let stream = tunnel.controlStream else {
+            throw PeerTransportError.sendFailed(reason: MeshTransportError.noControlStream.diagnosticDescription)
+        }
+        try await sendFramed(data, over: stream)
+    }
+
+    /// How many per-transfer streams are open on one peer's tunnel, outbound plus inbound.
+    ///
+    /// The read `NetworkPeerChannel.openTransferCount` exposes: it lets a test — and a Lane C
+    /// transcript — assert that a transfer released its slot rather than infer it from a later send
+    /// happening to succeed.
+    func openTransferCount(for peer: PeerHandle) -> Int {
+        guard let key = identities.key(for: peer), let tunnel = tunnels[key] else { return 0 }
+        return tunnel.transfers.outbound.openCount + tunnel.transfers.inbound.openCount
+    }
+
+    // MARK: - Test seam
+
+    /// How many endpoints the session is holding an identity for. The read that lets a test assert
+    /// ``stop()`` left nothing behind rather than inferring it from a re-mint.
+    var trackedEndpointCountForTesting: Int { identities.trackedCount }
+
+    /// The link table, so a test can assert what the radio decided without driving real radios.
+    var linkTableForTesting: MeshLinkTable { links }
+
+    /// How many introduction nonces the session is holding — the read that lets a test assert
+    /// ``stop()`` dropped the replay cache with everything else.
+    var trackedIntroductionNonceCountForTesting: Int { introductionNonces.trackedCount }
+
+    /// How many inbound connections are mid-introduction, holding no roster slot.
+    var pendingInboundCountForTesting: Int { pendingInbound.count }
+
+    /// Whether ``pauseDiscovery()`` is holding this radio. The read that lets a test assert a pause
+    /// is refused on a radio that never started, and cleared by ``stop()``.
+    var isDiscoveryPausedForTesting: Bool { isDiscoveryPaused }
+
+    /// The TXT fields this radio would advertise. The read that lets a test assert
+    /// ``updateDiscoveryInfo(_:)`` RECORDED what it was told on a radio it may not re-mint.
+    var advertisedFieldsForTesting: [String: String] { advertisedFields }
+
+    /// Books a pending inbound connection behind a stub task, so the introduction deadline can be
+    /// driven at tier 1. The sweep cancels the stub exactly as it would a real connection's task.
+    func bookPendingInboundForTesting(_ key: MeshLinkKey, startedAt: Date) {
+        pendingInbound[key] = PendingInbound(startedAt: startedAt, task: Task {})
+    }
+
+    /// Runs the pending-introduction sweep the shared poll runs, at a caller-chosen `now`.
+    func expirePendingInboundForTesting(now: Date) {
+        expirePendingInbound(now: now)
+    }
+
+    /// Books one re-propose offer for `key`, exactly as ``reproposeIdleBrowsedPeers(now:)`` books
+    /// one — the half of the sweep reachable without a browser, a listener and a five-second wait.
+    ///
+    /// It exists so the `.preCommitTimeout` arm of ``disconnectPeer(_:cause:)`` has a driver: the
+    /// booking is the thing that arm consumes, and a cell that could not make one could only assert
+    /// the arm compiles.
+    @discardableResult
+    func bookReproposalForTesting(_ key: MeshLinkKey) -> Bool {
+        links.admitRepropose(key)
+    }
+
+    /// Records a browsed advertisement in the link table's endpoint cache exactly as
+    /// ``noteBrowsed(_:key:at:)`` records one, minus the framework endpoint a unit test cannot build
+    /// and the owner's discovery announcement — the half the inbound `sid` resolution reads
+    /// (2026-09-23).
+    func rememberBrowsedForTesting(_ key: MeshLinkKey, instanceName: String, advertisement: [String: String]) {
+        links.remember(MeshEndpointRecord(
+            key: key, instanceName: instanceName, advertisement: advertisement, lastSeenAt: Date()
+        ))
+    }
+
+    /// Which endpoints hold a tunnel right now, in sorted key order — the read that lets a test say
+    /// *which* tunnel of a collapsed pair survived, not merely how many did.
+    var tunnelKeysForTesting: [MeshLinkKey] {
+        tunnels.keys.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    /// Books a tunnel exactly as `replaceTunnel` and `activate` record one, minus the two framework
+    /// objects a unit test cannot build.
+    ///
+    /// `verified: nil` is a tunnel mid-introduction — precisely what sits in the map at the instant
+    /// the duplicate-collapse gate is asked about it. A non-nil one is an activated tunnel, holding
+    /// a roster slot and a running heartbeat — and, booked as the `.initiator`, a dial that proved
+    /// who answers `key`, recorded exactly as `activate` records it (2026-09-23).
+    func bookTunnelForTesting(_ key: MeshLinkKey, role: MeshChannelRole, verified: MeshVerifiedPeer?) {
+        let channel = prepareChannel(for: key)
+        var tunnel = Tunnel(peer: channel.peer, channel: channel, role: role)
+        tunnel.verified = verified
+        tunnels[key] = tunnel
+        guard let verified else { return }
+        if role == .initiator { links.noteProvenOwner(key, signingPublicKey: verified.signingPublicKey) }
+        let now = Date()
+        links.noteReady(key, now: now)
+        heartbeats.start(key, now: now)
+    }
+
+    /// Claims one outbound transfer slot on a booked tunnel — the **budget** half of what
+    /// ``send(_:to:mode:)`` does, minus the framework connection a unit test cannot build.
+    ///
+    /// Same fork, same cap, same answer shape: nil means "send it on the control stream", whether
+    /// because the frame is under the floor or because the direction is full.
+    func claimOutboundTransferForTesting(_ key: MeshLinkKey, byteCount: Int) -> MeshTransferID? {
+        guard var tunnel = tunnels[key],
+              let id = tunnel.transfers.openOutbound(reliableByteCount: byteCount) else { return nil }
+        tunnels[key] = tunnel
+        return id
+    }
+
+    /// Releases one outbound transfer slot, exactly as ``sendOverTransferStream(_:key:claim:)``'s
+    /// `defer` releases it on both the success and the failure path.
+    func releaseOutboundTransferForTesting(_ key: MeshLinkKey, id: MeshTransferID) {
+        tunnels[key]?.transfers.closeOutbound(id)
+    }
+
+    /// Runs the duplicate-collapse gate `activate` runs, and answers exactly what it answers: may
+    /// this tunnel go live?
+    func admitActivationForTesting(
+        at key: MeshLinkKey,
+        role: MeshChannelRole,
+        verified: MeshVerifiedPeer
+    ) -> Bool {
+        admitActivation(at: key, role: role, verified: verified)
+    }
+
+    /// Runs the verified inbound admission, so the same-key half of the convergence can be driven
+    /// through the production function rather than through its parts.
+    func admitVerifiedInboundForTesting(
+        _ verified: MeshVerifiedPeer,
+        pendingKey: MeshLinkKey
+    ) -> MeshLinkKey? {
+        admitVerifiedInbound(verified, pendingKey: pendingKey)
+    }
+}
+
+// MARK: - Listener and browser
+
+private extension NetworkMeshSession {
+
+    /// Brings up the QUIC listener over Bonjour and starts serving inbound tunnels.
+    func startListener() throws {
+        guard let tlsIdentity else { throw MeshTransportError.tlsIdentityUnavailable }
+        let listener = try NetworkListener(
+            for: .bonjour(
+                name: instanceName,
+                type: serviceType,
+                txtRecord: NWTXTRecord(advertisedFields)
+            ),
+            using: listenerParameters(identity: tlsIdentity.identity)
+        ).newConnectionLimit(MeshLinkTable.maxConcurrentLinks)
+        self.listener = listener
+        listener.onStateUpdate { [weak self] _, state in
+            Task { @MainActor in self?.listenerStateChanged(state) }
+        }
+        listener.onServiceRegistrationUpdate { [weak self] _, change in
+            Task { @MainActor in self?.listenerRegistrationChanged(change) }
+        }
+        listenerTask = Task { @MainActor [weak self, listener] in
+            do {
+                try await listener.run { connection in
+                    self?.acceptInbound(connection)
+                }
+            } catch {
+                // A cancel is this radio tidying itself, never a failure: ``updateDiscoveryInfo(_:)``
+                // cancels this task on EVERY republish (a mesh-mode change, a merge, a member-count
+                // change), because re-creating the listener is the only way to withdraw a Bonjour
+                // registration, and ``pauseDiscovery()`` cancels it at every hold. The owner's only
+                // reader is `discoveryError`, the Friends-screen banner: the republish path never
+                // clears it, and the hold and stop paths clear it BEFORE the cancel lands here, so a
+                // reported `CancellationError` is a "discovery failed" banner pinned over a healthy
+                // search. The `.cancelled` state callback below is already silent; this agrees with it.
+                guard !Task.isCancelled else { return }
+                self?.report("The QUIC listener stopped: \(error)")
+            }
+        }
+    }
+
+    /// Stands the browser down and forgets it, keeping every tunnel. Shared by the pause and, by
+    /// name rather than by repetition, readable beside `cancelListener()`.
+    func cancelBrowser() {
+        browserTask?.cancel()
+        browserTask = nil
+        browser = nil
+        lastBrowseSetCount = 0
+    }
+
+    /// Stands the listener down and forgets it, keeping every tunnel. The five lines
+    /// ``updateDiscoveryInfo(_:)`` and ``pauseDiscovery()`` both need before a re-mint.
+    func cancelListener() {
+        listenerTask?.cancel()
+        listenerTask = nil
+        listener = nil
+        listenerIsReady = false
+        listenerIsAdvertised = false
+    }
+
+    /// Starts browsing once the listener is both ready and advertised — browsing earlier finds
+    /// peers this device cannot yet be found by, which is how one side of a pair ends up dialing
+    /// into a service that is not registered.
+    func startBrowser() {
+        guard isRunning, !isDiscoveryPaused, browser == nil else { return }
+        let browser = NetworkBrowser(
+            for: .bonjour(serviceType, includeTxtRecord: true),
+            using: connectionParameters().parameters
+        )
+        self.browser = browser
+        browser.onStateUpdate { [weak self] _, state in
+            Task { @MainActor in self?.browserStateChanged(state) }
+        }
+        browserTask = Task { @MainActor [weak self, browser] in
+            do {
+                try await browser.run { endpoints in
+                    self?.observe(endpoints)
+                }
+            } catch {
+                // Same rule as the listener task above: ``pauseDiscovery()`` and ``stop()`` cancel this
+                // one, and a cancellation reported as a failure is a banner over a radio that was
+                // told to stand down.
+                guard !Task.isCancelled else { return }
+                self?.report("The Bonjour browser stopped: \(error)")
+            }
+        }
+    }
+
+    func listenerStateChanged(_ state: NetworkListener<QUIC>.State) {
+        guard isRunning else { return }
+        switch state {
+        case .ready:
+            listenerIsReady = true
+            startBrowserWhenReady()
+        case .waiting(let error):
+            logger.debug("QUIC listener waiting: \(error.localizedDescription, privacy: .public)")
+        case .failed(let error):
+            report("The QUIC listener failed: \(error.localizedDescription)")
+        case .setup, .cancelled:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    func listenerRegistrationChanged(_ change: NetworkListener<QUIC>.ServiceRegistrationChange) {
+        guard isRunning else { return }
+        switch change {
+        case .add:
+            listenerIsAdvertised = true
+            startBrowserWhenReady()
+        case .remove:
+            listenerIsAdvertised = false
+        @unknown default:
+            break
+        }
+    }
+
+    func startBrowserWhenReady() {
+        guard listenerIsReady, listenerIsAdvertised, !isDiscoveryPaused else { return }
+        startBrowser()
+    }
+
+    func browserStateChanged(_ state: NetworkBrowser<Bonjour>.State) {
+        guard isRunning else { return }
+        switch state {
+        case .failed(let error):
+            report("The Bonjour browser failed: \(error.localizedDescription)")
+        case .waiting(let error):
+            logger.debug("Bonjour browser waiting: \(error.localizedDescription, privacy: .public)")
+        case .ready, .setup, .cancelled:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    /// QUIC parameters for an outbound mesh connection — ``ProximityQUICParameters`` under the
+    /// mesh's own ALPN, so the two radios share one parameter factory and cannot drift apart on the
+    /// settings that are safety claims (`prohibitedInterfaceTypes`, the idle timeout).
+    func connectionParameters() -> NWParametersBuilder<QUIC> {
+        ProximityQUICParameters.connection(alpn: alpn)
+    }
+
+    /// QUIC parameters for the mesh listener, presenting this session's ephemeral identity.
+    func listenerParameters(identity: sec_identity_t) -> NWParametersBuilder<QUIC> {
+        ProximityQUICParameters.listener(alpn: alpn, identity: identity)
+    }
+}
+
+// MARK: - ProximityQUICParameters
+
+/// The QUIC parameter factory both proximity radios use, parameterized only by ALPN and identity.
+///
+/// Extracted from ``NetworkMeshSession`` when the presence radio arrived (plan §17.1) rather than
+/// copied, because everything in it except the ALPN is a claim rather than a preference:
+/// `prohibitedInterfaceTypes = [.cellular]` is what turns the serverless/local-link promise into
+/// something the OS enforces, the accept-any validator is the deliberate statement that
+/// certificate validation is *not* the authentication decision on either radio, and the declared
+/// idle timeout is the P2 item 15 fix — the framework's default sat at roughly the heartbeat
+/// interval, so QUIC reaped every tunnel a moment before its first beat was due. A second copy of
+/// those four lines is a second place for one of them to be forgotten.
+///
+/// The **ALPN is the parameter that must differ**: a presence connection and a mesh connection
+/// speak different protocols over the same transport, and a shared ALPN would let one radio's dial
+/// complete a TLS handshake with the other's listener.
+nonisolated enum ProximityQUICParameters {
+
+    /// Parameters for an outbound connection. No local identity: only the listener side presents a
+    /// certificate, and neither side validates one — see ``EphemeralMeshTLSIdentity``.
+    static func connection(alpn: String) -> NWParametersBuilder<QUIC> {
+        peerToPeerAdjusted(base(alpn: alpn))
+    }
+
+    /// Parameters for a listener, presenting `identity`.
+    ///
+    /// The idle timeout is declared on both sides deliberately: QUIC uses the **minimum** of the
+    /// two endpoints' advertised `max_idle_timeout` values, so a listener left on the default would
+    /// pull the negotiated timeout straight back under the heartbeat interval.
+    static func listener(alpn: String, identity: sec_identity_t) -> NWParametersBuilder<QUIC> {
+        let parameters = NWParametersBuilder<QUIC>.parameters {
+            QUIC(alpn: [alpn])
+                .tls.localIdentity(identity)
+                .tls.certificateValidator { _, _ in true }
+                .tls.peerAuthentication(.none)
+                .idleTimeout(MeshHeartbeatSchedule.idleTimeoutMilliseconds)
+                .maxUDPPayloadSize(NetworkMeshSession.udpPayloadSize)
+                .maxDatagramFrameSize(NetworkMeshSession.datagramFrameSize)
+        }.prohibitedInterfaceTypes([.cellular])
+        return peerToPeerAdjusted(parameters)
+    }
+
+    /// The settings both directions share, minus the listener's identity.
+    private static func base(alpn: String) -> NWParametersBuilder<QUIC> {
+        NWParametersBuilder<QUIC>.parameters {
+            QUIC(alpn: [alpn])
+                .tls.certificateValidator { _, _ in true }
+                .tls.peerAuthentication(.none)
+                .idleTimeout(MeshHeartbeatSchedule.idleTimeoutMilliseconds)
+                .maxUDPPayloadSize(NetworkMeshSession.udpPayloadSize)
+                .maxDatagramFrameSize(NetworkMeshSession.datagramFrameSize)
+        }.prohibitedInterfaceTypes([.cellular])
+    }
+
+    /// Requests Apple peer-to-peer Wi-Fi where the platform has an AWDL radio. Simulators have
+    /// none and reach each other over infrastructure only, which is the lane the feasibility probe
+    /// validated.
+    private static func peerToPeerAdjusted(_ parameters: NWParametersBuilder<QUIC>) -> NWParametersBuilder<QUIC> {
+        guard NetworkMeshSession.includesPeerToPeer else { return parameters }
+        return parameters.peerToPeerIncluded(true)
+    }
+}
+
+// MARK: - Discovery
+
+private extension NetworkMeshSession {
+
+    /// One browse result set: refresh what is known, announce arrivals, announce departures.
+    ///
+    /// The local advertisement is filtered out by instance name — the same self-exclusion the
+    /// presence radio does, and necessary because a device browses its own Bonjour registration.
+    func observe(_ endpoints: [Bonjour.Endpoint]) {
+        guard isRunning, !isDiscoveryPaused else { return }
+        let now = Date()
+        let bounded = endpoints.prefix(MeshSessionIdentityMap.maxTrackedEndpoints)
+        var seen: Set<MeshLinkKey> = []
+        for endpoint in bounded where endpoint.name != instanceName {
+            let key = MeshLinkKey(endpoint.id)
+            seen.insert(key)
+            noteBrowsed(endpoint, key: key, at: now)
+        }
+        for key in Array(browsedEndpoints.keys) where !seen.contains(key) {
+            noteLost(key)
+        }
+        noteBrowseSet(seen)
+    }
+
+    /// Records the browse result set whenever it changes size.
+    ///
+    /// Discovery was the one stage of the QUIC radio with no transcript at all, and the three-node
+    /// bring-up needed exactly this line: "this node never browsed that peer" and "this node
+    /// browsed it and declined to dial" are different defects with different owners, and without
+    /// the set they read identically. Size, not identity, is the trigger — a TXT record arriving
+    /// late re-announces the same peer and must not re-print the set.
+    ///
+    /// **The COUNT is public and the NAMES are private** (plan §8.7 finding 1, the one item owed
+    /// before QUIC ships — taken 2026-09-21, in the cutover that made this radio the shipping one).
+    /// The count is what a transcript is read for, it identifies nobody, and it stays redactable to
+    /// nothing. The names are the other devices' Bonjour instance names, and the interpolation that
+    /// carried them was `.public` — a system-log line, off-device in a sysdiagnose, naming who else
+    /// was in the room.
+    ///
+    /// **This is hygiene, not a leak fix, and the difference is worth keeping straight.** A mesh
+    /// instance name is `MeshLinkAdvertisement`'s random per-session token, not a device name and
+    /// not a person: it carries nothing across sessions and nothing a scanner on the same link
+    /// could not read for itself. What the downgrade buys is that the log stops being the place a
+    /// stable-looking identifier accumulates if that ever stops being true, and it stops a
+    /// transcript of who was nearby riding out in a diagnostic the user never reads.
+    ///
+    /// The DEBUG console echo keeps the whole line: `MeshTransportConsoleLog.echo` is a no-op
+    /// outside DEBUG, and it is the transcript the runbook's Simulator lanes grep. A lane that
+    /// could not see the names could not tell the three-node star from the mesh, which is the
+    /// defect this line was added for.
+    func noteBrowseSet(_ keys: Set<MeshLinkKey>) {
+        guard keys.count != lastBrowseSetCount else { return }
+        lastBrowseSetCount = keys.count
+        let names = keys.map(\.rawValue).sorted().joined(separator: ",")
+        logger.notice("browsed peers=\(keys.count, privacy: .public) [\(names, privacy: .private)]")
+        MeshTransportConsoleLog.echo("browsed peers=\(keys.count) [\(names)]")
+    }
+
+    /// Re-offers every browsed peer this session holds no link to, at most once per
+    /// ``reproposeIntervalSeconds``.
+    ///
+    /// Only ``MeshLinkPhase/idle`` links are re-offered, and that is the whole safety argument: a
+    /// peer this side is dialing, connected to, backing off from or has exhausted its budget on is
+    /// left exactly as it is, so the sweep can neither double-dial nor spend a retry budget. What
+    /// it recovers is the one case discovery cannot: an announcement the owner declined — because
+    /// its session was momentarily shut, or its slots momentarily full — which
+    /// ``noteBrowsed(_:key:at:)`` will never make again for an advertisement that has not changed.
+    ///
+    /// Three things are skipped, and each closes a loop rather than an inefficiency:
+    ///
+    /// * **A peer already reachable under another key.** The losing half of a collapsed duplicate is
+    ///   returned to ``MeshLinkPhase/idle`` deliberately, so re-offering that key would re-dial a
+    ///   device this session is already connected to, every interval, forever. When a dial of this
+    ///   device's has proven who answers the advertisement, the comparison is that identity against
+    ///   each live tunnel's verified key; otherwise it is the advertised `sid` against the `sid` on
+    ///   each live tunnel's ``MeshVerifiedPeer`` — the same value the inbound path resolves keys by
+    ///   (``MeshLinkTable/sweepSkips(_:liveSessionIDs:liveSigningKeys:)``, 2026-09-23: a `sid` is a
+    ///   claim, and a peer claiming an absent member's used to keep that member from ever being
+    ///   re-dialed).
+    /// * **Every peer, while any inbound introduction is in flight.** A pending inbound is keyed by
+    ///   its *connection id*, not by a browsed key — the peer has not said who it is yet — so this
+    ///   radio cannot tell whether the connection mid-introduction is from the very peer the sweep
+    ///   is about to dial. Deferring the whole sweep is the honest answer and it is bounded:
+    ///   ``expirePendingInbound(now:)`` runs first in the same tick and drops anything past
+    ///   ``NetworkMeshSession/introductionDeadlineSeconds``. The interval is deliberately *not*
+    ///   stamped on this path, so the sweep resumes on the first tick after the introductions
+    ///   settle rather than waiting out another interval.
+    /// * **A peer whose re-proposal budget is spent** (``MeshLinkTable/admitRepropose(_:)``). The
+    ///   owner has reasons to refuse a seat that this radio cannot see — a locally-kicked peer, a
+    ///   removed member, a capacity race — and each refusal ends the tunnel, which returns the link
+    ///   to `idle` with a full *dial* budget. Without a separate, never-refilled budget here that is
+    ///   an unbounded connect/refuse/re-dial cycle at 0.2 Hz. A pre-commit **timeout** hands its own
+    ///   booking back (``MeshLinkTable/refundRepropose(_:)``), because nobody refused anything — but
+    ///   only ``MeshLinkTable/maxTimeoutRefundsPerEndpoint`` times per endpoint per session, so an
+    ///   endpoint whose every tunnel times out is re-offered eight times in all and then stops. The
+    ///   five-minute proximity gate that ends those tunnels rate-limits that loop; the cap is what
+    ///   bounds it.
+    ///
+    /// Bounded by ``browsedEndpoints``, itself bounded by ``MeshSessionIdentityMap/maxTrackedEndpoints``.
+    func reproposeIdleBrowsedPeers(now: Date) {
+        guard !isDiscoveryPaused else { return }
+        guard pendingInbound.isEmpty else { return }
+        if let last = lastReproposedAt, now.timeIntervalSince(last) < Self.reproposeIntervalSeconds {
+            return
+        }
+        lastReproposedAt = now
+        let liveSessionIDs = Set(tunnels.values.compactMap { $0.verified?.sessionID })
+        let liveSigningKeys = Set(tunnels.values.compactMap { $0.verified?.signingPublicKey })
+        for key in browsedEndpoints.keys.sorted(by: { $0.rawValue < $1.rawValue })
+        where tunnels[key] == nil && links.phase(of: key) == .idle {
+            guard !links.sweepSkips(key, liveSessionIDs: liveSessionIDs, liveSigningKeys: liveSigningKeys),
+                  links.admitRepropose(key) else { continue }
+            onPeerDiscovered?(handle(for: key))
+        }
+    }
+
+    /// Records a browsed endpoint and announces it when it is new or its advertisement changed.
+    ///
+    /// Re-announcing on change is load-bearing: a Bonjour peer is routinely seen before its TXT
+    /// record arrives, so the first sighting can carry no `sid` at all and the owner's tie-break
+    /// would be stuck with "unrankable" forever if the late record never reached it.
+    func noteBrowsed(_ endpoint: Bonjour.Endpoint, key: MeshLinkKey, at now: Date) {
+        let previous = links.cachedEndpoint(key)?.advertisement
+        let advertisement = MeshLinkAdvertisement.advertisement(from: endpoint.txtRecord.dictionary)
+        browsedEndpoints[key] = endpoint
+        links.remember(MeshEndpointRecord(
+            key: key,
+            instanceName: endpoint.name,
+            advertisement: advertisement,
+            lastSeenAt: now
+        ))
+        guard previous != advertisement else { return }
+        onPeerDiscovered?(handle(for: key))
+    }
+
+    /// Drops an endpoint that left the browse results. Its cache entry survives only while a tunnel
+    /// to it does — that is the endpoint cache doing its job, keeping a re-dial possible without
+    /// waiting for Bonjour to find the peer again.
+    func noteLost(_ key: MeshLinkKey) {
+        let peer = handle(for: key)
+        browsedEndpoints.removeValue(forKey: key)
+        if tunnels[key] == nil { links.forget(key) }
+        onPeerLost?(peer)
+    }
+
+    /// The session-stable handle for an endpoint.
+    ///
+    /// `advertisedFingerprint` is always nil, matching ``MeshLinkAdvertisement/withheldKeys``: this
+    /// radio publishes no `fp` and believes no inbound one, so a handle from it never carries a
+    /// fingerprint claim. `displayHint` is the peer's random Bonjour instance name — a hint, never
+    /// a name shown to anyone; mesh display names arrive inside the signed identity introduction.
+    func handle(for key: MeshLinkKey) -> PeerHandle {
+        let identity = identities.identity(for: key)
+        let record = links.cachedEndpoint(key)
+        return PeerHandle(
+            id: identity.id,
+            displayHint: record?.instanceName ?? key.rawValue,
+            discoveryInfo: record?.advertisement,
+            advertisedFingerprint: nil,
+            endpoint: identity.endpoint
+        )
+    }
+}
+
+// MARK: - Tunnels
+
+private extension NetworkMeshSession {
+
+    /// Opens an outbound QUIC tunnel to a cached endpoint.
+    ///
+    /// The dial admission has already been booked by the caller; this only builds the connection
+    /// and the task that owns it. Cancelling that task is how the connection is torn down — the
+    /// TN3213 connection has no `cancel()` of its own, its lifetime is its running task's.
+    func startOutboundTunnel(to key: MeshLinkKey) {
+        guard let endpoint = browsedEndpoints[key] else {
+            handleDialFailure(key, reason: "no cached endpoint for a due re-dial")
+            return
+        }
+        let connection = NetworkConnection(to: endpoint, using: connectionParameters()).start()
+        let channel = prepareChannel(for: key)
+        replaceTunnel(at: key, with: Tunnel(peer: channel.peer, channel: channel, role: .initiator))
+        tunnels[key]?.task = Task { @MainActor [weak self] in
+            await self?.runInitiator(connection, key: key)
+        }
+    }
+
+    /// Takes an inbound QUIC connection as *pending*: nothing is admitted, no channel exists, and
+    /// no roster slot is held until the peer has proved who it is.
+    ///
+    /// The admission decision moved into ``admitVerifiedInbound(_:pendingKey:)``, behind the signed
+    /// channel introduction, which is what closes item 5's named residual. Two things were wrong
+    /// with deciding here: the peer had said nothing yet, so the tie-break had no `sid` to rank and
+    /// fell through to ``MeshDialPreference/unranked`` on every inbound tunnel; and an
+    /// unauthenticated connection took a roster seat, so eight strangers could fill an eight-member
+    /// mesh. Both are answered by waiting: a pending connection holds one of
+    /// ``maxPendingInboundTunnels`` instead, and takes a real slot only once it is verified.
+    func acceptInbound(_ connection: NetworkConnection<QUIC>) {
+        guard isRunning else { return }
+        let key = MeshLinkKey(connection.id)
+        guard pendingInbound[key] == nil, pendingInbound.count < Self.maxPendingInboundTunnels else {
+            logger.debug(
+                "inbound QUIC tunnel refused pre-introduction for \(self.peerLabel(for: key), privacy: .public)"
+            )
+            return
+        }
+        pendingInbound[key] = PendingInbound(
+            startedAt: Date(),
+            task: Task { @MainActor [weak self] in
+                await self?.runResponder(connection, pendingKey: key)
+            }
+        )
+    }
+
+    /// Resolves a verified inbound peer to the link key its tunnel should live under, and books the
+    /// admission — the accept path, now unreachable without a ``MeshVerifiedPeer``.
+    ///
+    /// The verified `sid` does two jobs. It resolves the connection to the browsed advertisement it
+    /// came from (see ``MeshLinkTable/key(advertisingSessionID:)``), so an inbound tunnel and an
+    /// outbound dial to the same peer collide under one key instead of coexisting; and it ranks the
+    /// pair, so duplicate-tunnel suppression makes the real ``MeshDialPreference`` decision rather
+    /// than admitting both sides.
+    ///
+    /// The owner's ``invitationGate`` is consulted here too, and fails closed: this is the moment
+    /// the retired MC advertiser's `shouldAcceptInvitation` answered, moved to the earliest point on this
+    /// radio where the question can honestly be asked (the peer has proved who it is; nothing has
+    /// been admitted yet).
+    ///
+    /// A duplicate against a tunnel *already verified as the same peer* is not a refusal but a
+    /// convergence question, and it is answered by the same ``MeshTunnelConvergence`` rule the
+    /// cross-key case uses. It has to be: whether a peer's two connections collide under one key or
+    /// land under two depends on whether that side happened to have cached the peer's TXT `sid`, and
+    /// the two ends can differ on that. One rule at both sites is what stops the pair from closing
+    /// one connection each and ending with none.
+    ///
+    /// **The `sid` is a claim, and a claim may not displace anybody** (2026-09-23). It is not in
+    /// the signed transcript and nothing binds an advertisement to a key, so a verified peer can
+    /// name another member's `sid`. Resolving it blindly let that peer take an absent member's
+    /// browsed key, and the member's own re-link was then refused as a duplicate of the squatter's
+    /// tunnel. ``inboundKey(for:pendingKey:)`` resolves it only when nothing this device verified
+    /// contradicts it; the owner's gate is asked about the key the tunnel will actually live under.
+    ///
+    /// - Returns: the key to build the tunnel under, or nil when the table or the owner refused it.
+    func admitVerifiedInbound(_ verified: MeshVerifiedPeer, pendingKey: MeshLinkKey) -> MeshLinkKey? {
+        let key = inboundKey(for: verified, pendingKey: pendingKey)
+        guard invitationGate?(handle(for: key)) ?? false else {
+            noteInboundRefusal("owner", key: key)
+            return nil
+        }
+        var admission = inboundAdmission(for: verified, at: key)
+        if case .refusedDuplicateTunnel = admission, yieldSameKeyDuplicate(at: key, to: verified) {
+            admission = inboundAdmission(for: verified, at: key)
+        }
+        guard admission == .admit else {
+            noteInboundRefusal("\(admission)", key: key)
+            return nil
+        }
+        return key
+    }
+
+    /// The link key a verified inbound tunnel lives under: the browsed advertisement its claimed
+    /// `sid` names, unless a dial of this device's proved a different key answers that
+    /// advertisement or a live tunnel verified as a different key already holds it — then its own
+    /// connection key (``MeshLinkTable/claimResolves(_:to:heldBy:)``, 2026-09-23).
+    ///
+    /// The one residual, stated rather than implied: an advertisement no dial of this device's has
+    /// reached yet and no tunnel holds can still be named first by a claimant. When this device is
+    /// the preferred dialer toward it — so its owner waits to be dialed — the claimant's tunnel
+    /// then holds that key until it ends. Once any dial has proven the owner, it cannot happen
+    /// again, and the owner can always re-link by dialing this device.
+    func inboundKey(for verified: MeshVerifiedPeer, pendingKey: MeshLinkKey) -> MeshLinkKey {
+        guard let claimed = links.key(advertisingSessionID: verified.sessionID),
+              links.claimResolves(
+                claimed,
+                to: verified.signingPublicKey,
+                heldBy: tunnels[claimed]?.verified?.signingPublicKey
+              ) else { return pendingKey }
+        return claimed
+    }
+
+    /// The single place the link table is asked about an inbound tunnel, so the `sid` that drives
+    /// duplicate suppression can only ever come off a ``MeshVerifiedPeer``.
+    func inboundAdmission(for verified: MeshVerifiedPeer, at key: MeshLinkKey) -> MeshLinkAdmission {
+        links.admitInbound(
+            from: key,
+            localSessionID: localSessionID,
+            peerSessionID: verified.sessionID,
+            now: Date()
+        )
+    }
+
+    /// The `sid` this session advertises, which is also the one its hello carries — one spelling, so
+    /// the value the peer ranks us by and the value we rank ourselves by cannot drift apart.
+    var localSessionID: String {
+        advertisedFields[MeshLinkAdvertisement.sessionIDKey] ?? ""
+    }
+
+    /// Drops a pending inbound connection, cancelling the task that owns it. Idempotent, and safe
+    /// to call from inside that task — cancelling itself is how the connection is closed.
+    func dropPendingInbound(_ key: MeshLinkKey) {
+        pendingInbound.removeValue(forKey: key)?.task.cancel()
+    }
+
+    /// Drops every inbound connection that has outstayed
+    /// ``NetworkMeshSession/introductionDeadlineSeconds`` without finishing its introduction.
+    /// Bounded by ``maxPendingInboundTunnels``, and driven by the shared poll (Power of 10 rule 2).
+    func expirePendingInbound(now: Date) {
+        let expired = pendingInbound
+            .filter { now.timeIntervalSince($0.value.startedAt) > Self.introductionDeadlineSeconds }
+            .keys
+        for key in expired {
+            logger.debug(
+                "inbound QUIC tunnel timed out mid-introduction for \(self.peerLabel(for: key), privacy: .public)"
+            )
+            dropPendingInbound(key)
+        }
+    }
+
+    /// The channel for an endpoint, reusing the live one so a reconnect does not orphan the
+    /// publishers an owner is already subscribed to.
+    func prepareChannel(for key: MeshLinkKey) -> NetworkPeerChannel {
+        if let existing = tunnels[key]?.channel { return existing }
+        return NetworkPeerChannel(peer: handle(for: key), host: self)
+    }
+
+    /// Dialing side: open the control stream, run the signed channel introduction, and only then
+    /// read app frames.
+    ///
+    /// An introduction failure ends the tunnel through the dial budget, not as a live disconnect: no
+    /// control stream was ever recorded, so ``endTunnel(_:cause:reason:notifyOwner:)`` charges it as a failed dial and
+    /// the three-attempt budget bounds how often this side re-offers itself to a peer that refuses
+    /// it. A cancelled task returns silently — cancellation is a deliberate teardown (``stop()``, or
+    /// this dial losing the duplicate-tunnel tie-break), never a failure to book.
+    func runInitiator(_ connection: NetworkConnection<QUIC>, key: MeshLinkKey) async {
+        do {
+            let stream = try await connection.openStream()
+            let datagrams = try await connection.datagrams
+            guard let verified = await introduce(role: .initiator, over: connection, stream: stream) else {
+                guard !Task.isCancelled else { return }
+                endTunnel(
+                    key,
+                    cause: .introductionFailed,
+                    reason: "The outbound QUIC tunnel failed its signed channel introduction."
+                )
+                return
+            }
+            activate(key, connection: connection, stream: stream, datagrams: datagrams, verified: verified)
+            try await receiveFrames(for: key, from: stream)
+        } catch {
+            guard !Task.isCancelled else { return }
+            endTunnel(
+                key,
+                cause: .controlStreamEnded,
+                reason: "The outbound QUIC tunnel ended: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// Listening side: serve the peer's control stream, and every later stream as a transfer.
+    ///
+    /// **The control stream is the peer's stream 0, and only ever that.** RFC 9000 §2.1 numbers
+    /// client-initiated bidirectional streams 0, 4, 8 …, and the dialing side opens exactly one
+    /// stream before the signed introduction — so `streamID == 0` names the control stream without a
+    /// latch, and cannot be confused by a transfer that arrives while the introduction is still
+    /// running. Anything else is a per-transfer stream (plan §7.1), which closes item 5's named
+    /// residual: those streams used to be dropped for want of a handler.
+    ///
+    /// The handler for stream 0 blocks for the tunnel's whole life, and that is fine: this framework
+    /// runs `inboundStreams` handlers concurrently, one task per stream. Measured, not assumed — a
+    /// loopback QUIC pair delivered stream 4 to a handler while stream 0's handler was still parked
+    /// in its receive loop.
+    func runResponder(_ connection: NetworkConnection<QUIC>, pendingKey: MeshLinkKey) async {
+        do {
+            try await connection.inboundStreams { stream in
+                guard stream.streamID == Self.controlStreamID else {
+                    await self.serveTransferStream(stream, on: connection)
+                    return
+                }
+                guard self.pendingInbound[pendingKey] != nil else { return }
+                let datagrams = try await connection.datagrams
+                await self.serveInbound(connection, stream: stream, datagrams: datagrams, pendingKey: pendingKey)
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            dropPendingInbound(pendingKey)
+        }
+    }
+
+    /// Runs the introduction on an inbound connection and, only if it succeeds and the table admits
+    /// the verified peer, promotes it from pending to a real tunnel.
+    ///
+    /// Every early return drops the pending connection whole: no channel is built, no handle is
+    /// minted for an owner, and `links` is never told a `sid`. That is the "no leakage" property —
+    /// it holds by construction, because everything downstream needs a ``MeshVerifiedPeer`` this
+    /// path does not have.
+    func serveInbound(
+        _ connection: NetworkConnection<QUIC>,
+        stream: Network.QUIC.Stream<QUICStream>,
+        datagrams: Network.QUIC.Datagrams<QUICDatagram>,
+        pendingKey: MeshLinkKey
+    ) async {
+        guard let verified = await introduce(role: .responder, over: connection, stream: stream),
+              pendingInbound[pendingKey] != nil,
+              let key = admitVerifiedInbound(verified, pendingKey: pendingKey),
+              let owning = pendingInbound.removeValue(forKey: pendingKey) else {
+            dropPendingInbound(pendingKey)
+            return
+        }
+        let channel = prepareChannel(for: key)
+        replaceTunnel(
+            at: key,
+            with: Tunnel(peer: channel.peer, channel: channel, role: .responder, task: owning.task)
+        )
+        activate(key, connection: connection, stream: stream, datagrams: datagrams, verified: verified)
+        do {
+            try await receiveFrames(for: key, from: stream)
+        } catch {
+            guard !Task.isCancelled else { return }
+            endTunnel(
+                key,
+                cause: .controlStreamEnded,
+                reason: "The inbound QUIC tunnel ended: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// Installs a tunnel, cancelling whatever held that key before it.
+    ///
+    /// The other half of duplicate-tunnel suppression: when the table admits an inbound tunnel for a
+    /// key this side was dialing, ``MeshLinkTable/admitInbound(from:preference:now:)`` says the peer
+    /// won the tie-break, and this is where the losing outbound attempt is actually abandoned. The
+    /// cancelled task returns without booking anything, because both its failure paths check
+    /// `Task.isCancelled` first.
+    private func replaceTunnel(at key: MeshLinkKey, with tunnel: Tunnel) {
+        tunnels.removeValue(forKey: key)?.cancelTasks()
+        tunnels[key] = tunnel
+    }
+
+    /// Marks a tunnel live: record its stream, datagram flow and verified peer, start its heartbeat
+    /// and its datagram reader, and hand the channel to the owner.
+    ///
+    /// Only ever called with a ``MeshVerifiedPeer``, which is what makes "no app frame crosses
+    /// before the introduction" structural rather than a matter of call order: the control stream is
+    /// recorded here, ``send(_:to:mode:)`` refuses without one, and both receive loops start here.
+    ///
+    /// `notifyConnected()` is deliberately NOT called here. The owner's `onPeerChannelReady` hook
+    /// creates the coordinator and awaits its `begin()`, and publishing `.connected` before that
+    /// completes is what put the retired MC radio's handshake into the wrong branch — the channel's owner makes the
+    /// call once `begin()` returns. Same contract, same reason.
+    ///
+    /// ``admitActivation(at:role:verified:)`` runs **first**, before a single hook fires: a tunnel
+    /// that loses the duplicate collapse must never be announced to an owner, or the owner is handed
+    /// a second peer for one device and then told one of them died.
+    ///
+    /// The connection is recorded here for the same reason the control stream is: it is what a
+    /// per-transfer stream is opened on, and recording it only at activation is what makes "a
+    /// transfer stream can never carry a frame from an unverified peer" structural rather than a
+    /// matter of call order (``serveTransferStream(_:on:)`` resolves its tunnel *through* it). The
+    /// dialing side also starts its transfer acceptor here — the listening side already has one.
+    ///
+    /// A DIAL's verified key is recorded as the proven owner of the advertisement it dialed
+    /// (``MeshLinkTable/noteProvenOwner(_:signingPublicKey:)``, 2026-09-23) BEFORE the duplicate
+    /// collapse, because the proof is the introduction over a connection to that advertisement's
+    /// own endpoint, and it holds whether or not this tunnel is the one the pair keeps.
+    func activate(
+        _ key: MeshLinkKey,
+        connection: NetworkConnection<QUIC>,
+        stream: Network.QUIC.Stream<QUICStream>,
+        datagrams: Network.QUIC.Datagrams<QUICDatagram>,
+        verified: MeshVerifiedPeer
+    ) {
+        if tunnels[key]?.role == .initiator {
+            links.noteProvenOwner(key, signingPublicKey: verified.signingPublicKey)
+        }
+        guard let role = tunnels[key]?.role,
+              admitActivation(at: key, role: role, verified: verified),
+              var tunnel = tunnels[key] else { return }
+        let now = Date()
+        tunnel.controlStream = stream
+        tunnel.datagrams = datagrams
+        tunnel.connection = connection
+        tunnel.verified = verified
+        tunnel.datagramTask = Task { @MainActor [weak self] in
+            await self?.receiveDatagrams(for: key, from: datagrams)
+        }
+        if role == .initiator {
+            tunnel.transferAcceptorTask = Task { @MainActor [weak self] in
+                await self?.acceptTransferStreams(on: connection, key: key)
+            }
+        }
+        tunnels[key] = tunnel
+        links.noteReady(key, now: now)
+        heartbeats.start(key, now: now)
+        // `tunnels=` is what makes "at most one connection per peer pair" READABLE in a Lane C
+        // transcript. Without it the line says a tunnel came up and nothing about whether the last
+        // one is still there, so two activations are indistinguishable from one tunnel replacing
+        // another — which is exactly the ambiguity item 13 was opened on.
+        MeshTransportConsoleLog.echo(
+            "accepted \(verified.fingerprint) sid=\(verified.sessionID): tunnel activated, tunnels=\(tunnels.count)"
+        )
+        noteDatagramCapacity(key, datagrams: datagrams)
+        onPeerVerified?(tunnel.peer, verified)
+        onPeerChannelReady?(tunnel.channel)
+    }
+
+    /// Records this tunnel's declared and reported liveness parameters, once, at activation.
+    ///
+    /// The measurement the P2 loop went a fortnight without. It carries the requested datagram frame
+    /// size, the size the framework *reports* as usable, the beat a heartbeat needs, and the two
+    /// numbers whose relationship the churn turned on — the heartbeat interval and the QUIC idle
+    /// timeout. Until they were logged together, "the keepalive fires after the timeout it defends
+    /// against" was not a thing anyone could read off a transcript.
+    ///
+    /// The reported usable size is evidence, not a verdict: see ``MeshHeartbeatChannel`` for why it
+    /// is read off the parent connection and therefore cannot distinguish "datagrams did not
+    /// negotiate" from "this is the wrong object to ask".
+    ///
+    /// A separate line rather than a longer `accepted` one: the runbook's Lane C rows grep the
+    /// activation line, and a diagnostic that rewrites the evidence it is being read against is a
+    /// diagnostic that invalidates its own record.
+    func noteDatagramCapacity(
+        _ key: MeshLinkKey,
+        datagrams: Network.QUIC.Datagrams<QUICDatagram>
+    ) {
+        let lines = peerLines(
+            "datagramCapacity usable=\(datagrams.parent.usableDatagramFrameSize) "
+                + "requested=\(Self.datagramFrameSize) required=\(heartbeatDatagram.count) "
+                + "idleTimeoutMs=\(MeshHeartbeatSchedule.idleTimeoutMilliseconds) "
+                + "beatSeconds=\(Int(MeshHeartbeatSchedule.intervalSeconds))",
+            key: key
+        )
+        logger.notice("\(lines.logged, privacy: .public)")
+        MeshTransportConsoleLog.echo(lines.echoed)
+    }
+
+    // MARK: Duplicate collapse
+
+    /// Collapses a verified pair that ended up holding two tunnels, and says whether the tunnel now
+    /// activating is the one that survives.
+    ///
+    /// The defect this closes, observed on the radio in P2 item 9: during the pre-TXT window neither
+    /// side can rank the other, so *both* dial (the documented, deadlock-avoiding fallback); an
+    /// inbound tunnel whose `sid` still resolves to no browsed advertisement lands under its own
+    /// connection key; and two keys never collide, so the link table's duplicate suppression never
+    /// sees a duplicate. Both tunnels activated, and "at most one connection per peer pair" failed
+    /// on the wire while selectivity was untouched.
+    ///
+    /// Keying on the **durable verified identity** — the Ed25519 signing key, not the per-launch
+    /// `sid` and not the link key — is what makes the two tunnels recognisable as one peer's. The
+    /// verdict itself is ``MeshTunnelConvergence``, a pure function of facts both devices share.
+    func admitActivation(at key: MeshLinkKey, role: MeshChannelRole, verified: MeshVerifiedPeer) -> Bool {
+        guard let established = liveTunnel(verifiedAs: verified.signingPublicKey, excluding: key) else {
+            return true
+        }
+        switch MeshTunnelConvergence.resolve(
+            incomingRole: role,
+            establishedRole: established.tunnel.role,
+            localSessionID: localSessionID,
+            peerSessionID: verified.sessionID
+        ) {
+        case .keepBoth:
+            return true
+        case .keepIncoming:
+            closeRedundantTunnel(established.key, peer: verified)
+            return true
+        case .keepEstablished:
+            closeRedundantTunnel(key, peer: verified)
+            return false
+        }
+    }
+
+    /// The live tunnel already carrying `signingPublicKey` under some key other than `key`.
+    ///
+    /// Only *verified* tunnels are candidates: a tunnel still dialing has proved nothing, so it has
+    /// no identity to match and is left to ``MeshDialPreference`` where it already belongs. Scanned
+    /// in sorted key order so the answer is deterministic, and bounded by the roster cap.
+    private func liveTunnel(
+        verifiedAs signingPublicKey: Data,
+        excluding key: MeshLinkKey
+    ) -> (key: MeshLinkKey, tunnel: Tunnel)? {
+        for candidate in tunnels.keys.sorted(by: { $0.rawValue < $1.rawValue }) where candidate != key {
+            guard let tunnel = tunnels[candidate],
+                  tunnel.verified?.signingPublicKey == signingPublicKey else { continue }
+            return (candidate, tunnel)
+        }
+        return nil
+    }
+
+    /// Closes the losing half of a collapsed duplicate pair — a **benign** close, and every clause
+    /// of that word is load-bearing.
+    ///
+    /// It is not a dial failure, so it never reaches ``handleDialFailure(_:reason:)`` and spends
+    /// nothing from the three-attempt budget; the link returns to ``MeshLinkPhase/idle`` with a full
+    /// one, exactly as an honest disconnect does. It is not a rejection, so it does not go through
+    /// ``report(_:)`` — an owner's `onTransportError` must not light up because a radio tidied
+    /// itself. And it is not a peer disconnect, so ``onPeerDisconnected`` is not fired: the peer is
+    /// still connected, on the surviving tunnel, and re-entering the owner's removal funnel would
+    /// arm its re-invite retry against a device that never left (P2 item 8's `notifyOwner:` lesson).
+    /// The channel is still told, because a coordinator built on the losing tunnel must not sit
+    /// waiting on a connection that is gone; the owner's stale-coordinator sweep reclaims its slot
+    /// through the same `removeSlot` funnel a disconnect would have used.
+    ///
+    /// Idempotent, and everything it touches is keyed by `key` alone, so the surviving tunnel's
+    /// stream, heartbeat, budget and channel are untouched.
+    func closeRedundantTunnel(_ key: MeshLinkKey, peer verified: MeshVerifiedPeer) {
+        heartbeats.stop(key)
+        guard let tunnel = tunnels.removeValue(forKey: key) else { return }
+        tunnel.cancelTasks()
+        links.noteClosed(key)
+        tunnel.channel.notifyDisconnected(reason: MeshTunnelConvergence.closeReason)
+        noteTunnelEnded(key, cause: .redundantDuplicate, tunnel: tunnel, detail: "closed")
+        MeshTransportConsoleLog.echo(
+            "redundantTunnelClosed \(verified.fingerprint) sid=\(verified.sessionID): closed"
+        )
+    }
+
+    /// Hands one key's tunnel over to the connection now arriving on it, when the convergence rule
+    /// says the peer's dial is the one that survives.
+    ///
+    /// The same-key twin of ``closeRedundantTunnel(_:peer:)``, and it differs in exactly one way:
+    /// the channel is **kept**. Both connections resolved to one ``MeshLinkKey``, so they are one
+    /// peer to every owner above — the same ``PeerHandle``, the same channel, the same slot — and
+    /// tearing the channel down only to hand back an identical one would evict a live coordinator to
+    /// replace it with itself. What is released is the losing *connection*: its tasks are cancelled,
+    /// its stream and datagrams are dropped, its heartbeat stops, and its identity is cleared so the
+    /// cross-key scan cannot mistake the husk for a second live tunnel. The link returns to
+    /// ``MeshLinkPhase/idle`` with a full budget, so the caller's re-ask admits.
+    func yieldSameKeyDuplicate(at key: MeshLinkKey, to verified: MeshVerifiedPeer) -> Bool {
+        guard var tunnel = tunnels[key],
+              tunnel.verified?.signingPublicKey == verified.signingPublicKey,
+              MeshTunnelConvergence.resolve(
+                incomingRole: .responder,
+                establishedRole: tunnel.role,
+                localSessionID: localSessionID,
+                peerSessionID: verified.sessionID
+              ) == .keepIncoming else { return false }
+        heartbeats.stop(key)
+        noteTunnelEnded(key, cause: .redundantDuplicate, tunnel: tunnel, detail: "yielded")
+        tunnel.task?.cancel()
+        tunnel.datagramTask?.cancel()
+        tunnel.task = nil
+        tunnel.datagramTask = nil
+        tunnel.controlStream = nil
+        tunnel.datagrams = nil
+        tunnel.verified = nil
+        tunnels[key] = tunnel
+        links.noteClosed(key)
+        MeshTransportConsoleLog.echo(
+            "redundantTunnelClosed \(verified.fingerprint) sid=\(verified.sessionID): yielded"
+        )
+        return true
+    }
+
+    /// Reads length-framed app frames off the control stream until the connection ends or the
+    /// bounded frame budget is spent.
+    ///
+    /// Falling out of the loop **throws** rather than returning: a receive loop that simply stopped
+    /// would leave a tunnel that still reads as connected and delivers nothing, which is the silent
+    /// failure the bound exists to avoid rather than to cause.
+    ///
+    /// Heartbeats are filtered here for the same reason ``receiveDatagrams(for:from:)`` filters
+    /// them: since P2 item 15 a beat rides this stream whenever the datagram flow did not negotiate,
+    /// and a liveness token handed to a decoder as an app frame is a frame the coordinator has to
+    /// reject on every beat. One byte-equal comparison against a frozen token keeps it off that
+    /// path entirely.
+    func receiveFrames(for key: MeshLinkKey, from stream: Network.QUIC.Stream<QUICStream>) async throws {
+        for _ in 0..<Self.maxInboundFramesPerConnection {
+            guard !Task.isCancelled, tunnels[key] != nil else { return }
+            let header = try await stream.receive(exactly: NetworkMeshWire.headerByteCount).content
+            let length = try NetworkMeshWire.payloadLength(from: header, ceiling: Self.maxInboundWireBytes)
+            let payload = try await stream.receive(exactly: length).content
+            guard payload != heartbeatDatagram else {
+                noteHeartbeat("received", key: key, over: .controlStream)
+                continue
+            }
+            tunnels[key]?.channel.receive(payload, at: Date())
+        }
+        throw MeshTransportError.frameBudgetSpent
+    }
+
+    /// Reads datagrams: heartbeats are consumed here, everything else is a best-effort app frame.
+    ///
+    /// An oversized datagram is dropped rather than fatal — never disconnect at this layer, or any
+    /// peer could end any session with one malformed frame. Same rule the MC transport floor used.
+    func receiveDatagrams(
+        for key: MeshLinkKey,
+        from datagrams: Network.QUIC.Datagrams<QUICDatagram>
+    ) async {
+        for _ in 0..<Self.maxInboundFramesPerConnection {
+            guard !Task.isCancelled, tunnels[key] != nil else { return }
+            do {
+                let payload = try await datagrams.receive().content
+                guard payload != heartbeatDatagram else {
+                    noteHeartbeat("received", key: key, over: .datagram)
+                    continue
+                }
+                guard Self.withinWireCeiling(payload.count) else {
+                    ProximityAudit.log(
+                        "mesh.quic.droppedOversizedDatagram",
+                        context: ["bytes": "\(payload.count)"]
+                    )
+                    continue
+                }
+                tunnels[key]?.channel.receive(payload, at: Date())
+            } catch {
+                return
+            }
+        }
+        endTunnel(
+            key,
+            cause: .frameBudgetSpent,
+            reason: MeshTransportError.frameBudgetSpent.diagnosticDescription
+        )
+    }
+
+    /// Ends a tunnel, choosing between "the dial failed" and "a live link dropped" by whether the
+    /// control stream ever came up. Charging a disconnect to the dial budget is how a peer that
+    /// reconnects a few times would become permanently undialable.
+    ///
+    /// `notifyOwner` is false for exactly one caller — ``disconnectPeer(_:)``, an eviction the owner
+    /// asked for, which must not be reported back to the owner from inside its own removal funnel.
+    /// The channel is told either way.
+    ///
+    /// `cause` is not decoration. Every end passes through ``noteTunnelEnded(_:cause:tunnel:detail:)``
+    /// before anything else happens, so a tunnel can no longer stop carrying traffic without saying
+    /// so — the silence that made P2 item 13 misread three sequential tunnels as three coexisting
+    /// ones, and then hid the churn behind that misreading for another fortnight.
+    func endTunnel(
+        _ key: MeshLinkKey,
+        cause: MeshTunnelEndReason,
+        reason: String,
+        notifyOwner: Bool = true
+    ) {
+        heartbeats.stop(key)
+        guard let tunnel = tunnels.removeValue(forKey: key) else { return }
+        tunnel.cancelTasks()
+        noteTunnelEnded(key, cause: cause, tunnel: tunnel, detail: reason)
+        guard tunnel.controlStream != nil else {
+            handleDialFailure(key, reason: reason)
+            return
+        }
+        links.noteClosed(key)
+        tunnel.channel.notifyDisconnected(reason: reason)
+        guard notifyOwner else { return }
+        onPeerDisconnected?(tunnel.peer, reason)
+    }
+
+    /// The one line every tunnel end emits, in production and not only under a debug flag.
+    ///
+    /// **Permanent os.log, not a diagnostic hack.** A disconnect that leaves no trace is unreadable
+    /// on a device, where there is no console mirror at all — and the console mirror exists to make
+    /// a headless simulator run legible, not to be the only place the fact is recorded.
+    ///
+    /// What it carries is reasons and counts: the frozen ``MeshTunnelEndReason`` token, whether the
+    /// tunnel had ever gone live, the surviving tunnel count, the framework's own error text, and
+    /// the peer — named by ``peerLabel(for:)``. No payload, no endpoint address, no display name.
+    ///
+    /// **The fingerprint is not public here, and that is the whole of the cutover's fix to this
+    /// line.** `tunnel.verified?.fingerprint` is the peer's *stable* 16-character identity
+    /// fingerprint — the value the ledger, the roster and the moderation record are keyed on — and
+    /// until 2026-09-21 it interpolated at `privacy: .public` on **every teardown**, on a radio
+    /// that had just become the shipping one. That is not a rotating token that a scanner on the
+    /// same link could read for itself; it is the peer's identity, persisted into the system log
+    /// and carried off the device in a sysdiagnose. It is now `privacy: .private`, so the field
+    /// keeps its place on the line for a lane that installs a logging profile and renders
+    /// `<private>` for everyone else. The DEBUG console mirror keeps it in clear, unchanged: that
+    /// is the transcript the runbook's Simulator lanes grep, and its `tunnelEnded <cause>
+    /// <fingerprint> …` shape is quoted verbatim in those lanes' evidence rows.
+    ///
+    /// A benign end logs at `notice` and a fault at `error`, so an owner tidying a slot does not
+    /// read as a radio failure — see ``MeshTunnelEndReason/isBenign``.
+    private func noteTunnelEnded(
+        _ key: MeshLinkKey,
+        cause: MeshTunnelEndReason,
+        tunnel: Tunnel,
+        detail: String
+    ) {
+        let fingerprint = tunnel.verified?.fingerprint ?? MeshTunnelEndReason.unverifiedFingerprint
+        let logged = "tunnelEnded \(cause.rawValue) live=\(tunnel.controlStream != nil) "
+            + "tunnels=\(tunnels.count) for \(peerLabel(for: key)): \(detail)"
+        let echoed = "tunnelEnded \(cause.rawValue) \(fingerprint) "
+            + "live=\(tunnel.controlStream != nil) tunnels=\(tunnels.count) "
+            + "for \(key.rawValue): \(detail)"
+        guard cause.isBenign else {
+            logger.error(
+                "\(logged, privacy: .public) fingerprint=\(fingerprint, privacy: .private)"
+            )
+            MeshTransportConsoleLog.echo(echoed)
+            return
+        }
+        logger.notice(
+            "\(logged, privacy: .public) fingerprint=\(fingerprint, privacy: .private)"
+        )
+        MeshTransportConsoleLog.echo(echoed)
+    }
+
+    /// Books a failed dial attempt and reports the give-up. The retry itself is not scheduled here:
+    /// the shared poll picks it up from ``MeshLinkTable/dueRetries(now:)``, so a retry can never
+    /// outlive the table that authorised it.
+    func handleDialFailure(_ key: MeshLinkKey, reason: String) {
+        switch links.noteDialFailed(key, now: Date()) {
+        case .retry(let attempt, _):
+            logger.debug("QUIC dial attempt \(attempt, privacy: .public) queued after: \(reason, privacy: .public)")
+        case .giveUp(let attempts):
+            report("The QUIC tunnel gave up after \(attempts) attempts: \(reason)")
+        }
+    }
+}
+
+// MARK: - Per-transfer streams
+
+/// One claimed outbound transfer: the budget slot it holds and the connection its stream is opened
+/// on.
+///
+/// The two are claimed together and released together, so a slot cannot be taken for a tunnel whose
+/// connection has already gone.
+private struct MeshTransferClaim {
+
+    /// The budget slot this transfer holds, released when it finishes however it finishes.
+    let id: MeshTransferID
+
+    /// The connection to open this transfer's stream on.
+    let connection: NetworkConnection<QUIC>
+}
+
+private extension NetworkMeshSession {
+
+    /// Claims a transfer stream for one outbound frame, or answers nil to send it on the control
+    /// stream — see ``MeshTransferStreamTable/openOutbound(reliableByteCount:)`` for why those two
+    /// answers are deliberately one value.
+    func claimTransferStream(_ key: MeshLinkKey, byteCount: Int) -> MeshTransferClaim? {
+        guard var tunnel = tunnels[key], let connection = tunnel.connection,
+              let id = tunnel.transfers.openOutbound(reliableByteCount: byteCount) else { return nil }
+        tunnels[key] = tunnel
+        return MeshTransferClaim(id: id, connection: connection)
+    }
+
+    /// Writes one length-framed payload on a stream of its own and waits for the peer's ack.
+    ///
+    /// **The ack is not a protocol feature, it is what keeps the stream open.** A
+    /// `Network.QUIC.Stream`'s lifetime is its Swift object's: returning the moment the last write
+    /// returns releases the stream, and a peer that had not finished reading sees it reset. Reading
+    /// one byte back is the shortest thing that holds the object until the payload has landed — and
+    /// it turns a peer that vanished mid-transfer into a thrown send the caller already handles,
+    /// rather than a silent truncation the receiver would have to detect.
+    ///
+    /// The `defer` releases the budget on every path, including the throw and including a tunnel
+    /// that was torn down while this was in flight (where the optional chain is a no-op because the
+    /// whole record, budget included, is already gone).
+    func sendOverTransferStream(_ payload: Data, key: MeshLinkKey, claim: MeshTransferClaim) async throws {
+        defer { tunnels[key]?.transfers.closeOutbound(claim.id) }
+        do {
+            let stream = try await claim.connection.openStream()
+            noteTransfer("opened", bytes: payload.count, streamID: stream.streamID, key: key)
+            try await stream.send(NetworkMeshWire.header(for: payload.count))
+            try await stream.send(payload, endOfStream: true)
+            _ = try await stream.receive(exactly: MeshTransferStreamTable.ack.count)
+            noteTransfer("sent", bytes: payload.count, streamID: stream.streamID, key: key)
+        } catch {
+            noteTransfer("failed", bytes: payload.count, streamID: 0, key: key)
+            throw PeerTransportError.sendFailed(reason: error.localizedDescription)
+        }
+    }
+
+    /// The dialing side's inbound-stream acceptor.
+    ///
+    /// It exists because that side has none: it opens its own control stream, so every stream
+    /// arriving *at* it is a per-transfer stream and there is nothing to disambiguate. The listening
+    /// side needs no equivalent — its `inboundStreams` acceptor is already running and routes past
+    /// the control stream itself.
+    func acceptTransferStreams(on connection: NetworkConnection<QUIC>, key: MeshLinkKey) async {
+        do {
+            try await connection.inboundStreams { stream in
+                await self.serveTransferStream(stream, on: connection)
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            logger.debug(
+                "QUIC transfer acceptor ended for \(self.peerLabel(for: key), privacy: .public)"
+            )
+        }
+    }
+
+    /// Reads one whole transfer, hands it to the peer's channel as a single frame, and acks it.
+    ///
+    /// **Nothing crosses before the introduction, structurally.** A tunnel records its connection
+    /// only at ``activate(_:connection:stream:datagrams:verified:)``, which is only ever reached
+    /// with a ``MeshVerifiedPeer`` — so a stream opened by an unauthenticated connection resolves to
+    /// no tunnel here, is refused, and never reaches a channel or a decoder.
+    ///
+    /// A refused or failed transfer is dropped rather than fatal, and the stream goes back un-acked
+    /// so the sender's write fails loudly. That was the retired MC photo path's own failure
+    /// semantics, and it is why neither branch touches the tunnel: never disconnect at this layer,
+    /// or one malformed transfer could end any session.
+    func serveTransferStream(
+        _ stream: Network.QUIC.Stream<QUICStream>,
+        on connection: NetworkConnection<QUIC>
+    ) async {
+        guard let key = tunnelKey(for: connection), let id = claimInboundTransfer(key) else {
+            ProximityAudit.log("mesh.quic.refusedTransferStream")
+            return
+        }
+        defer { tunnels[key]?.transfers.closeInbound(id) }
+        do {
+            let header = try await stream.receive(exactly: NetworkMeshWire.headerByteCount).content
+            let length = try NetworkMeshWire.payloadLength(from: header, ceiling: Self.maxInboundWireBytes)
+            let payload = try await stream.receive(exactly: length).content
+            tunnels[key]?.channel.receive(payload, at: Date())
+            noteTransfer("received", bytes: length, streamID: stream.streamID, key: key)
+            try await stream.send(MeshTransferStreamTable.ack, endOfStream: true)
+        } catch {
+            ProximityAudit.log("mesh.quic.transferStreamFailed")
+            noteTransfer("dropped", bytes: 0, streamID: stream.streamID, key: key)
+        }
+    }
+
+    /// Takes one inbound transfer slot on a live tunnel, or answers nil when the peer already holds
+    /// ``MeshTransferStreamTable/maxConcurrentInbound``.
+    func claimInboundTransfer(_ key: MeshLinkKey) -> MeshTransferID? {
+        guard var tunnel = tunnels[key], let id = tunnel.transfers.openInbound() else { return nil }
+        tunnels[key] = tunnel
+        return id
+    }
+
+    /// The tunnel a connection belongs to, by object identity.
+    ///
+    /// Identity rather than a second pendingKey→tunnelKey map: a listening tunnel is promoted from
+    /// its pending key to the key its verified `sid` resolves to, so a map would have two spellings
+    /// of one link to keep in step. The connection object has exactly one. Scanned in sorted key
+    /// order and bounded by the roster cap, like ``liveTunnel(verifiedAs:excluding:)``.
+    func tunnelKey(for connection: NetworkConnection<QUIC>) -> MeshLinkKey? {
+        for candidate in tunnels.keys.sorted(by: { $0.rawValue < $1.rawValue })
+        where tunnels[candidate]?.connection === connection {
+            return candidate
+        }
+        return nil
+    }
+
+    /// Records one transfer crossing: the verb, the payload size, and the stream it rode.
+    ///
+    /// Byte counts and stream ids only — no payload and no peer name. The peer is named by
+    /// ``peerLabel(for:)`` in the system log and by its raw endpoint id in the DEBUG console
+    /// mirror, which is the split ``peerLines(_:key:detail:)`` exists to make. `notice`, not
+    /// `debug`: a transfer is a rare, significant event, and this is the line a Lane C transcript
+    /// reads the photo flow off.
+    func noteTransfer(_ verb: String, bytes: Int, streamID: UInt64, key: MeshLinkKey) {
+        let lines = peerLines("transfer \(verb) bytes=\(bytes) stream=\(streamID)", key: key)
+        logger.notice("\(lines.logged, privacy: .public)")
+        MeshTransportConsoleLog.echo(lines.echoed)
+    }
+}
+
+// MARK: - Signed channel introduction
+
+private extension NetworkMeshSession {
+
+    /// Runs plan §7.2's mutually-signed, exporter-bound channel introduction over a fresh control
+    /// stream, and returns the peer it authenticated.
+    ///
+    /// **Who sends when.** The initiator sends its hello, then the responder sends its. Both then
+    /// derive the same transcript and sign it. The responder *receives and verifies* the initiator's
+    /// signature before sending its own, so it never signs for a peer it has already refused; the
+    /// initiator necessarily sends first, and what it sends is worthless anywhere else because the
+    /// transcript is bound to this tunnel's TLS exporter secret.
+    ///
+    /// - Returns: the verified peer, or nil — which the caller must treat as a teardown. Every
+    ///   failure is reported with its own frozen-English reason: silence here would be
+    ///   indistinguishable from a network fault, and this is the surface that says "that peer is not
+    ///   on your roster" rather than "it didn't connect".
+    func introduce(
+        role: MeshChannelRole,
+        over connection: NetworkConnection<QUIC>,
+        stream: Network.QUIC.Stream<QUICStream>
+    ) async -> MeshVerifiedPeer? {
+        guard let authority = introductionAuthority else {
+            report("The QUIC transport has no introduction authority, so no peer can be authenticated.")
+            return nil
+        }
+        guard let binding = Self.channelBindingHash(for: connection, exporterLabel: tlsExporterLabel) else {
+            report("The QUIC transport could not derive a TLS exporter binding for this tunnel.")
+            return nil
+        }
+        var exchange = MeshChannelIntroductionExchange(
+            role: role,
+            localHello: localHello(from: authority),
+            purposes: purposes
+        )
+        do {
+            let peerHello = try await exchangeHellos(role: role, local: exchange.localHello, over: stream)
+            if let rejection = exchange.receive(
+                peerHello, roster: authority.roster, nonces: &introductionNonces,
+                mayReconcileDivergentEpochs: authority.mayReconcileDivergentEpochs
+            ) {
+                MeshTransportConsoleLog.echo(Self.refusalDetail(rejection, role: role, authority: authority))
+                report("A QUIC tunnel was refused: \(rejection.diagnosticDescription)")
+                return nil
+            }
+            guard let transcript = exchange.bind(channelBindingHash: binding) else {
+                report("The QUIC transport could not derive a channel-introduction transcript.")
+                return nil
+            }
+            let signed = MeshChannelIntroduction(
+                channelBindingHash: binding,
+                signature: MeshIntroductionChaos.signature(
+                    try authority.signChannelIntroduction(transcript)
+                )
+            )
+            return try await settle(exchange, role: role, signed: signed, over: stream)
+        } catch {
+            report("A QUIC channel introduction did not complete: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// This device's half of the hello. The `sid` is the one it advertises, so a peer can match this
+    /// tunnel to the advertisement it browsed.
+    ///
+    /// The nonce comes through ``MeshIntroductionChaos/introductionNonce()`` rather than directly
+    /// from ``MeshChannelIntroductionFormat/randomNonce()``: in Release the two are the same call,
+    /// and in DEBUG the seam lets a run deliberately replay a nonce so the peer's refusal is
+    /// observable over a real radio.
+    func localHello(from authority: any MeshIntroductionAuthority) -> MeshChannelHello {
+        MeshChannelHello(
+            protocolVersion: MeshChannelIntroductionFormat.protocolVersion,
+            meshID: authority.meshID,
+            epochRef: authority.epochRef,
+            signingPublicKey: authority.localSigningPublicKey,
+            nonce: MeshIntroductionChaos.introductionNonce(),
+            sessionID: localSessionID
+        )
+    }
+
+    /// One console line describing a refused hello *and what it was judged against*.
+    ///
+    /// The reason alone cannot tell "nobody is on my roster" from "somebody is, but not you", and
+    /// those are two different rows of the rejection matrix. DEBUG mirror only — the `report(_:)`
+    /// text and the `Logger` line are unchanged.
+    static func refusalDetail(
+        _ rejection: MeshIntroductionRejection,
+        role: MeshChannelRole,
+        authority: any MeshIntroductionAuthority
+    ) -> String {
+        let roster = authority.roster
+        return "refused \(rejection) as \(role): mesh=\(authority.meshID) epoch=\"\(authority.epochRef)\" "
+            + "rosterMembers=\(roster.memberCount) rosterBarred=\(roster.barredCount)"
+    }
+
+    /// Exchanges hellos in the order the role fixes: the dialer speaks first.
+    func exchangeHellos(
+        role: MeshChannelRole,
+        local: MeshChannelHello,
+        over stream: Network.QUIC.Stream<QUICStream>
+    ) async throws -> MeshChannelHello {
+        guard role == .initiator else {
+            let peer = try await receiveIntroductionFrame(MeshChannelHello.self, from: stream)
+            try await sendIntroductionFrame(local, over: stream)
+            return peer
+        }
+        try await sendIntroductionFrame(local, over: stream)
+        return try await receiveIntroductionFrame(MeshChannelHello.self, from: stream)
+    }
+
+    /// Exchanges signed introductions and reports the verdict. The responder verifies before it
+    /// signs its half onto the wire.
+    func settle(
+        _ exchange: MeshChannelIntroductionExchange,
+        role: MeshChannelRole,
+        signed: MeshChannelIntroduction,
+        over stream: Network.QUIC.Stream<QUICStream>
+    ) async throws -> MeshVerifiedPeer? {
+        let outcome: MeshChannelIntroductionOutcome
+        if role == .initiator {
+            try await sendIntroductionFrame(signed, over: stream)
+            outcome = exchange.review(
+                try await receiveIntroductionFrame(MeshChannelIntroduction.self, from: stream)
+            )
+        } else {
+            outcome = exchange.review(
+                try await receiveIntroductionFrame(MeshChannelIntroduction.self, from: stream)
+            )
+            if outcome.verifiedPeer != nil {
+                try await sendIntroductionFrame(signed, over: stream)
+            }
+        }
+        guard let peer = outcome.verifiedPeer else {
+            if case .rejected(let rejection) = outcome {
+                MeshTransportConsoleLog.echo("refused \(rejection) as \(role) at the signed introduction")
+                report("A QUIC tunnel was refused: \(rejection.diagnosticDescription)")
+            }
+            return nil
+        }
+        return peer
+    }
+
+    /// SHA-256 of this connection's TLS exporter secret — the value that is equal at the two ends of
+    /// one live tunnel and nowhere else.
+    ///
+    /// The label is the host namespace's `keyDerivation.meshTLSExporterV1`, which the radio read at
+    /// construction and hands in here, never a literal, and deliberately **not** the DEBUG probe's
+    /// `meshProbeTLSExporterV1`: two builds deriving the same secret from the same connection would
+    /// make the spike a signing oracle for the shipping introduction. `CryptographicDomainSeparationTests`
+    /// pins the two apart. Its role, `.tlsExporterLabel`, takes the label whole: the exporter gets its
+    /// bytes and their count, with no terminator and no count in front.
+    ///
+    /// - Parameters:
+    ///   - connection: The live tunnel whose exporter secret is bound.
+    ///   - exporterLabel: The label the secret is derived under.
+    /// - Returns: The binding hash, or nil when the connection has no exporter secret to give.
+    static func channelBindingHash(
+        for connection: NetworkConnection<QUIC>,
+        exporterLabel: ProximityCryptographicPurpose
+    ) -> Data? {
+        let label = exporterLabel.rawValue
+        let secret = label.withCString { pointer in
+            sec_protocol_metadata_create_secret(
+                connection.securityProtocolMetadata,
+                label.utf8.count,
+                pointer,
+                MeshChannelIntroductionFormat.channelBindingByteCount
+            )
+        }
+        guard let secret else { return nil }
+        return Data(SHA256.hash(data: Data(secret as DispatchData)))
+    }
+
+    /// Writes one length-framed JSON handshake frame.
+    func sendIntroductionFrame(
+        _ value: some Encodable,
+        over stream: Network.QUIC.Stream<QUICStream>
+    ) async throws {
+        let payload = try JSONEncoder().encode(value)
+        guard payload.count <= MeshChannelIntroductionFormat.maxFrameByteCount else {
+            throw MeshTransportError.oversizedFrame(byteCount: payload.count)
+        }
+        // One write, for the reason ``sendFramed(_:over:)`` gives at length: a length prefix and its
+        // payload written as two awaited sends can be split by another writer on the same stream.
+        // The handshake has only one writer per stream today, so this is uniformity rather than a
+        // fix — but a framing rule that holds in one place and not the other is the kind that gets
+        // broken by the next caller.
+        var frame = NetworkMeshWire.header(for: payload.count)
+        frame.append(payload)
+        try await stream.send(frame)
+    }
+
+    /// Reads one length-framed JSON handshake frame, under the handshake's own small ceiling.
+    ///
+    /// The ceiling is ``MeshChannelIntroductionFormat/maxFrameByteCount``, not the transport's
+    /// ``maxInboundWireBytes``: these bytes come from a peer that has proved nothing yet, so the
+    /// only sizes it may name are handshake-sized ones.
+    func receiveIntroductionFrame<T: Decodable>(
+        _ type: T.Type,
+        from stream: Network.QUIC.Stream<QUICStream>
+    ) async throws -> T {
+        let header = try await stream.receive(exactly: NetworkMeshWire.headerByteCount).content
+        let length = try NetworkMeshWire.payloadLength(
+            from: header,
+            ceiling: MeshChannelIntroductionFormat.maxFrameByteCount
+        )
+        let payload = try await stream.receive(exactly: length).content
+        return try JSONDecoder().decode(type, from: payload)
+    }
+}
+
+// MARK: - Sending and the shared poll
+
+private extension NetworkMeshSession {
+
+    /// Writes one length-framed payload to a control stream, in **one** write.
+    ///
+    /// The single write is the whole point, and it is not a micro-optimisation. Every frame on a
+    /// tunnel shares one control stream, and `MeshNetworkManager` fires its envelopes as independent
+    /// tasks — a photo manifest, a vouch list, a shop catalogue and a shop request all leave within
+    /// the same instant of a slot committing. Writing the header and the payload as two awaited
+    /// sends let two of those tasks interleave at the suspension between them, so the peer read one
+    /// frame's header followed by another frame's first four bytes as a length. The reader then
+    /// refused an implausible length (``MeshTransportError/invalidFrameLength``) and the tunnel died
+    /// — observed on the Lane C app-flow run, every time, within a second of the first slot commit.
+    ///
+    /// One contiguous buffer per frame closes it: concurrent sends can be ordered either way, but
+    /// neither can land inside the other. The bytes on the wire are identical.
+    ///
+    /// The per-transfer streams do not need this and deliberately do not copy: a transfer stream is
+    /// opened by one task, written by that task alone, and closed with it, so it has no second
+    /// writer to interleave with — and a bulk payload is exactly the one it would be wasteful to
+    /// concatenate.
+    func sendFramed(_ payload: Data, over stream: Network.QUIC.Stream<QUICStream>) async throws {
+        var frame = NetworkMeshWire.header(for: payload.count)
+        frame.append(payload)
+        do {
+            try await stream.send(frame)
+        } catch {
+            throw PeerTransportError.sendFailed(reason: error.localizedDescription)
+        }
+    }
+
+    /// Writes one QUIC datagram.
+    func sendDatagram(
+        _ payload: Data,
+        over datagrams: Network.QUIC.Datagrams<QUICDatagram>
+    ) async throws {
+        do {
+            try await datagrams.send(payload)
+        } catch {
+            throw PeerTransportError.sendFailed(reason: error.localizedDescription)
+        }
+    }
+
+    /// Starts the one timer this radio owns.
+    ///
+    /// One poll for every link, rather than a timer per link per duty: N self-rescheduling timers is
+    /// N ways for a closure to outlive what it was scheduled for, and this codebase has been bitten
+    /// by exactly that. Bounded at ``maxPollTicks`` (Power of 10 rule 2) — six hours at 1 Hz, the
+    /// session ceiling plan §3 sets.
+    func startPoll() {
+        guard pollTask == nil else { return }
+        pollTask = Task { @MainActor [weak self] in
+            for _ in 0..<NetworkMeshSession.maxPollTicks {
+                do {
+                    try await Task.sleep(for: .seconds(NetworkMeshSession.pollIntervalSeconds))
+                } catch {
+                    return
+                }
+                guard let self, self.isRunning else { return }
+                self.tick(now: Date())
+            }
+        }
+    }
+
+    /// One tick: re-dial what is due, beat what is due. Both lists are capped by the roster cap, so
+    /// both loops are bounded by construction.
+    func tick(now: Date) {
+        expirePendingInbound(now: now)
+        reproposeIdleBrowsedPeers(now: now)
+        for key in links.dueRetries(now: now) {
+            guard browsedEndpoints[key] != nil else {
+                links.forget(key)
+                continue
+            }
+            guard links.admitDial(to: key, now: now) == .admit else { continue }
+            startOutboundTunnel(to: key)
+        }
+        for key in heartbeats.due(now: now) {
+            heartbeats.noteSent(key, now: now)
+            sendHeartbeat(to: key)
+        }
+    }
+
+    /// Sends one heartbeat on whichever pipe this tunnel actually has.
+    ///
+    /// **The channel is asked, not assumed** (P2 item 15). Plan §7.1 puts heartbeats on QUIC
+    /// datagrams, so a fresh tunnel tries that first; if the write throws, the tunnel latches
+    /// ``Tunnel/datagramWriteFailed`` and every later beat rides the control stream. See
+    /// ``MeshHeartbeatChannel`` for why the *reported* usable frame size is recorded as evidence but
+    /// never used as the gate.
+    ///
+    /// A failed datagram write is **not** a dead peer and no longer ends the tunnel. Only a beat
+    /// that the reliable control stream also refuses does that — a link that cannot carry 22 framed
+    /// bytes really is not a link.
+    func sendHeartbeat(to key: MeshLinkKey) {
+        guard let tunnel = tunnels[key] else { return }
+        let channel = MeshHeartbeatChannel.choice(
+            hasDatagramFlow: tunnel.datagrams != nil,
+            datagramWriteFailed: tunnel.datagramWriteFailed
+        )
+        guard channel == .datagram, let datagrams = tunnel.datagrams else {
+            guard let stream = tunnel.controlStream else { return }
+            noteHeartbeat("sending", key: key, over: .controlStream)
+            beat(key) { try await self.sendFramed(self.heartbeatDatagram, over: stream) }
+            return
+        }
+        noteHeartbeat("sending", key: key, over: .datagram)
+        beat(key, isDatagram: true) {
+            try await datagrams.send(self.heartbeatDatagram)
+        }
+    }
+
+    /// Runs one heartbeat write off the main actor's queue and applies the failure policy.
+    ///
+    /// The two channels differ only in the write, so the policy lives here once rather than twice.
+    /// A failed *datagram* beat latches the tunnel onto the control stream and is otherwise
+    /// harmless; a failed *control stream* beat ends the tunnel, naming
+    /// ``MeshTunnelEndReason/heartbeatSendFailed`` instead of ending it without a word.
+    func beat(
+        _ key: MeshLinkKey,
+        isDatagram: Bool = false,
+        write: @escaping @MainActor () async throws -> Void
+    ) {
+        Task { @MainActor [weak self] in
+            do {
+                try await write()
+            } catch {
+                self?.heartbeatFailed(key, isDatagram: isDatagram, error: error)
+            }
+        }
+    }
+
+    /// One failed heartbeat write: latch and carry on, or end the tunnel.
+    func heartbeatFailed(_ key: MeshLinkKey, isDatagram: Bool, error: Error) {
+        guard isDatagram else {
+            endTunnel(
+                key,
+                cause: .heartbeatSendFailed,
+                reason: "A heartbeat could not be sent: \(error.localizedDescription)"
+            )
+            return
+        }
+        tunnels[key]?.datagramWriteFailed = true
+        let lines = peerLines(
+            "heartbeat datagram refused, falling back to the control stream",
+            key: key,
+            detail: error.localizedDescription
+        )
+        logger.notice("\(lines.logged, privacy: .public)")
+        MeshTransportConsoleLog.echo(lines.echoed)
+    }
+
+    /// Records one heartbeat crossing, at `debug` level plus the console mirror.
+    ///
+    /// Debug rather than notice on purpose: two lines a minute per link is the right volume for a
+    /// Lane C transcript and the wrong volume for a device's persisted log. What it makes directly
+    /// observable is the thing that was only ever inferred before — that beats are *flowing*, and on
+    /// which pipe.
+    func noteHeartbeat(_ verb: String, key: MeshLinkKey, over channel: MeshHeartbeatChannel) {
+        let lines = peerLines("heartbeat \(verb) over \(channel)", key: key)
+        logger.debug("\(lines.logged, privacy: .public)")
+        MeshTransportConsoleLog.echo(lines.echoed)
+    }
+
+    /// Records one inbound tunnel this session verified and then declined to keep.
+    ///
+    /// Mirrored to the console log rather than left at `debug`, because a declined inbound is
+    /// *silent on both ends otherwise*: the dialer sees only its own control stream die with an
+    /// `ENOTCONN`, and this side logs nothing a `--console-pty` transcript can read. That silence
+    /// is what made the runbook's three-node bring-up unreadable — an edge that never formed looked
+    /// identical to an edge nobody attempted. `notice`, not `error`: a duplicate collapsing or an
+    /// owner tidying a slot is ordinary, and only the *absence* of a reason was ever the fault.
+    ///
+    /// - Parameters:
+    ///   - reason: Frozen English naming who refused — `owner`, or the ``MeshLinkAdmission`` case.
+    ///   - key: The link the refused tunnel would have lived under.
+    func noteInboundRefusal(_ reason: String, key: MeshLinkKey) {
+        let lines = peerLines("inbound tunnel refused \(reason)", key: key)
+        logger.notice("\(lines.logged, privacy: .public)")
+        MeshTransportConsoleLog.echo(lines.echoed)
+    }
+
+    /// Logs a diagnostic and hands it to the owner. Frozen English: this is the surface that makes
+    /// a missing `NSBonjourServices` entry or a declined Local Network prompt visible instead of
+    /// silently dead, and it is read by a developer, not a user.
+    func report(_ message: String) {
+        logger.error("\(message, privacy: .public)")
+        MeshTransportConsoleLog.echo(message)
+        onTransportError?(message)
+    }
+}

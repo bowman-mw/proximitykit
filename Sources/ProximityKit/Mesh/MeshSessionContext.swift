@@ -1,0 +1,383 @@
+// MeshSessionContext.swift
+// ProximityKit/Mesh
+//
+// P3 item 2 (plan §8.1): the ONE value a mesh session persists. Everything about who belongs is
+// carried here as the pure ledger of item 1; everything derived from it (the roster, the connected
+// set, the coordinator, quorum, "final pair") is recomputed on read and never stored.
+//
+// This file is the documented policy reversal of plan §17.3: until P3, ProximityKit persisted no
+// session state at all. It now persists exactly this, sealed, and the things that stay memory-only
+// say so by contrast — above all `MeshGroupKey`, which is still never written anywhere.
+
+import Foundation
+
+// MARK: - MeshSessionContextSchema
+
+/// The at-rest schema constants for ``MeshSessionContext``.
+///
+/// ``current`` is the integer actually written into every context, and the ONLY value the decoder
+/// accepts — a context stamped with any other version is refused as corrupt rather than partially
+/// decoded, because a partially decoded membership ledger is a roster that silently lost members.
+/// The blob's sealing domain is its store's column seal (`fernlet.mesh.session-context.v1` for
+/// Fernlet), which a schema bump never changes; the unused `token` that mirrored it was deleted in
+/// ProximityKit plan step A0.2.8, and `ProximityNamespaceGoldenTests` pins that spelling as a
+/// literal row against the label instead.
+///
+/// **Bumping it is a deliberate act.** Adding a field with a default is *usually* compatible and
+/// needs no bump; changing the MEANING of a field, or narrowing one, always does. The third
+/// trigger, which version 3 is: a field whose **absence** would be read as a meaningful answer
+/// rather than as "not written yet" — see the version-3 discussion below.
+///
+/// ## Version 2 (P3 item 4) — and why a v1 file is corrupt, not migrated
+///
+/// v2 narrows ``MeshSessionContext/epochHeads`` from an opaque `[String]` placeholder to
+/// `[MeshEpochRef]`: the same JSON shape (each head is still one string) with a strictly narrower
+/// meaning (each string must now be a canonical ``MeshEpochRef``). There is **no migration**, and
+/// a v1 file lands in the store's `corrupt` state like any other unreadable one. That is honest
+/// rather than lazy: the store shipped in this same phase and no build that wrote a v1 file has
+/// ever run on a device, so a v1 file on disk is not an old user's data — it is a file this build
+/// cannot account for, and `corrupt` is exactly the state that refuses to overwrite such a thing.
+/// If a v1 file could ever have held a real roster, this would have to be a migration instead.
+///
+/// ## Version 3 (P6 item 1) — an additive field that bumps anyway, and why
+///
+/// v3 adds ``MeshSessionContext/keyAdvertisements`` and retires the dead
+/// `routingInventoryDigest`. The addition is decode-compatible on its face, so by the rule above it
+/// would not have owed a bump — and it takes one, as a recorded policy act, because the field's
+/// **absence is semantically load-bearing** in a way `localTermination`'s was not. A device that
+/// restored a v2 context would come back with an empty advertisement set and then silently refuse
+/// every mint to a member it was not linked to at that instant: the exact D-13.22 outage this field
+/// exists to close, re-created by a stale file and invisible. Treating a v2 blob as `corrupt` makes
+/// that loud, and `corrupt` refuses to overwrite rather than destroying anything.
+///
+/// The refusal is **exact equality in both directions** (``MeshSessionContext/init(from:)``), so a
+/// v3 blob read by a v2 build is also `corrupt`. That is part of the same act: only the owner's own
+/// device has ever written one of these files and it holds test data only, so the rollback direction
+/// costs nothing a migration would have had to buy.
+nonisolated enum MeshSessionContextSchema {
+
+    /// The schema version this build writes and the only one it reads. See the type's discussion
+    /// for what v2 and v3 changed, and why an older file is refused rather than migrated.
+    static let current = 3
+
+    /// Epoch branch heads retained (plan §9 caps the keyring; 8 is the roster cap, and a mesh
+    /// cannot have more live branches than it has members).
+    static let maxEpochHeads = MeshMembershipBounds.maxRosterMembers
+}
+
+// MARK: - MeshSessionContextDecodingError
+
+/// Why a decoded ``MeshSessionContext`` was refused before any of its fields were trusted.
+///
+/// Thrown from `init(from:)`, so it surfaces through `JSONDecoder` and lands in the store's
+/// `corrupt` state — deliberately NOT in `absent`. A context this build cannot read is not a
+/// green field: overwriting it would destroy membership records a newer build wrote.
+nonisolated enum MeshSessionContextDecodingError: Error, Equatable, Sendable {
+    /// The blob decoded, but its `schemaVersion` is not ``MeshSessionContextSchema/current``.
+    /// Carries the version found so a refusal can name it.
+    case unsupportedSchemaVersion(Int)
+}
+
+// MARK: - MeshSessionTerminationReason
+
+/// Why this device's participation in a mesh ended, for good (plan §8.2).
+///
+/// Frozen English `rawValue`s: they are written into the sealed context and read back after a
+/// relaunch, so they are at-rest tokens and never localize. The display copy that a UI would show
+/// for "this session has ended" is forked separately and does not live here.
+///
+/// The distinction ``endsTheMeshForEveryone`` draws is plan §8.3's: a departure or a removal takes
+/// **this device** out of a mesh that carries on without it, while a termination, a development or
+/// the ceiling ends the mesh itself.
+nonisolated enum MeshSessionTerminationReason: String, Codable, Equatable, Sendable, CaseIterable {
+
+    /// This device sent its own signed departure record.
+    case ownDeparture = "own-departure"
+
+    /// A verified removal record named this device (plan §10.4's vote completed elsewhere).
+    case removedFromRoster = "removed-from-roster"
+
+    /// A peer's `terminated.v1` verified against the merged roster.
+    case verifiedTerminationRecord = "verified-termination"
+
+    /// This device signed the termination as a member of the final pair.
+    case finalPairTermination = "final-pair"
+
+    /// The signed absolute `hardDeadline` was reached.
+    case hardDeadlineSigned = "hard-deadline-signed"
+
+    /// The local monotonic guard reached the ceiling first — a wall clock that moved backwards
+    /// cannot lengthen a session (plan §8.2).
+    case hardDeadlineMonotonic = "hard-deadline-monotonic"
+
+    /// The epoch counter cap was reached, so no further key can be minted (plan §8.4).
+    case epochCounterExhausted = "epoch-counter-exhausted"
+
+    /// The user developed the mesh: a permanent rejoin bar.
+    case developed = "developed"
+
+    /// Whether this reason ends the mesh for every member, as opposed to only for this device.
+    var endsTheMeshForEveryone: Bool {
+        switch self {
+        case .ownDeparture, .removedFromRoster: return false
+        case .verifiedTerminationRecord, .finalPairTermination, .hardDeadlineSigned,
+             .hardDeadlineMonotonic, .epochCounterExhausted, .developed:
+            return true
+        }
+    }
+}
+
+// MARK: - MeshSessionLocalTermination
+
+/// The durable mark that this device's participation in a mesh ended (plan §8.2's rejoin bar).
+///
+/// Written into the sealed context **before** the frame that tells anybody about it is sent (plan
+/// §3.6), which is what makes the bar survive a force-quit: a session that ended and then died
+/// before it could say so still comes back ended.
+nonisolated struct MeshSessionLocalTermination: Codable, Equatable, Sendable {
+
+    /// Why it ended. A frozen token.
+    let reason: MeshSessionTerminationReason
+
+    /// When this device recorded the ending. Diagnostic and ordering only — the *authority* is the
+    /// signed record or the ceiling, never this timestamp.
+    let at: Date
+
+    /// Builds a mark.
+    ///
+    /// - Parameters:
+    ///   - reason: Why the session ended.
+    ///   - at: When this device recorded it.
+    init(reason: MeshSessionTerminationReason, at: Date) {
+        self.reason = reason
+        self.at = at
+    }
+}
+
+// MARK: - MeshSessionContext
+
+/// Everything one device durably knows about one mesh session (plan §8.1).
+///
+/// Sealed at rest by ``MeshSessionStore`` and by nothing else — there is no plaintext writer, and
+/// no second copy in `UserDefaults`, the synced blob, or CloudKit.
+///
+/// ## What is here, and what is deliberately not
+///
+/// - **The membership ledger** (``ledger``) is the whole of "who belongs". The roster is
+///   `admitted − departed − removed`, derived per read via ``MeshMembershipLedger/derivedRoster``
+///   and never stored, so reload-after-process-death and merge-after-partition are literally the
+///   same code path (plan §10.3).
+/// - **The key advertisements** (``keyAdvertisements``) are *addressing* for the members the ledger
+///   already admitted — each member's own signed key-agreement public key, verified against the
+///   ledger's admissions and folded into a grow-only, conflict-refusing set (P6 item 1). They are
+///   public keys of admitted members, which is why they belong in the same sealed file as the
+///   roster rather than in a sidecar of their own.
+/// - **The group control key is NOT here** and never will be. `MeshGroupKey` stays memory-only:
+///   after a process death the session resumes by reconnecting and rotating (plan §8.3), and
+///   content never depends on the control key (invariant 3). That doc guard is load-bearing
+///   precisely because THIS type broke the "ProximityKit persists nothing" rule beside it.
+/// - **No message content.** The live transcript (its host's: Fernlet's is FernletSocial's
+///   `SessionMessageStore`) stays memory-only; the
+///   durable half of a session is membership, not conversation.
+/// - **No display copy.** Every string here is a frozen token or a fingerprint.
+///
+/// ## Concurrency
+///
+/// `nonisolated` against the module's `defaultIsolation(MainActor.self)` and `Sendable`: a pure
+/// immutable-ish value read and written by a nonisolated store, exactly like the membership
+/// records it carries.
+nonisolated struct MeshSessionContext: Codable, Equatable, Sendable {
+
+    /// The at-rest schema stamp. Always ``MeshSessionContextSchema/current`` on write; any other
+    /// value on read is refused (``MeshSessionContextDecodingError/unsupportedSchemaVersion(_:)``).
+    let schemaVersion: Int
+
+    /// The mesh this context describes. Every membership record in ``ledger`` carries the same id;
+    /// mixing two meshes in one file is a bug the store cannot detect for you.
+    let meshID: UUID
+
+    /// The mesh protocol version agreed at creation, mirrored from the mesh descriptor.
+    let protocolVersion: Int
+
+    /// When the mesh was created — signed into the descriptor, identical on every member.
+    let createdAt: Date
+
+    /// `createdAt + 6 h`: the absolute membership ceiling (plan §8.2). Signed at creation and
+    /// identical on every member, so it is enforceable across a process death; the local monotonic
+    /// guard that pairs with it belongs to the state machine (item 6), not to this value.
+    let hardDeadline: Date
+
+    /// The four grow-only signed record sets membership is made of (item 1). The only mutable
+    /// field that grows, and its growth is bounded by ``MeshMembershipBounds``.
+    var ledger: MeshMembershipLedger
+
+    /// Current epoch branch head(s) — plan §8.4's real model, as of schema 2.
+    ///
+    /// **Plural on purpose.** Two members that rotated independently while partitioned hold
+    /// divergent epochs at the same counter, and §8.4 says neither is wrong: they *coexist* until
+    /// a merge mints a strictly greater successor. Both belong here, which is what makes that
+    /// state representable across a process death instead of only inside one run
+    /// (``MeshEpochAcceptance/mergedHeads(_:adding:limit:)`` is how one is added).
+    ///
+    /// Each head is stored as its canonical string, so the at-rest JSON shape is unchanged from
+    /// schema 1 while the meaning is strictly narrower — a head that is not a canonical
+    /// ``MeshEpochRef`` now fails the decode instead of being carried as an opaque token. Capped at
+    /// ``MeshSessionContextSchema/maxEpochHeads`` on both init and decode — a bound, never a trap.
+    ///
+    /// The **keys** those epochs name are not here and never will be: ``MeshEpochKeyring`` is
+    /// memory-only, exactly like the ``MeshGroupKey`` values it holds.
+    var epochHeads: [MeshEpochRef]
+
+    /// Last authenticated external heartbeat, which resets the 30-minute idle timer (plan §8.2).
+    /// Nil until one is seen.
+    var lastExternalHeartbeat: Date?
+
+    /// Set when this device develops the mesh. A **permanent rejoin bar**: a developed mesh can
+    /// never be re-entered, which is why the flag is durable rather than derived from live state.
+    var developedLocally: Bool
+
+    /// Every admitted member's own signed key-agreement public key, as far as this device has been
+    /// told (P6 item 1). The durable third source the mint's resolver accepts.
+    ///
+    /// **Addressing, not membership.** A row here can never create, end or revoke a membership: it
+    /// is verified *against* ``ledger``'s admissions, and a fingerprint with no admission has no
+    /// row. It lives beside the ledger rather than inside it because it is not union-mergeable the
+    /// way a record set is — two different keys under one fingerprint is a conflict a merge must
+    /// refuse rather than resolve, which is why
+    /// ``MeshKeyAgreementAdvertisementSet`` is its own type with its own fold.
+    ///
+    /// This is the field that makes a **resumption** addressable: a restart, an idle-lapse resume or
+    /// a rejoin restores the ledger and not the memory-only session roster, and without this the
+    /// mint refused every destination that was not live at that instant.
+    var keyAdvertisements: MeshKeyAgreementAdvertisementSet
+
+    /// The durable ending mark (P3 item 6, plan §8.2). Nil while this device is still a member.
+    ///
+    /// **Additive, and it did not bump the schema** (it landed at 2 and stayed there). The at-rest
+    /// shape does not move: a context written before this field existed decodes with a nil mark
+    /// (``init(from:)`` uses `decodeIfPresent`), and a nil mark is honestly "this device has not
+    /// ended" — the absence says the same thing the value would. Contrast
+    /// ``keyAdvertisements``, whose absence would be read as "nobody is addressable" and which
+    /// therefore took version 3 (see ``MeshSessionContextSchema``); and contrast `epochHeads`, whose
+    /// v2 bump was a NARROWING.
+    ///
+    /// The ledger cannot carry this on its own: an ending recorded here is often one this device
+    /// signed for itself (its own departure, the ceiling), and the verifier is fail-closed against
+    /// a ledger that holds no admission for the signer — so the ending would be refused into the
+    /// very record set that was supposed to remember it. This field is the honest home until item
+    /// 7 gives joiners a real ledger.
+    var localTermination: MeshSessionLocalTermination?
+
+    /// Whether the person has already been SHOWN this context's ending — the one-shot mark behind
+    /// the Friends tab's "previous session ended" card (owner-calls item 3, 2026-09-22).
+    ///
+    /// **Why it exists.** The context of a session this device left, was removed from, or outlived
+    /// is deliberately never reaped: it is where the durable rejoin bar is re-derived from at every
+    /// launch (``recordedEndingReason(selfFingerprint:)``), and deleting it would let a relaunch
+    /// rejoin a mesh it left. But the launch restore reads it on EVERY cold start, and
+    /// `MeshSessionResumePresentation` turned every one of those reads into the same card — "You
+    /// left the previous session" at every launch until a new session overwrote the file, with only
+    /// a per-view-instance dismissal to hide it. This mark is what lets the bar stay durable while
+    /// the NEWS is told once: `MeshNetworkManager.acknowledgeSessionEndingPresented()` sets it when
+    /// the card appears, and the presentation answers `.nothing` for an ending already shown.
+    ///
+    /// **Additive, and it did not bump the schema** — ``localTermination``'s precedent exactly. A
+    /// context written before this field existed decodes `false`, which is the conservative
+    /// direction: an old ending is presented once more and then marked, never silently swallowed.
+    /// It lives inside the sealed file rather than in `UserDefaults` so it shares the context's
+    /// whole lifecycle: delete-all already wipes it with the file (`MeshSessionStore.wipeForDeleteAll`),
+    /// a new session's context replaces it along with the ending it described, and it is sealed
+    /// like everything beside it — no new surface and no new disposition row.
+    var endingPresented: Bool
+
+    /// Builds a context, stamping the current schema version and clamping ``epochHeads``.
+    ///
+    /// - Parameters:
+    ///   - meshID: The mesh this context describes.
+    ///   - protocolVersion: The mesh protocol version agreed at creation.
+    ///   - createdAt: Mesh creation instant, from the signed descriptor.
+    ///   - hardDeadline: `createdAt + 6 h`, from the signed descriptor.
+    ///   - ledger: Membership records known so far; defaults to empty.
+    ///   - epochHeads: Epoch branch heads; clamped to the cap.
+    ///   - lastExternalHeartbeat: Last authenticated heartbeat, if any.
+    ///   - developedLocally: Whether this device has developed the mesh.
+    ///   - keyAdvertisements: The verified key advertisements folded so far; defaults to empty.
+    ///   - localTermination: The durable ending mark, if this device's participation has ended.
+    ///   - endingPresented: Whether the person has been shown this context's ending; defaults to not.
+    init(
+        meshID: UUID,
+        protocolVersion: Int,
+        createdAt: Date,
+        hardDeadline: Date,
+        ledger: MeshMembershipLedger = .empty,
+        epochHeads: [MeshEpochRef] = [],
+        lastExternalHeartbeat: Date? = nil,
+        developedLocally: Bool = false,
+        keyAdvertisements: MeshKeyAgreementAdvertisementSet = .empty,
+        localTermination: MeshSessionLocalTermination? = nil,
+        endingPresented: Bool = false
+    ) {
+        self.schemaVersion = MeshSessionContextSchema.current
+        self.meshID = meshID
+        self.protocolVersion = protocolVersion
+        self.createdAt = createdAt
+        self.hardDeadline = hardDeadline
+        self.ledger = ledger
+        self.epochHeads = Array(epochHeads.prefix(MeshSessionContextSchema.maxEpochHeads))
+        self.lastExternalHeartbeat = lastExternalHeartbeat
+        self.developedLocally = developedLocally
+        self.keyAdvertisements = keyAdvertisements
+        self.localTermination = localTermination
+        self.endingPresented = endingPresented
+    }
+
+    /// The ending this context already records, or nil while this device is still a member.
+    ///
+    /// Four independent authorities, checked in the order of how *specific* they are: the durable
+    /// mark this device wrote, its own development flag, a verified termination record in the
+    /// ledger, and its own departure record. Any one of them is a permanent bar — plan §8.2's
+    /// "a developed or terminated mesh can never be rejoined" — and a relaunch re-derives it from
+    /// exactly these bytes, which is what stops a restart resurrecting an ended session.
+    ///
+    /// - Parameter selfFingerprint: This device's fingerprint, for the own-departure check.
+    /// - Returns: The reason, or nil.
+    func recordedEndingReason(selfFingerprint: String) -> MeshSessionTerminationReason? {
+        if let mark = localTermination { return mark.reason }
+        if developedLocally { return .developed }
+        if ledger.termination != nil { return .verifiedTerminationRecord }
+        if ledger.departures.contains(fingerprint: selfFingerprint) { return .ownDeparture }
+        return nil
+    }
+
+    /// Decodes a context, refusing any schema version this build does not own and clamping the
+    /// one unbounded array.
+    ///
+    /// The version check runs FIRST, before any other key is touched: a future build's context must
+    /// be refused as a whole, not silently reinterpreted field by field. The clamp mirrors the
+    /// membership record sets, which do the same on their own decode — bounded growth is a property
+    /// of the at-rest format, not only of the writer (Power of 10 R2/R3).
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let version = try container.decode(Int.self, forKey: .schemaVersion)
+        guard version == MeshSessionContextSchema.current else {
+            throw MeshSessionContextDecodingError.unsupportedSchemaVersion(version)
+        }
+        schemaVersion = version
+        meshID = try container.decode(UUID.self, forKey: .meshID)
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        hardDeadline = try container.decode(Date.self, forKey: .hardDeadline)
+        ledger = try container.decode(MeshMembershipLedger.self, forKey: .ledger)
+        let heads = try container.decodeIfPresent([MeshEpochRef].self, forKey: .epochHeads) ?? []
+        epochHeads = Array(heads.prefix(MeshSessionContextSchema.maxEpochHeads))
+        lastExternalHeartbeat = try container.decodeIfPresent(Date.self, forKey: .lastExternalHeartbeat)
+        developedLocally = try container.decodeIfPresent(Bool.self, forKey: .developedLocally) ?? false
+        keyAdvertisements = try container.decodeIfPresent(
+            MeshKeyAgreementAdvertisementSet.self, forKey: .keyAdvertisements
+        ) ?? .empty
+        localTermination = try container.decodeIfPresent(
+            MeshSessionLocalTermination.self, forKey: .localTermination
+        )
+        endingPresented = try container.decodeIfPresent(Bool.self, forKey: .endingPresented) ?? false
+    }
+}

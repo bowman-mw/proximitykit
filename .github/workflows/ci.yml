@@ -1,18 +1,32 @@
-# ProximityKit CI: on every pull request into main and every push to main, the four walls, then the
+# ProximityKit CI: on every pull request into main and every push to main, the walls, then the
 # package build and tests.
 #
 # The walls are the Python scripts in Scripts/ (Python 3, standard library only). Each one runs
 # locally with `python3 Scripts/<name>.py` and exits 1 on a violation. They are ports of the checks
-# that guard this code in the Fernlet repository today:
+# that guard this code in the Fernlet repository today, or counterparts of them:
 #   * power-of-10-scan.py: the Power of 10 rules a line tokenizer can decide, with the exceptions in
 #     Scripts/power-of-10-allowlist.json (every entry states the invariant that makes it safe);
 #   * doc-coverage-scan.py: every struct, class, protocol, enum and actor carries a /// comment;
 #   * no-tracking-scan.py: no tracking SDK in Sources/ or Tests/, no HTTP client in Sources/, and no
 #     package dependency in Package.swift or Package.resolved;
-#   * local-link-scan.py: Network.framework's local-link API only in the three radio files.
+#   * local-link-scan.py: Network.framework's local-link API only in the three radio files;
+#   * manifest-scan.py: Package.swift carries no unsafe flags and no warnings setting, and exists
+#     once the sources do;
+#   * codeowners-scan.py: every rule in .github/CODEOWNERS resolves to a path, and the
+#     wall-critical paths stay owned;
+#   * ci-scan.py: this file keeps its legs, their warnings-as-errors flags and the floor checks;
+#   * test-count-floor.py declared: the floor literals below against the package's inventory of
+#     its tests, Tests/ProximityKitTests.tsv.
 #
-# The code arrives later with its git history from the Fernlet repository. Until Package.swift
-# exists, the build and test steps are skipped with a notice and the job is the walls alone.
+# Once Package.swift exists, every build leg treats warnings as errors (Power of 10 rule 10, set on
+# the command line and never in the manifest): a Debug and a Release build with SwiftPM, the tests
+# on macOS through both SwiftPM and Xcode, an iOS Simulator build, and the tests on an iPhone 17
+# simulator. After each test leg, the test-count floor reads what ran: swift test's summary line,
+# and the result bundle each xcodebuild test leg writes to $RUNNER_TEMP.
+#
+# The code came with its git history from the Fernlet repository. On a tree without Package.swift,
+# as this repository's was until then, the build and test steps are skipped with a notice and the
+# job is the walls alone; once Sources/ProximityKit exists, manifest-scan fails such a tree.
 #
 # RUNNER: macOS with Xcode 26 or newer, for Swift tools 6.2 and the iOS 26 and macOS 26 SDKs. The
 # job picks the newest Xcode 26+ on the image and fails in seconds when a floor is unmet. It never
@@ -43,6 +57,42 @@ jobs:
     name: Walls, build and test
     runs-on: macos-26
     timeout-minutes: 60
+    # The test-count floor (Scripts/test-count-floor.py), its reviewed pin. Its declared pin is the
+    # package's inventory, Tests/ProximityKitTests.tsv, one row per suite with its declared tests,
+    # which the package's PackageTestHygieneTests holds to the test tree. The Walls step holds
+    # MIN_TESTS at or above the inventory's declared tests and MIN_SUITES equal to its rows; after
+    # each test leg the floor holds the run to them: swift test's summary line at least MIN_TESTS
+    # tests in exactly MIN_SUITES suites, and each result bundle at least MIN_TESTS tests, none
+    # failed or skipped, every inventory suite run and no other. Lowering coverage takes an edit to
+    # both pins. RAISE both when a suite gains a test or a suite joins, with a note like this one;
+    # never lower them in passing.
+    # MEASURED on a Mac, 2026-10-14 (Xcode 26.5, Swift 6.3.2; an iPhone 17 simulator on iOS 26.5),
+    # before the import, over a layout of this repository with the Fernlet repository's ProximityKit
+    # sources, package tests and inventory at its plan step A1.1.13 and a root Package.swift, this
+    # workflow's test legs run as written: swift test "Test run with 179 tests in 22 suites passed";
+    # the macOS and the iOS result bundle each totalTestCount 179, 0 failed, 0 skipped, the same 22
+    # suites by name; the inventory 22 rows declaring 179 tests. Each lane passed at these floors and
+    # refused MIN_TESTS 180; with one suite's file deleted, each lane refused the run. The import
+    # commit measures again over the imported tree and sets both for it.
+    # RAISED 179 -> 203 and 22 -> 25 at the import, MEASURED on a Mac, 2026-10-14 (Xcode 26.5, Swift
+    # 6.3.2; an iPhone 17 simulator on iOS 26.5), over this repository's tree with the code imported
+    # from the Fernlet repository at its plan step A1.1.20, this workflow's steps run as written:
+    # swift test "Test run with 203 tests in 25 suites passed"; the macOS and the iOS result bundle
+    # each totalTestCount 203, 0 failed, 0 skipped, the same 25 suites by name; the inventory 25 rows
+    # declaring 203 tests. The 24 tests and 3 suites over the note above are the suites that
+    # repository's plan steps A1.1.14 to A1.1.17 added after the layout it measured:
+    # PackageTestTreeWallTests 6, ProximitySourceWallTests 13 and ProximityMemoryLifecycleTests 5.
+    # Each lane passed at these floors and refused MIN_TESTS 204.
+    # RAISED 203 -> 508 and 25 -> 58 on a Mac, 2026-10-14 (the same Xcode, Swift and simulator), for
+    # the 33 suites and 305 tests copied from the Fernlet repository's tests, over this repository's
+    # tree with the copies: swift test "Test run with 508 tests in 58 suites passed"; the macOS and
+    # the iOS result bundle each totalTestCount 508, 0 failed, 0 skipped, the same 58 suites by name,
+    # 547 cases with four parameterized tests' 43 arguments expanded; the inventory 58 rows declaring
+    # 508 tests. Each lane passed at these floors and refused MIN_TESTS 509. ARITHMETIC CHECK:
+    # 203 + 305 = 508 and 25 + 33 = 58.
+    env:
+      MIN_TESTS: 508
+      MIN_SUITES: 58
     steps:
       - uses: actions/checkout@v4
 
@@ -109,23 +159,29 @@ jobs:
             fi
           done
 
-      # Runs on every push and pull request, before and after the code arrives. All four scripts
-      # run even when one fails, so a single run reports every wall that broke.
+      # Runs on every push and pull request, before any build. Every wall runs even when one
+      # fails, so a single run reports every wall that broke. The last is the test-count floor's
+      # declared half, which needs no build.
       - name: Walls
         run: |
           set -uo pipefail
           python3 --version
           status=0
-          for wall in power-of-10-scan.py doc-coverage-scan.py no-tracking-scan.py local-link-scan.py; do
-            echo "::group::$wall"
-            if python3 "Scripts/$wall"; then
-              echo "$wall: clean"
+          wall() {
+            echo "::group::$*"
+            if python3 "Scripts/$1" "${@:2}"; then
+              echo "$*: clean"
             else
-              echo "::error::$wall found a violation. Its output above names the file and line."
+              echo "::error::$* found a violation. Its output above names the file and line."
               status=1
             fi
             echo "::endgroup::"
+          }
+          for script in power-of-10-scan.py doc-coverage-scan.py no-tracking-scan.py \
+                        local-link-scan.py manifest-scan.py codeowners-scan.py ci-scan.py; do
+            wall "$script"
           done
+          wall test-count-floor.py declared
           exit "$status"
 
       - name: Look for the package
@@ -135,7 +191,7 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Walls only::There is no Package.swift yet. The code arrives later with its history from the Fernlet repository; until then CI runs the walls only and skips the build and test steps."
+            echo "::notice title=Walls only::There is no Package.swift, so CI runs the walls only and skips the build and test steps. Once Sources/ProximityKit exists, manifest-scan fails the Walls step for it."
           fi
 
       # `swift package describe` loads the manifest and resolves the package graph. Its JSON form
@@ -153,22 +209,67 @@ jobs:
             echo "::notice title=No test target::The package declares no test target, so the test steps are skipped."
           fi
 
-      - name: Build for macOS (swift build)
+      # Power of 10 rule 10, warnings are errors, holds on every build leg below, set on the command
+      # line as the Fernlet repository sets it on its strict build: `-Xswiftc -warnings-as-errors` on
+      # the SwiftPM legs, and on the xcodebuild legs that build's three overrides,
+      # SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES.
+      # Fernlet's strict build applies the same overrides to this package when it consumes a tag, so
+      # a warning that reached a tag would fail Fernlet's build; these legs fail first. Never put the
+      # setting in Package.swift (`.treatAllWarnings`, or `-warnings-as-errors` through
+      # `unsafeFlags`): the Fernlet repository measured a manifest warnings setting colliding with
+      # the `-suppress-warnings` Xcode gives package targets and failing its whole build, and
+      # PackageDescription documents that unsafe flags make a product ineligible for use by other
+      # packages, which is what this package is for. Scripts/manifest-scan.py holds the manifest, and
+      # Scripts/ci-scan.py holds every leg here to its flags: a leg that loses one fails the Walls step.
+      - name: Build for macOS (swift build, warnings are errors)
         if: steps.package.outputs.present == 'true'
-        run: swift build
+        run: swift build -Xswiftc -warnings-as-errors
 
+      # The one Release compile, of the library alone (`swift build` builds no test target): the
+      # package's tests need a Debug build, because ProximityKit's keychain test door (the backend
+      # slot its own tests fill with an in-memory store) exists only under `#if DEBUG`, so the test
+      # target cannot compile in Release. This leg compiles the Release arm of every `#if DEBUG`,
+      # which no other leg builds.
+      - name: Compile the Release build for macOS (swift build -c release)
+        if: steps.package.outputs.present == 'true'
+        run: swift build -c release -Xswiftc -warnings-as-errors
+
+      # The tests run on macOS twice, on purpose. `swift test` is SwiftPM's own build and runner, the
+      # path a developer using the package takes. `xcodebuild test` below is Xcode's build system,
+      # the one that builds this package inside an app, and it writes a result bundle with the
+      # per-suite counts, as the iOS test leg does. Each test leg's output goes through `tee` under
+      # pipefail, so the leg's own status still decides the step, and the test-count floor reads
+      # what ran right after it (Scripts/ci-scan.py holds every leg to that shape).
       - name: Test on macOS (swift test)
         if: steps.describe.outputs.tests == 'true'
-        run: swift test
+        run: |
+          set -euo pipefail
+          swift test -Xswiftc -warnings-as-errors 2>&1 | tee "$RUNNER_TEMP/swift-test.log"
+          python3 Scripts/test-count-floor.py swift-test "$RUNNER_TEMP/swift-test.log"
+
+      - name: Test on macOS (xcodebuild test)
+        if: steps.describe.outputs.tests == 'true'
+        run: |
+          set -euo pipefail
+          xcodebuild test -scheme ProximityKit -destination 'platform=macOS' \
+            -resultBundlePath "$RUNNER_TEMP/macos-test.xcresult" \
+            SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            2>&1 | tee "$RUNNER_TEMP/macos-test.log"
+          python3 Scripts/test-count-floor.py xcresult "$RUNNER_TEMP/macos-test.xcresult" \
+            --log "$RUNNER_TEMP/macos-test.log"
 
       - name: Build for the iOS Simulator (xcodebuild)
         if: steps.package.outputs.present == 'true'
-        run: xcodebuild build -scheme ProximityKit -destination 'generic/platform=iOS Simulator'
+        run: |
+          xcodebuild build -scheme ProximityKit -destination 'generic/platform=iOS Simulator' \
+            SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES
 
-      # iPhone 17 is the one simulator the iOS tests run on, pinned the way the Fernlet repository
-      # pins its test lines: if the image drops the device, fail in seconds and name the fix. There
-      # is no fallback to another device, because a silent device change is the failure a pinned
-      # device exists to rule out.
+      # iPhone 17 is the one simulator the iOS tests run on. The package has no appearance baselines,
+      # so the pin is not about rendering: it keeps one named device, so that every run's per-suite
+      # counts and timings compare with the last run's and with the Fernlet repository's measured
+      # lines, which run on the same device. If the image drops it, the step fails in seconds and
+      # names the fix. There is no fallback to another device, because a silent device change is
+      # the failure a pinned device exists to rule out.
       - name: Resolve the iPhone 17 simulator
         if: steps.describe.outputs.tests == 'true'
         run: |
@@ -185,4 +286,11 @@ jobs:
 
       - name: Test on the iOS Simulator (iPhone 17)
         if: steps.describe.outputs.tests == 'true'
-        run: xcodebuild test -scheme ProximityKit -destination "$PROXIMITYKIT_DESTINATION"
+        run: |
+          set -euo pipefail
+          xcodebuild test -scheme ProximityKit -destination "$PROXIMITYKIT_DESTINATION" \
+            -resultBundlePath "$RUNNER_TEMP/ios-test.xcresult" \
+            SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            2>&1 | tee "$RUNNER_TEMP/ios-test.log"
+          python3 Scripts/test-count-floor.py xcresult "$RUNNER_TEMP/ios-test.xcresult" \
+            --log "$RUNNER_TEMP/ios-test.log"

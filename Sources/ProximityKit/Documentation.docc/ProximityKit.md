@@ -1,0 +1,3395 @@
+# ``ProximityKit``
+
+Fernlet's self-contained peer-to-peer subsystem: signed identity, QUIC + UWB session formation, trust lifecycle, the presence radio, the routed friend-mesh engine whose features its host plugs in, and the one-to-one pair session a host's in-person sends run over; Fernlet's mesh features (the session photos and their review, chat, the session hearts and the heart ledger, the clothing shop, activities, the moderation report relay and friend state), presence, the heart dead-drop, moderation's ban store and ledger, closeness and recipe sharing are `FernletSocial`'s.
+
+## Overview
+
+ProximityKit is the "meet in person" half of Fernlet's social layer. Nothing here talks to a
+server (`FernletSocial`'s heart dead-drop does, through a transport its app injects); everything
+moves over local radios (Network.framework/QUIC over Bonjour for data, NearbyInteraction/UWB for
+distance where the host's provider has it) between two phones
+that are physically together. The design center is a privacy stance the rest of the app depends
+on: identities are per-device Ed25519/X25519 key pairs (``IdentityService``), every wire transfer
+travels in a signed ``ProximityIdentityEnvelope`` that is verified — signature, expiry, recipient,
+replay, and mandatory sealing for sensitive payload types — before any handler sees it, and the
+social exhaust (who you met, who sent you warmth, who you reported) lives in device-local sidecar
+files that are deliberately **never** part of the synced snapshot.
+
+**Position in the FernletKit graph and the S3 wall.** The `ProximityKit` target depends on nothing
+in FernletKit (plan step A1.0). ``IdentityService`` signs and verifies only under its own
+``ProximityCryptographicPurpose`` values, a host's own signature labels among them, minted with
+``ProximityCryptographicPurpose/featureSignature(_:framing:)`` (`FernletSocial`'s feature labels and
+the app's duress and probe labels; see "Protocol namespace" below), so it has no `FernletCrypto`
+edge; its session mode is its own (``ProximitySessionMode``), which Fernlet converts to the
+`ProximityMode` it persists, so it has no `FernletDomainModel` edge. `ProximityNamespaceBoundaryTests`
+pins the empty list, so none of `FernletCrypto`, `FernletDomainModel`, `FernletFoundation` and
+`PrivateMediaStore` can come back unseen. It sits on the *protected* side of the S3 privacy wall: the walled `AIProviders` / `CloudKitSync` targets can never
+import it (nor it them: its manifest names no dependency, and its own platform wall refuses CloudKit by
+name; nor `FernletSocial`, whose heart dead-drop gets its CloudKit transport
+injected app-side through FernletDomainModel's `HeartDropTransporting` seam and so only ever hands
+ciphertext + rotating day tags outward). Its one seam back to app state is the
+``ProximityHost`` protocol, which `FernletStore` conforms to via an app-side adapter; the
+"outward edges only" rule keeps the module a black box the app drives, never the reverse. It builds
+for iOS 26 and native macOS 26, compiled for both on every push; see "Platforms" below.
+
+**No SwiftUI view and no `FernletUI` edge** (step A0.1 of
+`Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md`, the first step towards ProximityKit as a
+drop-in package of its own). The three screens this module used to ship from its `UI/` folder — the
+session-end photo review with its Photos saver and save-failure alert, the keep-as-friend prompt,
+and the fingerprint view — moved to the `FernletProximityUI` module, which depends on this one and
+never the reverse. ``PeerNameDisplay`` stays in `UI/` as the identifier filter, which is mechanism:
+it imports neither SwiftUI nor `FernletUI`, and ``PeerNameDisplay/personName(_:fingerprint:in:)``
+hides the QUIC instance name by the mesh instance-name prefix of the namespace each caller passes it
+and is the consumer the namespace's peer-name soundness rule protects. Its placeholders are Fernlet's
+display policy, so they are `FernletConnections`' extension of the type (`Placeholder`, `shown`,
+`firstName` and `text(for:)`, over that module's catalog), which the app's surfaces,
+`FernletProximityUI`'s screens and `FernletSocial`'s `PresenceManager.firstName(of:in:)` call; this
+module ships no placeholder of its own.
+
+**How a session forms.** A radio owner (``MeshNetworkManager`` for the friend mesh,
+``ProximityPairSession`` for a one-to-one pairing, which Fernlet's recipe share runs over,
+``ProximityPresenceSession`` for presence, which `FernletSocial`'s `PresenceManager` drives for
+presence hearts) runs one shared radio multiplexed into per-peer channels — one of the three `Network*Session`
+types, one per radio, since the MC→QUIC cutover (2026-09-21) took the friend mesh off
+MultipeerConnectivity and the deletion round (2026-09-22) took that radio out of the tree (see
+Transport below).
+The friend mesh has **three** discovery verbs, not two: ``MeshNetworkManager/startJoin()`` and
+``MeshNetworkManager/stopJoin()``, and — since P8 item 3 —
+``MeshNetworkManager/holdCommittedLinks()``, which stops browsing and closes the admission doors
+while KEEPING every committed slot, its coordinator and the group-key state. `stopJoin()` cannot do
+that (it funnels through `stopSearching()`, which cancels every coordinator and clears the group
+key), and a background continuation task holding a live session is exactly the caller that needs
+it. Its inverse is ``MeshNetworkManager/resumeSearchingForPartitionedMesh()``, and its radio half is
+`MeshTransportSession.pauseDiscovery()` / `resumeDiscovery()` — a pause that keeps the session and
+every live connection, which `stop()` does not.
+Since P8 item 5 the manager also carries the mesh's **two session-state raises**,
+``MeshNetworkManager/beginBackgroundContinuation()`` and
+``MeshNetworkManager/endBackgroundContinuation()``: one-line public doors onto the otherwise
+internal `applySessionEvent(_:)`, spoken only by the app's continuation driver while it holds a
+`BGContinuedProcessingTask`. They are the first shipping raiser `MeshSessionEvent.backgrounded` /
+`.foregrounded` ever had, so ``MeshSessionState/continuingInBackground`` becomes reachable outside a
+test — and with it plan §24.1's deliberate disagreement: that state closes
+``MeshNetworkManager/mayCommitRoutedHeartLedgerJudgement``, because a mesh continued in the
+background holds routed ciphertext and judges no heart, while the routed access gate's foreground
+leg is a separate fact the app pushes from `ScenePhase`. Neither leg is written in terms of the
+other, and neither raise touches a radio. The pair is also the whole of
+``MeshContinuationRaising``, the two-verb seam the manager conforms to and the driver holds it as:
+a `final class` cannot be stood in for, so the driver's exhaustive sweep needs a protocol to count
+the two raises through — and behind two verbs the rest of the manager is unspellable from the app's
+continuation half. Item 6 added the one narrow READ beside them,
+``MeshNetworkManager/sessionContinuationReading`` → ``MeshSessionContinuationReading``: the
+monotonic elapsed seconds, this run's ceiling budget and the connected-friend count, nil when no
+ceiling is armed. It is not a field on ``MeshSessionPollReport`` because that value says what one
+poll DID and exists only on a tick, while the app reads this at two sites — the submission, whose
+request subtitle carries the count, and the tick, whose progress bar carries the fraction. Item 6
+also stopped the mesh raising ``ProximityForegroundAnchor``'s Live Activity at all: a continued mesh
+presents the system's own continued-processing card, §14 forbids the duplicate, and the mesh seats
+up to five coordinators — so the mesh path was ATTEMPTING one `Activity.request` per committed slot.
+None of those could render, which is the honest reason the suppression is unconditional and costs a
+person nothing: the proximity activity's attributes type, `ProximityConnectionActivityAttributes`,
+was internal to this module and no widget in `App/FernletWidgets` declares an `ActivityConfiguration`
+for it, so each request either threw (audited) or made an activity nothing draws while spending the
+per-app Live Activity ceiling. **P9 item 5 then took the decision item 6 deferred** — the 1:1
+recipe-share and presence anchors were RETIRED, not given a widget. The ActivityKit conformer is
+deleted and ``ProximityCoordinator``'s default anchor is `NoopProximityForegroundAnchor`
+unconditionally on every platform, which is what the three shipping sites that omit the argument now
+get. Nothing in the app requests a proximity Live Activity; ``ProximityForegroundAnchoring`` survives
+as the seam a future widget would conform and the one tests inject through, and the once-per-launch
+orphan reaper is untouched — the only code that names the attributes type, which is why that type
+outlives its requester. Since plan step A0.6 the reaper and the attributes type are the app's
+(`ProximityLiveActivityReaper`, in `App/Fernlet/ProximityLiveActivityReaper.swift`), unchanged in
+behaviour, so this module holds no ActivityKit code.
+All three resolve the display name they advertise the same way
+(host preference, else the host's fallback name, Fernlet's device name), and the peer-supplied
+names that reach chat, hearts, vouches, and the keep-as-friend rows pass one sanitize-or-floor coercion
+(``ProximityDisplayName/peerDisplayName(_:in:)``, public so a host's features use the same one, over
+this module's own copy of the generic sanitizer, under the cap and floor of the host's peer-name
+policy: Fernlet's 24 characters and "A friend"); both live in `PeerDisplayNames.swift`, the single
+home of what was a copy per call site. Each connected peer
+gets a ``ProximityCoordinator``, the
+per-connection engine that exchanges signed identity introductions (carrying the UWB discovery
+token, advertised capability tokens, and optionally the host's prekey bundle,
+``ProximityPrekeyBundle``, which the coordinator carries without reading), starts ranging
+through a ``RangingProvider`` its host builds for that connection
+(``ProximityHost/makeProximityRangingProvider()``: ``NIRangingSession`` on iOS,
+``NoopRangingProvider`` without ranging), and gates the commit on
+physical closeness: a 15 cm / 0.8 s UWB dwell measured by ``ProximityCommitDetector``, a manual
+confirm on non-UWB hardware, or the QR verification ceremony (``ProximityVerifyQR``) which
+upgrades a manual commit to ceremony grade. That gate is the consent ceremony for a **first
+meeting**; a member of the live mesh coming back over a re-dialed link is not asked again
+(2026-09-22): ``MeshNetworkManager`` commits a gated slot whose verified signing key is on the signed
+roster **and** is the key the transport's channel introduction proved for that link
+(`reseatReturningMembers()`, judged whenever a coordinator's state, the roster or the session state
+moves), because the only controls that answer the gate are the pre-session slot rows the session's
+camera covers — a returning member used to sit uncommitted for good, with every frame it sent
+dropped. A member this device voted out is not re-seated, and an identity replayed over another
+key's link is refused once, audited (`mesh.slot.returningMemberRefusedMismatchedKey`). The decision is
+only an ask — the coordinator commits whatever identity it holds when the ask lands — so the seat
+checks it again and evicts a slot whose committed key is not the one judged
+(`mesh.slot.returningMemberRefusedAtSeat`). Trust questions along the way go to a
+``ProximityTrustPolicy`` the host hands out fresh for each connection
+(``ProximityHost/makeProximityTrustPolicy()``), which the manager retains because the coordinator
+holds it `weak`. The session policies are the host's rules, not this module's: Fernlet's, in
+`FernletConnections`, are `FriendSessionTrustPolicy` for friend radios (proximity *is* the
+authorization; only blocked keys ban) and `CoachSessionTrustPolicy` for the future coach channel
+(only a remembered `.trainer` pairing auto-confirms), and `ProximityTrustVault`, Fernlet's too and in
+`FernletConnections`, is the persistent record store behind both, holding the
+friend/removed/blocked/reported lifecycle and the audit trail. What the device remembers about a
+peer, whichever session is running, Fernlet's features ask the host's ``ProximityTrustStore``
+(the `proximityTrustStore` requirement of `FernletSocial`'s host refinement, `FernletSocialHost`):
+whether a key is a remembered, unrevoked peer and whether it is blocked, before a friend-state
+payload, a moderation report or a heart crosses; this module declares the protocol and asks it
+nothing itself, and Fernlet's app answers with that vault. The coordinator records its audit events through the same policy, in this
+module's own ``ProximitySessionAudit``, and names no host's record: Fernlet's policies convert each
+into the persisted `TrainerAuditEvent` the vault keeps.
+
+**Invariant: a link is seated — and its frames credited — only as the key its own tunnel proved**
+(2026-09-23, closing a hole the blind reviews of 31fafd6 found and which predates it). Two
+identities describe one mesh link: the coordinator's identity introduction, a signed envelope that
+on the QUIC radio has no recipient, a five-minute expiry and no advertised fingerprint to check it
+against — so it can be replayed over any tunnel — and the transport's signed channel introduction,
+bound to this connection's TLS exporter, which cannot
+(`MeshTransportSession.verifiedSigningPublicKey(for:)`). The coordinator accepts a second
+introduction in any state, `.connected` included, and re-gates to it, and a commit takes whatever
+identity it holds; the re-seat above judged the transport only for the slots it asked to commit. So
+a tap on a slot row, the QR ceremony or a 15 cm dwell could seat a link as an identity the transport
+had proven false — a stranger's replay, a member's introduction the re-seat had already refused, or a
+seated link re-committed as somebody else — and every frame on it was then credited to that
+identity (removal votes cast "as" another member). Now **every** seat, whoever asked for it, must
+commit the key the tunnel proved, and a link with no proven key is refused too: a seat adopts an
+identity, so it needs a proof rather than the absence of a contradiction
+(`seatTransportRefusal(at:identity:)`, evicted and audited once as
+`mesh.slot.refusedUnprovenIdentityAtSeat`, `reason` = `transportKeyMismatch` / `noTransportKey`).
+It never refuses an honest first meeting: a device's channel introduction and every envelope its
+coordinator signs carry the same Ed25519 key, one `IdentityService` signing both, so a provisional
+stranger proves exactly the key it introduces. And the **payload door**
+(``MeshNetworkManager/proximityCoordinator(_:didReceive:plaintext:from:)``) credits nothing against
+those proofs: the coordinator verifies each envelope against the key the envelope itself names and
+credits it to its current identity without comparing the two, so the door drops a frame whose
+signer, or the identity it would be credited to, is not the slot's seated key or the tunnel's proven
+key — the re-commit window before the next seat pass evicts, a replayed identity before any seat
+(an admission request in someone else's name), a relayed envelope — and a frame from a coordinator
+that no longer holds a slot (`mesh.dispatch.droppedUnattributable`, `reason` = `signerNotSeated` /
+`creditedNotSeated` / `signerNotProven` / `creditedNotProven` / `noSlot`). Nothing honest fails it:
+every envelope on a link is signed by the link peer's own key, and the mesh relays content inside its
+own envelopes, never another device's envelope.
+
+**Invariant: no display name crosses before this side commits** (stranger-admission Option 1b, the
+owner's call of 2026-09-22). Every envelope a coordinator signs reads one private property,
+`disclosedDisplayName`, which is empty until ``ProximityCoordinator/confirmPeerIdentity()`` and the
+real name after — the introduction, the acknowledgement, both heartbeat directions and every
+payload, because a peer that commits first sends a heartbeat whose ack would otherwise have carried
+the name out early. The introduction's summary is `"Hello"`, never an interpolated name. On receipt,
+an identity built from an introduction carries NO name whatever the peer sent
+(``ProximityCoordinator/PeerIdentity/isDisplayNameWithheld``), so the guarantee does not depend on the
+peer's build; the name is adopted from the first verified post-commit envelope that discloses one
+(``ProximityIdentityEnvelope/disclosedSenderDisplayName(in:)``), once, from the verified signing key only,
+and ``ProximityCoordinator/onPeerDisplayNameDisclosed`` tells the owning manager. Every site that
+persists a peer name (rosters, the trust vault, audits) reads
+``ProximityCoordinator/PeerIdentity/displayNameOrFingerprint``. Every site that RENDERS one goes
+through ``PeerNameDisplay`` instead (owner decision 2026-09-29, reversing the fingerprint title the
+first build showed): a pre-commit peer reads the host's placeholder ("Someone nearby" for Fernlet),
+never its fingerprint, and the same filter turns a fingerprint filed as a name, or the QUIC
+transport's instance name (the host namespace's mesh prefix and 12 hex characters, `fernlet-mesh-…`
+for Fernlet), into the placeholder; every call passes the namespace whose prefix it hides. Hearts
+copy that uses a first name goes through `PeerNameDisplay.firstName(_:fingerprint:placeholder:in:)`
+(`FernletConnections`' extension), which `FernletSocial`'s `PresenceManager.firstName(of:in:)`
+delegates to, so a sentence composed over this package cannot interpolate a fingerprint either. No
+wire shape moved: an empty name is a value.
+**The mesh has a door of its own** and the invariant holds there too: every mesh frame is signed in
+`MeshNetworkManager.sendEnvelopeCore`, six broadcasts reach slots this device has not committed and
+seated (the coordinator beacon, the admission request, rotation sync, key rotation and ack, the
+removal votes, departure and termination frames) and the QR ceremony is pre-commit by design — so
+that door sends an empty envelope name to an uncommitted slot and strips a
+`MeshPeerNameRedactable` payload (the removal proposal and second) of every name, a relayed member's
+included. The first build gated the coordinator only; the item's blind verify found the mesh door
+still naming this device to strangers. The RECEIVING side is honest too (the re-verify): a vote that
+arrives with names withheld is filled from what this device already knows
+(`knownDisplayName(forFingerprint:)`: the descriptor, then the roster, then the fingerprint), and the
+join request is sent to COMMITTED slots only — a blanked request had made the admitter mint "A
+friend" into the descriptor, whose merge keeps the first entry.
+
+**What rides a committed session.** A host's features ride the engine rather than living in it.
+``MeshNetworkManager`` carries what they hand it — live payloads through the payload token door
+(``MeshNetworkManager/registerPayloadHandler(forToken:handler:)``) and the captured-slot send, and
+routed items through the origination door (``MeshNetworkManager/originateRoutedItem(body:typeToken:itemID:audience:now:)``)
+— and calls what they register: a projection handler (``MeshRoutedProjectionHandler``) or a ledger
+judge (``MeshRoutedLedgerJudge``) for each routed type's token, one ``MeshSessionObserver``, the
+capability-list provider and the ``MeshVouchListExchange``. Fernlet's are `FernletSocial`'s, built
+and registered by its `FernletMeshFeatures` composition over the identity the mesh holds: disposable
+camera photos (`MeshSessionPhotos`: quota-capped, HELD in the sealed pending corpus until the person
+chooses, then cached metadata-only on the `PrivateMediaStore` wall), the in-person clothing shop
+(`MeshClothingShop`, with its 1-hour post-session browse window), vanish-at-session-end chat
+(`MeshSessionChat` over `SessionMessageStore` — deliberately not Codable so a message can never
+enter a snapshot, and since P6 item 4 a *projection* over routed ciphertext rather than the only
+copy), in-session hearts (`MeshSessionHearts`), the one-hop moderation relay (`ModerationReportRelay`,
+whose verified rows the app files in `ModerationLedger` and `ModerationBanStore`), fuzzy friend state
+(whose payloads the app caches in `FriendStateCache`), and Group Activities
+(`ProximityActivityManager`, whose authorization is a host-signed, invitee-key-bound token rather
+than the shared handshake). Feature payloads dispatch through a registry whose committed-slot gate
+is the security boundary — behind the payload door's attribution rule, which every frame of every
+family passes first (see the seat invariant above); the session end hands the observer the roster the
+engine drains (``MeshSessionEnd/drainedRoster``), and the photos promote it AND the session's
+unreviewed photos into the keep-as-friend review (`FriendMintingReview` in `FernletConnections`,
+`KeepFriendsPromptSheet` and `FriendPhotoReviewSheet` in `FernletProximityUI`). The roster and its
+custody stay the engine's. **Nothing is on the wall until the person
+chooses** (2026-09-30, the owner: "None of the photos should be saved to the camera roll until this
+selection has been made", and the review must survive a process kill). Every session photo — taken
+here or received from a peer — is HELD from the moment it exists in the sealed pending corpus
+(`PendingSessionPhotoStore`: its own `PendingSessionPhotos/` directory, excluded from backup, under a
+device-bound key of its own), through the photos' `holdSessionPhoto(_:key:live:)` for both
+producers; their `sessionPhotos` (live) and `MeshFriendReviewBatch.photos` (awaiting) are memory
+projections of that corpus's index, and the session-end move between them writes nothing. The
+answer — `finishReviewedPhotos(_:keeping:in:)` for a promoted batch,
+`finishSessionPhotos(keeping:of:)` in the camera, both through one engine — copies kept photos to the
+wall with a per-photo keep commit that reports exactly which ones landed (`SessionPhotoAnswer`),
+deletes the rest for good — a ticked photo is removed as unreadable only when its held bytes are
+gone for good, never on a read that may succeed later (no key right now, a file read that failed:
+it stays held and the answer says `SessionPhotoAnswerFailure.unavailable`) — and tombstones every
+answered photo by its origin and item id for 24
+hours, so the photo row's projection handler refuses a custody copy of it before the engine decrypts
+it and before the quota — across a restart too, which the old wall-only `photo.id` dedup could not.
+Identity is origin + item id, never the id alone: a member reusing another's item id is held
+separately under a fresh local id and can neither suppress nor tombstone the genuine photo. "Live" is
+the SIGNED `manifest.meshID`'s call, never the optional peer-supplied `header.session`, and a late
+arrival is held awaiting and re-triggers the review. Photos built after a kill rebuild a photos-only
+awaiting batch (the candidates are memory-only key material and are lost — owner question Q5), once a
+reconcile over a READABLE wall has dropped any photo a kill left both kept and held; the
+unlock/foreground edge, which the engine reports to its observer, re-reads a wall or pending index a
+locked launch could not. **No timer ever removes a held photo**: it leaves only through an answer,
+delete-all (`purgeHeldSessionPhotosForDeleteAll()`, which takes the whole batch, and the live roster
+through ``MeshNetworkManager/clearSessionRoster()``), the duress crypto-erase, or an index whose AEAD
+open fails under a present key. Pending bytes have exactly one reader, the photos'
+`reviewThumbnailData(for:)` / `reviewImageData(for:)`, gated on the routed access gate (unlocked,
+foreground, no duress) the engine reports; the wall's byte doors never read them, so a
+Photos-library export — an opt-in toggle the hosts apply only AFTER the answer, over its
+`SessionPhotoAnswer.keptOnWall` — can never reach an unchosen photo. The camera's answer is by the
+ids its review snapshotted at Develop, applied wherever each photo is listed — door 3's give-up ends
+the session with the mesh (and so the camera and its open review) still up, and moves the list out
+from under it (`photosAwaitingAnswer(among:)` is what that review renders).
+`leaveSession()` used to empty it first, so the last device left in a mesh was offered no photo
+review and kept everything; every ending now reaches the review. `completeFriendReview(_:)` answers
+only the candidate half, so a batch with photos still pending stays up. **The app presents it first**
+(session photos U3): one app-level presenter shows the session-end review in its own overlay window,
+above every tab and sheet, from these observable facts — the photos' `pendingFriendReview` and
+`heldPhotosCanBeShown`, the engine's `isSessionLive` and `isInSession` — never over a live session
+and never under a duress decoy.
+The package's half is `FriendPhotoReviewSheet`'s (in `FernletProximityUI` since plan step A0.1): an optional `notNow` (the overlay's "Not now",
+which answers nothing and is also VoiceOver's escape gesture there; the camera's Develop sheet
+passes nil and keeps its own swipe-down, which is disabled while an answer runs), the title as a heading, spoken tile labels naming the
+sender through ``PeerNameDisplay``, and an "Ending the session..." working line
+(`FriendPhotoReviewWorkingMessage.endingSession`) while the host waits for the ended mesh to be
+left. The sheet reads `\.scenePhase` for its snapshot cover; a host outside the SwiftUI scene (the
+overlay window) injects it.
+**"The session end" is the MESH ending — ``MeshNetworkManager/isSessionLive``
+going false — and never a lost link** (P6 item 2 and its fix): a proximity-join pair now FOUNDS a
+mesh — descriptor, membership ledger, founder admission, ceiling, state machine — at its FIRST
+commit, so `currentMesh != nil` outlives every link and three predicates that used to agree now
+answer three questions. `isInSession` is the UI half (is a session surface up), `hasCommittedPeer`
+is "is there a peer this instant" (the app's discovery lifecycle and the connection choreography
+read it), and `isSessionLive` is the lifecycle half, read by the three hooks and by the review
+sheet. It has exactly four doors: End Session, a termination or completed departure (every terminal
+edge of the machine), the five-minute discovery timeout with no committed peer, and slot loss while
+no mesh is held (the legacy pairwise session). A link blip is none of them — it must not clear the
+transcript, promote the batch, open the shop window, or present a sheet whose primary action signs
+a termination on a mesh the pair can still resume. Ending a pair tells the partner (2026-09-22):
+"Ask to remove" on the only other person leaves through `leaveSessionAfterNotifyingPeers()` like
+End Session does, and when the signed roster is the final pair the leaver signs the termination and
+holds its radio up — bounded, 1.5 s — until the partner closes its end
+(`MeshTransportSession.awaitRemoteClose(of:within:)` — ordinarily the partner's close after reading
+the record, though a local link failure ends the link too; the outcome is audited as
+`mesh.development.partnerReceipt`). That is a bounded
+best effort, not a delivery guarantee: a partner suspended at that moment reads nothing and ends by
+its own five-minute give-up, and a pair whose roster is not yet two — the founding window before the
+admission grant lands — sends a departure, which is not waited on.
+Photo-library save failures surface through one shared mapping in `FernletProximityUI` —
+`FriendPhotoLibrarySaver`'s `userFacingFailure(for:photoCount:)` producing a
+`PhotoSaveFailure` rendered by the `photoSaveFailureAlert(_:failure:)` view modifier — so every
+save surface (review sheets and the album carousel) shows identical wording.
+
+**Store bans are `FernletSocial`'s**, like the report relay above. The relay only carries signed
+rows; the ledger they are filed in, the tamper-resistant ban clock that reconciles them in both
+directions (applying a warranted ban, lifting one whose reporters positively withdrew enough of its
+evidence) and the content hash a report binds an artwork by live in that module too, whose landing
+page states the invariants.
+
+**Presence and hearts.** The presence radio is this module's mechanism, wrapped whole by its
+presence engine, ``ProximityPresenceSession`` (plan step A1.1): it builds the radio for its host's
+namespace, wears the epoch posture the radio advertises under, encodes the host's tags into the TXT
+record and decodes a sighting's back into tags, drops the device's own ghosts by name, and hands a
+tunnel up as a ``ProximityPeerChannel``. Fernlet's presence feature, `FernletSocial`'s
+`PresenceManager`, drives it, broadcasting only rotating pairwise-DH tags — no names, no stable
+identifiers — so kept friends recognize each other nearby without connecting. The tags, and the pair
+secret under them, are `FernletSocial`'s too (its `presenceTag(for:epoch:)`, over
+``IdentityService/pairSecret(with:purpose:)`` under the presence salt `.fernlet` declares), and so
+are the matching, the other two self-exclusion layers, the nearby set and the one rotation tick;
+what stays here is the engine, the radio, its TXT vocabulary (`PresenceAdvertisement`, internal), the
+epoch clock the tags rotate on (``IdentityService/presenceEpoch(at:)``) and the posture. The posture behind that rotation is an
+explicit value since P9 item 2: ``PresenceEpochPosture`` answers, for any instant, the presence
+epoch, the service instance name to advertise and the TLS identity to present, all three replaced
+whole at every 900 s boundary — so two sightings 901 seconds apart share no byte. Since pass 2 that
+value is what the radio actually advertises: `NetworkPresenceSession` registers its Bonjour listener
+under the posture's instance name and presents its `sec_identity_t`, and re-registers both whole at
+each boundary. What a boundary does not break is stated where it belongs, on `PresenceManager` — a
+link-local observer sees one IP address throughout, and a tunnel open across the boundary belongs to
+a verified friend who already knows us. The value is anchored to the wall
+clock on purpose — the pairwise tag epoch must be absolute for two phones to agree without
+exchanging anything, a per-launch phase would itself be a fingerprint that survives every
+rotation, and a globally synchronised rotation instant makes the anonymity set at the boundary
+every device in range; the certificate is minted at the epoch's START for the same reason, since a
+validity window anchored to the mint instant would stamp each posture with the second that radio
+came up. The value is pure (injected clock, injected entropy, no radio and no
+timer); the engine rotates it when its host asks (``ProximityPresenceSession/rotatePosture(at:)``,
+which Fernlet's manager calls from the epoch tick it already runs; the engine owns no timer), and
+drops it on `stop()`. Hearts are delivered over short-lived
+connections formed on that recognition, each a ``ProximityCoordinator`` over the peer channel the
+engine hands up, marked connected only after the coordinator has begun, with the sealed-introduction rule
+(``SealedIntroductionEnvelope``) ensuring a tag-replay forger never sees an identity. When the
+friend is away, `FernletSocial`'s heart dead-drop takes the heart instead: its `HeartDropService`
+seals it, forward-secret to a one-time or signed prekey the friend gossiped (or to the friend's
+static key, opened through ``IdentityService/staticKeyAgreement(withEphemeralPublicKey:)``), queues
+it for the transport its app injects, and on receipt dedups it durably and records it into the shared
+heart ledger (`ProximityHeartLedger`, `FernletSocial`'s too), which enforces the bidirectional
+5-minute rate limit for every heart transport. Its pair secret derives through
+``IdentityService/pairSecret(with:purpose:)`` under the
+heart salt `.fernlet` declares, as presence's does under the presence salt. `FernletSocial`'s
+`ClosenessLedger` turns these interactions into the private closeness score.
+
+The prekeys travel as the core wire type ``ProximityPrekeyBundle`` (`FernletSocial`'s prekey store
+names it `Bundle`, with `PrekeyEntry` and `SignedPrekey`), inside the signed identity introduction under
+its frozen `heartDropPrekeyBundle` key: the coordinator encodes what its owner's
+``ProximityCoordinator/introductionPrekeyBundleProvider`` returns and hands a verified
+introduction's bundle to ``ProximityCoordinator/onIntroductionPrekeyBundle``, reading no field, and
+the mesh manager and `FernletSocial`'s presence manager wire those two from their own
+`heartDropBundleProvider` and `onPeerPrekeyBundle`. Whether a heart from or to a peer may be
+recorded is one predicate, `FernletSocial`'s: its host refinement's
+`FernletSocialHost.isTrustedUnblockedPeer(signingPublicKey:fingerprint:)` — the host's trust store
+remembers the key and has not removed it, does not hold it blocked, and the host's fingerprint
+block list does not hold the fingerprint. Presence's gate delegates to it and the session hearts'
+ledger judge asks it with the admission ledger's key. That refinement also answers the one hearts
+setting, `allowNearbyHearts`, which presence and the session hearts read; none of these is a
+``ProximityHost`` requirement, since nothing in this module reads them. The away-delivery consent is
+no host requirement at all, and each feature that reads it (presence for its not-nearby copy, the
+mesh features' capability list, `FernletMeshCapabilities`, for its `heartsAway` capability) takes a
+`heartsAwayEnabledProvider` of its own, nil reading as off.
+
+**Concurrency and persistence invariants.** The target sets `defaultIsolation(MainActor.self)`
+in Swift 6 language mode: managers, coordinators, and stores are `@MainActor` (most
+`@Observable`), while every wire value type, the canonical signing serializer, and the pure
+crypto statics are explicitly `nonisolated` + `Sendable` so untrusted bytes can be decoded and
+signatures verified off the main actor (the WI-9 convention). The managers that mirror
+coordinator state into their own observable properties (``MeshNetworkManager`` and
+``ProximityPairSession`` here, `FernletSocial`'s `PresenceManager` over this module) drive
+that mirroring through the
+``ObservationLoop`` helper (`Engine/ObservationLoop.swift`), which owns the shared
+`withObservationTracking` re-arm machinery and holds its owner weakly — including across the
+suspension — so the loop can never pin the manager; it is public, as settled mechanism, so a host's
+manager that watches the coordinators it owns uses it too, as presence does. Every long-running task those three managers
+own is also cancelled in an `isolated deinit`, and every record-drop path (stop, refresh, MC
+disconnect, stale/parked sweeps, slot eviction) runs the dropped ``ProximityCoordinator``'s own
+`cancel()` so ranging and the Live Activity anchor stop with it; the mesh manager additionally
+kicks an evicted peer's link (`MeshTransportSession.disconnectPeer`) so no zombie link
+survives a slot (this module's own `ProximityMemoryLifecycleTests` holds its code to the four
+static disciplines, ML1-ML4: stored tasks cancelled in a deinit, observers removed, observation
+tracking in ``ObservationLoop`` alone, every `Task` in a file holding an `unowned` host pinned or
+marked; in Fernlet's repository `Tests/FernletTests/MemoryLifecycleTests` holds the behaviour and
+`MemoryLifecycleBoundaryTests` the same disciplines over Fernlet's code; see
+Docs/Memory-Leak-Review-2026-08-17.md). Framework delegate callbacks
+(NearbyInteraction; the retired MultipeerConnectivity radio's did too) transfer non-Sendable objects across the main-actor
+hop via documented `nonisolated(unsafe)` locals. Signing inputs come from the deterministic
+binary serializer in `CanonicalSignatureSerializer.swift` (domain-tagged per signed type,
+cross-platform stable; the legacy JSON encoder is retained verify-only). Persistence follows one
+stance throughout: small device-local files under the root the host states (Fernlet's
+`Application Support/Fernlet`), with `.completeFileProtection` on iOS,
+never synced. This module's own two durable surfaces, the mesh session context and the routed store,
+are sealed (see "Two durable surfaces" below); data of record a host's feature keeps loads through
+``ProtectedSidecar``, which classifies read failures so a locked-device read can never be mistaken
+for "empty" and overwrite real data — `FernletSocial`'s heart ledger and its three heart-drop
+sidecars, the last sealed at rest through the ``SidecarSeal`` hooks by that module's
+`HeartDropSidecarSeal` — while `FernletSocial`'s best-effort stores share that module's own naive
+JSON sidecar, `JSONSidecarFile`. Key
+material lives in the keychain, ThisDeviceOnly. Keys a host keeps beside the identity's rows, under
+its keychain service, are the host's: its identity's ``IdentityProvisioningParticipant`` accounts for
+them at fixed points of provisioning and wipe (Fernlet's is its app's sealed-backup escrow key, the
+one deliberately synced key), and this module keeps none.
+
+Where those files live is the host's call, not a constant. Every device-local file of the mesh hangs
+off ``ProximityHost/proximitySupportDirectory`` — this module's two sealed stores, through the default
+storage scopes ``ProximityHost`` builds from it — and Fernlet's app builds `FernletSocial`'s files on
+the same root: the session photos' wall index and preferences, the heart ledger and the activity
+ledger, the three sealed heart-drop stores, and the moderation, friend-state and closeness ledgers.
+The heart ledger and the activity manager take their file URL with no default, so their owner states
+the file, and there is deliberately no argument-less default on `FernletSocial`'s `JSONSidecarFile`:
+every owner states its root, because a default that silently resolves to the process-wide
+`Application Support/Fernlet` is exactly how a store rejoins the shared-root race, and the omission
+compiles. The root itself has no default either (plan step A0.6.6): where an installation keeps its
+files is its host's fact, so this module computes no directory and a host that states none fails to
+compile. ``ProximityNamespace/Storage/directory(under:)`` puts the namespace's folder under a base the
+host picks, and Fernlet's app states `Application Support/Fernlet`, the path the cache has always used
+(`FernletConnections`' `FernletProximityStorage.productionDirectory`), or a test store's own root. The
+indirection exists because the wall's index is re-saved WHOLE on every keep or delete and re-read by
+every session-photo object at init — on a single process-wide path, one live `MeshSessionPhotos`
+inherits and then overwrites another's album. That is invisible in the app, which has one, and a live
+cross-suite race under the test runner, where suites share a process. Routing the root through the
+host means every composition a test builds over its own store inherits that store's isolation without
+naming a directory.
+
+The wall's whole-index re-save is the sharpest version of the hazard, but not the only one: `resetAll`
+calls `clearAll()` on the moderation, friend-state, closeness and activity ledgers, and turning
+fuzzy-state sharing off clears the friend-state cache on its own — so a plain settings toggle in one
+test, not just a wipe, used to empty another's cache.
+
+The heart-drop sidecars sit on the same root and need one thing more, which `FernletSocial`'s
+`HeartDropStorageScope` carries: they are SEALED, and their key lives under the heart-drop keychain
+service, so isolating them means a (directory, keychain service) pair, always both (that module's
+landing page says why, and how the format's retired `FSC1` generation is refused by name yet still
+classified). The mechanism stays here: ``SidecarSeal``'s `isSealed` predicate is what splits a file
+into "sealed" and "legacy plaintext v0 — read it as JSON and re-seal it", and bytes whose open
+throws ``SidecarSeal/SealError/legacyFormatRetired`` meet ``ProtectedSidecar``'s unopenable-sealed
+policy (quarantined or deleted, as the store chose, the loss latched), never the corrupt-plaintext
+path.
+
+Before changing anything here, read the wire-compatibility notes on the type you are touching:
+canonical signing bytes, sealed-payload framing (``SealedPayloadFraming``), the freeze/park
+handling of unknown payload types, and the additive-optional-key rule for intro payloads are all
+compatibility contracts with in-field peers.
+
+### The host pin: the managers read a host they do not own (HP0/HP1/HP2)
+
+The proximity managers — ``MeshNetworkManager`` and the pair session, ``ProximityPairSession``,
+here, and `FernletSocial`'s `PresenceManager` and `ProximityActivityManager` — hold their host as
+`unowned let store` (`any ProximityHost`, or presence's `any FernletSocialHost`), and `FernletSocial`'s
+other mesh features reach it through the composition's `FernletMeshHost`, which holds it the same
+way. That is right: the host owns them (`FernletStore`'s lazy `meshFeatures` composition owns the
+mesh and every feature, and the recipe-share manager, which owns its pair session, and the presence
+manager are `lazy var`s of their own), so
+the back-reference is the cycle-breaker. It also means a manager can be alive while its host is gone,
+and reading `store` then is not a nil — it is `swift_abortRetainUnowned`, which kills the whole
+process. Three invariants keep that unrepresentable, and a new manager or feature in this subsystem
+inherits all three:
+
+- **HP0 (ownership).** Whatever holds a manager holds that manager's host at least as long.
+  Production satisfies this structurally. Tests satisfy it by rig discipline — never
+  `MeshNetworkManager(store: makeTestStore(), …)` or `FernletMeshFeatures(host: makeTestStore())`,
+  whose host dies at the end of the expression.
+- **HP1 (the pin).** Every detached task a manager spawns captures the host for the duration of the
+  operation that will read it. That is what `spawnHostPinned(_:)` does: it reads `store`
+  synchronously, on the main actor, where the host is provably alive, and releases it when the
+  operation returns. Where the read happens after a suspension inside an `async` callee that a
+  *stored* task re-enters, the callee takes the same pin scoped to its own call
+  (`let host = store` + `defer { withExtendedLifetime(host) {} }`, marked `// host-pin: scoped`).
+  That pin goes **below** any early-return guard that does not itself read the host: `let host =
+  store` *is* an `unowned` read, so a resume that would have returned without touching the host must
+  not be made to touch it.
+- **HP2 (the bound).** No pin may outlive the operation that reads the host — and in particular no
+  pin may be taken for the lifetime of a `Task` whose handle the manager STORES. Such a task is
+  reachable from the host (host → manager → handle), so a pin in its closure context closes the loop:
+  neither object ever deallocates, and the `isolated deinit` that ends the perpetual timers becomes
+  unreachable. Those spawns stay plain `Task { … }` and carry a `// host-pin: timer — <reason>`
+  marker instead.
+
+Rule ML4 fails any unmarked `Task` construction in a file holding an `unowned` host: in this module's
+code its own `ProximityMemoryLifecycleTests` holds its two holders, the mesh manager and the pair
+session, and a host's ML4 holds the host's code (Fernlet's `MemoryLifecycleBoundaryTests` also every file
+holding or taking a `FernletMeshHost`, a stored property or a parameter). Rule ML5 fails a test that
+builds a manager or a composition over an inline host expression. A host's ML5 holds the host's tests;
+in this module's own tests `PackageTestTreeWallTests` holds the same rule over its two holders.
+`ProximityManagerDeallocationTests` measures HP2 directly, with the beacon loop armed.
+
+### Localization: nothing on the wire is display copy
+
+The module ships no string catalog and no copy vault: nothing it hands out is resolved display text. The one resolved line the mesh carries, the camera's hold-failure line that `FernletSocial`'s session photos publish on the engine's `meshError`, is that module's (`FernletSocialCopy.Camera`, over `FernletSocial`'s own catalog). The name placeholders a person reads when ``PeerNameDisplay`` refuses a name are the host's, not this module's: Fernlet's two ("Someone nearby", "Someone you met") are `FernletConnections`' extension of the type and resolve against that module's catalog (`FernletConnectionsCopy.Peer`, keys `proximity.peer.someoneNearby` and `proximity.peer.someoneYouMet`). A placeholder is resolved display text and never a token: it must not be persisted, put in a roster or vault row, or sent. The three SwiftUI surfaces the review needs — the friend-photo review sheet, the keep-friends prompt, and the photo-save failure alert — and their 28 keys are `FernletProximityUI`'s (`FernletProximityUICopy` and that module's own catalog). Those strings were bare literals once, and a `LocalizedStringKey` literal inside an SPM module resolves against `Bundle.main`, which never consults the module's catalog: untranslatable English with a clean build. Six of them were hiding inside ternaries (`Button(isKept ? "Keeping" : "Keep")`) or in `LocalizedStringKey`-typed properties, where no call-site scan could see them; `LocalizationBoundaryTests.packageDisplayLiteralsPassModuleBundle()` now catches both shapes. **A copy vault is display copy only.** Nothing below may go in one.
+
+This module, and the host's namespace and features over it, ship English sentences that a bulk
+localization pass will read as UI strings and that must never become `String(localized:)`. Every
+``PayloadSummary`` title — "Recipe share", "Session ended", "Hello", "Identity acknowledged",
+"Heartbeat", "Heartbeat ack", presence's "Good vibes" — is written into the Ed25519 canonical
+signing bytes by `CanonicalSignatureSerializer`, so localizing one makes the signed bytes depend on
+the sender's locale; it is also the text a *different* device shows in its Connection Inspector, so
+a translated sender writes its own language into a stranger's audit log. (`FernletSocial`'s clothing
+shop sends "Clothing catalog request" as its catalog request's signed *body*, a summary encoded as
+the payload, under the same rule.) Both halves are silent: no crash, no log, just an audit row in the
+wrong language and a future cross-stack signature mismatch nobody can reproduce in English.
+
+The localized inspector is still reachable, and the wire already carries what it needs. Every
+envelope has `payloadTypeToken`, a stable enum rawValue identical on every device. Localize on the
+RECEIVING side: map that token to a `String(localized:)` label at render time, and fall back to the
+raw summary for tokens this build has no case for (the host's typed view says so: Fernlet's
+`isUnknownPayloadType`, in `FernletConnections` — a newer peer's payload type has no local label).
+Senders keep emitting frozen English forever.
+
+### Protocol namespace: what the host supplies
+
+``ProximityNamespace`` (`Namespace/`) holds the byte strings by which this module's wire, keychain
+and disk formats identify the app it runs in: the 39 protocol labels and the feature salts the host
+declares, the three radios' values, the QR scheme, the identity's and the two mesh seal keys'
+keychain rows, the storage names and the log subsystem, and this module reads every one of those off
+it, each byte-identical for Fernlet (plan steps A0.2 and A0.3 of
+`Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md`). Its family also carries the radios'
+presentation strings, which the radios, their postures and ``PeerNameDisplay`` read off it, and the
+payload vocabulary, every group of which this module reads off it too: the envelope's payload rules,
+the coordinator's session messages and capability rules, the managers' wire2 token, the inventory
+digest's record kinds, the routed type registry's routed types and the mesh engine's own messages.
+The mesh features' payload and capability tokens are their host's: Fernlet's features, in
+`FernletSocial`, register, send and gate on Fernlet's `PayloadType` and `ProximityCapability` raw
+values through this module's token doors, and read and sign envelopes through Fernlet's typed view
+of the envelope's token, which is `FernletConnections`'; this module names no `PayloadType`. It reads
+no feature label:
+the activities' and the moderation report's are `FernletSocial`'s, signed and verified there through
+``IdentityService`` under host labels minted with
+``ProximityCryptographicPurpose/featureSignature(_:framing:)``, and the sealed-backup escrow's two are
+the app's, with its escrow. The heart dead-drop's keychain service and the moderation ban store's are
+`FernletSocial`'s, and so is presence, with its labels and the heart payload format it checks.
+`ProximityNamespaceBoundaryTests` refuses any read of FernletCrypto's registry here, and any literal
+that spells `fernlet` or line that names one of Fernlet's domain types outside an exact allowlist
+naming the step that removes it; both lists are empty. Beside it the
+host supplies two things this module used to take from Fernlet's own modules, the install binding
+the sealed mesh stores seal under and the sink audit lines go to, and two mechanisms were copied in
+rather than shared: the column seal and the keychain item. This module holds no instance of the
+namespace or the binding and offers no default for either: no global, no slot, no `@TaskLocal`. Of
+what the host supplies, the audit sink alone lives in one process-wide slot, ``ProximityAudit`` (see
+"The audit sink" below); the only other slot, the keychain funnel's backend, exists in a Debug build
+alone, and only this module's own package tests fill it (see "The keychain mechanism").
+
+**What the namespace holds.** Its ``ProximityNamespace/Family`` is what every interoperating app
+shares: the 39 protocol labels and the host's declared feature salts as
+``ProximityCryptographicPurpose`` values (``ProximityNamespace/Purposes``: 21 signature transcripts
+with the verify-only legacy pair, three HKDF salts, the QUIC channel binding's TLS exporter label, the
+two column seals, five AEAD labels and seven hash domains, the epoch id's among them, then
+``ProximityNamespace/FeaturePurposes``, the HKDF salts the host's own features derive pair secrets
+under: Fernlet declares two, its heart dead-drop's and presence's), the three radios' service types
+and ALPNs, the mesh heartbeat and three presentation strings (``ProximityNamespace/Radios``: the
+mesh and recipe-share radios' Bonjour instance-name prefix, the presence radio's, and the ephemeral
+certificates' common name), the verify QR's URL scheme, and the payload vocabulary
+(``ProximityNamespace/Vocabulary``: the coordinator's three session messages with their signed
+summary titles, every payload token the host dispatches and those that must arrive sealed, the
+capability tokens with the wire2 token and what a peer that lists none is taken to support, the four
+membership record kinds, the routed-type tokens and the mesh engine's thirty messages). Tokens are
+plain `String`s, wire data rather than labels, and decoding never produces one. Its
+``ProximityNamespace/Installation`` is what belongs to one app on one device: the identity's
+keychain service and its four accounts, the two seal-key rows, the default directory name and the
+three storage names, the radios' log subsystem, and how it shows a peer's name
+(``ProximityNamespace/PeerNames``: the most characters a peer's sanitized name keeps and the floor
+shown for one that sanitizes to nothing). Two apps that share a family speak one wire and
+still never share a key, a file or a log stream. What names a format rather than an app stays this
+module's: the QR host `verify`, its query key `d` and version 1, the `FPT2`, `FGK2`, `FMGM2` and
+`FMRI1` markers, the column byte `0x03`, the `corrupt` and `chunk` extensions, and each keychain
+row's accessibility and synchronizable class, which this module's own source walls
+(`ProximitySourceWallTests`) hold to `ThisDeviceOnly` and never synchronizable in its code.
+
+**Labels are the host's literals; roles are this module's.** A label is a `StaticString` source
+literal handed to a group initializer, to
+``ProximityCryptographicPurpose/featureKeyDerivationSalt(_:)`` for a salt a host's feature derives
+under, or to ``ProximityCryptographicPurpose/featureSignature(_:framing:)`` for a transcript a host's
+feature signs and verifies through ``IdentityService``: those are the only doors that mint a
+``ProximityCryptographicPurpose`` (its own initializer is
+internal, and it has no `Codable` conformance and no decoding path), so every label is a reviewed
+spelling in the host's source: none is assembled at run time and none arrives over the wire. The
+field it fills fixes its ``ProximityCryptographicPurpose/Role`` (a length-prefixed or raw-prefix
+signature transcript, the verify-only `.absent` legacy pair, a length-prefixed or raw hash preimage,
+an HKDF salt, a column seal, an AEAD prefix, the exporter label), the feature-salt mint gives its
+one role, an HKDF salt, and the feature-signature mint a writable signature role under the one fact
+a host states, the framing its own transcript is written in (length-prefixed or raw prefix: the
+framing's type has no verify-only `.absent`), so a host supplies bytes and never decides how this
+module consumes them, and a label in a non-signature role verifies nothing. A feature signature
+label is declared in no namespace, so the soundness verdict does not judge it: keeping it apart
+from the protocol's labels is the host's own review (Fernlet's six are twins of its FernletCrypto
+registry's entries until plan step C1). A feature salt reaches its one door,
+``IdentityService/pairSecret(with:purpose:)``, only when the host's namespace declares it, byte for
+byte in its role (``ProximityNamespace/FeaturePurposes/declares(_:)`` compares the label's bytes,
+never its text, which Swift's `String` would compare by Unicode canonical equivalence): the door
+refuses any other purpose with ``IdentityError/undeclaredPurpose`` before it reads a key, the
+protocol's own salts and a spelling only canonically equivalent to a declared salt included, and it
+derives under the declared label's bytes. The initializer is total and records
+``ProximityNamespace/soundness``
+(labels well-formed, distinct and prefix-free, the declared feature salts judged with the protocol's;
+radio, QR, keychain and storage values well-formed and distinct; every
+vocabulary token within the bytes its receivers accept (a mesh message within a summary title's 200,
+since the mesh signs it as its frame's title), none repeated within its group (the session and mesh
+messages count as one) and none a rule names left unknown; summary titles, instance-name prefixes
+and the common name well-formed; the peer-name cap at most 63 characters and at least a key
+fingerprint's 16 and the mesh instance-name prefix's length, so a name cut to it still shows
+``PeerNameDisplay`` the identifiers it hides, and the floor a name this module's sanitizer leaves
+unchanged);
+``ProximityNamespace/validated(family:installation:)`` throws the same violations, and
+``ProximityNamespace/familyCollisions(with:)`` and ``ProximityNamespace/installationCollisions(with:)``
+let a host's own tests show it overlaps no other app.
+
+**An unsound namespace is refused at run time.** This module refuses one on its own, failing closed,
+by reading the verdict ``ProximityNamespace/soundness`` stored when the namespace was built (no rule
+runs twice), at three doors. ``IdentityService/ensureProvisioned()`` throws ``ProximityNamespaceError``
+first thing, before any keychain row is read or written, so the identity holds no signing or
+key-agreement key to sign, seal to a peer or open with, and ``IdentityService/encryptGroupKey(_:for:)``,
+which needs no provisioned key, throws it before it wraps anything, each auditing
+`identity.namespace.unsound`; each radio's `start` throws it before it mints, listens or advertises,
+auditing `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound` or
+`recipe.quic.namespaceUnsound`. Each line's context names the door (`at`: `provision`,
+`groupKeyWrap` or `start`), the violation count and the first violation's case name, never a field
+or a value. The pair-secret door needs the provisioned key-agreement key, so under an unsound
+namespace it derives nothing either, and provisioning calls no participant: none is told of an
+adoption or asked or told of a mint. ``IdentityService/wipe()`` reads no verdict, so under any
+namespace it sweeps the identity's rows, clears its keys and tells its participant. Nothing else
+reads the verdict. Each manager, and each pair session, also compares the namespace of the identity
+it holds with its own, one handed to it through its `identity:` seam (no shipping caller passes one)
+or, handed none, the one its host's ``ProximityHost/makeProximityIdentity()`` builds: on a mismatch
+it still constructs, audits `mesh.identity.namespaceMismatch`, `presence.identity.namespaceMismatch`
+or the pair session's `<auditArea>.identity.namespaceMismatch` (`recipeShare.identity.namespaceMismatch`
+under Fernlet's recipe profile) (at `construction`), and refuses with the same event (at `start`), first thing, every start of its radio
+and, for the mesh manager, every founding a caller can begin without one
+(``MeshNetworkManager/startNewMesh(name:)`` and its DEBUG harness's founder ledger; the promotion at a
+first commit needs a peer the radio linked), so that identity founds no mesh and links no peer.
+A ``ProximityPairSession`` checks its ``ProximityPairProfile`` against its host's namespace too, once,
+at construction: a profile whose radio is not one of the namespace's pair-session rows
+(`family.radios.pair`), or whose TXT mode is empty or over 64 UTF-8 bytes, is refused the same
+way, under `<auditArea>.profile.namespaceMismatch` (at `construction`, then at every refused `start`),
+before its radio can start, so namespace soundness still covers every value its radio runs on.
+`FernletSocial`'s `HeartDropService` holds no namespace of its own to compare with; its identity's
+doors cover it. The checks live in
+``ProximityNamespaceGate`` (`Support/`), whose two manager doors,
+``ProximityNamespaceGate/checkIdentity(_:isOf:event:)`` and
+``ProximityNamespaceGate/mayStart(identityIsOfNamespace:event:)``, are public so a host's manager
+built over this module's identity checks it the same way, while the unsound-namespace refusal stays
+internal; `ProximityNamespaceGateTests`, on the crypto-goldens CI line, holds every door to its
+error and its audit line, over namespaces built from literals, and the pair-secret door to its
+refusals and its derivation.
+
+**How a host supplies it.** ``ProximityHost/proximityNamespace`` and
+``ProximityHost/proximityInstallBinding`` are ``ProximityHost`` requirements with no default in the
+protocol extension, as are the display name, `isBlockedFingerprint(_:)`,
+`blockProximityPeer(signingPublicKey:)`, the name an unnamed device goes by,
+``ProximityHost/proximityFallbackDisplayName``, the per-connection trust policy,
+``ProximityHost/makeProximityTrustPolicy()``, the per-connection ranging provider,
+``ProximityHost/makeProximityRangingProvider()``, the identity a manager builds when it is handed none,
+``ProximityHost/makeProximityIdentity()``, the routed-type rows the mesh registers,
+``ProximityHost/meshRoutedTypeEntries``, and the root of the installation's files,
+``ProximityHost/proximitySupportDirectory``. Both are among those it will never default, because each
+is the host's identity, custody, rule or platform fact (`ProximityHost.swift`'s header names them), so
+a host that leaves either out fails to compile instead of running under another app's identity or
+binding. The identity is the host's custody: a host that keeps keys beside
+the device identity answers one carrying its ``IdentityProvisioningParticipant`` (Fernlet's app answers
+its own factory's, which carries its sealed-backup escrow key), and this module never guesses one. The
+extension's two defaults are both mesh storage scopes, built from the root, the namespace and the
+binding the host states: its namespace's production rows on its root. What only a
+host's features read — its trusted peers, its trust store, the in-person hearts setting and the
+heart-eligibility predicate over them — is no requirement here; Fernlet's features declare it in
+`FernletSocial`'s refinement, `FernletSocialHost`.
+Fernlet's values are not in this module and never will
+be: `ProximityNamespace.fernlet` and `FernletDeviceBindingAdapter` live in `FernletConnections`,
+which depends on this module, so ProximityKit cannot name them. Fernlet's app answers both in
+`ProximityHostAdapter.swift`, as twelve of the seventeen doubles in Fernlet's `FernletTests` do; the
+other five, `ProximityNamespaceGoldenTests`' three hosts and `ProximityVocabularyGoldenTests`' two,
+take the namespace, and two of the golden's hosts the binding, from the cell that builds them, so a
+cell can run one under another app's namespace, a namespace with some of Fernlet's groups replaced,
+or a pinned binding.
+
+**How each kind of reader gets it.** Every reader keeps, or is handed, its own copy, read from a
+value it already holds, so no read hops an actor and no reader can see a namespace its root did not
+hand it:
+
+| Reader | How it reads the namespace |
+| --- | --- |
+| ``MeshNetworkManager``, ``ProximityPairSession``, and `FernletSocial`'s `PresenceManager` | Read ``ProximityHost/proximityNamespace`` once in `init` and keep a `nonisolated let namespace`; build their radio from it (the presence manager through the engine it builds for it, ``ProximityPresenceSession``; the pair session from it and its profile, which it checks against it), take their default identity from ``ProximityHost/makeProximityIdentity()``, and hand the namespace, or its `family.purposes`, to every reader they call. The identity they hold, handed to them or built by their host, is compared with it once, in `init`, and one of another namespace never starts their radio. |
+| ``IdentityService`` | Takes it in ``IdentityService/init(namespace:keychainService:provisioningParticipant:)`` (a `nil` service means the namespace's identity service) and keeps it with its ``IdentityService/purposes``: it signs, seals, opens and wraps under its own labels and keeps its four device rows under the namespace's accounts. Its `sign` and `verify` take only a ``ProximityCryptographicPurpose`` and treat a label by its role, and `sign` refuses a verify-only or non-signature label. ``IdentityService/pairSecret(with:purpose:)`` derives only under a feature salt its namespace's family declares (`family.purposes.feature`). Under an unsound namespace it refuses to provision and to wrap a group key, and so derives no pair secret. |
+| Builders: envelopes, admission tokens, membership records and messages, the removal quorum, key advertisements, routed items, chunks and receipts, the verify QR | Sign under their signing identity's ``IdentityService/purposes``. |
+| Verifiers: the six routed verifiers, `MeshChannelIntroductionExchange` | Keep their own copy, a trailing `purposes:` with no default. |
+| The membership digest and its holders: `MeshInventoryDigest`, `MeshMembershipRecordVerifier`, `MeshLedgerAdoption` | Take the whole family (`family:`, or the adoption's `in family:`, with no default), because the digest needs its record kinds beside its labels: every record is tagged with its kind's token from `family.vocabulary.membershipRecordKinds` (`MeshMembershipRecordKind.token(in:)`). The verifier keeps the family as its copy, so its labels and record kinds come from one namespace; an identity's signed digest uses its own namespace's. |
+| The routed type registry: ``MeshRoutedTypeRegistry`` and its projection, the ack-stage table | Read no namespace: ``MeshNetworkManager`` builds its one registry at `init` from its host's rows (``ProximityHost/meshRoutedTypeEntries``), each keyed by a token the host reads off its own namespace's `family.vocabulary.routedTypes` (Fernlet's, `FernletSocial`'s `FernletRoutedTypes`), and the manifest mint takes the manager's registry with no default, so this module spells no routed type. |
+| The envelope: ``ProximityIdentityEnvelope/verify(identityService:replayCache:sealedPayloadFormat:)`` | Reads its identity's namespace's `family.vocabulary.payloads`, in the checks' fixed order: an unsealed envelope whose token is in `sealingRequired` is refused, and one whose token is outside `known` is parked (authenticated and replay-recorded, never opened). `signed` mints under a token the host names; Fernlet's typed view of the token (`payloadType`, `isUnknownPayloadType`, and a typed initializer and `signed`) is `FernletConnections`', and delegates to the raw forms. |
+| The session coordinator: ``ProximityCoordinator`` | Reads its identity's namespace's `family.vocabulary` at each use: it signs its introduction, acknowledgement and heartbeat with its reply under `session`'s tokens and titles and dispatches by them, parks a token outside `payloads.known`, and takes the wire2 token, the legacy assumption and its receive bound on a peer's list (twice `capabilities.known.count`) from `capabilities`. |
+| The mesh engine's own frames: ``MeshNetworkManager``, `MeshPayloadRole` | Name each frame by role, never by spelling: `MeshPayloadRole` has one case per mesh message, and its `token(in:)` and `role(for:in:)` are the one place a role meets its token, read off the manager's namespace's `family.vocabulary.mesh`. Every engine send is signed under the role's token, which is also its summary title; the payload door parks a token outside `payloads.known`, switches on the role of one inside it, and hands any other token, a feature's, to the handler registry, which is keyed by token (a host's feature registers its handler under its own token, ``MeshNetworkManager/registerPayloadHandler(forToken:handler:)``). The encrypted-metadata door resolves its inner token the same way, and every audit line names the token. A feature's payload goes out under its own token through the feature-only send, ``MeshNetworkManager/sendFeatureEnvelope(_:encodable:via:sealed:)``. |
+| Capability gates: `ProximityCoordinator.PeerIdentity.supports(_:in:)`, `PeerSlot.supports(_:in:)` | Take a token and the host's `capabilities` last: a peer that listed none supports exactly `assumedForLegacyPeers`. A host's features gate on their own capability tokens through these token forms (Fernlet's spell `ProximityCapability` raw values; this module has no typed overload); the mesh's sealed sends and the coordinator ask for the host's wire2 token, which the mesh, through its host's capability list, and presence advertise. |
+| Stateless helpers: the serializer's `canonicalBytes(for:in:)` overloads and `canonicalInventoryDigestBytes`, ``MeshRoutedContentDigest``, ``MeshChunkAssembly``, the item seal and the content-key wrap, ``ProximityVerifyQR/parse(_:in:)``, ``MeshEpochRef/minted(counter:coordinatorFingerprint:meshID:in:)`` | Take `in purposes:` (or `in:` a namespace) last. |
+| Ids that hash a label: ``MeshChunk/chunkID(in:)``, ``MeshCustodyReceipt/receiptID(in:)``, ``MeshRecipientReceipt/receiptID(in:)`` | Are functions, not stored properties: a value decoded off the wire carries no namespace, so `Codable` stays namespace-free. |
+| The radios: `NetworkMeshSession`, `NetworkPresenceSession`, `NetworkPairSession` | Take `init(namespace:)` (the pair session's radio `init(namespace:profile:)`, reading its service type, ALPN and TXT mode off its pair profile, which its session has checked against the namespace) and read their service type, ALPN, heartbeat, exporter label, log subsystem and soundness verdict there, once (their `start` refuses an unsound namespace by that verdict); the mesh radio keeps `family.purposes` for the channel introductions it frames and checks, and the mesh and recipe radios keep the mesh instance-name prefix and the TLS common name their instance names and certificates are minted under. |
+| The presence posture: `PresenceEpochPosture` | Is minted, and rotated, with the presence instance-name prefix and the TLS common name its caller passes: ``ProximityPresenceSession``'s posture mint, built in `init` from the session's namespace, passes them. |
+| The name display: ``PeerNameDisplay/personName(_:fingerprint:in:)``, with `FernletConnections`' placeholders (`shown`, `firstName`) and `FernletSocial`'s `PresenceManager.firstName(of:in:)` over it | Take `in namespace:` last, sanitize under its peer-name cap and hide a name that begins with its mesh instance-name prefix. The app passes the namespace it hands this module. |
+| The peer-name coercion: `ProximityDisplayName.peerDisplayName(_:in:)`, ``ProximityIdentityEnvelope/sanitizedSenderDisplayName(in:)`` and ``ProximityIdentityEnvelope/disclosedSenderDisplayName(in:)``, `ProximityPairAdvertisedName.publishable(_:in:)`, and over them `FernletSocial`'s chat store (`SessionMessageStore.receiveIncoming(…in:)`) and incoming-photo coercion | Take `in namespace:` last and read `installation.peerNames`: a peer's sanitized name keeps at most the cap and reads as the floor when nothing displayable is left, and the advertised recipe name is capped the same way. The managers pass their own namespace (the mesh manager also to its descriptor coercion, a mesh name under the cap), the coordinator its identity's, and `FernletSocial`'s features their composition's. `ProximityDisplayName.sanitized(_:maxLength:)` is FernletDomainModel's `ItemNameModeration.sanitizedName` copied scalar for scalar; only `FernletSocial`'s activities still use the original. |
+| Storage scopes: ``MeshSessionStorageScope``, ``MeshRoutedStorageScope`` | Carry the namespace and the install binding (`init(namespace:directory:keychainService:installBinding:)`, ``MeshSessionStorageScope/production(for:directory:installBinding:)`` on the root the host states); the two stores read their file names, seal-key accounts and column-seal labels off `scope.namespace`. |
+| Closures that cross an actor | Capture the `Sendable` value when they are made, as ``ProximityPresenceSession``'s radio factory and posture mint, set in its `init`, do. |
+
+**What pins it.** `ProximityNamespaceGoldenTests`, on the crypto-goldens CI line, holds every value
+`.fernlet` carries to the literal Fernlet shipped (64 rows, its two declared feature salts among
+them), each label's role and its FernletCrypto twin, soundness, the byte-prefix check over
+FernletCrypto's 81 registry labels and `.fernlet`'s 41 together, one role-versus-consumer cell per
+hash and transcript consumer, the readers above under `.fernlet` and under a foreign namespace, and
+the six signature labels Fernlet mints with the feature-signature mint, each its FernletCrypto twin's
+spelling, framing and accepted bytes. `ProximityVocabularyGoldenTests`, on
+the same line, holds every token and presentation string this module's consumers read to the
+literal Fernlet shipped before A0.3, and `.fernlet`'s vocabulary and presentation strings to the
+same literals; it drives the radios, the presence posture mint and the name display under `.fernlet`
+and under a namespace whose presentation strings are its own, the inventory digest, the routed type
+registry and a mesh manager under `.fernlet` and under a namespace whose record kinds and routed types
+are its own, the envelope, the coordinator and the mesh's sealed sends under `.fernlet` and under a
+namespace whose payload rules, session messages or capabilities are its own, and a mesh manager's own
+sends and dispatch under a namespace whose mesh messages are its own; and it holds this module's
+sanitizer to FernletDomainModel's byte for byte and drives the peer-name coercion, the envelope's
+sender reads, the name display, the advertised recipe name, the session message store and the mesh
+and recipe-share managers under `.fernlet` and under a namespace whose peer-name policy is its own.
+`ProximityNamespaceSoundnessTests`, on the same line (in this module's own package test target; see
+"Its tests" below), holds the soundness and collision rules, a declared feature salt's place in
+them included, over namespaces built only from literals.
+`FernletFeatureGoldenTests`, on the crypto-goldens line too, holds the bytes of Fernlet's features
+over this module, in `FernletSocial` and the app, which no move may change, to frozen literals: the
+feature labels of the heart dead-drop, presence and the ban store, each read where its feature reads
+it, the heart-drop and presence pair secrets and tags, the ban evidence's reporter tag and a reported
+artwork's content hash, a frozen sealed drop and sealed sidecar opened through their readers, the
+prekey bundle's JSON and the identity introduction that gossips it, the features' keychain and file
+names and persisted shapes, presence's advertisement and the sealed-backup escrow's provisioning
+cases (over the identity the app's factory builds, which carries the escrow as its provisioning
+participant), the two feature salts `.fernlet` declares, under which the pair-secret door derives the
+heart-drop and presence pair secrets' known answers, and the heart-eligibility predicate's three legs
+as presence's gate answers them; and what the mesh features carry over the engine: the capability
+array the mesh advertises in every state of its five switches, the three routed rows' caps and the
+resident bound they share, the token each sender mints under, the routed heart and text bodies, the
+activity and moderation transcripts with frozen signatures, the feature payloads' JSON, the heart and
+activity ledgers' files, the photo wall's files and the keychain role each photo corpus seals under,
+the vouch list's lifetime and label, the item report and friend state sealed at a commit, the
+camera's hold-failure line, the audit lines the features write, and the order a session's commit and
+end run their legs in.
+`ProximityNamespaceBoundaryTests`, one of this module's own tests (see "Its tests"), keeps the result
+from eroding wherever the module lives: no
+namespace, group or purpose is built in this module outside `Namespace/`; `FernletCryptoPurpose` is
+named nowhere in its code; a string literal that spells `fernlet` is only on an exact allowlist
+that names why it is still here and the plan step that removes it, which is empty: no literal
+spells it (the DEBUG launch-environment keys this module reads are its own, `PROXIMITYKIT_*`);
+FernletDomainModel's `PayloadType`, `ProximityCapability`, `ProximityMode`, `ItemNameModeration`,
+`ProximityTrustedPeerRecord`, `TrainerAuditEvent` and `ConnectionSessionLog` are named only on an
+exact per-file, per-type allowlist, which is empty: the seven types are named nowhere (the
+coordinator's session mode is ``ProximitySessionMode``, and Fernlet's typed view of the envelope's
+token is `FernletConnections`');
+`package` is declared nowhere: its list is empty (see "Package doors" below); no type that
+left this module for `FernletSocial` or the app (the heart dead-drop's, presence's, moderation's,
+closeness's and friend state's types, the parked chat payload, the mesh features' — the clothing
+shop's, the report relay's, the activity manager's, the chat's and the content layer's, the session
+hearts' with the heart ledger, the session photos' with their review, the JSON sidecar and the camera's
+copy vault — the deleted support layout, the sealed-backup escrow's and the recipe share's: its
+manager, the diagnostics ring presence shares with it, and its wire types), and none of the recipe
+share's three public values this module renamed for the one-to-one send (`RecipeShareOutcome`,
+`RecipeShareFailure`, `ProximityRecipeShareRecipient`), nor the nine recipe-named types of the pair
+session's mechanism, renamed with pair names before the split (`ProximityPairTransfer`,
+`NetworkPairSession` and the rest; the wall lists the old names, and the old name of the
+namespace's pair-session radio, renamed `pair` with them, is named nowhere in this module's code),
+nor the Fernlet name of the signed envelope, renamed ``ProximityIdentityEnvelope`` before the
+package's first tag (the wall lists it too), is declared, extended or aliased here again, a list
+that only grows as features move out or a public name is made the module's own, because a
+feature that came back under its old name with no Fernlet string, label or domain type of its own
+would pass the other rules; and the target depends on nothing in FernletKit. The literal and
+domain-type lists can only shrink, and a door's row lasts exactly as long as the door. The exact
+per-file lists in `ProximityNamespaceBoundaryTests` are the one place the ratchet's numbers live.
+
+**The install binding and the column seal.** The two sealed mesh stores seal through
+``ProximityColumnCrypto`` (`Support/`), FernletCrypto's `ColumnCrypto` V3 format copied byte for
+byte: the `0x03` ‖ nonce ‖ ciphertext ‖ tag blob, the salt-free HKDF-SHA256 column key with the label
+as `info`, `label ‖ binding` as the authenticated data, the marker classified before the binding is
+read, and the open's three named refusals and the seal's one. It takes a label in the
+``ProximityCryptographicPurpose/Role/columnSeal`` role, so ``MeshSessionStore`` seals under its scope
+namespace's `family.purposes.keyDerivation.meshSessionContextV1` and ``MeshRoutedStore`` under
+`.meshRoutedStoreV1`. The binding comes from the host as a ``ProximityInstallBinding``: one
+synchronous ``ProximityInstallBinding/read(for:)`` whose ``ProximityInstallBindingAccess/seal``
+answer may mint and is `nil` without a durable binding (the seal refuses, owner decision D4), and
+whose ``ProximityInstallBindingAccess/open`` answer never mints, is `nil` for an absent binding (the
+open refuses) and throws the retryable ``ProximityInstallBindingReadError`` for a failed read (the
+open defers). It reaches the stores through their scopes, which are not `Equatable`, since a
+capability has no equality. This module keeps no binding row of its own: an install has one binding,
+shared with whatever else its host seals under it. Fernlet's `FernletDeviceBindingAdapter` delegates
+to FernletCrypto's `DeviceBindingID` at each call, so the row Fernlet's private stores share, its
+cache and its task-local test seam stay the only ones, and an override flipped in the middle of an
+operation still reaches the stores. The golden runs the column vectors pinned before A0.2 through the
+copy and checks that it and `ColumnCrypto` open each other's blobs and refuse alike.
+
+**The keychain mechanism.** This module's key stores (the identity's four device rows and the two
+mesh seal keys) reach
+the keychain through ``ProximityKeychainItem`` (`Support/`), FernletFoundation's
+`KeychainItem` mechanism copied member for member: delete-then-add `store` with its `synchronizable:`
+and `replacing:` scopes, `load`, `loadDistinguishingAbsence`, `loadAll`,
+`loadAllDistinguishingFailure`, `delete`, `deleteReportingStatus`, `deleteAll` and
+`deleteAllReportingStatus`, with the same empty-name guards and status handling. The stores here call
+the reads that distinguish absence, `store` under its default scopes and the whole-service deletes;
+the nil-collapsing read, the enumerations, the `.synced` / `.local` scopes and a narrow `replacing:`
+have no caller in this module (they served the sealed-backup escrow, now its host's) and stay member
+for member. Each query
+dictionary is built in one place and is FernletFoundation's for the same call, so every row written
+before the copy reads back unchanged and a host may still read or clear these services with its own
+accessor, as Fernlet's tests do. Fernlet's catalogue stayed behind (its `Account` names, typed
+overloads and service constants, the device sealing-key mint): the copy holds no account, service or
+accessibility class of its own, and each store passes its row's names and class, where the
+key-custody walls read them. A failed `delete` or `deleteAll` is audited as `keychain.delete.failed`
+or `keychain.deleteAll.failed`, with FernletFoundation's context keys. The golden holds every query
+dictionary to the one FernletFoundation's source spells.
+
+Every member reaches the keychain through one backend (plan step A1.1): the add, the match and the
+delete each hand the dictionary its builder spelled to an internal `ProximityKeychainBackend`. The
+system keychain, `ProximityKeychainItem.SystemKeychain`, is the only backend a shipping build has; it
+calls `SecItemAdd`, `SecItemCopyMatching` and `SecItemDelete` with that dictionary unchanged, so every
+row and every status is the keychain's. A Debug build also holds one `Mutex` slot and its internal
+door, `installBackend(_:)`, which nothing in a host calls: only this module's own package tests, whose
+unhosted bundle has no keychain it may use, install an in-memory store through it (see "Its tests").
+A Release build has neither the slot nor the door. This module's own package tests hold the door's one
+caller to their installer and its declaration to the `#if DEBUG` branch (`ProximityKeychainDoorTests`,
+see "Its tests"). No CI step compiles a Release build; ProximityKit's door suite pins the text of the
+`#if DEBUG` / `#else` region, so the Release branch can only break where the Debug one does. Fernlet's
+`KeyCustodyBoundaryTests` holds that no file of Fernlet's names the door, and holds the funnel on the
+system keychain in Fernlet's hosted tests, where the golden's live round trip and the key-custody walls
+read real rows.
+
+**The audit sink.** This module writes its audit lines (frozen English event names such as
+`mesh.routedDrain.rejected`, with counts, reasons and salted labels as context, which a sink keeps
+private because a few lines name a peer) through ``ProximityAudit``, which hands each one to the
+``ProximityAuditSink`` the host installed with ``ProximityAudit/install(_:)``. It names no host's log
+and keeps none of its own: with no sink installed, a line is dropped. Delivery is synchronous, on the
+emitting executor, with no hop: the sink is read under a `Mutex` the slot owns and called after the
+lock is released, so it may re-enter or block, and the requirement is `nonisolated` because the
+routed and session stores that log are `nonisolated` value types. Unlike the namespace it is a
+process-wide slot: audit lines come from nearly four hundred call sites, including static helpers that
+hold no host, and a host's tests build this module's objects directly and still need to see every
+line, so one install at launch reaches all of them. Fernlet's sink is `FernletAuditBridge` in
+`FernletConnections`, installed first thing in `FernletApp.init` and not behind the UI-test harness
+check, so the unit tests, hosted in the app, see every line in `FernletAuditLog`'s capture registry
+exactly as they did when this module named `FernletAuditLog` itself. `ProximityAuditBridgeTests` is
+the canary for that install: every test asserting that an event was not logged would pass vacuously
+without it. This module's own package tests run unhosted, with no app to install a sink, so their test
+support installs one of its own (see "Its tests"); `ProximityAuditBridgeTests` also holds that the
+app's install is the only one in Fernlet's code and tests, and this module's tree walls
+(`PackageTestTreeWallTests`) hold its tests' install to the one in their installer and this module's
+code to none.
+
+**What is left.** The vocabulary and the session rules are the host's: every group
+of the vocabulary is read off the namespace its reader holds (the reader table above), the radios
+and the presence posture mint their Bonjour instance names (`fernlet-mesh-…` and `fn-…` for Fernlet)
+and certificates under the namespace's strings, the coordinator has no display default (every caller
+passes the host's name) and `PeerTransport`'s discovery doors take no service type, and the trust
+policies, the trust records and the peer-name policy come from the host. Fernlet's social features
+are its own modules': `FernletSocial` holds presence (its manager, over this module's presence
+engine, ``ProximityPresenceSession``, and its pair secret and tag, the pair secret a wrapper over
+``IdentityService/pairSecret(with:purpose:)`` under the salt `.fernlet` declares), the heart
+dead-drop (with its heart-drop derivations, its keychain service and the mesh stores' services
+derived beside it), moderation's ban store, ledger, content hash and report relay, closeness, friend
+state, the parked chat payload, recipe sharing (its manager over this module's pair session under
+Fernlet's recipe profile, which is `FernletConnections`', its wire types and its English), and the
+mesh features its `FernletMeshFeatures` composes over this module's engine — the capability list and the vouch list's content, the clothing shop, activities,
+chat with the content layer's first half, the session hearts with the heart ledger, and the session
+photos with their review — each through the engine's public seams (the payload token door and
+captured-slot send, the host's routed-type rows, the origination door, a projection handler or a
+ledger judge per routed type, the session observer, the capability-list provider and the vouch-list
+exchange); the sealed-backup escrow is the app's (`SealedBackupEscrowKey`, the provisioning
+participant every identity the app builds carries, with the escrow's two feature labels); and so,
+since plan step A0.6, is the Live Activity reaper (`ProximityLiveActivityReaper`, with the attributes
+type it enumerates), which only cleans up after Fernlet's own earlier builds.
+`ProximityNamespaceBoundaryTests` keeps every one of their types out of this module, and holds its
+dependencies to none (plan step A1.0). What still ties this module to Fernlet leaves in these steps:
+
+- **C1.** FernletCrypto's 40 twins of `.fernlet`'s labels (38 protocol labels and the two
+  feature salts) retire, with its 6 twins of the signature labels Fernlet mints with
+  ``ProximityCryptographicPurpose/featureSignature(_:framing:)`` (`FernletSocial`'s activity and
+  moderation labels, the app's duress and probe labels).
+- **C5.** The one-to-one radio is a profile-driven pair session, ``ProximityPairSession`` over a
+  host's ``ProximityPairProfile``, whose per-connection half is the coordinator's public token send
+  and manual commit (see "Package doors" below); Fernlet's typed view of the envelope's token and its
+  recipe profile are `FernletConnections`'. The coach profile joins at C5, and each of its needs is
+  a defaulted profile field, a new verb or a new case: its radio row (the session's profile check
+  widens to it, and the radio's inbound resolution and dial hello change for its admission), roles
+  and admission after the identity handshake, a confirmation timeout long enough for pairing, a
+  sealed send before confirmation that fails closed, an introduction bound to the channel, and the
+  radio's `recipe.quic.*` labels, pinned in a golden before they are parameterized. The coordinator's
+  `Mode`, ``ProximitySessionMode`` (a session profile, not a token; its raw values are frozen),
+  generalizes then into the session policy that profile brings, the first other than friend.
+
+### Package doors
+
+A `package` declaration is a door into this module that a Fernlet module inside FernletKit could use
+(the two test targets too, Fernlet's through `@testable import`, and never the app, nor any module of
+another package) while a named later step reshapes or replaces what is behind it; a settled seam is
+`public`, with its contract, instead. This module opens none. Its last doors, the presence radio's
+(its seam, its QUIC conformer, the peer channel, the epoch posture and the TXT vocabulary, which
+`FernletSocial`'s presence manager drove), closed at plan step A1.1 behind the public presence
+engine, ``ProximityPresenceSession``, and everything behind it is internal: the manager advertises
+and reads tags, asks the engine to rotate the posture from its own tick and builds each heart
+connection's coordinator over the ``ProximityPeerChannel`` the engine hands it, calling
+``ProximityPeerChannel/notifyConnected()`` once that coordinator has begun. A test reaches the radio
+seam, the posture and the record through `@testable import`, as it reaches any internal.
+
+The coordinator's per-connection API is public, with its contract: its token send,
+``ProximityCoordinator/sendPayload(payloadTypeToken:summary:payload:sealed:)``, which signs one payload
+under a token its host's vocabulary names and sends it, sealed or not, to the confirmed peer, and its
+manual commit, ``ProximityCoordinator/commitManualProximity()``, which confirms the identity it holds at
+a proximity gate. A ``ProximityPairSession``'s pairings and `FernletSocial`'s presence heart
+connections send and commit through them, and the mesh commits a slot through the same method.
+
+The naive JSON sidecar `FernletSocial`'s ledgers persist through is that module's own, internal
+there, so it opens no door here. Rule 5 of `ProximityNamespaceBoundaryTests` lists every door, file
+by file, with the step that closes it (none is left, so the list is empty), and fails a `package`
+line no row names (any code line on
+which `package` is an access modifier, a setter's `package(set)` included, however its declaration
+goes on) or a row whose line is gone; that list is the one place the counts live.
+
+### Platforms
+
+ProximityKit builds for iOS 26 and native macOS 26 (plan step A0.6). Mac Catalyst is not a
+destination, and nothing builds it. A fact whose right answer differs by platform is its host's to
+state, as a ``ProximityHost`` requirement with no default whose doc says what a Mac host answers (the
+name an unnamed device goes by, whether a connection ranges, and where an installation keeps its
+files; see "Hosting on macOS" below). Two platform mechanisms stay in this module, each compiled only
+where its framework is usable:
+
+- ``NIRangingSession``, the NearbyInteraction provider a host on iOS hands out, is compiled on iOS
+  only: its whole file is under `#if os(iOS)`. NearbyInteraction's module ships in the macOS SDK with
+  every type it declares unavailable there, so `canImport` would not keep it out of a Mac build. A host
+  without ranging answers ``NoopRangingProvider``.
+- ``ProtectedSidecar``'s protected-data retry observes UIKit's protected-data notification under
+  `#if canImport(UIKit)` and compiles out without it, so on a Mac a read retries on access only.
+
+**The gate.** `Scripts/macos-build-check.sh` builds the package's `MacReady` product, which names the
+Mac-ready set: this module, and `FernletFoundation`, `FernletCrypto` and `FernletDomainModel`, which a
+Mac host of Fernlet's needs whatever this module depends on. It builds them for
+`generic/platform=macOS`, arm64 and x86_64, with warnings as errors, and then requires native macOS
+products, because that destination also matches Mac Catalyst. The manifest's `.macOS(.v26)` is
+package-wide, as SwiftPM declares platforms, and no other module is built for macOS
+(`FernletSocial`'s photo path still needs `UIImage`). `Scripts/macos-build-selftest.sh` proves the
+check load-bearing: an `import UIKit` it plants in this module must fail the check, and the clean tree
+must pass it. CI runs the self-test on every push (the "ProximityKit on native macOS" step of
+`s3-wall.yml`), and the pre-push hook runs the check when a push touches one of the four modules, the
+manifest or either script. It is an `xcodebuild` build, not `swift build`: the SwiftPM command line
+leaves the set's string catalogs (`FernletFoundation`'s and `FernletDomainModel`'s) unprocessed. The
+build is the compiler half, which refuses any symbol native macOS lacks wherever it stands outside its
+guard. `ProximityPlatformNeutralityTests`, one of this module's own tests on the `proximitykit` CI line
+(see "Its tests"), is the source half: it holds this module's imports to a neutral baseline and the
+two seams above, refuses CloudKit by name whatever row is written (the cloud half of the S3 pair,
+which no compiler wall can hold), holds its platform branches (`#if os(…)`) to the NearbyInteraction
+file's guard, refuses the device-name sources, platform-directory APIs and host-fact defaults it lists
+(its rows for them are empty), and holds this module's two channel-ready doors to their host's ranging
+provider and `NIRangingSession` to its own file. Fernlet's `ProximityPlatformBoundaryTests`, on the s3-grep CI line,
+holds its own channel-ready door, presence's heart door in `FernletSocial`, to the same rule, and pins
+that the gate runs, neither skipped nor tolerated in CI and on by default in the pre-push hook.
+
+### Hosting on macOS
+
+A host on a Mac owes this module the following, beside the requirements every host answers. No build
+checks them; plan step P0.2 and A1's device lanes prove them on hardware.
+
+| Topic | What a Mac host owes |
+| --- | --- |
+| Keychain | Every query this module issues sets `kSecUseDataProtectionKeychain` (``ProximityKeychainItem``). On macOS that keychain needs the host signed with entitlements a provisioning profile authorizes (Apple's TN3137). Without them `SecItem` returns `errSecMissingEntitlement` (-34018), and identity provisioning throws ``IdentityError/keychainReadFailed(_:)`` and fails closed. This module's own tests never reach a Mac's keychain, whatever it would answer them: they run against an in-memory store ("Its tests"); a host has no such door. |
+| Local network | `NSLocalNetworkUsageDescription`, and `NSBonjourServices` listing its namespace's service types (Fernlet's are in `App/Fernlet/Info.plist`); when sandboxed, `com.apple.security.network.client` and `com.apple.security.network.server`, because the radios both listen and dial. |
+| Routed access gate | ``MeshNetworkManager``'s gate starts ``MeshRoutedAccessGate/closed``, and its three facts are iOS-shaped. A Mac host answers each in the same meaning, `protectedDataAvailable` (the user's session is unlocked and the host's keys are readable), `appIsForeground` (the app is active) and `duressActive` (its own lock's duress session, or `false`), and pushes them through ``MeshNetworkManager/applyRoutedAccessGate(_:now:)`` on every change; otherwise nothing routed is ever decrypted. |
+| Lifecycle | macOS never suspends a process, while Fernlet's run policy (the app's) leans on iOS suspension, so a Mac host stops or holds the radios itself. App Nap can stretch the mesh radio's 1 s poll and its 30 s heartbeat past the 90 s QUIC idle reap, so a Mac host holds a user-initiated `ProcessInfo` activity while a session is live. |
+| Protected data | ``ProtectedSidecar``'s retry observer compiles out without UIKit, so its reads retry on access only. Data protection's file-protection classes are iOS's; on a Mac, the sealed stores carry the at-rest guarantee. |
+| Peer-to-peer | The mesh radio asks for peer-to-peer Wi-Fi everywhere but the simulator, macOS included, so a Mac uses AWDL beside its other interfaces; the cellular ban is moot there. Untested on a Mac until plan step P0.2. |
+| Ranging | Answer ``NoopRangingProvider`` from ``ProximityHost/makeProximityRangingProvider()``, so every session commits by hand or by the QR ceremony. An iOS host that answers ``NIRangingSession`` must declare `NSNearbyInteractionUsageDescription`. |
+| Name | ``ProximityHost/proximityFallbackDisplayName`` is a generic word, a token that is never localized, and never the Computer Name (`Host.current().localizedName`, `SCDynamicStoreCopyComputerName`, `ProcessInfo.processInfo.hostName`), because it rides the recipe radio's unauthenticated TXT record. |
+| Storage | ``ProximityHost/proximitySupportDirectory`` is a folder no other app shares: a sandboxed host's container's Application Support, or, for an unsandboxed host, a folder named for its bundle identifier. Its namespace's ``ProximityNamespace/installationCollisions(with:)`` must be empty against every app of its family, so its `directoryName` is never another app's, and never "Fernlet". The requirement has no default, and this module computes no directory: ``ProximityNamespace/Storage/directory(under:)`` puts the namespace's folder under the base the host picks, so nothing lands in the process's Application Support, which on an unsandboxed Mac every app shares, unless the host picks it. |
+| Continued processing | `BGContinuedProcessingTask` is the iOS app's (Fernlet's continuation host); a Mac host has nothing to continue into. |
+
+### Its tests
+
+This module's own tests live in the package's test target, `ProximityKitTests`
+(`FernletKit/Tests/ProximityKitTests`, plan step A0.8), and travel with the package at plan step A1.
+It holds the suites that need nothing but this module and its own test support: the in-memory transport
+fabric, the peer handle and the rule a claimed `sid` answers to (`FakePeerTransportTests`,
+`PeerHandleIdentityTests`, `MeshSessionIDClaimTests`, on CI's mesh-batteries line),
+the namespace's soundness and collision rules (`ProximityNamespaceSoundnessTests`, on the
+crypto-goldens line) and, on the `proximitykit` line, the membership records (`MeshDerivedRosterTests`,
+`MeshMembershipMergeTests`, `MeshMembershipBoundsTests`), the epoch model (`MeshEpochRefTests`,
+`MeshEpochKeyringTests`, `MeshEpochAcceptanceTests`, `MeshFrameReplayWindowTests`), the routed drain plan
+(`MeshRoutedDrainPlanTests`), the commit detector and the ranging fallback
+(`NearbyRangingSessionTests`), the replay cache (`ReplayCacheTests`), the test support's own facts
+(`PackageTestSupportTests`), the test keychain (`PackageKeychainStoreTests`), the test host and
+audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoundaryTests`), the
+platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
+(`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`), the tests' own
+hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`), the source walls
+over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
+(`ProximityMemoryLifecycleTests`); and thirty-three suites copied from Fernlet's tests, described
+below: fifty-eight suites, 508 tests. The
+target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
+the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
+call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
+app installs a ``ProximityAuditSink`` (with none installed, this module drops every audit line). Its
+keychain is therefore an in-memory store its test support installs as this module's keychain backend,
+and its audit sink one its test support installs too, both described below.
+It builds in Swift 6 language mode with no default isolation; with the three upcoming features it
+declares, that is every upcoming feature Fernlet's own tests use, though they build in Swift 5 mode.
+It declares this module as its one dependency, and its files import nothing else of the package,
+whose other modules hold Fernlet's values and do not travel (this module depends on none of them). Fernlet's CI runs it on
+the iOS simulator; the package repository's CI has a macOS lane (`swift test`) beside its iOS simulator lane.
+
+Its test support lives in `TestSupport/`. The suites compute under a namespace of their own,
+`.packageTest` (`PackageTestNamespace.swift`), built from this module's public API alone out of
+`pktest.*` labels, `_pktest-*._udp` radios and `org.example.pktest.*` keychain services, in the shapes
+Fernlet's namespace takes (its legacy peers accepted, two feature salts, a two-letter presence prefix,
+`pk-`, and a peer-name cap of 24), and declared on the namespace, its family, its labels and its
+installation, each level a call may hand this module. `PackageTestSupportTests` holds it sound, and
+Fernlet's `ProximityNamespaceGoldenTests`, which can name both, holds it disjoint from `.fernlet`
+everywhere. The call shapes the suites moved from `FernletTests` were written against come back in
+`PackageTestBindings.swift`, each Fernlet's test binding with `.packageTest` for `.fernlet`. A suite that
+reads one of this module's sources names it relative to the package root through `PackageRoot`
+(`PackageRoot.swift`), which walks up from its own file to the first folder holding both `Package.swift`
+and `Sources/ProximityKit`: `FernletKit/` in Fernlet's repository, the root of ProximityKit's own.
+
+The bundle's keychain is `PackageKeychainStore` (`PackageKeychainStore.swift`), an in-memory store
+that answers the keychain funnel's query dictionaries as the keychain does: rows keyed by service,
+account and synchronizable flag, a duplicate add refused, a synchronizable add under a
+`ThisDeviceOnly` class refused, single-row reads and enumerations, one-row and
+whole-service deletes, the any, synced and device-only matches, and, on demand, a service that answers
+`errSecInteractionNotAllowed`, as a keychain does before the first unlock, which no simulator can be made
+to return. Where the keychain promises no order (an enumeration, or a single-row read under
+`kSecAttrSynchronizableAny` that matches both variants) the store answers in its own order, by account
+and then the device-only variant first; a suite must not rely on that order.
+`PackageTestEnvironment` (`PackageTestEnvironment.swift`) installs it through the funnel's
+Debug-only door once, lazily, by a `static let` the first read runs: Swift Testing has no bundle-level
+set-up, so whatever reaches the keychain reads `PackageTestEnvironment.keychain` first, and its every
+call reaches the store, never a keychain. The store's file imports Security to read those dictionaries.
+`PackageKeychainStoreTests` holds the store installed (the funnel
+resolves it) and holds this module's identity and two seal keys to it, on `.test.` services of
+`.packageTest`'s: an identity provisions, reads its public keys back and wipes; each seal key mints,
+reads back the same key and wipes; an unreadable service defers or refuses and is never minted over,
+while an absent one mints; scopes on two services never see each other's rows; and the synced and
+device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
+built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
+`swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
+Mac too, all fifty-eight passing `swift test` with this module and its tests laid out as in the package
+repository (`Sources/`, `Tests/` and a root manifest).
+
+The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
+`PackageTestEnvironment.audit` installs through ``ProximityAudit/install(_:)`` once, lazily, as it
+installs the keychain store: it hands each line, in line, to every capture registered at that moment,
+each under a token of its own, so parallel suites never replace one another's. A suite reads lines
+through a `PackageAuditCapture`, which registers as it is built, so the sink is installed before any
+capture reads and a check that a line was not logged is never vacuous, and which keeps only the lines
+its scope admits: those whose context holds the capture's context pairs (a rig's own label) and, for a
+capture built `markedOnly`, those logged inside its own `marking(_:)`, for a line that names no rig.
+The bundle's host is `PackageTestHost` (`PackageTestHost.swift`), a ``ProximityHost`` built from this
+module's public API alone that states all thirteen requirements itself, since nothing in the target
+extends ``ProximityHost`` (`PackageTestHygieneTests` holds that): the namespace it is handed, `.packageTest` by default; a scratch root,
+`PackageTestHost-<UUID>` directly under the temporary directory and never Application Support, which
+nothing creates until a store opens and `tearDown()` removes; both storage scopes on that root, under
+its namespace and a sixteen-byte `PinnedInstallBinding` read with no keychain, on `.test.` services of
+its own (`org.example.pktest.mesh-session.test.<UUID>` and `org.example.pktest.mesh-routed.test.<UUID>`);
+a fresh identity per call, every one on its one `.test.` service,
+`org.example.pktest.identity.test.<UUID>`; a fresh `PackageTrustPolicy` per call, answering from the
+host's own blocked, revoked and trusted sets and keeping its audits; a fresh ``NoopRangingProvider`` per
+call; and the temporary-message, heart and photo routed rows on its namespace's tokens, in the shapes
+and with the caps Fernlet's rows have, none under the reserved control token. Its initializer reads
+`PackageTestEnvironment.keychain` and `PackageTestEnvironment.audit` first. `PackageTestHostTests`
+holds both: a line reaches the capture scoped to it and no other, and a stopped capture keeps nothing
+more; the host's root and services are scratch of its own, and two hosts share none; the host states
+its rows, its policy and its radio itself; and a ``MeshNetworkManager`` built over it, unhosted,
+provisions its identity into the in-memory store and logs no line, while one whose identity service
+the store answers as unreadable logs its failure. So a suite in this target can build a manager over
+`PackageTestHost` and read this module's audit lines, a line's absence included. This target's tree
+walls (`PackageTestTreeWallTests`, below) hold the host as the package tests' host double and the
+installer to the one install of a sink in these tests.
+
+The namespace wall, `ProximityNamespaceBoundaryTests` (see "Protocol namespace" and "Package doors"),
+is one of this target's suites, on the `proximitykit` line, so it travels with the package and runs
+in either repository. It reads this module's sources and its manifest through `PackageRoot`, by the
+paths `Sources/ProximityKit` and `Package.swift`, and reads code apart from comments and literals
+through the package's copy of the source walls' lexer (`TestSupport/SwiftSourceLexer.swift`), which
+its lexer cell holds to its fixtures. Its manifest pin needs only the `ProximityKit` target's literal
+`dependencies: []`, so it reads either repository's manifest alike. What it refuses is Fernlet's: the
+app's strings, labels, domain types and the types that left this module for its features.
+
+The platform wall, `ProximityPlatformNeutralityTests` (see "Platforms"), is one of this target's
+suites too, on the `proximitykit` line, so it also travels with the package. It walks this module's
+sources with the namespace wall's walk, through `PackageRoot`, reads its two channel-ready doors by
+their paths under the package root, and reads code through the same copy of the lexer, its readers
+fixtured in a cell of their own. Its platform-directory needles are also this target's hygiene
+suite's location needles (what an unhosted test may not reach). A host's own doors and its Mac build are its own walls' to hold: Fernlet's
+`ProximityPlatformBoundaryTests` holds presence's heart door and pins the native macOS build.
+
+The keychain door's wall, `ProximityKeychainDoorTests` (see "The keychain mechanism"), is one of this
+target's suites as well, on the `proximitykit` line. It reads this module's sources and this target's
+own files through `PackageRoot` and their code through the same copy of the lexer, and holds the
+funnel's Debug-only door declared once, in its `#if DEBUG` branch, whose whole text it pins, and named
+by this target's installer alone, its readers fixtured first. A host's own walls hold that the host
+names the door nowhere: Fernlet's `KeyCustodyBoundaryTests`.
+
+The tests' own hygiene, `PackageTestHygieneTests`, is one of this target's suites too, on the
+`proximitykit` line, so the rules that keep these tests runnable unhosted travel with them. It reads
+every Swift file of this target through `PackageRoot` and the walls' walker
+(`TestSupport/PackageSwiftFiles.swift`), which each cell that reads through it holds to a file floor, and
+holds four rules, each reader fixtured both ways. Nothing reaches what the unhosted bundle cannot serve
+(rule I9): a keychain call outside a file listed with the structure that keeps it behind the
+installer's read, a raw `SecItem` call anywhere, a store or its production scope, a production or
+process-shared location, or a path of a host repository, each excused only by an exact allowlisted line
+with its invariant; a wall file, the suite's own first, is read as code, so the needles it holds in its
+literals are data and a needle in its code is refused, and so is a literal of it that starts with a
+host repository's folder. Every import travels with the package (rule I11): this module, Foundation,
+Testing, Combine, CryptoKit, Observation, Security, simd and Synchronization; a file that imports
+Security still reaches the keychain only through this module's funnel, since rule I9 refuses a raw
+`SecItem` call in every file. The target's own inventory, `Tests/ProximityKitTests.tsv` beside this
+target's folder, is the tree: every
+suite's file and its declared tests, the row count and the tests' sum measured, which the test-count
+floor of CI in ProximityKit's own repository reads. And nothing extends ``ProximityHost``.
+
+The tests' tree walls, `PackageTestTreeWallTests`, are one of this target's suites as well, on the
+`proximitykit` line, so the walls that keep these tests from harming one another in one process travel
+with them. Each reads every Swift file of this target, and one of them this module's sources too,
+through the walls' walker at its file floor, each matcher fixtured first, and holds four rules. The
+audit install: ``ProximityAudit/install(_:)`` is named in this target's installer alone, once, and in
+none of this module's code, and outside ProximityAudit's own file nothing extends it, aliases it or takes
+its metatype. The stores: every session or routed store a test builds names a scope of its own, none
+reaches a production scope by any spelling, and every host double that states a root of its own states
+both scopes on it (`PackageTestHost` the one double). ML5: no test builds a ``MeshNetworkManager`` or a
+``ProximityPairSession``, the two holders of an `unowned` host, over a host expression that is itself a
+call. And no test file is a home of either determinism digest, which a host's acceptance batteries pin.
+In Fernlet's repository, Fernlet's own walls (`ProximityAuditBridgeTests`, the store isolation walls,
+ML5 and the batteries' digest homes) hold the same rules over Fernlet's trees and not this folder.
+
+The source walls, `ProximitySourceWallTests`, are one of this target's suites as well, on the
+`proximitykit` line, so the rules a host holds over its shipping code hold this module's code wherever
+it lives. They read every Swift file of this module through the walls' walker at its file floor, each
+matcher fixtured first, and hold four rules. The launch hooks: every line that reads one of this module's
+DEBUG launch-environment keys, `PROXIMITYKIT_UI_TEST_*` (the mesh manager's canned-mesh flags) or
+`PROXIMITYKIT_MESH*` (the transport's console mirror and chaos keys), sits inside an open `#if DEBUG`
+region, and each family is read at its measured floor, so a matcher that stops seeing one fails. Key
+custody: no keychain row this module writes is synchronizable, every accessibility class it names is a
+`ThisDeviceOnly` one, and no line of its code constructs an ``IdentityService`` or delegates to one of
+its initializers, its own file included, read as code through the walls' lexer: its host door,
+``ProximityHost/makeProximityIdentity()``, has no default, so every identity a manager holds is built in
+its host's code, under the host's custody. The purpose wall: every line that opens a raw CryptoKit
+primitive call (nine markers: signing and verifying, HKDF, HMAC, ChaChaPoly and AES-GCM) names a purpose
+within three lines above it to six below, by ``ProximityCryptographicPurpose``, a `purpose` argument, an
+authenticated-data binding or an escape-hatch comment, and at least 16 such lines are read (21 in six
+files today). The escape-hatch census: the calls that answer with a `cryptographic-domain:` comment
+instead are pinned by total, by label, by file and by documentation mention, with no legacy read path
+among them; the one hatch is the QUIC transport's X.509 certificate self-signature
+(`x509-self-signature`, over bytes X.509 fixes, under the radio's ephemeral TLS key, whose only other
+signatures are its listener's TLS 1.3 CertificateVerify messages, which TLS itself prefixes so that no
+bytes one use signs can be bytes the other signs), its justification beside its pin. In Fernlet's
+repository, `TestHookBoundaryTests`, `KeyCustodyBoundaryTests`, `CryptographicPurposeBoundaryTests` and
+`CryptographicEscapeHatchCensusTests` hold the same rules over Fernlet's shipping code and not this
+folder.
+
+The memory-lifecycle wall, `ProximityMemoryLifecycleTests`, is one of this target's suites as well, on
+the `proximitykit` line, so the static memory-lifecycle disciplines travel with this module's code. It
+reads every Swift file of this module through the walls' walker at its file floor, each
+matcher fixtured first, and holds four disciplines, each at a measured floor of the files it applies
+to. ML1: a file that stores a `Task` handle cancels it in a `deinit` or `isolated deinit` (six do, with
+no exemption). ML2: a block-based `NotificationCenter` observer is removed (one file registers one). ML3:
+`withObservationTracking` is used in ``ObservationLoop``'s file and nowhere else. ML4: in a file holding
+an `unowned` ``ProximityHost`` (the mesh manager's and the pair session's), every `Task` construction
+goes through the file's one `spawnHostPinned(_:)` or carries a `// host-pin:` marker of a known kind
+with its reason. In Fernlet's repository, `MemoryLifecycleBoundaryTests` holds the same rules over
+Fernlet's shipping code and not this folder.
+
+The presence engine's own contract is held here too, by `ProximityPresenceSessionTests`, over an
+in-memory radio of the suite's own, under `.packageTest` and the engine's own posture mint: a sighting
+under a name the session wore, or of another record version, never reaches the host, and the ring of
+worn names forgets only its oldest name past its cap; a failed mint drops the worn posture, so nothing
+is re-advertised under the previous epoch's name; a start and a republish advertise the tags they are
+handed, with all six of the radio's hooks wired before it starts; each hook reaches the host's own; and
+the engine and its radio are released when the host lets go of them without a stop.
+
+The suites copied from Fernlet's tests at plan step A1, the split's first batch, are the thirty-three
+of its ProximityKit suites that need no keychain: the transport's decision tables and its channel
+introduction (every suite of `NetworkMeshTransportTests.swift`), epoch rotation's triggers, plan, wire
+cause and grace, the session state machine and its ceiling, the observation loop's lifecycle, the
+presence posture, the routed chunk's shape and assembly, the routed inventory's shape and delta, the
+recipient receipt's shape, the membership inventory digest, the merge window's state, the retry plan,
+and the custody hand-off's source wall. Each keeps its name and its tests, so it reads beside its
+original, which Fernlet keeps. A copy differs from its original only where the package's tests must:
+it imports nothing of Fernlet's, computes under `.packageTest` where the original named Fernlet's
+namespace or labels, and reads a source through `PackageRoot`; where Fernlet's file holds suites that
+need the keychain, a store, or Fernlet's types or bytes, the copy holds only the others, and says so in
+its header. Their fixtures keep the file names they have in Fernlet's tests, the call shapes they were
+written against join `PackageTestBindings.swift`, and the helper the source-reading cells share is
+`TestSupport/MeshRoutedSourceScan.swift`.
+
+Seven helpers both test targets use live in each, held identical but for their imports, because a test
+target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
+mesh-message spelling helper, the test namespace, the epoch fixtures, whose one mint binds in each
+target to that target's namespace, and the source walls' lexer, each copy held to the same fixtures in
+its own target. The test bindings are a replacement, not a twin: this target's bind to
+`.packageTest` and Fernlet's to `.fernlet`, so `CIGateSelectorBoundaryTests` holds each declaration of
+this target's to one of Fernlet's with that one token read across, and lets the extensions both declare
+live nowhere else. CI names its suites `ProximityKitTests/<Suite>`. In Fernlet's repository,
+`Tests/suite-inventory.tsv` and `CIGateSelectorBoundaryTests` hold every suite to one target, one file
+and its lines, and hold its rows to this target's own inventory, while this target's hygiene suite
+refuses what the bundle cannot serve and an import of the closure.
+
+Every other ProximityKit suite still runs in the app's `FernletTests`. `ProximityNamespaceSoundnessTests`
+needs neither a host nor an audit sink, and it runs in this module's
+test target, still on the crypto-goldens line beside Fernlet's goldens: its five framing byte pins are
+over a literal namespace that belongs to no app, and it imports this module plainly, not `@testable`,
+so it sees only what a host sees. The mesh-message spelling helper it builds its fixtures with
+(`ProximityNamespaceMeshMessagesSpelling.swift`) is the fourth helper: the namespace and vocabulary
+goldens and the runtime gate, which stay in `FernletTests`, build their fixtures with it too.
+
+## Topics
+
+### Host seam and app integration
+
+- ``ProximityHost``
+- ``ProximityInstallBinding``
+- ``ProximityInstallBindingAccess``
+- ``ProximityInstallBindingReadError``
+- ``MeshContinuationRaising``
+- ``MeshSessionContinuationReading``
+- ``ProximityAudit``
+- ``ProximityAuditSink``
+
+### A host's mesh features
+
+A host's features ride the engine through these public seams rather than living in it: the session
+observer and the moments it is told, the projection handler or ledger judge a routed type's token
+registers and what the engine hands it (the opened body, the delivery, the author, the verdicts and
+the judgement), the content-scope column of a host's routed-type row, the origination door's
+audience, the vouch-list exchange, the canonical byte writer a feature's signed transcript is built
+with, and the generic content set a feature's merged records union through. Fernlet's mesh features
+are `FernletSocial`'s, composed by its `FernletMeshFeatures`: the session photos and their review,
+chat with its transcript store, the session hearts with the heart ledger, the clothing shop,
+activities, the moderation report relay and friend state.
+
+- ``MeshSessionObserver``
+- ``MeshSlotCommit``
+- ``MeshSessionEnd``
+- ``MeshScopeChange``
+- ``MeshRoutedProjectionHandler``
+- ``MeshRoutedLedgerJudge``
+- ``MeshRoutedBody``
+- ``MeshRoutedDelivery``
+- ``MeshRoutedAuthor``
+- ``MeshRoutedAdmission``
+- ``MeshRoutedJudgement``
+- ``MeshRoutedContentScope``
+- ``MeshRoutedAudience``
+- ``MeshVouchListExchange``
+- ``CanonicalByteWriter``
+- ``MeshContentSet``
+- ``MeshContentOrder``
+- ``MeshMergeableContent``
+
+### Protocol namespace
+
+- ``ProximityNamespace``
+- ``ProximityCryptographicPurpose``
+- ``ProximityNamespaceError``
+- ``ProximityNamespaceGate``
+
+### Identity and signing
+
+- ``IdentityService``
+- ``IdentityProvisioningParticipant``
+- ``IdentityError``
+- ``ProximityKeychainItem``
+- ``ReplayCache``
+
+### Wire envelope and sealing
+
+- ``ProximityIdentityEnvelope``
+- ``PayloadEncryption``
+- ``PayloadSummary``
+- ``DateRange``
+- ``SealedIntroductionEnvelope``
+- ``SealedPayloadFormat``
+- ``SealedPayloadFraming``
+
+### Session engine
+
+A coordinator reports its session to the ``ProximityInspectorRecording`` its owner attaches in this
+module's own value types (an envelope record, a distance sample, the peer line, transport events
+stamped with the coordinator's own clock, the role, the ranging mode and the session mode) and names
+no host's log: a host that keeps one converts each value into its own record, as Fernlet's app-side
+`ConnectionInspector` does into its persisted `ConnectionSessionLog`, which keeps its own copies of
+the role and ranging mode, and FernletDomainModel's `ProximityMode` for the session mode, with the
+same raw values.
+
+- ``ProximityCoordinator``
+- ``ProximityCommitDetector``
+- ``ProximityPayloadHandling``
+- ``ObservationLoop``
+- ``ProximityRole``
+- ``ProximityRangingMode``
+- ``ProximitySessionMode``
+- ``ProximityInspectorRecording``
+- ``ProximityInspectorEventRecorder``
+- ``ProximityInspectorEnvelope``
+- ``ProximityInspectorDistanceSample``
+- ``ProximityInspectorPeer``
+- ``ProximityInspectorTransportEvent``
+
+### Transport
+
+The protocol surface carries no framework peer type. That is what let the Network.framework/QUIC
+conformer slot in beside the MultipeerConnectivity one in P2 without changing anything here, replace
+it as the default at the cutover without changing anything here either, and — in the deletion round
+of 2026-09-22 — leave the tree with the framework's last two files (`MeshMultipeerSession.swift`,
+`MCPeerIDStore.swift`) while this surface stayed as it was. `TransportNeutralityBoundaryTests` now
+asserts **zero** framework identifiers under the whole package.
+
+**Three sessions, one surface.** `NetworkMeshSession` (Network.framework/QUIC, **the friend mesh's
+radio** since 2026-09-21 — see
+[the network migration plan](../../../../Docs/Plan-ProximityKit-Network-Migration-2026-08-27.md) §7),
+`NetworkPresenceSession` (the same framework, the presence radio, §17.1, which its presence engine
+``ProximityPresenceSession`` builds and drives) and
+`NetworkPairSession` (the recipe radio, same plan section) each multiplex into per-peer
+channels — `NetworkPeerChannel` — that conform to ``PeerTransport``. The three share one channel
+type through `NetworkChannelHost` and one parameter factory through `ProximityQUICParameters`,
+which is where `prohibitedInterfaceTypes = [.cellular]`, the accept-any validator and the declared
+idle timeout live once rather than three times; what they do NOT share is the ALPN, so a recipe dial
+can never complete a handshake with a presence or mesh listener. They also share the **glare** rule:
+when both ends dial at the same moment, each collapses the duplicate with ``MeshTunnelConvergence``
+— the mesh ranking two session ids, presence and recipe share ranking the two advertised instance
+names, each a pure function of values the two devices agree on, so the connection that survives is
+the same one on both. Refusing the second connection instead is what leaves a mutually-dialing pair
+with none. The channel never publishes ``PeerTransportState/discovered``:
+`ProximityCoordinator.shouldInviteDiscoveredPeer` is a dormant, opposite-direction inviter policy
+that wakes if one does, and two policies pointing opposite ways means neither side dials. Discovery
+reaches the owner through the sessions' closure hooks instead.
+
+**The manager holds its radio through a seam, and `NetworkMeshSession` is the only conformer any
+build constructs** (plan §7, P2 item 8; the cutover, 2026-09-21; the deletion, 2026-09-22).
+`MeshNetworkManager` holds its radio as a `MeshTransportSession` — `wire(_:)` installs one
+`MeshTransportHandlers` value, and start/stop/republish/invite/disconnect are the whole surface — so
+the same manager ran on either conformer while there were two and, in the suite, runs on an
+in-memory fake. That seam was built to make the migration possible and is what the migration then
+travelled through; with the second conformer gone there is no selection left (no kind, no factory,
+no launch variable), and **nothing about the radio is persisted**: no setting, no UI, no
+`UserDefaults` key, so it owes no row on the wipe ledger. A slot's channel is
+held as `MeshPeerChannel` for the same reason; `DetachedPeerChannel` is the radio-less one the
+manager's test seams use. The manager is attached to the QUIC radio as its `MeshIntroductionAuthority`
+(mesh id, epoch reference, roster, signing key); membership is decided one layer up, at the slot
+coordinator's identity introduction, the commit and the admission grant.
+
+Every decision the QUIC session makes is factored out of it so it can be enumerated at tier 1 with
+no radios and no wall clock: `MeshLinkTable` (peer cap, per-connection state machine, three-attempt
+dial budget, duplicate-tunnel suppression, endpoint cache, and — since 2026-09-23 — which key a dial
+proved answers each advertisement, the one thing a claimed `sid` must not contradict), `MeshHeartbeatSchedule` (the 30 s
+heartbeat's due times), `MeshLinkAdvertisement` (the Bonjour TXT vocabulary — `sid` carried, `fp`
+withheld), `MeshSessionIdentityMap` (one session-stable ``PeerHandle`` identity per endpoint),
+`NetworkMeshWire` (control-stream framing), `MeshTransferStreamTable` (which frames earn a stream of
+their own, and how many may be open at once) and `EphemeralMeshTLSIdentity` (a self-signed P-256
+identity minted per session and never persisted). `Tests/FernletTests/NetworkMeshTransportTests.swift`
+is the battery; the session actor itself is covered by the runbook's device lanes.
+
+**`MeshLinkTable`'s link records are bounded** (owner-calls item 4b, 2026-09-22): slot-holding links
+by the peer cap, and a closed link only while its endpoint is cached — `noteClosed(_:)` keeps no
+record for an uncached key (an inbound tunnel from a peer this side never browsed), and the cache's
+oldest-first eviction takes an idle record with its entry. Both are lossless: an idle record with a
+full budget is exactly what the table answers for a key it has never seen. A backing-off or
+exhausted record keeps its retry state until `forget(_:)` (the browser's *lost*) reaps it.
+
+**Bulk frames ride per-transfer streams** (plan §7.1). A reliable payload at or above
+`MeshTransferStreamTable.bulkFloorBytes` is written on a QUIC stream opened for it alone, so a friend
+photo cannot park a heartbeat or a chat message behind it on the control stream; everything smaller
+stays in order where it was. Nothing above the transport can tell — one transfer stream carries
+exactly one length-framed payload, delivered as exactly one ``InboundPeerFrame``, under the same
+ceiling both radios enforce. The budget lives inside the tunnel record, so a torn-down link takes its
+open transfers with it, and both exhaustion paths degrade to today's behaviour rather than to a
+failure: an outbound frame with no slot free goes on the control stream, and an inbound stream with
+no slot free goes back un-acked so the sender's write fails loudly.
+
+**One frame is one write.** `sendFramed` writes the length prefix and the payload as a single
+contiguous send. Two awaited sends let concurrent senders on the shared control stream interleave at
+the suspension between them, and the peer then read one frame's header followed by another frame's
+first bytes as a length — observed on the runbook's Lane C app-flow run, and reproduced on a loopback
+pair. A per-transfer stream keeps two writes because it has exactly one writer, by construction.
+
+**Peer authentication is the signed channel introduction, not the certificate** (plan §7.2). Before
+any app frame crosses a QUIC tunnel, both ends exchange a `MeshChannelHello` and then Ed25519
+signatures over one `MeshChannelIntroductionTranscript` — purpose ‖ version ‖ meshID ‖ epochRef ‖
+both signing public keys ‖ both nonces ‖ the SHA-256 of this connection's TLS exporter secret —
+serialized by `canonicalBytes(for:in:)` under the host namespace's
+`purposes.signature.meshChannelIntroductionV1` (step A0.2.5). `MeshChannelIntroductionExchange` holds
+the whole decision as a value type: a foreign mesh, a diverged epoch, a roster-absent or barred key,
+a replayed nonce, a mismatched channel binding and an invalid signature each name themselves, and
+every one tears the tunnel down. **The epoch gate is strict as of P3 item 4** (plan §20.1): P2's
+soft rule was `local.isEmpty || peer.isEmpty || local == peer` on raw strings, which let junk
+through opposite an empty side and let two divergent branches that both rendered `"7"` agree they
+matched. Every non-empty reference must now be a canonical `MeshEpochRef` (checked with the field
+widths, so a bad one is `malformedHello`), equality is equality of the whole value, and the joiner
+that holds no key is a named branch of `MeshEpochAcceptance.introductionVerdict` rather than a
+short-circuit that skipped the comparison. `MeshIntroductionAuthority` is the seam that supplies the mesh id,
+epoch reference, roster and signing key; the labels the exchange frames and checks under are the
+radio's own copy of its namespace's `family.purposes`, read in `init(namespace:)`, and they match the
+label `signChannelIntroduction` signs under because the manager builds its radio from the namespace
+it stores and signs under. A session without an authority authenticates nobody and therefore
+admits nobody. The verified `sid` it yields is what lets an inbound tunnel be matched to the browsed
+advertisement it came from, so duplicate-tunnel suppression ranks the pair instead of admitting both.
+
+**A `sid` is a claim, and a claim may not displace anybody** (2026-09-23, a reviewer's note on
+31fafd6). The `sid` is not in the signed transcript, and every advertisement's `sid` is public in its
+TXT record, so a verified peer — a member, or a stranger while the join doors are open — could claim
+an ABSENT member's `sid`, take that member's browsed key, and hold it until its own tunnel ended:
+the member's re-link was refused as a duplicate of the claimant's tunnel, this device's dial to it
+was refused as already connected, and the re-dial sweep passed it over because a live tunnel carried
+its `sid`. Signing the field would not help — nothing binds an advertisement to a key (the TXT
+withholds `fp` on purpose), so a signature would only prove the claimant chose the claim. What this
+device CAN verify is its own dial: a tunnel it opened to an advertisement's endpoint proves who
+answers there (`MeshLinkTable.noteProvenOwner(_:signingPublicKey:)`, recorded at activation, before
+the duplicate collapse). So an inbound claim resolves to a browsed key only when no dial proved a
+different key answers it and no live tunnel verified as a different key holds it
+(`claimResolves(_:to:heldBy:)`) — otherwise the tunnel keeps its own connection key, which is what an
+inbound tunnel whose `sid` matches nothing browsed has always done — and the sweep asks whether the
+proven owner is among the live tunnels rather than whether its `sid` is
+(`sweepSkips(_:liveSessionIDs:liveSigningKeys:)`). A member can therefore always re-link by dialing,
+and a member this device has dialed before is re-dialed however its `sid` is claimed. **The residual,
+stated rather than implied:** an advertisement no dial of this device's has proven, and no tunnel
+holds, can still be named first by a claimant; when this device is the preferred dialer toward it —
+so its owner waits to be dialed — the claimant then holds that key until its own tunnel ends. It
+costs availability, never identity: the claimant is seated only as the key its own tunnel proved.
+
+Verification is also where a pair that ended up with **two** tunnels is collapsed back to one.
+`MeshDialPreference` deliberately admits on both sides when it cannot rank — zero tunnels is the
+unrecoverable direction — and in the pre-TXT window that means both peers dial; if neither inbound
+tunnel resolves to a browsed key, the two never collide and both activate (observed on the radio,
+P2 item 9). `MeshTunnelConvergence` closes that: keyed on the **durable verified identity** rather
+than the per-launch `sid`, it keeps the tunnel the *preferred dialer* opened — the same `sid`
+comparison the dial tie-break makes, so both devices name one connection and neither can close the
+one the other kept. The loser's close is benign: no dial-budget charge, no `onPeerDisconnected`, no
+transport error, and its own `redundantTunnelClosed` reason so a log never reads it as a refusal.
+
+**Membership is a set of signed records; the roster is derived from them** (plan §8.1). The roster
+the introduction is judged against is not stored state that somebody updates — it is
+`admitted − departed − removed`, recomputed on every read from four grow-only record sets:
+`SignedAdmissionRecord` (which keeps the existing `MeshAdmissionToken` whole rather than minting a
+second signed admission format), `SignedDepartureRecord`, `SignedRemovalRecord` and
+`SignedTerminationRecord`. `MeshMembershipRecordSet` holds one kind — deduplicated by member,
+ordered by a total order over the record's own fields, and capped — and `MeshMembershipLedger` holds
+the four; `MeshDerivedRoster` is the pure function from a ledger to who is in, who is barred, and
+whether the mesh still exists, plus the three things everything else reads off it: the
+lowest-fingerprint coordinator, the ⌊|roster|/2⌋ + 1 quorum, and whether this is the final pair.
+Because a merge is a set union, it is commutative, associative and idempotent **including its caps**
+— keeping the earliest *k* of a set is the same answer whether you cap before or after merging — so
+two devices that have seen the same records agree on the roster no matter what order, or over which
+radio, they saw them in. That is why a reconnect after a blip, a merge after a partition and a
+reload after a process death can be one code path. Two derivations are deliberately read-time rather
+than merge-time: a termination whose signer is still on a roster larger than two downgrades to that
+signer's departure, and a termination signed by a non-member is ignored — applying either at merge
+time would have made the union depend on arrival order. Departure is permanent by construction: the
+sets only grow, so a re-admission record for a departed fingerprint is subtracted straight back out,
+and rejoining means a new mesh. Nothing in this layer verifies a signature — `signature` is opaque
+bytes a record carries — so records must be signature-checked by the layer that owns the crypto
+purpose *before* they reach a ledger a roster is derived from. `MeshMembershipBounds` states the
+plan §9 caps in one place, and reuses `MeshIntroductionRoster`'s own constants rather than
+restating them: roster 8, sixteen records per kind, one termination.
+
+**A key advertisement is ADDRESSING, not membership** (P6 item 1, plan §11.3 item 13(ii)). A mint
+wraps one content key per destination, and until P6 the only sources it accepted were present-tense:
+a live slot's handshake-verified key-agreement key and the session-roster entry written from that
+same value. Both are memory-only, so a restart, an idle-lapse resume or a rejoin restored the ledger
+and not the keys, and the mint refused every destination it was not linked to at that instant.
+`SignedKeyAgreementAdvertisement` is the durable third source, on its own additive frame
+`fernlet.mesh.key-agreement.v1` (the table above): a member signs its **own**
+key-agreement public key (self-signed, subject == author, with `meshID` bound into the transcript),
+`MeshMembershipRecordVerifier` checks it against `ledger.admissions` — the ledger's own trust root,
+so a fingerprint with no admission has no row — and `MeshKeyAdvertisementFold` folds it into a
+`MeshKeyAgreementAdvertisementSet` on the sealed session context. It can never create, end or revoke
+a membership; it only says which key an already-admitted member holds, and a departed or removed
+signer is refused by name because the mint's destinations come from the derived roster, which
+subtracts both. It is deliberately **not** a fifth `MeshMembershipRecordKind`: the inventory digest
+enumerates records by kind with four positional counts and a kind-tagged hash, and
+`maxProofs == maxReGossipFrames == 49` is pinned by assertion against `maxRecordsPerKind * 3 +
+maxTerminationRecords` — so a fifth kind would move two goldens and a budget P4's 80 and P5's 40
+cells were measured under. Because the advertisement is not a `MeshMembershipRecord` at all,
+`MeshRecordIdentity` cannot be built from one, which makes "the digest cannot move" a type-system
+fact. Two rules carry the rest: **verification happens before any conflict decision** (an unverified
+advertisement that could mark a fingerprint conflicted would let any peer in radio range permanently
+un-address any member — the compile fence is `MeshVerifiedKeyAgreementAdvertisement`'s `fileprivate`
+initializer, which the set's only two mutating doors demand), and **a second, different verified key
+for one fingerprint is refused rather than resolved**, marking that member unaddressable. That is
+why the set is its own type rather than a `MeshMembershipRecordSet`: the record set's merge is
+earliest-wins and silently keeps one of two rows, which for a key means wrapping a content key to a
+device that may not hold it.
+
+**Where the advertisement travels, and what it converts** (P6 item 1 pass B). It rides its own
+additive frame, `MeshKeyAgreementPayload` / `MeshPayloadRole.meshKeyAgreement`, carrying the sender's
+whole verified set (at most sixteen rows) rather than one row: relaying the set is what lets A's key
+reach C through B, so two members that never link can still address each other. The frame is
+**unsigned and unsealed** — every element is signed by its own subject and re-verified at the
+receiver against the receiver's own admissions, so a relay can add nothing, and unlike the inventory
+digest this frame spends no budget of the receiver's. It goes out only to **named, committed**
+recipients: `broadcastMembershipFrame`'s nil-recipient path writes every slot, uncommitted ones
+included, and a frame that enumerates the roster's fingerprints and public keys must never reach an
+unauthenticated peer in range. Six doors, all of them link-opens: the three ask doors
+(`beginMergeExchange`, `askOneReconnectedPeer`, `handleAdmissionGrant`), the two non-ask membership
+doors (`readvertiseMergeProof`, which is the one door that fires exactly when records crossed and is
+therefore what makes a merged-in member addressable, and `attemptLedgerAdoption`), and the
+admitter's `grantAdmission`, which exists because an admission is deliberately not a reconnect —
+without it a fresh pair's joiner could never address the member that let it in. The send is bounded
+**once per (peer, set version)**: not spent-forever like the record re-gossip, which would stop a
+peer passing on a key it learned in between, and not unbounded like the late-reconnect ask. The
+receive door sits in the membership dispatch family, outside the routed refusal budget and the
+replay window (it is a statement about state, not a delivery), with its own per-sender frame bound —
+it is the first frame in that family whose per-frame cost can be sixteen signature verifications.
+On restore the persisted rows are **re-proved** against the ledger adoption just proved and dropped
+by name if they no longer verify. What all of that converts, stated exactly: of the three refusals
+D-13.22 named, the **resumption** becomes a delivery, while the **star** and the **over-cap roster**
+become a successful mint whose delivery waits for a link or a departure hand-off — a destination
+never forwards an item it holds, because `relayInFlight` is increment 2's. The mint's own precedence
+is present-tense-first, and two verified sources that disagree refuse by name (`keyMismatch`) rather
+than choosing.
+
+**The grant door needed a receiver-side half** (P6 item 1 fix, found by item 2's audit on the app's
+own proximity-join path). A row relayed at `grantAdmission` always arrives while the joiner's ledger
+is still the one-record bootstrap its admitter rooted — a ledger in which the admitter itself is not
+an admitted member — so the fold refused every one of them `signerNotAdmitted`, the send's
+once-per-(peer, version) bound never re-fired, and the sixth door closed nothing on the joiner side.
+The joiner now **parks** a row whose signer its ledger does not yet name and re-offers
+the park through the one fold door at each widening — `attemptLedgerAdoption`, the merge door and
+the live record insert. Every re-offer is **re-decided by that door**: a row that has become
+provable is folded, a row that now fails for any other reason is dropped and named, and one whose
+signer this device still cannot see waits for the next widening (a widening arrives in stages — a
+third device adopts the moment the chain to its *own* admission proves, which can be a two-member
+ledger). A parked row is raw bytes that have verified nothing and can mark nothing.
+
+**The park's share is per SENDER, and rows expire** (`MeshKeyAdvertisementPark`, second fix review).
+The first shape was one flat map keyed by member fingerprint, first-arrival wins, capped at the set's
+sixteen — and it was squattable by a single misbehaving *member*, because the verifier answers
+`signerNotAdmitted` **before** it checks the signature and one frame carries sixteen rows: one frame
+disabled the park for the session, and a junk row sitting in member M's slot meant M's genuine
+relayed row was silently not parked at all. Each authenticated sender now has its own share of
+`rowsPerSender` (a whole frame's worth — the joiner-bootstrap case needs exactly that, since it can
+prove *none* of what its admitter relays), the map itself is bounded by `senders`, a collision is
+named (`mesh.keyAgreement.parkCollision`) instead of hidden inside a refusal, a row that has already
+failed a roster move yields its slot to a newcomer, and a row that has failed
+`failedRosterMovesPerRow` of them is dropped by name (`mesh.keyAgreement.parkDropped`) rather than
+re-verified for the life of the mesh. The bound counts verified roster **moves**, not widenings, and
+the name says so as of the third review: the re-offer fires on any move, so three narrowings — which
+could never prove a row — evict a genuine early one. It is audited rather than silent, and the
+sender re-states its whole set at the next link-open on which its own set version has moved. Within
+a share the rule is **first parked wins** — arrival order, *not* the set's `precedes` earliest-wins
+rule, which orders on an unverified row's own attacker-chosen `advertisedAt`.
+So the ends a never-named row leaves by are the share refusal (`mesh.keyAgreement.parkFull`), the
+roster-move drop, and the session reset — of which there are **four**, one more than the
+re-gossip budget's three since item 2's newborn yield. A re-offer whose seal the store refuses rolls
+the park back **with** the set (`mesh.keyAgreement.parkRolledBack`): a row in neither container is a
+row nothing re-sends, because the sender's latch is spent at that (peer, version). The same fix keys the receive door's per-sender bound
+to a **roster member** rather than to any committed slot — with the one exception the record path
+already makes for a joiner's own admitter — so a handful of committed non-members cannot spend the
+bound every real member needs, and the map's roster cap becomes true by construction.
+
+**The park's six audit tokens**, frozen English and counts only (third review P3 10 — two of them
+were in no index and on no page): `mesh.keyAgreement.parked` (a refused row took a slot in its
+sender's share), `…parkedReoffered` (a widening drained the park — the count), `…parkCollision`
+(two different rows for one member in one share, `kept: newcomer` or `kept: held`), `…parkFull`
+(the share or the sender bound is spent), `…parkDropped` (the roster-move eviction above) and
+`…parkRolledBack` (a re-offer whose seal was refused). None of them carries a fingerprint.
+
+**Every one of them — and the rest of the key-agreement vocabulary, the routed projection's
+`openFailed`, the share's `skipped` and the routed dispatch's `droppedUncommittedSlot` — also
+carries `held`, the mesh id this device holds** (P8 item 0's spelling; P9 item 7 for the two digest
+lines, its fix review for the other twenty). `FernletAuditLog`'s capture registry is process-global
+and Swift Testing runs suites in parallel, so a test's `count(of: token) == N` is a claim about the
+whole PROCESS unless it can filter; the mesh id is the one value in the line a sibling rig cannot
+mint. The single door is `MeshNetworkManager.heldMeshAuditContext(_:)`, and the key is omitted
+rather than faked where this device holds no mesh — the routed dispatch's uncommitted-slot drop is
+the only site where that is reachable, because it refuses before the mesh guard by design.
+
+**An epoch is a value, not a number** (plan §8.4, P3 item 4). `MeshEpochRef` is a Lamport counter
+(cap 4096, and a counter *at* the cap refuses to mint a successor rather than trapping — a mesh that
+cannot rotate must end rather than keep serving a key it cannot retire), an `epochID`, and the
+fingerprint of the coordinator that minted it. The id is **derived**, not drawn:
+`SHA-256(domain ‖ meshID ‖ counter ‖ coordinatorFingerprint)`, so every member of one branch
+computes the same id with no wire change, while two partitions differ because their deterministic
+coordinators — each partition's lowest fingerprint — cannot be the same member. That is what makes
+**divergent same-counter epochs representable**: two members who rotated independently at counter 7
+hold two distinct values, both belong in `MeshSessionContext.epochHeads`, and neither is wrong; they
+coexist (`MeshEpochRotationVerdict.coexist`) until a merge mints a strictly greater successor. The
+canonical string form `"<counter>.<32 hex>.<16 hex>"` is at most 54 characters, which is why a real
+epoch reference rides the introduction's existing 96-character `epochRef` field without moving a
+byte of wire framing. `MeshEpochAcceptance` is the rule — the presenter must be the deterministic
+coordinator of the roster it presents and the counter must strictly advance; **epoch continuity is
+never required**, so a member returning from a long partition at counter 5 syncs forward to 9
+without being "stale". `MeshEpochKeyring` holds the current key plus ≤ 3 predecessors, each usable
+for ≤ 5 minutes after supersession and rejected after it, on an injected clock — and it is
+**memory-only**, like the `MeshGroupKey`s inside it: only the epoch *names* persist.
+
+**Rotation triggers are the timer, any roster change and any merge** (plan §8.3, P3 item 5). The
+15-minute schedule is no longer the only way the group key turns over: a verified admission,
+departure, removal or termination record entering the ledger, and a ledger merge that moves the
+derived roster, each raise a trigger too. That is what closes the confirmed
+voted-out-member-keeps-the-key gap — before it, a member the mesh had just removed held a working
+group key until the next tick. `MeshRotationTriggerQueue` is the single front door: it **coalesces a
+burst into one rotation** inside a two-second window (`MeshRotationTriggerBounds`, chosen so a
+healing partition's re-gossip does not mint an epoch per record, and small beside the ≤ 5-minute
+predecessor grace it delays), and it is **non-reentrant** — a trigger raised while a rotation is in
+flight is deferred and re-armed, never dropped and never run concurrently. The `meshKeyRotation`
+frame carries a frozen English `MeshKeyRotationCause` (`timer` / `membership` / `merge`); the frame
+is unsigned (it rides the signed identity envelope), so the field moved no signature transcript and
+no existing golden vector — `MeshKeyRotationCauseWireTests` pins the extended JSON, and a frame with
+no `cause` decodes as `timer`, which is the only rotation older builds ever performed.
+
+`MeshRotationPolicy` holds the two decisions. `plan` mints the successor and runs it through
+`MeshEpochAcceptance` before anything moves — at the counter cap it answers `terminate`, and the
+manager emits `terminated.v1` and ends the session rather than trapping. `recipients` is the
+exclusion rule: **removed and departed members get no copy of the new key**, subtracting both the
+derived roster's `barred` set and the live vote-out set, and narrowing to the roster's members once
+the ledger knows one. It is deliberately subtractive rather than positive, because a positive rule
+over a ledger that is still empty in shipping builds would distribute the key to nobody at all.
+`MeshNetworkManager` now **holds** its `MeshEpochKeyring` rather than re-deriving an epoch on every
+read — `epochRef` is the head's canonical string — and persists the new head into
+`MeshSessionContext.epochHeads` through `persistSessionContext(addingEpochHead:)` **before** the
+rotation is distributed or acknowledged (plan §3.6): a refused or deferred seal abandons the
+rotation and names the reason, it does not hand out a key no restart could explain.
+
+**Replay protection does not ride epochs** (plan §8.4). Once a predecessor key can still open a
+frame and a merge can bring two branches together, "the epoch no longer opens it" stops being a
+replay answer. `MeshFrameReplayWindow` is the replacement: dedup by frame id, per **authenticated**
+sender, with the frame's own expiry and an explicit mesh id, bounded on both axes — and it
+*refuses* at the cap rather than evicting, because an LRU would let a flood of fresh frames erase
+the history an attacker wants to replay into. It knows nothing about epochs, which is the point.
+
+Both bounds are **per instance** since P5 item 12. The control-frame defaults are P3's (8 senders ×
+64 ids); the routed instance overrides them, because its two axes have different populations —
+`MeshRoutedDrainBounds.sessionFramesPerPeer` ids (1056, one maximal 1024-chunk item plus its
+manifest and both receipt kinds) per author, and `MeshMembershipBounds.maxRecordsPerKind` authors
+(16), the **admission set's** capacity rather than the tighter roster cap, because a routed frame's
+author is any admitted-and-not-removed signer and a departed origin's content stays valid and keeps
+moving under custody transfer.
+
+**Wired against routed content ids** (P5 item 12, plan §11). The four routed content doors —
+manifest, chunk, custody receipt, recipient receipt — key it on the ids items 1–4 derived for this
+purpose, attributed to the frame's **author**, never to the forwarding envelope's sender and never
+to an epoch; the two digest doors are deliberately outside it (an inventory digest is bound by its
+slot and the per-peer frame budget — and, being re-recorded with no `sentAt` monotonicity guard,
+costs a stale delta rather than a lost delivery; a drain answer by advertiser + `advertisedAt`). The
+mesh id passed at the four doors is the **ingest session's own** (`currentMesh.meshID`), never the
+frame's claimed one, so the window's mesh guard is inert there by construction and the foreign-mesh
+refusal stays each routed verifier's, one step later. Two calls, not
+one: the manager **probes** with `verdict(frameID:from:meshID:expiresAt:now:)` on the unverified
+frame — safe on a claimed author precisely because it records nothing — and **records** with
+`admit(…)` after the store's door has answered, only when that outcome is `.completed` and this
+device's rung work settled, so a store that could not act, a capacity refusal, or an unfinished rung
+all stay re-offerable. A full axis is a **named degradation, never a refusal**: only `.replayed` is
+actionable and every other verdict falls through to the unchanged verify-and-store path. The routed
+instance never calls `forget(senderFingerprint:)` — releasing a departed origin's axis would hand an
+attacker a free replay of exactly the content custody transfer keeps moving — while
+`forget(frameID:from:)` un-records the one thing the store gives back, a repaired chunk slot.
+Memory-only and session-scoped: nothing persists, so there is no wipe row, and the window is cleared
+at the three session resets and nowhere else. This is the promise plan §8.4 let item 13 retire the
+three `keyEpoch` gates against — routed content carries unique ids + meshID + expiry and dedups by
+id — and item 13 collected on it: two gates deleted with the paths they gated, none loosened.
+
+**What the window does not bound is bounded per sender** (the P5 review's finding 3, 2026-09-06,
+closing D-12.14). Every refusal that sits *before* a store verb — a verifier rejection at any
+content door, `notADestinationOrHandoff`, `unknownItemNotFromOrigin`, `unregisteredTypeChunk`, an
+undecodable frame, and the parked-set drop's index load behind an unsigned `unknownTypeToken`
+claim — is never recorded by the window and costs real work each time (an Ed25519 verify, or a
+sealed-index load). ``MeshRoutedRefusalBudget`` counts them per **authenticated envelope sender** —
+never the frame's claimed author, which is exactly the value the window cannot trust there — through
+the manager's one door `refuseRoutedFrameBeforeStore`, capped at
+`MeshRoutedDrainBounds.sessionFramesPerPeer`, which an honest peer cannot reach because that is
+already the most frames the drain lets it make this device serve. The one transition writes
+`mesh.routedDrain.refusalBudgetSpent`; after it the sender's content is dropped at
+`dispatchRoutedContent` before the decode, unlogged — a per-drop line would be the unbounded channel
+wearing a bound's name. Bounded on both axes (the sender axis is the admission set's 16, as the
+window's author axis is), fail-closed on a full sender axis, and reset with the drain state at the
+three session resets only — never on a disconnect or a partition flap, the attacker's reset lever.
+One exemption: a frame for an item this device already capacity-refused from this sender
+(`routedRefusedKeys`) is the receiver's own refusal arriving in pieces — a courier's batch carries a
+manifest and up to 64 chunks and re-offers it every exchange until capacity frees — so it is named
+but never charged. The two digest doors stay outside it by D-5.12 / D-6.10.
+
+- ``PeerTransport``
+- ``PeerHandle``
+- ``PeerEndpointKey``
+- ``PeerDeliveryMode``
+- ``PeerTransportState``
+- ``PeerPendingInvite``
+- ``InboundPeerFrame``
+- ``PeerTransportError``
+
+Internal to the module, and listed here because they are the transport SEAM the manager holds its
+radio through (the selection that used to live beside them — `MeshTransportKind`,
+`MeshTransportFactory` — left with the second radio in the deletion round): `MeshTransportSession`,
+`MeshTransportHandlers`, `MeshSlotEvictionCause`, `MeshPeerChannel`, `DetachedPeerChannel`.
+
+Internal to the module, and listed here because they are where the QUIC transports' behaviour
+actually lives: `NetworkMeshSession`, `NetworkPresenceSession` with its seam `PresenceRadioSession`,
+`NetworkPeerChannel` (a presence host holds it as a ``ProximityPeerChannel``),
+`NetworkChannelHost`, `ProximityQUICParameters`, `PresenceAdvertisement`, `PresenceDialHello`,
+`MeshLinkTable`, `MeshLinkKey`,
+`MeshLinkPhase`, `MeshLinkAdmission`, `MeshDialPreference`, `MeshTunnelConvergence`,
+`MeshDialOutcome`, `MeshEndpointRecord`,
+`MeshHeartbeatSchedule`, `MeshLinkAdvertisement`, `MeshSessionIdentityMap`, `NetworkMeshWire`,
+`MeshTransferStreamTable`, `MeshTransferRoute`, `MeshTransferID`,
+`EphemeralMeshTLSIdentity`, `MeshCertificateDER`, `MeshTransportError`, `MeshChannelRole`,
+`MeshChannelIntroductionFormat`, `MeshChannelHello`, `MeshChannelIntroduction`,
+`MeshChannelIntroductionTranscript`, `MeshChannelIntroductionExchange`,
+`MeshChannelIntroductionOutcome`, `MeshIntroductionRejection`, `MeshIntroductionRoster`,
+`MeshRosterVerdict`, `MeshIntroductionNonceCache`, `MeshVerifiedPeer`, `MeshIntroductionAuthority`.
+
+The pair session's radio, the recipe-share radio, is on QUIC (P9 item 3 pass 2:
+`NetworkPairSession`, behind the `ProximityPairRadioSession` seam, on its pair profile's row:
+`_fernlet-recipe2._udp`, ALPN `fernlet-recipe-v1`, TXT mode `recipe` under Fernlet's recipe profile),
+and the two decisions a transport swap would have lost quietly were settled as tier-1 values first.
+``ProximityPairDiscoveryGate`` is the
+pause/resume contract — the radio goes quiet to new peers the moment a pairing is registered and
+reopens only when that pairing's session-level RECORD is evicted, never on a transport disconnect
+event (a failed handshake fires none) and never over a stopped radio. ``ProximityPairTransfer`` is the
+share itself: `connecting → verified → sending → sent/failed/cancelled`, with a completion that is
+counted rather than assigned, and with the row that matters most — a discovery pause or resume is
+accepted in every phase and moves none of them, because closing the radio to new peers is not
+pausing a share in flight. ``ProximityPairAdvertisedName`` bounds the advertised display name in
+BYTES, not Characters, so the Bonjour publisher (which DROPS an over-long TXT value rather than
+truncating it) cannot silently strip the name off a long one; a name it cannot publish at all is
+omitted rather than sent empty, and ``ProximityPairAdvertisedName/received(_:hint:)`` falls back to
+the peer's transport hint on an absent *and* an empty one. The gate answers `unchanged` for
+`refreshRequested`, `transportErrorWhileListening` and `stopped` only because the SESSION's own
+`stop()` clears its paused flag — `NetworkPairSession.stop()` does, and a cell says so,
+because otherwise a refresh restarts into a radio that is still standing down and the only symptom
+is a search that finds nothing.
+
+**What the QUIC radio adds, and what it deliberately does not.** It wears a `ProximityPairPosture`
+minted fresh at every `start()` and every resume — a random instance name, a new TLS identity and a
+new `sid`, with **no rotation timer**, because the radio's lifetime is a Food-tab visit. That is an
+improvement on what it replaces rather than a reproduction: the retired radio advertised the
+persistent, device-name-derived peer identity, so a passive Bonjour scanner could read the device's
+name and link a person's sightings across days. **The residual, stated rather than hidden:** an
+ephemeral name does not make a recipe advertiser unlinkable, because the TXT record still carries the
+user's chosen display name on purpose — the picker on the other phone shows it. What the posture
+removes is the identifier the user never chose. It also adds the one thing the presence radio has
+none of: a **per-transfer-stream acceptor**. A recipe crosses as ONE sealed frame, but a recipe
+carrying a picture clears ``MeshTransferStreamTable/bulkFloorBytes`` and takes a stream of its own,
+exactly as a friend photo does on the mesh, so it cannot park the pairing's control stream behind
+itself. And every `report` it makes is a START failure: a per-dial miss, a refused hello and a failed
+transfer are audited and nothing more, because the owner's transport-error hook stands the whole
+radio down.
+
+Internal to the module, DEBUG-only, and listed here so they are never mistaken for production
+behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroductionChaosBehaviour`,
+switched on by the launch-environment keys `PROXIMITYKIT_MESH_CONSOLE_LOG`,
+`PROXIMITYKIT_MESH_CHAOS` and `PROXIMITYKIT_MESH_CHAOS_BARRED` (the module's own names, as are the
+`PROXIMITYKIT_UI_TEST_MESH_*` flags ``MeshNetworkManager`` `injectUITestStateIfNeeded()` seeds a
+canned mesh from), every read of them held inside `#if DEBUG` by this module's own
+`ProximitySourceWallTests`.
+They exist so the rejection matrix above can be *observed on a real radio* rather than only
+enumerated at tier 1 — the runbook's Lane C, two Simulators on one Mac. **Three** Simulators run on
+the same lane and form a **full mesh** (3/3 runs, 2026-09-02): every node reaches `slots total=2
+committed=2`, the derived roster converges to `derived=3` on all three, one epoch head is agreed by
+all three, and a clean departure is accepted by both survivors. They first formed a spanning *star*,
+and the cause was not in this module: `MeshNetworkManager.isSessionOpen` — the mesh-wide "admits new
+**members**" rule — was gating whether a **link** could be opened at all, so the first `.closed`
+descriptor a node merged stopped it dialing, accepting and seating its own co-members. See
+``MeshNetworkManager`` `mayLinkToDiscoveredPeers`. Two diagnostics landed with the fix and are worth
+knowing when reading a transcript: `browsed peers=<n> […]` (the browse set, on every size change) and
+`dial refused <admission> for <key>`. The mirror echoes lines the
+`Logger` already emitted and changes no decision; the chaos seam damages this side's own outbound
+introduction (a reused nonce, a flipped signature bit) or adds keys to the roster's barred set, so
+every switch can only cause a *refusal* that would not otherwise happen, never an admission. In a
+Release build the environment-reading half is compiled out entirely.
+
+### Ranging
+
+Each connection's provider is its host's (``ProximityHost/makeProximityRangingProvider()``, no default):
+``NIRangingSession``, compiled on iOS only, or ``NoopRangingProvider`` on a host without ranging.
+
+- ``RangingProvider``
+- ``NIRangingSession``
+- ``NoopRangingProvider``
+- ``RangingError``
+- ``RangingDistance``
+- ``RangingState``
+
+### Foreground anchor
+
+- ``ProximityForegroundAnchoring`` — the seam. Since P9 item 5 its only shipping conformer is the
+  no-op, which is ``ProximityCoordinator``'s unconditional default: the app raises no proximity Live
+  Activity, because no widget ever declared an `ActivityConfiguration` for its attributes. The
+  launch-time reaper of the activities earlier builds stranded is the app's since plan step A0.6.
+
+### Trust and verification
+
+The session trust policies, the coach session contract, the keep-as-friend review and the trainer
+export body are Fernlet's rules, and the trust vault holds Fernlet's records, so they live in
+`FernletConnections`. The managers ask the host's records their two trust questions through
+``ProximityTrustStore``, which Fernlet's vault answers; a manager gets each
+connection's policy from ``ProximityHost/makeProximityTrustPolicy()``, and a trainer-mode
+coordinator refuses any inbound blob over ``ProximityCoordinator/maxTrainerModeInboundBytes`` before
+decoding it. A coordinator records its audit events through its policy as ``ProximitySessionAudit``
+values, which carry an envelope's payload token as a plain string and name no host's record; a
+policy that keeps an audit trail converts each into its own row (Fernlet's, in `FernletConnections`,
+into the `TrainerAuditEvent` the vault keeps). The vault is not itself a policy.
+
+- ``ProximityTrustPolicy``
+- ``ProximitySessionAudit``
+- ``ProximityTrustStore``
+- ``CoachVerificationCeremony``
+- ``FriendsDiscoveryEntry``
+- ``ProximityVerifyQR``
+- ``ProximityVerifySignature``
+- ``VerifyChallengePayload``
+- ``VerifyResponsePayload``
+
+### Friend mesh sessions
+
+Internal to the module, and listed here because they are the membership model the roster is derived
+from (plan §8.1): `MeshMembershipRecordKind`, `MeshMembershipRecord`, `MeshMembershipBounds`,
+`MeshMembershipRecordOrder`, `SignedAdmissionRecord`, `SignedDepartureRecord`,
+`SignedRemovalRecord`, `SignedTerminationRecord`, `MeshCustodyHandoffSummary`,
+`MeshMembershipRecordSet`, `MeshMembershipLedger`, `MeshDerivedRoster`, `MeshRosterMember`,
+`MeshRosterStatus`. P6 item 1 added the addressing beside them — `SignedKeyAgreementAdvertisement`,
+`MeshKeyAgreementAdvertisementSet`, `MeshKeyAdvertisementFold`, `MeshKeyAdvertisementFoldOutcome`,
+`MeshKeyAdvertisementFoldResult`, `MeshVerifiedKeyAgreementAdvertisement`,
+`MeshKeyAgreementVerification` and the park's own four (`MeshKeyAdvertisementPark`,
+`MeshParkedKeyAdvertisement`, `MeshParkedKeyAdvertisementOffer`,
+`MeshKeyAdvertisementParkOutcome`, bounded by `MeshKeyAdvertisementParkBounds`) — which verify
+*against* the admission set and are deliberately not a fifth record kind. The sealed store's own internal vocabulary is `MeshSessionContext`,
+`MeshSessionContextSchema`, `MeshSessionContextDecodingError`, `MeshSessionLoad`,
+`MeshSessionSealRefusal`, `MeshSessionDeferral`, `MeshSessionCorruption`, `MeshSessionSaveError`,
+`MeshSessionSealKey` and `MeshSessionSealKeyOutcome`. P3 item 3 added the membership events that
+move those records between devices: `MeshMembershipEventFormat`, `MeshRecordIdentity`,
+`MeshInventoryDigest`, `MeshMemberDeparturePayload`, `MeshMemberRemovalPayload`, `MeshTerminationPayload`,
+`MeshInventoryDigestPayload`, `MeshEpochHeadsPayload`, `MeshMembershipRecordVerifier`, `MeshMembershipRecordRejection`,
+`MeshLegacyGoodbyeOutcome` and `MeshMembershipGoodbyeInterop`. P3 item 7 added the admission frame
+and the joiner's ledger bootstrap: `MeshMemberAdmissionPayload`, `MeshLedgerAdoption`,
+`MeshLedgerAdoptionOutcome` and `MeshLedgerAdoptionRefusal`. P3 item 4 added the epoch model:
+`MeshEpochRef`, `MeshEpochBounds`, `MeshEpochRefParseError`, `MeshEpochRefOrder`,
+`MeshEpochKeyring`, `MeshEpochKeyringRotationRefusal`, `MeshEpochAcceptance`,
+`MeshEpochRotationVerdict`, `MeshEpochRotationRefusal`, `MeshEpochIntroductionVerdict`,
+`MeshFrameReplayWindow` and `MeshFrameReplayVerdict`. P3 item 5 added the rotation triggers:
+`MeshKeyRotationCause` (on `MeshKeyRotationPayload`), `MeshRotationTriggerBounds`,
+`MeshRotationTriggerOutcome`, `MeshRotationTriggerQueue`, `MeshRotationPlan`, `MeshRotationRefusal`
+and `MeshRotationPolicy`. P5 item 1 added the routed-content wire family: `MeshRoutedManifestFormat`,
+`MeshRecipientKeyWrap`, `MeshRoutedManifest`, `MeshRoutedManifestPayload`, `MeshRoutedManifestMintError`,
+`MeshRoutedManifestVerifier`, `MeshRoutedManifestRejection`, `MeshRoutedWrapBinding`,
+`MeshRoutedKeyWrapError` and `MeshRoutedContentKeyWrapper`. P5 item 2 added the routed CHUNK family
+— thirteen types: `MeshChunkFormat`, `MeshRoutedContentDigest`, `MeshChunk`, `MeshChunkPayload`,
+`MeshChunkRejection`, `MeshChunkVerifier`, `MeshChunkMintError`, `MeshChunker`, `MeshChunkRefusal`,
+`MeshChunkAdmission`, `MeshChunkBinding`, `MeshChunkCompletion` and `MeshChunkAssembly`. P5 item 3
+added the CUSTODY RECEIPT and the sealed routed store — the module's **second** durable surface:
+`MeshCustodyReceiptFormat`, `MeshCustodyReceipt`, `MeshCustodyReceiptPayload`,
+`MeshCustodyReceiptMintError`, `MeshCustodyReceiptRejection`, `MeshCustodyReceiptVerifier`,
+`MeshCustodyDurabilityWitness`, `MeshRoutedStorageScope`, `MeshRoutedSealKeyOutcome`,
+`MeshRoutedSealKey`, `MeshRoutedIndexSchema`, `MeshRoutedStoreFormat`, `MeshRoutedIndexDecodingError`,
+`MeshRoutedItemKey`, `MeshRoutedChunkDescriptor`, `MeshRoutedDeliveryProgress`,
+`MeshRoutedDeliveryRecord`, `MeshRoutedItemRecord`, `MeshRoutedItemRef`, `MeshRoutedIndex`,
+`MeshRoutedSealRefusal`, `MeshRoutedDeferral`, `MeshRoutedCorruption`, `MeshRoutedLoad`,
+`MeshRoutedSaveError`, `MeshRoutedChunkFileRead`, `MeshRoutedStore`, `MeshRoutedRetryBounds`,
+`MeshRoutedUnavailability`, `MeshRoutedStoreRefusal`, `MeshRoutedOutcome`,
+`MeshRoutedManifestAdmission`, `MeshRoutedCustodyOutcome`, `MeshRoutedSweepReport`,
+`MeshRoutedIndexLoad`, `MeshRoutedStagedFile`, `MeshRoutedContentHasher`, `MeshChunkDescriptor`,
+`MeshChunkSetShape`, `MeshChunkAdmissionRule`, plus `MeshDeliveryRestoreRefusal` and
+`MeshDeliveryRestoreOutcome` on the P4 delivery target. P5 item 4 added the RECIPIENT RECEIPT and
+plan §11's acknowledgement stages — fourteen types: `MeshRoutedAckStage`,
+`MeshRoutedAckStageRow`, `MeshRoutedAckStageTable`, `MeshRoutedHeartAck`, `MeshRoutedAckEvidence`,
+`MeshRoutedAckShortfall`, `MeshRoutedDeliveryCommitOutcome`, `MeshRecipientReceiptFormat`,
+`MeshRecipientReceipt`, `MeshRecipientReceiptPayload`, `MeshRecipientReceiptMintError`,
+`MeshRecipientReceiptRejection`, `MeshRecipientReceiptVerifier`, `MeshRecipientDeliveryWitness`, and
+one read-only door on the heart ledger (`MeshHeartLedgerProof` + `commitProof(for:)`). P5 item 13
+added the ITEM SEAL, the first routed body, the sender door's vocabulary and the one plaintext
+delivery seam — twelve types: `MeshRoutedItemSealFormat`, `MeshRoutedItemSealError`,
+`MeshRoutedItemSealer`, `MeshRoutedItemBodyFormat`, `MeshRoutedPhotoHeader`, `MeshRoutedPhotoBody`,
+`MeshRoutedTextHeader`, `MeshRoutedTextBody`, `MeshRoutedShareSkip`, `MeshRoutedShareRefusal`,
+`MeshRoutedOriginationOutcome`, `MeshTextSendOutcome`, `MeshRoutedDeliveryError`,
+`MeshRoutedOriginQuotaKey`, `MeshRoutedProjectionVerdict`, `MeshTranscriptLiveness` and
+`MeshRoutedItemDelivery`. Of those, the features' own types are `FernletSocial`'s, with the features
+they serve: the heart's ack and the ledger's proof (`MeshRoutedHeartAck`, `MeshHeartLedgerProof`),
+the photo and text headers and bodies, and `MeshTextSendOutcome`. The ack's evidence is
+`MeshRoutedLedgerCommit` beside the stage vocabulary, which the engine alone mints, bound to the item,
+from a ledger judge's committed answer.
+
+P5 item 5 added the ROUTED CONTENT digest and its pure comparison — eleven types:
+`MeshRoutedInventoryFormat`, `MeshRoutedInventoryEntry`, `MeshRoutedInventory`,
+`MeshRoutedInventoryPayload`, `MeshRoutedInventoryMintError`, `MeshRoutedInventoryRejection`,
+`MeshRoutedInventoryVerifier`, `MeshRoutedInventoryReceiptKind`, `MeshRoutedInventoryReceiptRef`,
+`MeshRoutedChunkGap` and `MeshRoutedInventoryDelta`. **None of them carries the stem
+`InventoryDigest`, on purpose:** that stem belongs to P4's MEMBERSHIP digest, and the two wire tokens
+deliberately share the `inventory-digest` spelling, so the Swift value-type names are what keep a
+manager dispatch from reaching for the wrong family.
+
+The mint has **one** spelling of "this device": `MeshRoutedInventoryPayload.signed(meshID:index:sentAt:identity:)`
+takes no `selfFingerprint`, deriving it from the signing identity exactly as `MeshRoutedManifest.signed`
+derives its origin. The reason is not tidiness — the builder's custody self-rule turns "who am I" into
+an advertised `custodySigners` entry, and `custodySigners` is advertiser-asserted rather than signed
+evidence, so a second, disagreeing spelling would mint a digest that verifies cleanly while claiming
+custody for a member that never held the item; the peer would then ask that member for a receipt it
+can never mint and the merge window item 7 closes would never close.
+
+P5 item 6 wired the DRAIN onto that one merge path — six new types and two new store doors:
+`MeshRoutedDrainAnswerFormat`, `MeshRoutedDrainAnswer`, `MeshRoutedDrainAnswerPayload`,
+`MeshRoutedDrainAnswerMintError`, `MeshRoutedDrainAnswerRejection`,
+`MeshRoutedDrainAnswerVerifier`, plus the pure planning values `MeshRoutedPeerInventory`,
+`MeshRoutedDrainRefusalNote`, `MeshRoutedDrainBounds`, `MeshRoutedDrainChunkSend`,
+`MeshRoutedInventoryStampRule` (P6 item 7's pure `sentAt` decision) and
+`MeshRoutedDrainPlan`, and `MeshRoutedCustodyEvidence` beside
+`MeshRoutedStore.recordingCustodyEvidence(item:receipt:now:)` /
+`forwardableCustodyReceipts(item:)`. The drain itself is a private section of
+`MeshNetworkManager` — it needs the manager's `store`, `identity`, `broadcastMembershipFrame` and
+slot table, all file-scoped, so the value-type extraction above is what keeps the new *logic* out of
+that file rather than a manager extension, which could not compile elsewhere. Three seams are
+`internal` rather than private, and only three: `sendRoutedInventory(to:now:)`,
+`dispatchRoutedPayload(_:plaintext:decoder:slot:now:)` and `receiveRoutedInventory(_:from:now:)` —
+the drain's send door, its ingest door and its advertisement door, each taking an injected `now`
+(D-6.12) because every admission, `isLive(at:)` check and `deliveredAt` stamp downstream reads that
+one instant. A battery that cannot reach them, or cannot supply the instant, is testing the wall
+clock instead of the drain.
+
+The advertisement door carries P6 item 7's **`sentAt` monotonicity guard** (D-12.12, closed). A
+peer's own digest whose signed `sentAt` is strictly BEFORE the one already recorded for it is
+refused by name (`mesh.routedInventory.staleSentAt`, carrying exactly one context key, `held` —
+the mesh id this device holds, so a per-cell count can be scoped on a process-global capture
+registry, P9 item 7) — refused as a **record**: `inventory`,
+`inventorySentAt` and the `quiescentLocalAsOf` stamp an admitted digest re-writes all stand. The
+peer is still **answered**, from the view already recorded (P6 item 7's fix review). That half is
+not a detail: `answerRoutedInventory` is the only caller that reaches `sendRoutedDrainBatch`, and a
+digest arrives only from the three merge doors, so a refusal that suppressed the answer left every
+delivery this device custodies for a peer whose clock stepped backwards stalled until the step
+elapsed or the 6 h ceiling fell — silently, at both ends. Answering from the recorded view costs a
+stale delta and redundant offers, bounded by `sessionFramesPerPeer` and refused at the peer as
+duplicates, and an item minted since is still offered. One delivery shape survives that sentence
+and is a residual rather than a defect (P6 item 10's SET A): if the peer's own HOLDINGS shrink — its
+delete-all, a store reset — while its stamp is still stale, we plan against the newer-stamped,
+content-older record, so an item it has just lost and still needs, whose leg here is outstanding
+because a receipt never came back, waits until its stamp passes the recorded one. Bounded by the
+step and by the 6 h ceiling, and strictly better than the suppression it replaced. The guard is on
+the door and not inside `recordPeerRoutedInventory` because one verdict decides two things there:
+whether the record is written, and whether the answer may re-stamp the quiescence halves from this
+digest's instant — and those halves are **audit state**, not a gate: `quiescentLocalAsOf` has no
+reader at all and `localQuiescent` has one, `routedConvergenceSummary(for:)`, which gates nothing
+(D-7.11). Skipping them keeps the summary from quoting a stale instant, and the wire still carries
+the planned quiescence bit, so on that path the peer records us quiescent while we record neither
+half. An
+EQUAL stamp is admitted silently — an idempotent replay re-records the same value, and auditing it
+would turn the commonest benign duplicate into a named refusal (its own cost is bounded, not free:
+an admitted digest runs the whole answer). The decision itself is the pure
+`MeshRoutedInventoryStampRule`, which the convergence battery's thirteenth invariant **calls**, so
+the door and the claim cannot drift. It is **not** charged to `MeshRoutedRefusalBudget`: D-5.12 and
+D-6.10 keep the two digest doors outside that budget, and its door count did not move — and the
+budget's own wall now counts the audit lines inside the two doors' brace-matched bodies rather than
+listing their spellings, because the list was already one short (P6 item 10 SET A: the drain
+answer's binding guard `mesh.merge.routedQuiescentUnbound` is a fifth refusal exit that no
+spelling list held).
+
+The two store doors are deliberately asymmetric with the delivery family's. A record holds **other
+members'** custody receipts only, so `forwardableCustodyReceipts` never returns this device's own —
+that is the `custodiedAt` stamp, and the drain re-mints the receipt from the durable bytes, which is
+byte-identical because the commit re-uses the stored instant. And `recordingCustodyEvidence` stores a
+forwarded receipt while advancing **no** rung: `recordingCustodyTransfer`'s `for destinations:` is
+the *caller's* statement about a hand-off, and a drain that was handed no hand-off has no honest
+value for it.
+
+**P5 item 8 shipped CUSTODY-TRANSFER-ON-DEPARTURE — increment 1's only relay hop** (plan §10.6,
+§11). Custody is at the **origin**, or, after exactly one transfer at exactly one moment — a
+development — at the custodians ``MeshDevelopmentPlan/handoffTargets`` names. There is no hand-off
+between two live connected members, and no second hop. Ten new types across two files:
+``MeshCustodyHandoffScope``, ``MeshCustodyHandoffSuppression``, ``MeshCustodyHandoffResult`` and
+``MeshCustodyHandoffPlan`` (`MeshCustodyHandoffPlan.swift`, pure values with no store and no clock,
+where the *choosing* lives), plus ``MeshRoutedCustodyHandoff``, ``MeshRoutedHandoffClaim``,
+``MeshRoutedHandoffRefusalReason``, ``MeshRoutedHandoffRefusal``, ``MeshRoutedHandoffStep`` and
+``MeshRoutedHandoffReport`` beside two new store doors in `MeshRoutedCustodyHandoff.swift`:
+`MeshRoutedStore.recordingCustodyHandoff(_:now:)` (the departing origin, receipt-backed) and
+`MeshRoutedStore.claimingHandedOffLegs(_:now:)` (the custodian, receipt-free). Both are **one load,
+N bounded updates, one save** — looping the single-item `recordingCustodyTransfer` over a full index
+would be two thousand crypto passes on the main actor inside a fifteen-second window — and both
+apply that door's rules through its own now-internal helpers, so the rule has one implementation.
+`recordingCustodyTransfer` itself is untouched and still has **zero** shipping callers.
+
+Five things make the increment-1 line structural rather than a comment:
+
+- **No new wire, no new signature.** The custodian's authority is the leaver's own
+  `SignedDepartureRecord.custodyHandoff.custodianFingerprints`, already inside the departure's
+  canonical bytes, verified, grow-only and available offline. `MeshDeliveryTarget`'s existing
+  `pending → custodied(by:) → delivered` ladder is the whole state change; no frame, no
+  `PayloadType`, no crypto purpose and no golden moved, and `MeshRoutedIndexSchema` stays 2.
+- **The enumerator refuses the second hop.** ``MeshRoutedIndex/itemsAwaitingHandoff(at:in:originatedBy:)``
+  takes a **required** origin filter, so a departing *custodian* enumerates nothing at all; a future
+  call site cannot forget what it is not allowed to omit.
+- **The hop bound is the origin-served set, not the record.** `custodyHandoff.custodianFingerprints`
+  is the whole roster minus the leaver in every production departure, so the record alone would make
+  every member an entitled courier for every other and content would walk A→B→C→D. A device may
+  therefore claim handed-off legs only for an item whose **manifest it admitted from the origin
+  itself**, recorded at the one door that knows the sender. Every courier of a departed origin's
+  content is consequently a device that origin both named and served directly. The set is
+  memory-only and dies with the session: a restart before claiming forfeits the claim, which is
+  fail-closed and named (`mesh.development.handoffClaimNotOriginServed`).
+- **Every "nothing transferred" is a named answer.** ``MeshCustodyHandoffSuppression`` distinguishes
+  a store that could not say what it holds, a partition of one with nobody to hand to, a record that
+  was never emitted and a window that had already closed — so `nil` really is the single value that
+  means "this device handed over exactly what it says it did", and a delivery-ladder refusal inside a
+  batch door keeps its own name rather than reading as "nothing to do".
+- **A removed member's record grants nothing.** `MeshMembershipRecordVerifier` accepts a departure
+  from any *admitted* fingerprint, not only a current member, and a derived roster cannot separate
+  *departed* from *removed*; so the gate lives in the manager, over `ledger.removals` and
+  `removedMemberFingerprints`, before the pure planner ever sees a leaver.
+
+`MeshDevelopmentPlan.handoffSummary(handedOffItemCount:)` is what a departure record now signs, and
+the count is defined narrowly: **distinct items whose rung this device's own durable index moved
+`pending → custodied(by:)`, inside the window, and whose single save succeeded.** Not sends, not
+attempts, not candidates — nothing can retract it once the record is signed, so every uncertain path
+under-reports. The claim at the custodian is **one idempotent derivation applied at four doors** (a
+live roster move, a merge, an item completing, and the drain-exchange entry) rather than four event
+hooks; the fourth exists because a store that answered `deferred` when the record folded is reachable
+by no other event. At each door the claim runs **only after** the roster verdict has declined to end
+the session — a merge that hands this device its own removal ejects it before any rung is written,
+which is the order ``MeshNetworkManager`` already used on the live-record path. The durable custody
+commit those doors trigger is capped per evaluation, and its overflow is *carried* rather than
+dropped: the planner cannot recover it, because after a claim no named leg is `pending`, so the queue
+is what makes "retried at the next evaluation" true. Items no stored receipt could place are named
+(`MeshCustodyHandoffResult.unplacedItemKeys`) and their bytes ride a best-effort push through the
+drain's own narrowing planner and frame budget, bounded by the plan's deadline re-read per custodian
+— a frame cap is not a time bound. Everything the push sends is the origin's exact stored objects:
+**a custodian is a courier, never a co-signer.**
+
+**P5 item 9 gave BACKPRESSURE a consequence** (plan §11, §3.4). Every cap was already refused by
+name at every writer door and every collection already had a bound; what did not exist was one value
+that *is* the cap model, any caller for the three reclaim verbs, any drop rule for a parked set whose
+manifest was refused, the fourth at-rest guard, or a user-visible consequence of any of it — a
+refusal ended in one audit line nobody reads, which is precisely "grows past its cap without telling
+anyone". Five types close that, in two files: `MeshRoutedCapacity` (the caps as one **injectable**
+value, `.production` defined *as* `MeshRoutedStoreFormat` so no number is written twice, threaded
+through `MeshRoutedStore.init(scope:capacity:)` and read back off the store by everything that
+accounts, so the doors and the accounting can never measure against two models), `MeshRoutedCapacityUsage`
+(the accounting rule stated once — parked items count, staged bytes count, and the manifest door's
+**over-commit** is named by `uncompletableItemCount` rather than fixed, because a durable reservation
+would need at-rest state), `MeshRoutedParkedDrop` (the ONE-clause terminal-refusal rule) and the
+bounded observable `MeshRoutedDeliveryHold` + `MeshRoutedDeliveryHoldCause`. The store gained a bulk
+`dropping(items:reason:)` — one load and one seal for a whole reclaim batch, where sixteen calls to
+the single-item verb would be sixteen full index seals on the main actor — and `MeshRoutedIndex`
+gained `parkedItems(at:)` (C10 made countable), `everyDestinationDelivered(_:in:)` and the fourth
+at-rest sibling `capacityExceeded("chunkCount")`.
+
+Four decisions are worth reading before touching any of it:
+
+- **The parked-set drop has exactly one clause, and it is origin-bound.** `unknownTypeToken` **and**
+  `sender == manifest.originFingerprint`, because that rejection is checked *before* the signature
+  and the origin is the only party the chunk door lets park a set. A clause on
+  `notADestinationOrHandoff` was designed and removed: that guard's else branch fires whenever the
+  sender is not the origin, so any co-destination holding the origin's genuine manifest could have
+  deleted a hand-off custodian's parked ciphertext with a replayable frame. Only a **parked** record
+  is ever dropped — the caller is that guard — and never on a capacity refusal, which would turn
+  backpressure into data loss.
+- **The reclaim reads `itemsReclaimableAsCustodian` intersected with the POSITIVE
+  `everyDestinationDelivered(_:in:)`.** "Nothing outstanding" reads true for a destination this
+  device's ledger has not heard of yet (an absent fingerprint derives as `departed`), so a reclaim on
+  that answer would delete content still owed and audit it as `delivered`. A roster-absent
+  destination therefore frees no byte; such an item waits for expiry instead.
+- **The release predicate measures what the DOOR measures.** `MeshRoutedCapacityUsage.hasRoomToAdmit`
+  takes the file cap against `max(index-named files, files the directory actually holds)`, exactly as
+  the chunk door does, and an unreadable directory reads as "no room" rather than as room — otherwise
+  the visible hold clears while the door is still refusing. Orphans are not hypothetical: every drop
+  verb saves the index *before* it unlinks, and a failed unlink is counted rather than swallowed, so
+  `sweepingOrphanChunkFiles()` is the file cap's only recovery route and runs inside the same
+  once-per-peer budget. Only the three **store-level** caps
+  (`MeshNetworkManager.routedStoreFullRefusals`) may raise the hold this predicate releases; the three
+  per-item caps are refused by name and narrow the entitlement, but they are not "this device is
+  full", and a store-level release must never drop a hold raised by a cap it cannot see.
+- **Expiry needs no roster, so it has three seams** — the drain-exchange entry, the next session's
+  ledger arm, and the Friends-tab search *while a hold is showing*. A routed item expires
+  `hardDeadline + 20 minutes`, i.e. **after** the session that could have swept it: a sweep wired only
+  to the exchange could never collect one in the common case. Every seam is gated on `case .loaded`,
+  so nothing sweeps while protected data is unavailable.
+- **The visible surface has to be TRUE, not merely present.** `MeshNetworkManager.routedDeliveryHold`
+  is derived from three facts kept apart (refused keys, the over-commit count, item 8's unplaced keys)
+  under a fixed precedence, so one count never unions two of them; the two key sets are bounded by
+  `MeshRoutedStoreFormat.maxItems` and **name that bound in an audit line** when full, so the count
+  saturates rather than lying. It is cleared by a new ledger and **not** by `leaveMesh` — the Friends
+  tab is where it is read — and it is *released* the moment a sweep gives the store room again. It is
+  the module's only observed routed seam, on purpose. `deferred`, seal-`refused` and `corrupt` set no
+  hold at all: they are three other answers, not "full" — and the sweep budget is spent only **after**
+  the store answers `.loaded`, so an exchange that did no work does not strand that peer's reclaim,
+  and its release, for the rest of the session.
+
+**P5 item 10 answered the LOCKED DEVICE** (plan §11's locked-device row, §19.5's fifth wrinkle).
+The finding it is built on inverts the obvious design: after the first post-boot unlock a locked
+device's routed store is **`loaded`** — the seal key is `AfterFirstUnlockThisDeviceOnly` and the
+files are `…UntilFirstUserAuthentication` — so ciphertext-only custody, custody receipts and
+photo/text recipient receipts already work with the screen off, by design rather than by accident.
+`UIApplication.isProtectedDataAvailable` is `false` in exactly that state, so the gate item 10 adds
+is **not** a proxy for store readability: the store answers readability itself, in five states, and
+``MeshRoutedAccessGate`` answers a different question — *may plaintext exist on this device right
+now.* The genuinely blocked window is **pre-first-unlock**, already fail-closed in five named states
+with no path from any of them to a writer. What was missing was a way **back**.
+
+- **One pushed value, three facts, three questions.** The app pushes iOS data protection, the scene
+  and `FernletLockService`'s duress session through
+  ``MeshNetworkManager/applyRoutedAccessGate(_:now:)`` — ProximityKit observes no lifecycle
+  (plan §13 rejects that by name), and a pulled property would have no **edge**. The push is P7's
+  `apply(_:)` shape, so `ProximityRunPolicy` later becomes its single writer without the seam moving.
+  ``MeshRoutedCapability/sealCustody`` is answered `true` **deliberately**: custody's authority is the
+  store's own five-state load, a *type-level* gate, and a lock fact at a ciphertext door would delete
+  the locked-device feature. The two plaintext capabilities are answered at the **same** strength — a
+  plaintext write is not a weaker act than a plaintext read.
+- **Which lock gates what.** iOS data protection gates plaintext, and (at the store) readability. The
+  **app lock gates nothing in the mesh** — no `FernletLockScope` covers Friends, and ProximityKit
+  cannot import `FernletLock` — with one exception: **duress**, which closes the gate, because a
+  friend's content must never be committed into a canonical store during a duress session. It is
+  observed on its own `onChange` because it moves at neither a scene nor a protected-data transition.
+- **The identity key's keychain protection is never weakened for background decryption, full stop.**
+  Every row stays `AfterFirstUnlockThisDeviceOnly`, including the routed seal key: strengthening it
+  makes every background custody write unsealable — and an unsealable write is an unacknowledgeable
+  one — while weakening it to a syncable class is prohibited and pointless, since V3 ciphertext
+  authenticates a `ThisDeviceOnly` binding. This is a **policy** gate, not a capability one: the
+  identity KA key is cached in memory after `ensureProvisioned()`, so a locked device *could* unwrap.
+  It does not, and the answer to "background decrypt would be convenient" is *no*, never a class
+  change.
+- **The re-entry is defined by an EDGE, not by `isOpen`.** ``MeshRoutedAccessEdge`` runs the pass when
+  a **ciphertext** leg rises (an unlock or a foreground makes the sealed store readable again — those
+  jobs must run even while the app is backgrounded) or when a **duress session clears**, which is the
+  one fact that closes the gate with no other leg moving. Six jobs, fixed order, each idempotent and
+  bounded: the session-restore retry that had no caller (guarded on `sessionState == .idle`, because
+  the launch restore re-arms the ceiling before the state machine's refusal is reached), the claim
+  derivation plus a durable re-derivation of item 8's memory-only commit queue from the **rung**, the
+  roster-free expiry sweep plus only the capacity sweeps a non-loaded store actually suppressed, the
+  stranded-receipt retry list, **item 13's projection pass** (the plaintext half a closed gate
+  deferred, last because it is the only job that produces plaintext), and a re-derivation of the
+  delivery hold. **It sends no frame**: receipts are filed durably and forwarded at the next
+  exchange.
+- **Both retry lists spend their allowance on never-attempted work first** (P6 item 5, D-13.32).
+  Each pass takes 16 items from a list ordered by ORIGIN FINGERPRINT — a position whoever mints the
+  item chooses — so a population that refuses and is right to keep its place (a deferred store, a
+  blip-time liveness skip, and from item 6 a heart whose ledger judgement needs a foreground) would
+  otherwise hold every slot at every rising edge. ``MeshRoutedRetryPlan`` splits the allowance: at
+  most half to keys a previous pass attempted, the rest reserved for keys nothing has tried, unused
+  slots spilling either way, and the retry share taken in round-robin so its own tail cannot starve
+  either. ``MeshRoutedRetryRotation`` is the memory-only per-list state, bounded by the store's item
+  cap and audited at the bound; it is armed by the session's FIRST pass, and an item already held at
+  that instant competes for the retry share rather than the reserved half — which is what bounds a
+  restart's re-derivation of item 4's memory-only FINAL marks. A verdict that `leavesTheRetryList`
+  drops the key from both the tried set and the rotation, through the one caller that writes item 4's
+  mark; a refusal made by the GATE itself is charged to no item, because it is the same answer for
+  every item on the list. The filter-before-plan seam is the manager's own — `isProjectableAtThisPass`
+  on job 5's list and `ackableNow` on job 4's — and it is where a type this device cannot finish at
+  all leaves the list instead of pacing on it.
+- **A counted no-op was said plainly, and P5 item 13 cashed it.** Item 10 shipped the three
+  predicates, the heart stage's enumeration and source walls that fail the moment a plaintext seam
+  appears — a tripwire plus a predicate, never a claim that something was being blocked at the time.
+  Item 13 wrote the first two seams: the decrypt predicate is a **parameter guarded on as the first
+  line** of ``MeshRoutedItemDelivery``, and the mutation predicate gates the canonical dispatch. The
+  wall **pins the count** of each plaintext seam across all of `ProximityKit` rather than only asking
+  each file to name its predicate: the manager defines all three predicates, so a containment-only
+  wall could never fire in the one file where such a seam would most naturally be written. Moving a
+  pin obliges the same file to name its predicate, and the custody-door wall exempts exactly those
+  files — an exemption item 13 is the first to exercise, and asserts it exercises.
+
+**P6 item 6 put HEARTS on the routed store, and the heart is the one row whose plaintext pass is not
+a projection.** Four things landed together.
+
+- **The registry row flipped in place** to ``MeshRoutedDestinationSemantics/singleRecipient``, with
+  its cap narrowed to a formula whose payload term is **zero** (a heart body is header-only: the
+  heart body's `maxFramedHeaderByteCount` + ``MeshRoutedItemSealFormat/overheadByteCount`` = 553 B,
+  down from the shared 256 MiB wire bound; the row and the body are `FernletSocial`'s,
+  `FernletRoutedTypes` and `MeshRoutedHeartBody`). The flip is the one re-declaration
+  ``MeshRoutedTypeEntry``'s freezing rule allows a **never-minted** row — the rule's failure mode is
+  silent divergence between two builds that both mint the token, and no build had ever produced a
+  heart manifest — and the allowance is now **spent**: the next semantics change is a `…heart.v2`
+  token. The mint-side reader of the column is the **audience** `originateRoutedItem` takes from its
+  caller; `MeshRoutedManifest.validated` reads it as a shape check, which is one-directional
+  (vacuous on a pair, and blind to a full-roster row handed one recipient).
+  ``MeshDeliveryTarget/addressing(contentID:recipient:roster:selfFingerprint:)`` is the capture door,
+  and the recipient is a caller argument validated against the roster — never body-derived.
+- **The live-slot requirement went with the legacy transport.** A heart to an admitted member with no
+  live slot is now sealed, staged and custodied until a link forms or the origin departs and hands
+  custody on, and the engine's addressability query
+  (``MeshNetworkManager/isAddressableRoutedRecipient(_:)``, which `FernletSocial`'s session hearts
+  ask as `canSendSessionHeart(toFingerprint:)`) answers "is this a member this device can
+  address" rather than "are they linked". The app still prefers a live `.hearts` slot, then the
+  presence path while the friend is presence-reachable, and only then a routed custodied heart — a
+  delivered heart beats a custodied one in the one case presence was best at. Feedback is
+  **consume-on-stage**: the routed stage is durable-before-acknowledged, so `.staged` is "Sent", and
+  the two honest costs (`.staged` ≠ delivered; a recipient's refusal does not refund the cooldown)
+  are named rather than hidden.
+- **The ack ceremony has ONE call site**, resolved inside `commitLocalDelivery` — the single door
+  both the live path and re-entry job 4 already reach — so `mayCommitRoutedHeartLedgerJudgement`
+  stays defined once and the live door judges an in-person heart in the same pass instead of waiting
+  for a rising access edge. The heart stage's extra leg (`sessionState == .activeForeground`) is
+  **not inert**: `.linksLost` moves the machine to `.partitioned`, so a link blip defers a heart —
+  retryably, which is right. It is also **reachable**, which it was not when item 6 shipped: a
+  device that adopts somebody else's mesh over a slot it had already committed re-enters at
+  `joining` and raises no further `peerCommitted`, so `recordVerifiedAdmissionDurably` re-asserts
+  that one commit (`reassertCommitIntoAdoptedMesh()`, fix review P1-1) — without it the yielding
+  half of every pairwise founding judged no heart for the whole session. FINAL refusals (not a friend, a removed or locally BLOCKED origin, a
+  malformed body) are marked in a memory-only `routedHeartRefusedKeys`; the retryable ones (a closed
+  predicate, hearts off, an unloaded ledger, the ledger's own five-minute receive cooldown) are not,
+  so a flip or a foreground return heals for free. The ceremony is generic over the ledger judge
+  the row's token registered (``MeshRoutedLedgerJudge``; Fernlet's is the session hearts', in
+  `FernletSocial`): hearts off and an unloaded ledger are its readiness, "not a friend" its
+  admission, which it answers before any byte is read, and the ledger commit its judgement — and
+  from a `.committed` answer the engine mints the ack evidence itself, bound to the item.
+- **The heart row registers no projection handler, so its token is never in
+  `projectableRoutedTypeTokens`**, and that is the design rather than an omission: a heart's ack
+  evidence is minted from its ledger judge's commit, job 5's list does not
+  shrink as work is done, and adding the token would put every heart permanently in a 16-slot
+  allowance it could never leave. Job 4's list shrinks, which is why the heart belongs there — and
+  `ackableNow` filters a heart this device cannot judge out of that list before the allowance is
+  planned, so sixteen unjudgeable hearts from one ground fingerprint cannot strand this device's own
+  photo and text receipts.
+
+The legacy `.friendHeart` mesh transport is gone into a zero-list wall (three functions, one test
+seam, one payload spelling). `PayloadType.friendHeart` itself is **not parked**: the presence path
+still sends and receives it, so there is nothing to park, and the presence heart path is untouched
+(P9's).
+
+**P5 item 11 made "unknown" ONE answer: the type-token registry** (plan §11's last line). Plan §11
+says every future routed type declares its size cap, destination semantics, relay-retention,
+final-ack condition and expiry **at registration** — and item 11 is that sentence as one value,
+``MeshRoutedTypeRegistry``, plus the two adjacent columns items 4 and 10 put on the same row (the
+foreground-decrypt requirement, **derived** from the stage so two fields cannot disagree; and the
+content scope, ``MeshRoutedContentScope``, **declared**: whether an item's content outlives the
+session it was offered in, which the engine reads to compute a session row's liveness, while the
+store a delivered item lands in is the business of the projection handler registered for its
+token, never a column). The rows are the host's (``ProximityHost/meshRoutedTypeEntries``;
+Fernlet's three are `FernletSocial`'s `FernletRoutedTypes`), read once at the manager's `init`, and
+a sender mints under its own row's token. ``MeshRoutedAckStageTable`` survives as the registry's
+**projection** — its `ackStages` over the same rows — so the accepted-token set and the stage
+column come from one source and cannot drift, which is the failure item 4's forward-compat note
+named.
+
+- **`entry(for:) == nil` IS "unknown", and item 11 adds no fourth answer.** The manifest verifier
+  refuses ``MeshRoutedManifestRejection/unknownTypeToken`` before the origin lookup, the ack door
+  refuses ``MeshRoutedStoreRefusal/unknownTypeToken``, the re-entry pass skips the item, and four
+  gates that had **no type check at all** now answer the same way: the drain offer (`mayCourier` +
+  `handoffEntitlement` inside `offerableKeys`, which the departure push inherits by narrowing
+  through `offerableKeys(…).intersection(pushable)` rather than building its own offer set), the
+  answer builder's **receipt and ask half** (an unregistered key is unioned into the `refused:` set
+  both `MeshRoutedDrainPlan` sites already take, because `receiptsToForward()` takes no entitlement
+  argument and the origin's signed receipts would otherwise still cross), the hand-off claim, and
+  the **chunk ingest door wherever the type is decidable** — a chunk carries no token, but an item
+  whose manifest this device already holds does, so a narrowed build stops growing what it can never
+  acknowledge instead of filling its caps with it. The parked-set drop is untouched: it keeps item
+  9's single origin-bound clause, which is the one place a chunk has no type to resolve.
+- **The four new gates are UNREACHABLE in one shipping build**, and that is said rather than
+  dressed up: nothing carrying an unregistered token can be admitted, so no such record exists at
+  rest. They are reachable only across a build that narrowed its own registry — held, never grown,
+  never offered, never forwarded, never claimed, never acknowledged, collected by expiry, and **not
+  dropped**, because a build narrowing itself is not the origin's refusal.
+- **Two policies are unreachable by construction, by two different mechanisms, and the asymmetry is
+  derived.** Increment 2's ``MeshRoutedRelayRetention/relayInFlight`` is *unregisterable* —
+  `init(entries:)` drops such a row, so its token answers nil at every door and no hop plumbing is
+  built ahead of plan §11's device-measurement gate — as is a row whose declared cap falls outside
+  `1 … MeshRoutedManifestFormat.maxContentByteCount`. ``MeshRoutedDestinationSemantics/singleRecipient``
+  was instead *registerable but unmintable*, because that column has **no receiver-side reader at
+  all**: a manifest carries its destination set on the wire and the verifier binds wraps ≡
+  destinations from those bytes, so a registered row cannot fall through to increment-1 behaviour on
+  receive. **P6 item 6 flipped it and it is now minted by the heart row** — see the heart paragraph
+  below.
+- **The per-type size cap is now a guard at BOTH ends, and P6 item 3 is what made it reachable.**
+  Through P5 every row's cap equalled the wire bound, so neither the mint's
+  ``MeshRoutedManifestMintError/sizeExceedsTypeCap`` nor any receiver check could fire — which is
+  precisely why the receiver-side case was not added earlier: it would have forced
+  ``MeshRoutedParkedDrop``'s exhaustive switch to re-decide D-9.3's origin-bound drop rule for a
+  condition no row could produce. P6 item 3 lands the three together in one commit: the check at the
+  manifest door (`routedTypeCapRejection(for:)`, between the verifier and the admission gate, exiting
+  through the one charging door like every pre-store refusal), the
+  ``MeshRoutedManifestRejection/sizeExceedsTypeCap`` case, and that case's **non-dropping** arm —
+  an over-cap manifest KEEPS its parked bytes, because a cap is a number one build chose and a later
+  build may loosen it, while a dropped parked set cannot be recovered. The first narrowed cap is the
+  photo row's, written as a **formula** rather than a literal, in the host's row (`FernletSocial`'s
+  `FernletRoutedTypes`): `PrivateMediaStore.maxIncomingPhotoBytes` (the payload's *plaintext*
+  bound, widened from `private` in the same commit rather than restated) + the photo body's
+  `maxFramedHeaderByteCount` + ``MeshRoutedItemSealFormat/overheadByteCount``. It is the widest row,
+  and the widest row (``MeshRoutedTypeRegistry/maxItemByteCount``) is the one bound the manager holds
+  from its host's registry at `init` for its seal, its open and the delivery projection's
+  resident-blob guard — so the door's cap and that guard are one number and cannot drift, and this
+  module names no photo bound of its own. The unit caveat is the whole
+  reason for the formula: `manifest.size` is the complete sealed *ciphertext* blob, while a store's
+  byte and pixel bounds are *plaintext* bounds enforced at reassembly. **What the row bounds is the
+  origin-signed manifest at the manifest door, not the bytes resident for an item:** a *parked*
+  chunk set has no type at all (a chunk carries no token), so its growth is bounded by the store's
+  own chunk caps — 1024 × 256 KiB — and by `MeshRoutedCapacity`, never by the row; that state is
+  reachable on purpose, because the non-dropping arm KEEPS an over-cap item's parked bytes for a
+  build that loosens the cap, and expiry collects them if none does. The mint still does **not**
+  refuse an unregistered token: acceptance is a receiver-side statement, so an unregistered item
+  mints under the shared bounds and is refused at every receiver door — loud, and documented as an
+  asymmetry rather than left to be discovered.
+- **The registry is not a wire change, not persisted and not a gate.** No golden, purpose, framing
+  case or `PayloadType` moves; nothing is stored (the index already holds the origin's manifest
+  verbatim, and a persisted policy would outlive the build that wrote it); and the file names none of
+  ``MeshRoutedAccessGate``'s symbols — a type's declared column is a property of the type, never the
+  gate. Three source-scan walls hold it: one registry construction site (the manager's, from its
+  host's rows), no named registry or ack-table value beside it, and **no per-type branch anywhere** —
+  a token spelling has one source, the host's namespace (a routed type is read off it only where the
+  host's rows are built, and no file here spells one), a lookup argument and a branch on a *resolved*
+  value stay legal, and a `switch` on a token does not.
+
+**Membership wire tokens (plan §8.3), and the one vocabulary rule.** A record kind's token (the
+namespace's `vocabulary.membershipRecordKinds`, which `.fernlet` reads off `PayloadType`),
+the mesh message it travels as (the namespace's `vocabulary.mesh`, which `.fernlet` reads off
+`PayloadType` too), and the namespace signature label it is signed under
+(`purposes.signature.<field>`; `.fernlet` spells each exactly as its `FernletCryptoPurpose` twin,
+pinned equal until C1) are, in Fernlet's namespace, the SAME frozen English spelling, so one grep
+finds every layer that touches those bytes:
+
+| token | record | signed by | crypto domain |
+| --- | --- | --- | --- |
+| `fernlet.mesh.member-admission.v1` | `SignedAdmissionRecord` | an existing member, or the founder | `Signature.meshAdmissionTokenV2` (the token's own) |
+| `fernlet.mesh.member-departure.v1` | `SignedDepartureRecord` | the departing member | `Signature.meshMemberDepartureV1` |
+| `fernlet.mesh.member-removal.v1` | `SignedRemovalRecord` | the tallier, citing ⌊\|roster\|/2⌋ + 1 votes | `Signature.meshMemberRemovalV1` |
+| `fernlet.mesh.terminated.v1` | `SignedTerminationRecord` | a final-pair member | `Signature.meshTerminatedV1` |
+| `fernlet.mesh.inventory-digest.v1` | — (a message, not a record) — **membership records only**, never routed content | any member | `Signature.meshInventoryDigestV1` over a `Hash.meshInventoryDigestV1` digest |
+| `fernlet.mesh.epoch-heads.v1` | — (a message, not a record) | any member | `Signature.meshEpochHeadsV1` |
+| `fernlet.mesh.key-agreement.v1` | — (ADDRESSING, not a record): a batch of `SignedKeyAgreementAdvertisement`, each a member's own durable X25519 public key | **each member, about its own key** — the batch frame itself is unsigned, and a relay forwards every element verbatim, never re-signing | `Signature.meshKeyAgreementV1` |
+| `fernlet.mesh.removal-proposal.v1` | — (live state, not a record) | the proposer, whose proposal IS its vote | `Signature.meshRemovalProposalV1` |
+| `fernlet.mesh.removal-vote.v1` | — (live state, not a record) | any member except the target | `Signature.meshRemovalVoteV1` |
+| `fernlet.mesh.routed-manifest.v1` | `MeshRoutedManifest` (a content record, not a membership record) | the origin only — relays forward it verbatim, never re-sign | `Signature.meshRoutedManifestV1`; wraps under `KeyDerivation.meshRoutedContentKeyWrapV1` + `AEAD.meshRoutedContentKeyWrapV1` |
+| `fernlet.mesh.routed-chunk.v1` | `MeshChunk` (one slice of that item's ciphertext) | the origin only — a custodian forwards it verbatim, never re-signs | `Signature.meshRoutedChunkV1`; digests under `Hash.meshRoutedContentV1` (the whole item), `Hash.meshRoutedChunkV1` (one slice) and `Hash.meshRoutedChunkIDV1` (the derived replay-window id) |
+| `fernlet.mesh.custody-receipt.v1` | `MeshCustodyReceipt` (a custodian durably holds one item's complete ciphertext) | the **custodian**, about the origin's item — the one routed record its subject did not sign; relays forward it verbatim | `Signature.meshCustodyReceiptV1`; the derived dedup id under `Hash.meshCustodyReceiptIDV1`; the at-rest store sealed under `KeyDerivation.meshRoutedStoreV1` |
+| `fernlet.mesh.recipient-receipt.v1` | `MeshRecipientReceipt` (a destination received one item, FINALLY) | the **recipient**, about the origin's item; relays forward it verbatim, and it carries no ack stage — what "finally" meant is resolved from the origin-signed type token | `Signature.meshRecipientReceiptV1`; the derived dedup id under `Hash.meshRecipientReceiptIDV1`, one per `(recipient, item)` |
+| `fernlet.mesh.routed-inventory-digest.v1` | — (a message, not a record) — the ROUTED CONTENT a device holds: a minimal fingerprint table plus one entry per live item, each with the signed `(origin, itemID)` pair, the parked flag, the chunk count, the **exact** held-chunk bitmap and the two receipt-signer lists | the **advertiser**, about its own disk — nobody forwards it on another device's behalf | `Signature.meshRoutedInventoryDigestV1`; **no** `Hash` sibling, because the entry list IS the digest |
+| `fernlet.mesh.routed-drain-answer.v1` | — (a message, not a record) — the RESULT of comparing two routed inventories: whose advertisement is being answered, which one (its own signed instant), and the single bit "my delta against it is empty" | the **answerer**, about its own comparison | `Signature.meshRoutedDrainAnswerV1`; **no** `Hash` and **no** `AEAD` sibling — one Bool and two binding scalars have nothing to digest and nothing to seal |
+
+**Nothing enters a ledger unverified.** ``MeshMembershipRecordSet`` is pure algebra and will merge
+whatever it is handed; ``MeshMembershipRecordVerifier`` is the only door. That matters because the
+sets are capped at sixteen and keep the EARLIEST records, so unverified junk with a low timestamp
+would crowd a real removal out of the set on every device it reached. Signing keys come from the
+ledger's own admissions, never from the record being checked; the single exception is the bootstrap
+admission, rooted in a founder key the caller authenticated elsewhere.
+
+**Legacy `fernlet.session.bye.v1`: parsed, never emitted.** A goodbye is unsigned, so the strongest
+thing it can mean is "this link is going away" — the peer is **disconnected, not departed** (plan
+§8.2). ``MeshMembershipGoodbyeInterop`` states that rule in code, including a
+`departureRecord(forGoodbyeFrom:)` that is always nil: departures are grow-only and permanent, so
+an unsigned frame that could mint one would make eviction forgeable by anybody who can reach the
+link, with no way to undo it. New builds send the departure record's frame
+(`MeshPayloadRole.meshMemberDeparture`) instead; deciding
+*when* is a state-machine transition, and `MeshNetworkManager.emitMembershipEvent(_:)` is the seam
+plan items 5–6 filled.
+
+**The removal frame does not go to the member it removes** (plan §8.3, P3 item 3b).
+The removal frame (`MeshPayloadRole.meshMemberRemoval`) carries a `MeshMemberRemovalPayload` — one quorum-signed
+`SignedRemovalRecord` and nothing else — to every member *except* the removed one, who is excluded
+by the same rule that keeps them out of the new epoch's key distribution
+(`MeshRotationPolicy.recipients`, reused verbatim so "who gets the key" and "who is told why"
+cannot drift apart). They learn of the removal as a key that no longer opens anything. On the
+receiving side the record goes through ``MeshMembershipRecordVerifier`` — quorum re-derived on the
+receiver's own merged roster — then through `commitVerifiedRecord(rollingBackTo:type:)`, so it is
+durable before it counts; a record naming THIS device applies plan §8.2's `removed` edge and tears
+participation down, which is the one state-machine edge item 6 built and could not yet wire.
+
+### Quorum under partition (plan §10.4, P4 item 5)
+
+A removal takes **⌊|roster|/2⌋ + 1 distinct signed votes**, and every part of that sentence is
+re-derived at the *receiver*: ``MeshRemovalQuorum`` stores raw voter fingerprints and filters them
+against the roster handed in at **verdict** time, so a merge that grew the roster raises the bar and
+a departure that shrank it lowers the bar with nothing stored having changed. The proposal counts as
+the proposer's vote, the target's vote is discarded (and refused at the door), a duplicate signer
+counts once, and a signer who has since departed or been removed falls out of the roster and so out
+of the tally.
+
+**Proposals and votes are live state, never records.** They are held in memory on
+`MeshNetworkManager.removalQuorum`, never sealed — `MeshSessionContext` stays at schema 2 and no
+wipe row is owed — because a proposal is a five-minute conversation, not a fact about the mesh. An
+incomplete one expires and leaves **no** trace: expiry is a deletion, not a tombstone, so there is
+nothing to merge and nothing a late vote can reopen. Only the completed removal is durable.
+
+**Expiry reads no wall clock from the wire.** The five-minute window is measured from the receiver's
+own `firstSeenAt` on an injected clock. The signed `issuedAt` / `castAt` stamps are bound into the
+signature for the audit trail and are used only as a **bound** — §10.3's ±10 minutes, reused rather
+than restated — so a forged far-future stamp cannot extend a window and a forged far-past one cannot
+kill a live proposal.
+
+**Completion mints the existing record.** `evaluateRemovalQuorum` hands the voter list to
+`mintAndFileRemoval`, the one body both quorum paths end in, which signs a `member-removal.v1`,
+files it through the verifier, seals it, and only then announces it (plan §3.6). Two branches that
+complete independently mint two records for one member; ``MeshMembershipRecordSet`` deduplicates by
+member keeping the earliest, so the union converges on **one** effective removal with no merge
+special case and no second ledger commit. The removed member is not cut off mid-tunnel — the record
+refuses their *next* introduction as `barredMember`.
+
+**The legacy two-party vote is untouched.** `fernlet.mesh.removal.proposal.v1` /
+`fernlet.mesh.removal.second.v1` are UNSIGNED, hard-code quorum at two and read `Date()` directly.
+They stay frozen and are what already-shipped builds speak, exactly as `fernlet.session.bye.v1`
+stays frozen beside the signed departure record. The spelling is the tell: **dots** for the legacy
+pair, **hyphens** for the signed quorum.
+
+**The introduction authority answers from the derived roster** (plan §8.1, §20.4.4, P3 item 7).
+`MeshNetworkManager.roster` is
+`MeshDerivedRoster.introductionRoster(additionalBarred:admitsStrangersProvisionally:)`, so the QUIC
+radio judges *membership* against `admitted − departed − removed` and nothing else — the second
+argument is not a membership answer but the owner's join-door posture, which since D-4.3
+(2026-09-21) lets a **stranger** hold a tunnel provisionally while the session is open (see
+``MeshIntroductionRoster/admitsStrangersProvisionally``). A barred key is refused with the doors
+wide open. This closes plan
+§20.1's recorded gap: the manager used to keep removals by *fingerprint* and hold no signing key for
+a member it had dropped, so `barred` was empty in production and a removed peer refused as an
+anonymous `unknownIdentity` — matrix row 3 (`barredMember`) was produced by a DEBUG chaos hook. The
+admission record keeps the member's signing key, so a verified removal or departure names a key and
+`barred` has real contents. P3 item 9 then drove the `barredMember` branch on the radio with
+`PROXIMITYKIT_MESH_CHAOS_BARRED` **unset** — a pair, a really-signed removal record, and the shipping
+derived roster's own refusal — so the hook survives only where a *real* quorum is needed
+(⌊2/2⌋ + 1 = 2 votes with the target excluded leaves one eligible voter), which takes three nodes. With **no** ledger the answer falls back to the gossiped
+descriptor's members and logs `mesh.introductionAuthority.legacyRosterFallback` once — reachable
+only in tests and in interop with a build predating these records, because a founder files its own
+admission at `foundMesh(_:now:)` — the shipping founder door since P6 item 2 is the proximity-join
+promotion, with `startNewMesh(name:)` calling the same function — and a joiner files its granted one
+at `armJoinerLedger(_:)`.
+
+**A joiner adopts a ledger; it does not merge into one** (plan §8.3, §10.5, P3 item 7). A founder
+bootstraps from its own signing key, but a joiner does not know the founder's — it knows only the
+admission token its transport-authenticated peer signed. So ``MeshLedgerAdoption`` does it in two
+steps. **Bootstrap**: arm a verifier whose root is the *admitter's* key and file this device's own
+admission, giving a one-member roster that can sign and file records at once. **Adopt**: when a
+peer's ledger arrives, re-verify it from *its own* root and accept that root as the founder only if
+the result admits this device's admitter under exactly the key its token names — the chain §8.3
+describes, checked end to end. Merging record-by-record could never converge: to a ledger rooted at
+the admitter, the founder's self-admission is `unauthorizedAdmitter`. Convergence is one round trip:
+the joiner sends `fernlet.mesh.inventory-digest.v1`, a peer holding at least as many records answers
+with a bounded re-gossip of the frames that already carry them (once per peer per session), and a
+record frame never provokes another digest. `fernlet.mesh.member-admission.v1` exists for that
+re-gossip and for the live case — an admission happens between two devices alone, and a third member
+that never learns of it derives a roster one short, which `MeshRotationPolicy` then turns into a
+member who silently never receives the group key. It moves **no new signed bytes**: the record wraps
+the existing `MeshAdmissionToken`, still signed under `meshAdmissionTokenV2`.
+
+**Plan §8.2's `terminationVerified` edge** (P3 item 7). A verified `fernlet.mesh.terminated.v1`
+whose signer the *merged* roster agrees was in the final pair ends the session — ending mark,
+teardown, permanent rejoin bar. Whether it ends the mesh is not the sender's decision and not the
+dispatch path's: ``MeshDerivedRoster`` applies §8.3's downgrade rule first, so a termination signed
+by a member of a roster larger than two costs its signer their own membership and nobody else's, and
+reaches the manager as an ordinary roster change that rotates the key.
+
+**Two durable surfaces, and the four that stay memory-only.** P3 item 2 reversed this module's
+old blanket "ProximityKit persists nothing" rule (plan §17.3), and the reversal is narrow on
+purpose. `MeshSessionContext` — mesh id, protocol version, `createdAt`/`hardDeadline`, the
+membership ledger, epoch heads, the develop bar — is sealed at rest by ``MeshSessionStore`` under
+its scope namespace's `family.purposes.keyDerivation.meshSessionContextV1` (Fernlet's
+`fernlet.mesh.session-context.v1`, FernletCrypto's registry purpose until step A0.2.9), on a
+per-instance ``MeshSessionStorageScope`` (directory *and* keychain service, so a wipe takes both
+together; since step A0.2.8 it also carries the host's namespace, which names the file and the seal
+key's account, and since step A0.2.9 the host's install binding).
+`MeshGroupKey`, `PeerSlot` and `MeshSessionRosterEntry` are **still never persisted**, and neither
+are `FernletSocial`'s review batch and transcript built over them (`MeshFriendReviewBatch`,
+`SessionMessageStore`); `MeshGroupKey`'s doc guard is
+now load-bearing by contrast: content never depends on the control key, so resume reconnects and
+rotates rather than reloading a secret.
+
+P5 item 3 added the **second** durable surface, on the same floor and with its own everything:
+``MeshRoutedStore`` seals `MeshRoutedIndex.sealed` (the catalogue of routed items this device is
+holding for other people, their delivery maps and the receipts other members signed) plus one
+`MeshRoutedChunks/<uuid>.chunk` file per held slice, under its scope namespace's
+`family.purposes.keyDerivation.meshRoutedStoreV1` (Fernlet's `fernlet.mesh.routed-store.v1`,
+FernletCrypto's registry purpose until step A0.2.9), on a per-instance ``MeshRoutedStorageScope``
+whose keychain service is its **own** (`com.fernlet.mesh-routed`) rather than a lodger under the
+session's — one fate per service is the only arrangement a service-wide delete can express honestly.
+Its schema is its own from day one (``MeshRoutedIndexSchema``, version **2** since P5 item 4 added the
+durable ack instant and the recipient-receipt evidence set — an older file is `corrupt`, never
+migrated, because reinterpreting one would produce a record whose two new fields the next save
+silently drops; the column seal does not move, since it is the key-derivation domain — the unused
+at-rest *token* that mirrored it was deleted in step A0.2.8);
+`MeshSessionContext` stays at schema 2 and gains nothing. Chunk file names are opaque random UUIDs recorded in the index, so no
+fingerprint, item id, index or hash appears in a path component; and because ``ProximityColumnCrypto``'s AAD is
+purpose ‖ install binding with **no file name in it**, every read compares the opened chunk's
+descriptor and payload length against the ones holding its slot — a comparison that is not redundant
+and must not be removed.
+
+**Loading either of them has five states, and three of them are not "empty".** ``ProximityColumnCrypto`` is
+V3-only and *refuses* to seal without the host's install binding (Fernlet's `DeviceBindingID`; owner
+decision D4), so before first unlock
+neither file can be written at all. ``MeshRoutedLoad`` mirrors ``MeshSessionLoad`` case for case and
+its refusal, deferral and corruption vocabularies carry the **same frozen rawValues** (a test asserts
+the sets are equal), because invariant 7 is stated once and enforced everywhere:
+
+| state | meaning |
+| --- | --- |
+| `loaded` | a context is in hand |
+| `absent` | no file — genuinely a green field |
+| `deferred` | ask again (locked file, transient keychain, retryable binding read error) |
+| `corrupt` | bytes exist and do not decode — quarantine explicitly, never overwrite |
+| `refused` | custody refused, by name (`MeshSessionSealRefusal`) |
+
+**Seal refused ≠ deferred ≠ absent.** A refusal that is filed as `absent` is the shape that
+overwrites live membership: a caller reading "no prior context" starts a fresh mesh and saves over
+records the user's friends still hold. Only `loaded` and `absent` vend a `MeshSessionStore.LoadToken`,
+and `save` cannot be called without one — so the distinction is enforced by the type system, not by
+a comment. `save` also honours durable-before-acknowledged (plan §3.6): it throws rather than
+returning success, so no membership record, custody receipt or "joined" is acknowledged over bytes
+that never reached the disk.
+
+**The at-rest schema is 3, and an older file is `corrupt` rather than migrated.** P3 item 4 took it
+to 2 by narrowing `epochHeads` from an opaque `[String]` placeholder to `[MeshEpochRef]` — the same
+JSON shape, a strictly narrower meaning. There is no migration, which is defensible only because of
+*when* it happened: the store shipped in this same phase, so no build that wrote a v1 file has ever
+run on a device, and `corrupt` is exactly the state that refuses to overwrite a file this build
+cannot account for. The sealing token stays `…session-context.v1` because it names the **crypto
+domain**, which did not change; `current` is what carries the shape. Item 6 added one field,
+`localTermination`, and did **not** bump: an additive optional whose absence decodes to nil changes
+no at-rest shape, and the bump rule is about narrowing, not growing. **P6 item 1 took it to 3** and
+retired the dead `routingInventoryDigest` in the same act — an addition that *would* have been
+compatible on its face, bumped anyway because the absence of `keyAdvertisements` is semantically
+load-bearing: a device restoring a v2 context would resume addressable to nobody and then silently
+refuse every mint it was not linked for, which is the exact outage the field closes. The version
+guard is exact equality, so the refusal runs in both directions; only the owner's own device has
+ever written one of these files and it holds test data only.
+
+**The lifecycle is a value, and it is total** (P3 item 6, plan §8.2). ``MeshSessionState`` has ten
+states and ``MeshSessionStateMachine/transition(from:on:)`` is a pure function over (state, event):
+every pair either moves — with an ordered ``MeshSessionEffect`` list — or is refused by name
+(``MeshSessionTransitionRejection``). There is no trap, because most of these events arrive from the
+wire. Effect **order** is the durable-before-acknowledged rule made mechanical: `persistContext`
+precedes every effect that tells anybody anything, and `MeshNetworkManager` abandons the rest of the
+list when a save fails.
+
+The edges, as a list:
+
+| from | event | to | effects |
+| --- | --- | --- | --- |
+| `idle` | `founded` / `joined` | `joining` | persist |
+| `idle` | `contextRestored(.resumable)` | `localIdleStop` | offer resume |
+| `idle` | `contextRestored(.terminated/.departed)` | `terminated` / `departed` | — |
+| `idle` | `contextRestored(.expired)` | `expired` | mark, persist |
+| `joining` | `peerCommitted` | `activeForeground` | persist, clear idle timer — the ONLY edge out of `joining`, which is why an adopted mesh re-asserts its committed slot |
+| `joining` | `linksLost` | `joining` | — (nothing committed is not a partition) |
+| `activeForeground` | `backgrounded` | `continuingInBackground` | — |
+| `continuingInBackground` | `foregrounded` | `activeForeground` | — |
+| `activeForeground` / `continuingInBackground` | `linksLost` | `partitioned` | arm idle timer |
+| `partitioned` | `linksRestored` / `peerCommitted` | `activeForeground` | clear idle timer, **merge** |
+| `partitioned` | `idleLapsed` | `localIdleStop` | stop participation |
+| `localIdleStop` | `resumedAfterLapse` | `activeForeground` | start radios, **merge** |
+| any live | `developed` | `handingOff` | mark, persist, stop |
+| any live | `departureRequested` / `terminationRequested` | `handingOff` | mark, persist |
+| any live | `terminationVerified` | `terminated` | mark, persist, stop |
+| any live | `removed` | `departed` | mark, persist, stop |
+| any live | `hardDeadlineReached` | `expired` | mark, persist, stop |
+| `handingOff` | `departureSent` / `terminationSent` | `departed` / `terminated` | stop |
+| `departed` / `terminated` / `expired` | anything | — | refused `sessionAlreadyEnded` |
+
+**A disconnect is not a removal** (invariant 1): losing the last committed link moves the *session*
+to `partitioned` and mints nothing — the ledger, the derived roster and the peer's admission are
+untouched, so the reconnect needs no re-admission and the returning member is still a key recipient.
+A member the roster actually *removed* stays excluded by `MeshRotationPolicy.recipients`.
+
+**A partition is presence, never a record** (P4 item 1, plan §10.2). ``MeshBranchView`` is what a
+device can *see* — derived from the roster plus a set of reachable fingerprints — held deliberately
+apart from ``MeshMembershipLedger``, which is what it can *prove*. Unreachable members are marked
+``MeshMemberPresence/temporarilyDisconnected``, and the derived roster, the quorum threshold and the
+final-pair test are **copied onto the branch view unchanged**, so a 2/2 split of a roster of four
+leaves both branches deriving four members, a quorum of three, and `isFinalPair == false` (§10.4,
+§10.6). None of it is `Codable`: presence is never sealed, so P4 item 1 moved no schema version
+(`MeshSessionContextSchema.current` was 2 then, and is 3 since P6 item 1). ``MeshPartitionDetector`` is the pure edge-detector — only *entering* a partition raises
+`linksLost` and only a *full* heal raises `linksRestored`; a partial heal keeps the branch a branch
+and lets the returning peer take `peerCommitted` into the merge path.
+
+Detection is **on demand**: `MeshNetworkManager.evaluatePartition(reachable:now:)` is the same shape
+as `enforceSessionCeiling(now:monotonicElapsed:)` and `evaluateIdleLapse(now:)`, with no timer of its
+own — ``MeshNetworkManager/pollSession(now:)`` (P7 item 4) is the one seam that drives all three, in
+that order, from the app's one timer, and ``MeshSessionPollReport`` is what a poll says it moved. The
+same item made every ADOPTING member arm the ceiling the founder signed
+(`armSessionCeilingFromAdoptedMeshIfNeeded(now:)`), so a joiner's session ends at the same 6-hour
+bound as the founder's. While a device is partitioned its rotation
+roster is scoped to the branch (intersected with the current full roster, so a departure since the
+last evaluation still excludes), which makes the **branch coordinator the lowest fingerprint
+present** and is exactly why two branches rotating independently at the same counter mint distinct
+``MeshEpochRef``s that `coexist`. `noteExternalHeartbeat(from:at:)` pushes the 30-minute idle window
+out for a current member's authenticated heartbeat, so a live branch of two or more stays alive
+while a partition of one runs to `localIdleStop` and resumes-as-merge.
+
+**Development under partition is decided on the merged roster** (P4 item 6, plan §10.6).
+``MeshDevelopmentPlan`` is the whole decision as one pure value, derived before anything is signed:
+the **merged derived roster** chooses the ending (``MeshDevelopmentEnding/termination`` only when
+`isFinalPair`, ``MeshDevelopmentEnding/departure`` otherwise) and the **branch view** chooses the
+custodians (`presentFingerprints − self`), with the 15-second window expressed as a deadline and
+``MeshDevelopmentHandoffOutcome`` as its named answer — completed, nobody reachable, or the window
+closed first. The type never sees how many peers are connected, so "a 2/2 split of a four-roster is
+two final pairs" is not a mistake the call site can make. P5 item 8 added
+``MeshDevelopmentPlan/handoffSummary(handedOffItemCount:)`` beside the zero-argument
+``MeshDevelopmentPlan/handoffSummary``, which stays as the nothing-transferred answer: the plan is
+handed the count rather than computing it, because the number is a fact about a durable routed index
+this pure value deliberately cannot reach. `permitsTermination(_:)` is the same rule
+applied as an **issuance gate** inside `sendMembershipEvent(_:custodyHandoff:)`: a device whose own
+merged roster is larger than two will not sign a `terminated.v1` at all (a device with no ledger —
+the ceiling, the epoch-counter cap — still may, or an ending would be silenced rather than a wrong
+one prevented). The receiver's safety never depends on that gate: ``MeshDerivedRoster`` downgrades a
+termination from a larger roster to its signer's departure **at read**, which is why the union-merge
+stays commutative, associative and idempotent. The derivation is stateless, so a receiver whose
+roster later *grows* re-reads the same record as a departure; the one-way half is the local session,
+whose ending mark and rejoin bar are durable and permanent.
+
+**Any reconnect is a merge, and there is exactly one merge path** (P4 item 2, plan §10.3). A blip, a
+healed partition, an idle-lapse resume and a process restart are four doors onto
+`MeshNetworkManager.mergeReconnected(_:entry:)`, which is a named front door onto
+`mergeMembershipLedger(_:)` and nothing more; ``MeshMergeEntry`` records *which* door without
+anything branching on it. The union each door carries is a ``MeshMergeOffer`` — the peer's records
+plus the epoch head(s) it holds. The **record** half is assembled from frames that already exist:
+the signed `fernlet.mesh.inventory-digest.v1` asks, and the bounded record re-gossip answers with the
+same record frames a live record arrives in — no wire bytes moved for any of it. The **epoch** half
+needed one frame of its own (P4 item 3): the digest describes records, and its signed bytes are
+pinned by a golden, so widening it would have been a wire decision rather than a merge fix.
+`fernlet.mesh.epoch-heads.v1` is additive — its own token, its own registered signature domain
+`Signature.meshEpochHeadsV1`, its own golden, its own framing-transcript case — and no existing
+golden moved. P5 item 1's `fernlet.mesh.routed-manifest.v1` followed the same rule — purposes
+pre-registered in P0, its own golden and framing case, no existing golden moved. So did P5 item 2's
+`fernlet.mesh.routed-chunk.v1`: one new signature purpose, three new `Hash` purposes, four new
+vectors (the chunk transcript, the per-chunk hash, the item hash and the derived chunk id), its own
+framing-transcript case — and the manifest golden re-asserted, untouched, in the new suite. And so
+did P5 item 3's `fernlet.mesh.custody-receipt.v1`: one new signature purpose, one new `Hash` purpose
+for the derived receipt id, one new `KeyDerivation` purpose for the at-rest seal, two new vectors and
+its own framing case — with the inventory, manifest and chunk goldens all re-asserted untouched. And
+so did P5 item 4's `fernlet.mesh.recipient-receipt.v1`: one new signature purpose, one new `Hash`
+purpose for its derived id, **no** new `KeyDerivation` (the at-rest seal is unchanged and item 4 adds
+no file), two new vectors and its own framing case — with the inventory, manifest, chunk and
+custody-receipt goldens all re-asserted untouched.
+And so did P5 item 5's `fernlet.mesh.routed-inventory-digest.v1`: one new signature purpose, **no**
+new `Hash` purpose (the digest carries no rollup hash — the entry list is the digest), one new
+vector and its own framing case, with all four routed goldens and the membership inventory golden
+re-asserted untouched. Its own token was the item's first decision, because
+`fernlet.mesh.inventory-digest.v1` was already taken by the membership digest and the two summarise
+structurally different things.
+And so did P5 item 6's `fernlet.mesh.routed-drain-answer.v1`: one new signature purpose, **no** new
+`Hash` and **no** new `AEAD`, one new vector and its own framing case — with all five routed goldens
+and the membership inventory golden re-asserted untouched. Its stem is `routed-drain-`, not
+`routed-inventory-`, because the frame states the result of a **comparison** rather than what a disk
+holds; the two diverge at `d` vs `i` immediately after `routed-`, so neither prefixes the other.
+
+**Both halves travel in both directions** (P4 item 2c). The ask sends the digest and the heads
+together, and the answer to a *mismatched* digest sends the bounded re-gossip and the heads together,
+for the same reason. A device inside an open merge window opens no second exchange, and an exchange
+is the only other thing that sends a head — so an answer of records alone left a peer converged on
+this device's ledger and still counting up from its own older head, with nothing in flight to correct
+it. The seeded convergence property found it (`MeshConvergencePropertyTests`); the fix moves no wire
+bytes, because the frame it now sends is the one the ask already sent.
+
+Three consequences worth stating outright:
+
+- **A record arriving while a merge is in flight is merge traffic.** While `awaitingResumeMerge` is
+  set, `dispatchMembershipEventPayload` offers the decoded record to `mergeMembershipLedger(_:)`
+  rather than to the live-record insert, so a returning peer's whole re-gossip mints **one** `.merge`
+  epoch instead of one `.membership` epoch per record. The window opens on
+  ``MeshSessionEffect/beginMerge`` (and on the `peerCommitted` self-edge, which carries no effects —
+  that is the blip and item 1's partial heal). Splitting again abandons it rather than concluding it.
+  **P5 item 6 wired the routed half onto exactly those doors** — `sendRoutedInventory(to:)` fires
+  from the same three call sites `sendInventoryDigest(to:)` does, and nowhere else, which is the
+  mechanically checkable form of "do not add a second reconnect path"
+  (`MeshRoutedDrainWallTests.theDrainFiresOnlyFromTheMergeDoor`). The routed answer gets its **own**
+  receive door rather than a ride inside `receiveInventoryDigest(_:)`, because that function returns
+  at its match branch before its own `Task` whenever the two ledgers already agree — the commonest
+  blip, and precisely the case the drain exists for. **P5 item 8 added a third door class to that
+  wall** — the one-moment hand-off push, which opens no exchange and sends neither digest, but does
+  carry routed bulk. It moves bytes through `sendRoutedBulk(_:to:now:)`, extracted from the drain's
+  own answer so both charge the per-peer session budget before their first `await`, and it is named
+  in the wall rather than left to a count that would have stayed green by accident.
+
+- **The window is a value, and it closes only when every asked peer has matched** (P5 item 7, which
+  retired P4's deferred defect 2d). ``MeshMergeWindow`` is a pure `nonisolated struct` holding three
+  bounded per-peer sets — **asked**, **answered**, **matched** — plus the digests peers sent *while
+  this window was open*. The rule is one line: `pending = (asked ∪ answered) ∩ reachable ∖ matched`,
+  and the window closes exactly when `pending` is empty. Four things about it are load-bearing:
+  - **"Answered" is inside `pending`.** A responder that merely answered a mismatch has *added* an
+    obligation, never discharged one — that is P4 item 2c's deadlock staying shut by construction
+    rather than by a comment. A peer's later *mismatching* digest also removes it from `matched`,
+    so an obligation can never be created and discharged by the same frame. So does the **late
+    ask**: a peer that re-commits while the window is open is re-asked through `reAsking(_:)`,
+    which drops it from `matched`, because a link that dropped and re-formed may have carried that
+    peer through the other branch of a split — the one peer whose pre-disconnect match proves
+    least. The *opening* ask un-matches nobody.
+  - **`reachable` is every committed slot ∩ the derived roster**, never `activeSlots`. `.active` is
+    a UWB distance rank capped at three of five slots, re-assigned from ranging samples, while
+    `broadcastMembershipFrame` reaches all slots — so a `.lightweight` peer re-gossips exactly like
+    an active one, and subtracting it would restore 2d from a distance measurement with no
+    membership meaning. A peer that departs or whose slot goes simply leaves `pending`: derived at
+    read time, never a stored fourth state.
+  - **The proof is the occasion, not a new frame.** Nothing else ever sent a second digest inside
+    one session, so the strict rule alone would wedge every bidirectional mismatch. A fold that
+    moves this device's `localInventoryDigest` re-advertises it, once per distinct digest, to the
+    pending set captured **before** that fold's re-evaluation — a device that has just converged is
+    precisely the device whose peers are still waiting to hear it. It rides
+    `fernlet.mesh.inventory-digest.v1` unchanged: no new frame, field, purpose or golden. It opens
+    no window, asks nothing, and carries no routed twin. A **joiner** gets the same treatment for
+    the same reason: its grant-reply digest is a one-record bootstrap ledger, so the admitter
+    answers it and holds the obligation, and adoption rebases the joiner's ledger without going
+    through `mergeMembershipLedger(_:)` — so `attemptLedgerAdoption(ownAdmission:meshID:)` sends one
+    digest to the admitter itself, the joiner's only other occasion to speak. Those two non-ask
+    doors are why the membership ask now has **six** call sites while the routed one still has four
+    — an asymmetry the wall asserts per function rather than by counting.
+  - **The routed half is recorded and gates nothing.** `MeshRoutedInventoryDelta.converged(local:
+    peerReportsQuiescent:)` is read at close time and logged as a count on `mesh.merge.converged`;
+    it is not part of the closing rule. Gating on it would hold a window for the length of a
+    256 MiB transfer, and — decisively — the capacity-refusal contract subtracts a refused key from
+    the entitlement but not from the delta's ask, so a refused pair is non-quiescent for the rest of
+    the session and such a window would never close again. That asymmetry is item 9's surface. The
+    window's job is to route this reconnect's *records* through the merge path; it is finished when
+    the ledgers agree, whatever the bytes are doing.
+- **Reconnect ≡ merge; admission ≠ reconnect.** The `peerCommitted` self-edge also carries every
+  genuinely new member's first commit, so `openBlipMergeIfReconnected(_:from:peer:)` opens the window
+  only for a peer that was **already on the derived roster** at that instant. A new admission keeps
+  its own `.membership` rotation — a merge window would relabel a brand-new member's first epoch
+  `.merge` (which outranks `.membership` in the 2 s coalescing window) and leave this device waiting
+  for a re-gossip nobody asked for. A commit that names no peer opens nothing: fail closed.
+- **A merge applies what the merged roster says about this device.** `applyMergedRosterVerdict(from:)`
+  is the merge-path counterpart of `applyRosterMove(_:from:)`: a departure or removal that happened
+  in the other branch of a split arrives *only* as a merged record, so a merge that left this device
+  believing it was still a member would be the merge failing open. It ejects only a device that
+  **was** on the roster and no longer is, so a ledger growing from empty is never mistaken for one.
+- **A merge refreshes presence.** `refreshBranchViewAfterMerge()` re-derives ``MeshBranchView``
+  against the roster the union just produced, carrying reachability over verbatim, so a member whose
+  departure record arrived in the merge stops answering ``MeshMemberPresence/present`` immediately
+  rather than at the next evaluation. It runs no detector and raises no event — a merge is not a
+  reachability change.
+- **A restart merges rather than rebuilding.** `restoreMembershipLedger(from:)` puts the sealed
+  ledger back through ``MeshLedgerAdoption/adopt(offered:ownAdmission:meshID:in:)`` — a
+  re-verification from the ledger's own self-admitted root, not a trust — so a relaunched member has
+  something to merge *from* instead of dropping every membership frame `droppedNoLedger`. Schema
+  stays at **2**; nothing new is written.
+
+Epoch heads **coexist**: two branches that rotated at the same counter hold distinct
+``MeshEpochRef``s (their coordinators cannot be the same member), both survive
+``MeshMergeOffer/foldedHeads(_:adding:limit:)`` into `epochHeads`, and an overflow past
+`MeshSessionContextSchema.maxEpochHeads` is **named** (`droppedEpochHeadCount`, plan §21.3's "an
+assertion, not a knob") rather than silently truncated. The count is taken **inside the one context
+writer, after the bytes seal** — the set the cap can bite is the set being written, so a count taken
+anywhere else measures something the file never held. Never a fresh session, never a silent re-key.
+
+**Coexistence ends at a mint** (P4 item 3, plan §10.3). `requestMergeRotationForDivergentHeads()`
+asks for **one** `.merge` rotation when the folded head set actually diverges —
+``MeshEpochAcceptance/isDivergent(_:)``, two heads at one counter — and it asks through
+`requestRotation(cause:)`, so a merge that both moved the roster and reconciled a divergence still
+mints one epoch: the second request lands in the first's open 2-second window. The counter is
+`max + 1` over the folded set, not `own + 1`: `rotationBasisHead` is the highest head in
+`knownEpochHeads` ∪ the keyring's, so a branch that rotated twice against one that rotated once is
+counted above rather than adopted. `MeshKeyRotationPayload.newEpoch` carries that same counter,
+because every receiver re-derives the ref from it.
+
+**Neither coexisting head wins, and no clock can pick one.** The minter is the merged view's
+deterministic coordinator — `presentedRotationRoster().min()`, the merged derived roster intersected
+with the branch while partitioned — so it is a pure function of the roster and the counters. When
+that coordinator is not at the merge, item 1's branch rule already answers "lowest fingerprint
+present among the merging parties" (plan §21.3's default), and a later merge that reaches the absent
+coordinator supersedes with a strictly greater counter. A ``MeshEpochRef`` carries **no timestamp**,
+so a forged far-future stamp has nothing to influence; `fernlet.mesh.epoch-heads.v1` binds `sentAt`
+into its signature and nothing downstream reads it. Both old heads then die at grace expiry, and
+every member ends on exactly one post-merge epoch.
+
+**The `divergent` tunnel gate opens for that merge, and only for it.**
+``MeshEpochIntroductionVerdict/reconcile(local:peer:)`` replaces P3's blanket refusal, because the
+merge runs *over* the tunnel the old rule tore down — two branches that had each rotated while split
+could never reconnect at all. The relaxation is scoped three ways: it is reachable only from
+``NetworkMeshSession``'s signed channel introduction (MC runs no such stage — 0b's lesson, and the
+reason ``MeshNetworkManager/maySeatVerifiedPeer(signingPublicKey:)`` exists for the other radio);
+only the epoch rule moved *here*, with the roster's `barred` verdict, the mesh-ID check and the
+malformed-reference check untouched by it; and it applies only when
+``MeshIntroductionAuthority/mayReconcileDivergentEpochs`` says a merge can actually run — a device
+with no mesh or no ledger keeps ``MeshIntroductionRejection/divergentEpoch``, and the parameter's
+default is `false` so a caller that forgets it fails closed.
+
+**That introduction is no longer members-only before any app frame** (D-4.3, 2026-09-21), and this
+paragraph is corrected rather than removed because the epoch gate itself did not move with it. Two
+identity decisions did, in a different arm: the roster's verdict is now read **before** the mesh ids
+are compared, so a `stranger` the owner's open join doors admit provisionally may differ on meshID —
+a *member* naming a foreign mesh is refused as strictly as before — and a `stranger` is refused
+unless ``MeshIntroductionRoster/admitsStrangersProvisionally`` says those doors are open. What a
+provisional peer gets is a tunnel and an uncommitted slot; plan §10.3's merge runs on signed records
+from a **committed** slot, so no merge runs over one.
+
+**Content merges by key-keyed union, and the gates re-run at the receiving member** (P4 item 7,
+plan §10.3 + §21.3). This module holds the generic union — ``MeshContentSet`` over any
+``MeshMergeableContent``, ordered by ``MeshContentOrder`` — and `FernletSocial` the content: its
+`MeshContentLedger` is the content twin of ``MeshMembershipLedger``, three ``MeshContentSet``s —
+photos, messages and hearts — each deduped by ``MeshContentKey``, i.e. by
+`(author, id)` and **never by the id alone** (P6 item 4's fix review; the id is its author's own
+choice and a manifest publishes it to the whole roster before the content arrives, so an id-only key
+let one admitted member spend another's dedup slot at a third device), sorted by one total order and
+capped at the same bound its live surface already applies (`SessionMessageStore.maxMessages`, `ProximityHeartLedger.maxStoredHearts`,
+`FriendPhotoLimits.maxManifestEntries`, reused rather than restated). Union is commutative,
+associative and idempotent at the cap as well as below it, so an N-way partition tree converges with
+pairwise merges only and no special case. Nothing conflicting can exist — only missing — so nothing
+is ever overwritten, and nothing here is persisted or on the wire: `MeshSessionContext`'s schema
+stays **2**.
+
+The visible transcript is **re-derived**, never stored: total order `(claimedSentAt clamped to
+±10 min of first-seen, senderFingerprint, messageID)`, where *first-seen is the receiver's own
+clock*, never a stamp in the message. The clamp is a bound rather than a coordination mechanism — a
+claim inside its window is returned unchanged, which is why honest traffic sorts identically at every
+member, while a forged stamp moves at most ten minutes from where it actually arrived. Photos are
+hash-validated at reassembly by `FernletSocial`'s `MeshPhotoReassembly`, whose
+`admitting(_:reassembled:into:)` returns the set **unchanged** unless the bytes match, so "silently
+kept" is not a reachable state. Hearts merge without a receipt field at all: a peer's receipt is not
+this member's, so `FernletSocial`'s `MeshHeartCommit` drives the merged batch through the
+**existing** heart ledger (`ProximityHeartLedger`) — its
+id-dedup, its five-minute per-sender cooldown — and a duplicate that crossed the split is collapsed
+by the union *before* the ledger sees it, so the cooldown is judged once rather than twice.
+
+**A branch's approval is not a free pass** (§21.3's decision, taken deliberately). The 13+ age gate
+and the local block/ban re-run at the *receiving* member through `FernletSocial`'s
+`MeshContentGates`, folded once from the seams that already enforce them — the chat's
+`isChatAllowed`, ``ProximityHost/isBlockedFingerprint(_:)``, `ModerationBanStore.isPeerBanned(fingerprint:)`.
+They are a **view filter over an unmutated union**,
+the same shape as the termination downgrade: a blocked sender's message still unions everywhere, and
+a member whose age gate refuses chat simply renders no transcript — re-opening the gate reveals the
+merged records with no second merge. The merged photo's `keyEpoch` (`FernletSocial`'s
+`MeshMergedPhoto`) rides through the union untouched, and P5 item 13 has now retired the gates that
+read one. The manifest's
+`keyEpoch >= localJoinedEpoch` filter and the photo decrypt's `key.epoch == photo.keyEpoch` are
+**deleted**, each with the path it gated — the pull protocol and the group-key photo decrypt, both
+replaced by routed items under a per-recipient content-key wrap. The metadata wrapper's
+`wrapper.keyEpoch == currentGroupKey?.epoch` is **kept**: its two content arms retired with the same
+flow, but its door survives with control arms that have no routed successor, so deleting the compare
+over those would be loosening a gate in place (plan §21.5's rule, honoured in both directions). P5
+owns the routed store, the drain and now the photo transport; P6 owns text, hearts and the rest of
+feature routing; this layer still owns only the rules.
+
+**Delivery targets: who content is for, held apart from how far each copy has got** (P4 item 8,
+plan §10.1). ``MeshDeliveryTarget`` is the vocabulary ``MeshRoutedManifest`` expresses its
+destination set in (P5 item 1). The set is the **full derived roster at creation time, minus this device** —
+never the connected set — and it is immutable for the life of the target: the initializer takes a
+``MeshDerivedRoster``, there is no form that takes a reachable set or a ``MeshBranchView``, and no
+method removes a destination. Reachability enters only as a *delivery* state, so content created
+during a 2/2 split of a roster of four is for three people, both of the far side included, and they
+are ``MeshDeliveryState/pending`` rather than absent. That is what stops P5 dropping a recipient who
+happened to be on the other side of a split when the photo was taken.
+
+The stored half is a three-rung monotone ladder — ``MeshDeliveryState`` `pending → custodied(by:) →
+delivered`, with delivered terminal and every regression refused by a named
+``MeshDeliveryRefusal`` — and `custodied` says on its own that **custody is not delivery** (§11:
+hearts are final only after the foreground decrypt and the ledger commit). Closure is *not* a fourth
+stored case: ``MeshDeliveryDisposition/departed`` is derived at read against the current roster, the
+same shape as the termination downgrade, so a departure or removal unioning in closes a destination
+with nothing rewritten — and grow-only records make that closure permanent, which is what lets the
+drain stop rather than back off. `outstanding(in:)` is exactly §11's "destinations lacking a
+`MeshRecipientReceipt`"; `isFullyDelivered(in:)` is its complement. Since P5 item 4 that phrase is
+literal: ``MeshRoutedStore/recordingRecipientReceipt(item:receipt:now:)`` is the **only** writer of a
+`delivered` rung, it advances only the receipt's own signer, and `committingDelivery` — which records
+this device's durable final ack — advances no rung at all. Every `delivered` in a persisted map is
+therefore receipt-backed by construction rather than by call-site discipline. `merging(_:)` takes the
+per-destination max (commutative, associative, idempotent) and **refuses a destination-set mismatch
+by name** rather than unioning or intersecting, either of which would invent or drop a recipient.
+The type carries no key epoch, no branch id and no partition of origin, by construction. Nothing is
+`Codable`: `MeshSessionContext`'s schema stays **2**, and P5 persists targets inside its routed
+store. What makes an item final at a destination is plan §11's per-type table
+(``MeshRoutedAckStageTable``, since item 11 a projection of ``MeshRoutedTypeRegistry``'s rows),
+resolved from the ORIGIN-signed type token — photos and text on
+durable recipient storage, hearts only after a foreground decrypt and the heart row's ledger judge's
+commit (into `FernletSocial`'s heart ledger), control immediately — and the stage is never on the
+wire and never the recipient's to state. The two existing seams are derivations rather than duplicates —
+``MeshDevelopmentPlan/handoffTargets`` is `outstandingReachable(from:in:)` and
+``MeshBranchView/temporarilyDisconnectedFingerprints`` is `outstandingUnreachable(from:in:)`, with
+neither type modified to say so.
+
+**Routed manifests: the origin-signed record a delivery target is for** (P5 item 1, plan §11).
+``MeshRoutedManifest`` binds item id, type token, ciphertext hash and size, `createdAt`, `expiresAt`
+(= the signed `hardDeadline` + 20 min, cross-checked by every receiver against its own context), the
+immutable destination set copied from ``MeshDeliveryTarget/destinations``, and one
+``MeshRecipientKeyWrap`` per destination — the random content key under ephemeral X25519 → HKDF →
+AES-GCM with the mesh, item, origin and recipient in the authenticated data, so a wrap cannot be
+moved between manifests or recipients. Signed by the origin only under
+`Signature.meshRoutedManifestV1`; a custodian forwards the exact object inside its own envelope and
+``MeshRoutedManifestVerifier`` resolves the key from the admission ledger by the manifest's own
+origin, never from the envelope's sender — does not require the origin to still be a member (a
+departed origin's manifest verifies: leaving is not a retraction) but refuses a quorum-removed
+origin's by name (``MeshRoutedManifestRejection/originRemoved``: removal is the mesh's moderation
+act, and the group-key rotation that enforces it on live traffic cannot reach a static-key wrap),
+does not look destinations up in the ledger (a destination outside the roster reads as departed,
+bounded by expiry and the relay caps), and refuses any type token outside the accepted set it is
+built with — which since item 11 is ``MeshRoutedTypeRegistry``'s `tokens`, the same rows the
+ack-stage table projects. The routed store keys on the signed pair
+`(originFingerprint, itemID)`, never on `itemID` alone — the frame is unsealed and any admitted
+member can mint under its own key reusing another origin's id. Verification needs public material only;
+``MeshRoutedContentKeyWrapper/unwrap(_:binding:localFingerprint:localKeyAgreementPublicKey:staticAgreement:in:)``
+is the separate, private-key half. The type carries no epoch, branch, custody or first-seen; nothing
+persists it yet (item 3); nothing dispatches it yet (item 6).
+
+**Routed chunks: the item's ciphertext, sliced, signed by the origin and reassembled in any order**
+(P5 item 2, plan §11). ``MeshChunk`` carries mesh, item, origin, the whole item's `contentHash`,
+`chunkIndex` of `chunkCount`, the slice's own `chunkHash`, the item's expiry and the slice — at most
+``MeshChunkFormat/maxChunkPayloadBytes`` (256 KiB), at most ``MeshChunkFormat/maxChunkCount`` (1024,
+derived from the 256 MiB content cap). **Signed by the origin only**, and the payload is *excluded*
+from the signed transcript and bound **through** `chunkHash`, so a 256 KiB slice costs 32 transcript
+bytes and a custodian forwards the exact object — signature included — inside its own envelope. Two
+domain-tagged digests keep the item hash and a slice hash apart even for a one-chunk item
+(``MeshRoutedContentDigest``), and the replay-window id P5 item 12 keys on is **derived**
+(``MeshChunk/chunkID(in:)``), never a wire field — `SHA-256(purpose ‖ itemID ‖ index)`, with the origin
+deliberately left out because the window separates by author, so the real key is the pair
+`(origin, chunkID)`. Item 12's routed instance is sized on that pair: 1056 ids per author carries a
+maximal item's 1024 chunks plus its manifest, and a full axis falls through rather than refusing, so
+the 64-vs-1024 caveat this page used to carry is answered twice over. ``MeshChunker`` is the mint and
+refuses to mint for a manifest this device did not originate; ``MeshChunkVerifier`` is the receive
+door (mesh → shape → admitted key → not removed → signature → chunk hash → expiry, then the manifest
+cross-checks, whose identity test is the **triple** `(itemID, originFingerprint, contentHash)` so an
+admitted member cannot squat another origin's item id); ``MeshChunkAssembly`` collects slices in any
+order — a manifest may arrive last, and completion is impossible until one binds, and a chunk
+offered at an index already held is a duplicate no-op when its **signed transcript and payload**
+match (an honest re-mint differs only in its hedged signature) and
+``MeshChunkRefusal/conflictingChunk`` otherwise. ``MeshChunkCompletion/complete(blob:)`` is the
+whole-item hash check, **necessary but never
+sufficient** for a custody receipt, since it is a verdict over in-memory bytes and durability (plan
+§3.6) is item 3's separate gate. Chunks ride P2's existing per-transfer stream lane with **no
+transport change**: a 256 KiB payload in a signed envelope is above the 64 KiB bulk floor and below
+the 16 MiB ceiling, so `NetworkMeshSession` gives it a stream of its own by size alone. Nothing here
+seals the item (that is ``MeshRoutedItemSealer``, P5 item 13 — item 2 chunks an opaque blob),
+forwards anything, persists anything, or tunes the transport.
+
+**The item seal: what makes branch and epoch stop deciding decryptability** (P5 item 13, plan §11,
+invariant §3.3). Item 1 wrapped a random content key per recipient; ``MeshRoutedItemSealer`` is what
+that key opens. One AES-256-GCM seal per item under `AEAD.meshRoutedItemV1`, with **four**
+authenticated fields: the purpose, the mesh id, the item id and the origin — the transplant proof, so
+a blob lifted into another `(mesh, item, origin)` triple fails the tag even if its wrap travels with
+it — plus the **routed type token**, the one field the wrap does not carry, because the receiver
+dispatches the plaintext on `manifest.typeToken` into a canonical store and "these bytes are a photo"
+should be authenticated by the same tag as the bytes. `contentHash` and `size` are deliberately
+absent (both are functions of the blob, so binding either would be circular — C12's freeze — and both
+already ride the origin's signature); the recipient is absent too, because one key, N wraps and one
+blob is the whole point.
+
+The blob is `marker ‖ nonce ‖ ciphertext ‖ tag`. ``MeshRoutedItemSealFormat/marker`` is five ASCII
+bytes (`FMRI1`) in the clear — the `FMA2` / `FMGP2` / `FMGM2` idiom — so a future v2 is tellable
+apart without a key and an unmarked blob is refused **by name** rather than joining the silent-drop
+pile; it is not in the authenticated data, because a routed blob is hash-committed by a signed
+manifest and a flipped marker fails `contentHash` at assembly before any key is unwrapped. The seal
+bound and the open bound are **one number**: the seal refuses a plaintext whose length plus
+`overheadByteCount` exceeds the `maxBlobByteCount` it is handed, and the open refuses a blob above the
+same value. Deriving the write bound from the 256 MiB wire cap while the open refused at the photo
+bound would let an origin mint an item every recipient custodies, receipts and then declines to
+open — and the photo stage is final on durable *ciphertext*, so that receipt is already minted when
+the open refuses. The sealer states no bound of its own: the manager holds its host registry's
+widest row (``MeshRoutedTypeRegistry/maxItemByteCount``) once, at `init`, hands it to both ends and
+reads it at the projection's guard, so the seam bound, the registry cap and the projection's guard
+are one value rather than three numbers that agree today. For Fernlet's rows it is the photo row's
+cap, 10 551 337 bytes, a formula since **P6 item 3** — `PrivateMediaStore.maxIncomingPhotoBytes` +
+the photo body's `maxFramedHeaderByteCount` + `overheadByteCount` — that `FernletSocial`'s
+`FernletRoutedTypes` writes, so this module names no photo bound and depends on no
+`PrivateMediaStore`. A test's fixture registry moves no bound.
+The sealer is pure — no actor, clock, I/O or identity — which is what keeps it
+outside every locked-device wall: the predicate is consulted by the delivery door that calls it.
+
+The photo body (`FernletSocial`'s `MeshRoutedPhotoBody`, a ``MeshRoutedBody``) is the plaintext for
+the first routed type, framed as a length-prefixed JSON
+header followed by the image **raw**. `JSONEncoder` base64s a `Data` property, so one all-`Codable`
+body would ship a JPEG at 4/3 its size and silently re-scale `manifest.size`, the chunk count charged
+against item 9's caps, the per-peer frame budget, the resident bound and the very number the sim lane
+exists to measure. The header carries **no epoch and no identity claim**: who sent a routed photo is
+the manifest's signed `originFingerprint`, and its signing key is the admission ledger's roster entry
+for that origin.
+
+**The friend-photo wall moved onto the routed store, and the three `keyEpoch` gates retired with the
+path they gated** (P5 item 13's second pass, plan §11/§21.5). The SENDER door is the session
+photos' `addPhoto` → the engine's origination door
+(``MeshNetworkManager/originateRoutedItem(body:typeToken:itemID:audience:now:)``, under the photo
+row's token) → seal → hash → `MeshRoutedManifest.signed` (its first shipping
+caller) → `MeshChunker.chunks` → the two store doors every inbound item goes through → one push to
+the committed slots. Nothing new writes the store, so item 9's caps and item 12's bookkeeping apply
+to an origin's own item unchanged; the local echo onto the user's own wall is **unconditional**, and
+only the transport is conditional, so a solo member's capture is silent rather than an error.
+``MeshRoutedShareRefusal`` names what a failed mint failed at, published as a frozen token on the
+manager's observed `routedShareRefusal` (a sender reports one through
+``MeshNetworkManager/noteRoutedShareRefusal(_:error:)``) for the app to fork into localized copy (the P5 review's
+finding 5 retired the in-package `meshError` sentence). Wrap keys come from **handshake-verified** sources only — a live slot's verified key, or the
+session-roster entry written from that same value — so a destination with neither refuses the whole
+mint by name: the stated outage covers a star topology, a roster above the slot cap and any
+resumption, and the real fix is a signed key-advertisement frame, handed forward.
+
+**Temporary text moved onto the same store, and the legacy `.tempMessage` fan-out retired with it**
+(P6 item 4, plan §12). The text body (`FernletSocial`'s `MeshRoutedTextBody`) is the second body
+family in the same frozen framing —
+a length-prefixed JSON header plus the message's **raw UTF-8** — and its own narrowed cap
+(`16 × SessionMessageStore.maxTextLength` + a 1 KiB text header allowance + the seal's overhead =
+9 065 B), because the product's 500-`Character` limit is unbounded in bytes: a grapheme cluster is.
+It has **two** hostile shapes the photo body does not. The fourth is the one a copy-paste gets
+wrong — `String(decoding:as:)` cannot fail, it substitutes U+FFFD, and U+FFFD survives the message
+sanitizer, so invalid UTF-8 is refused with a failable decoder rather than repaired. The fifth is a
+decoded `senderName` above `MeshRoutedTextBody.maxSenderNameUTF8ByteCount` (128 B), refused on the
+WIRE and not only bounded at the sender, because the header allowance's whole arithmetic is over
+that bound. The header carries a display-name CLAIM exactly as the photo header does, deliberately:
+the admission ledger holds no name at all, so the identity is bound by the signature and the ledger
+while the name is display copy the store re-moderates.
+
+Three things about text are not the photo row's rules. The chat's `sendTempMessage(_:)` **returns**
+`MeshTextSendOutcome` (both `FernletSocial`'s) and publishes nothing — `routedShareRefusal`'s one
+consumer is an alert on
+the view the chat panel covers, and its copy is photo-worded — so the panel shows a non-staged
+outcome inline at the top of the compose bar — above the text field — and keeps the draft. `.noDestinations` therefore **speaks** for text where it is
+**counted** for photos (`photosKeptOnThisPhone` — one sentence in the camera's info sheet and a
+glyph on the film counter, never an alert per shot; P8 item 0 (c)): the founding window is real, destinations are frozen at the mint, and there is no
+offline queue, so a message that reached nobody can never acquire a recipient later. And the local
+echo is appended only on `.staged`, because a row in a transcript is a claim that it was sent and the
+transcript has no failed-row state. What the routed path buys in exchange is the thing the legacy
+fan-out could not do at all: a message to an admitted member who is not linked at that instant is
+sealed, wrapped and custodied until a link forms.
+
+The text row's projection handler, the chat's, re-applies the 13+ gate as its verdict before the
+engine unwraps anything (leg 4 of that gate), and is handed the item's ``MeshTranscriptLiveness``,
+which the engine computes for a `.session` row: `isSessionLive` — the one predicate the engine's
+session end keys on, where it advances the transcript generation and tells its observer, whose
+chat then drops its transcript, so the gate and the clear cannot disagree, and a blip leaves it
+true — AND the item's own mesh AND the item's own transcript generation. The third leg exists because the first is reversible
+(re-arming the radios un-ends a session the five-minute give-up door ended) while the clear is not.
+Only the first is retryable; a mesh left and a generation moved are monotone, so those items leave
+the retry list — which is ``MeshRoutedProjectionVerdict``'s job, and the reason the projected mark
+now means "handed on, **or** refused for a reason that cannot change".
+
+Two more facts about the transcript came out of item 4's own fix review. **A row's identity is
+`(author, id)`, never the id alone** (``MeshContentKey``): a routed item's id is chosen freely by
+its origin, the routed index's key is `(originFingerprint, itemID)`, and the signed manifest
+publishing that id reaches the whole roster-at-creation **in the clear** before the content does —
+so an id-only dedup let an admitted member mint a same-id text, win the race to a partitioned third
+device, and have the genuine message land `alreadyHeld` → marked final → gone for the session, while
+its sender saw `.staged`. The key is local (no wire field, no golden, no persisted surface) and
+§10.3's order did not move, because it already ranked `senderFingerprint` above the id. And **the
+whole projection refuses, for every handler, while the app's delete-all funnel is running**
+(``MeshNetworkManager/privacyWipeInProgress``): the funnel's first step,
+``MeshNetworkManager/beginPrivacyWipe()``, advances the transcript generation and tells the
+observer, whose chat drops the live transcript, and the funnel destroys the routed ciphertext near
+its end, so a rising access edge in between used to re-project
+items whose bytes the user had just asked to have destroyed. That refusal is above the offer,
+retryable and charged to no item — a wipe is the gate's own answer for every item, never a fact
+about one of them.
+
+Since P6 item 7 that gate is a **depth counter** rather than a flag
+(``MeshNetworkManager/privacyWipeDepth``, with `privacyWipeInProgress` derived from it). Two wipe
+funnels are reachable at once — the delete-everything flow sets its own in-flight bit rather than
+checking it, and the duress purge hook fires the same funnel with no UI gate — and both run on the
+main actor, so a `Bool` was lowered by the inner funnel's `defer` while the outer one still had the
+routed-store purge ahead of it. Begin saturates at ``MeshNetworkManager/maxPrivacyWipeDepth`` with
+an audit line rather than growing without bound, end is a no-op at zero, and the projection comes
+back only when the LAST funnel has ended.
+
+The RECEIVER is unchanged down to and including the recipient receipt — the photo stage is final on
+durable ciphertext — and the plaintext is a later, separate pass over already-final bytes: the
+photo row's projection handler's verdict (the answered-tombstone refusal, ahead of the open), then
+the engine's one generic opener,
+``MeshRoutedItemDelivery/openBody(_:blob:manifest:identity:maxBlobByteCount:mayDecryptRoutedContent:)``,
+behind `mayDecryptRoutedContent`, then the handler's write behind
+`mayMutateCanonicalStoreWithRoutedContent`, into the session photos' pending corpus's hold (since
+2026-09-30; the wall only after the person's answer). Two
+policy checks keep their positions: the origin is resolved from the **admission ledger** and the
+block list is applied **before** the content key is unwrapped, and the per-origin quota is spent at
+the dispatch, 1:1 with a wall entry. "Admission ledger" is exact and is the same set
+``MeshRoutedManifestVerifier`` authenticated the item against — `admissions − removals`, departures
+never consulted — so a **departed** origin's already-custodied content still reaches the wall, which
+is what increment 1's custody-transfer-on-departure delivers: the origin leaves, the custodians it
+named deliver afterwards, and by then every destination's derived roster has already dropped it. A
+quorum **removal** refuses, by its own audit line. A projection whose origin the ledger cannot
+resolve at all **refuses** — custody kept, wall unfed, one audit line — because an entry is never
+written with a nil, empty or body-supplied signing key. A locked device defers the whole pass and the
+unlock's re-entry runs it, which is what makes the access gate the enforcement rather than the
+plumbing; that pass spends its bounded allowance only on items this build can finish, so a
+registered type with no projection handler registered for it can never hold a slot and strand a
+photo sorted behind it.
+
+**Custody: a custodian may say "I hold this" only after the ciphertext survived a write that
+returned** (P5 item 3, plan §11 and §3.6). ``MeshCustodyReceipt`` is signed by the **custodian**
+about the **origin's** item — the one routed record whose subject did not author it — and it carries
+mesh, item, origin, the item's `contentHash`, the custodian, the durable custody instant and the
+item's expiry, and nothing else: no destination set, no chunk index, no hop count, no key epoch, no
+schema integer (the `.v1` in the domain *is* the version). Its dedup id
+(``MeshCustodyReceipt/receiptID(in:)``) is derived from `(itemID, origin, custodian)`, excluding both the
+hedged signature and `custodiedAt`, so a re-mint of the same claim is the same id.
+
+The order is a **type rule, not a comment**: the mint takes a ``MeshCustodyDurabilityWitness``, whose
+initializer is `fileprivate` to `Mesh/MeshRoutedCustodyCommit.swift` — the file holding
+``MeshRoutedStore/committingCustody(item:custodian:now:)`` and nothing else. No witness ⇒ no receipt.
+The mirror-image gate is `MeshRoutedStore.LoadToken`'s own `fileprivate` initializer in
+`Mesh/MeshRoutedStore.swift`, so the commit verb cannot mint its own write token either: two
+`fileprivate` gates in two files, neither able to open the other's door. A grep-wall
+(`MeshRoutedStoreIsolationTests`) is what notices if the type is ever moved, because moving it would
+widen the gate with no compile error.
+
+``MeshRoutedStore``'s verbs — `admittingManifest`, `stagingChunk`, `committingCustody`,
+`recordingCustodyTransfer`, `forwardableManifest`/`forwardableChunk`, `sweepingExpired`,
+`sweepingOrphanChunkFiles` and `dropping` — each return one ``MeshRoutedOutcome``: `completed`,
+`refused` (by name, ``MeshRoutedStoreRefusal``) or `unavailable` (``MeshRoutedUnavailability``, which
+is retryable for `deferred`, `notWritten` **and** `refused`, exactly as
+`MeshSessionRestoreOutcome.isRetryable` answers its own refusal, and not for `corrupt`). Write
+ordering is one-way: the sealed chunk file, then the index — and the writer that makes an orphan
+removes it. Both chunk-set decisions are shared with ``MeshChunkAssembly`` through
+``MeshChunkAdmissionRule``, so the durable form cannot answer differently from the in-memory one
+(C13); ``MeshDeliveryTarget`` is persisted through the explicit ``MeshRoutedDeliveryRecord`` encoder
+and restored against the destination set from the **origin's signed manifest**, never from a stored
+copy and never re-derived from the current roster. A stored map that will **not** restore is a fault
+in this device's own bytes, not evidence that nothing is owed: it is audited, and named at the value
+level by ``MeshRoutedItemRef/deliveryRestoreRefused`` and
+``MeshRoutedIndex/itemsWithUnrestorableDelivery(at:)``, because every outstanding/handoff enumerator
+must skip it and a held item with outstanding destinations may not simply vanish from all of them.
+For the same reason a failed `custodiedAt` stamp answers the store's own classification — a refused
+seal is not an absent file (§19.5) — rather than flattening to a bare `notWritten`. The store has
+**no decrypt door**: it never
+unwraps a per-recipient content key and never touches the key-agreement key, so custody is
+ciphertext-only by construction (item 10). Nothing here gossips, asks, drains, relays or writes the
+`delivered` rung — that is items 4, 6, 8 and 11.
+
+**The ceiling is guarded at both bounds.** ``MeshSessionCeiling`` holds the signed absolute
+`hardDeadline` (± 120 s skew) *and* a local monotonic budget measured with `ContinuousClock`, clamped
+to six hours at construction. A wall clock set backwards cannot lengthen a session (the monotonic
+guard ends it anyway); one set forwards ends it only by the signed bound, and the recorded
+``MeshSessionTerminationReason`` names which bound did it. The struct itself is `public` for
+exactly one member — `ceilingSeconds` — which the app's `ProximitySessionPoller` reads for its
+loop bound; the guard's construction and verdict stay internal.
+
+**The launch restore maps the five load states onto seven outcomes**
+(``MeshSessionRestoreOutcome``): a terminated context restores terminated, a live one inside its
+ceiling restores as `localIdleStop` with a resume on offer (a relaunch never auto-reconnects,
+invariant 5), a live one past its ceiling expires *and writes the mark*, `absent` is no session, a
+deferral and a refusal are retried apart and bounded at `MeshSessionRestoreBounds.maxAttempts`, and a
+corrupt file is quarantined. The three token-less states start no session and run no writer.
+
+**P6 item 7 gave it a launch caller.** Until then the durable half had none at all — its only
+shipping driver was the routed re-entry's job 1, `retrySessionRestoreIfPending(now:)`, which answers
+nil until one attempt has been made — so on a shipping device a relaunched member held no ledger,
+no roster, no restored addressing and no rejoin bar. ``MeshNetworkManager/restoreSessionContextOncePerLaunch(now:)``
+is the public door the app's composition root calls once per process, and the per-process latch is
+the manager's own `sessionRestoreAttempts` rather than the caller's. It **reconnects nothing**:
+`currentMesh` stays nil, no radio is armed, no transport starts. What it buys is addressability —
+the re-proved ledger, its derived roster, the restored key advertisements and the epoch heads a
+reconnect must merge against — so a custodied routed item can drain the moment a link forms.
+Protected-data availability is deliberately not a precondition of the call: a launch before first
+unlock must still attempt it, because the attempt is what produces the `retryAfterUnlock` outcome
+the re-entry's retry then finds pending.
+
+**P6 item 9 corrected the join-ack's own re-assert.**
+``MeshNetworkManager/reassertCommitIntoAdoptedMesh(admittedBy:)`` names the **grant's own sender**,
+threaded down from `handleAdmissionGrant`'s authenticated sender, rather than the first committed
+slot it happens to hold: a device joining somebody else's mesh may hold slots facing peers that mesh
+never admitted, and handing one of those to `noteCommitIntoMesh(peer:)` was inert only because of
+guards on the far side of the raise. The derived roster is the fallback for a caller with no grant
+and deliberately not the rule — `armJoinerLedger` bootstraps the verifier from this device's own
+admission alone, so at the instant the grant is acknowledged the roster names the joiner and not the
+admitter. The door also answers its own durability now: the raise persists the context, and a
+refused seal there is a refused grant — and, since item 9's review, one whose state move is
+**unwound** rather than merely reported: `applySessionEvent` assigns the state before it performs
+the effects, so a `false` returned over a standing `.activeForeground` would have left the device
+live and beaconing under `handleAdmissionGrant`'s restored pre-join ledger. **The unwind goes back
+to the state the GRANT found, not to `joining`** (item 9's second fix review): on the ordinary
+joiner arm the grant finds `idle` and `joinDurably()` moves it to `joining` on a save that succeeds,
+so restoring `joining` left the device durably joining a mesh whose admission record the caller was
+rolling back — the same half-rolled-back grant one rung lower, at the one state whose only edge out
+is `.peerCommitted`. Its two timer rollbacks are independent rather than chained (a running beacon
+used to skip the rotation half), and door 3's give-up clock needs nothing put back because
+`evaluateSessionGiveUp(now:)` cancels a clock once a slot is committed — not because
+`armSessionGiveUpClock(now:)` refuses to arm, which bounds arming and not survival.
+
+**The phase's acceptance battery** (`Tests/FernletTests/MeshP6AcceptanceTests.swift`) is eight
+serialized suites, one per clause. Its property half is a **third pipeline** on the routed
+convergence rig: `MeshRoutedFeaturePipeline.featureRouting` converges the advertised-key set first
+and only then mints P6's two rows — a text through the real chat's `sendTempMessage(_:)` and a heart
+through the real session hearts' `sendSessionHeart(to:)`, both `FernletSocial`'s, over the engine's
+origination door — inside a bounded two-round window whose interleaving is a seeded
+draw. The ordering is the reason it is a third pipeline rather than four more lines in the first:
+nothing converges the advertisement set before the heal (`linkBranches` raises no `.peerCommitted` on
+purpose) and the resolver then refuses every mint by name, while pipeline 1's own mint must come
+*before* the heal or its lock window is vacuous. The two rows are judged with different audiences,
+because a text is `.fullRosterAtCreation` and a heart is `.singleRecipient` — and `routedDeliveryState`
+answers `.reclaimed` for "this device holds no record", so a roster-wide claim about a heart would
+pass at every non-recipient for the wrong reason.
+
+**The save cadence extends the one writer**, `persistSessionContext(addingEpochHead:terminating:)` —
+there is deliberately no second door over a five-state load, with one narrow exception:
+``MeshNetworkManager/acknowledgeSessionEndingPresented()`` (owner-calls item 3, 2026-09-22), the
+Friends tab's resume card's `.onAppear`, flips `MeshSessionContext.endingPresented` on a `.loaded`
+context of the same mesh the launch restored, for an ending only — so an ending is told once
+instead of at every cold start, while the rejoin bar (re-derived from the ending, not the mark) is
+untouched. A newly written ending clears the mark. It saves on founding, on a verified
+admission, on every verified record that moves the roster, on every merge, on every rotation, on a
+termination and on a departure; each caller treats a `false` as "the thing did not happen", which is
+why a refused seal abandons a founding, blocks a join acknowledgement, and **rolls a verified record
+back out of the ledger**. A developed, departed or terminated mesh is barred from rejoining by
+``MeshSessionRejoinBar``, re-derived from the sealed file at every launch so a restart cannot lift it.
+
+- ``MeshNetworkManager``
+- ``MeshSessionStore``
+- ``MeshSessionStorageScope``
+- ``ProximityColumnCrypto``
+- ``MeshSessionState``
+- ``MeshSessionEvent``
+- ``MeshSessionEffect``
+- ``MeshSessionTransition``
+- ``MeshSessionTransitionRejection``
+- ``MeshSessionStateMachine``
+- ``MeshBranchView``
+- ``MeshMemberPresence``
+- ``MeshPartitionVerdict``
+- ``MeshPartitionDetector``
+- ``MeshDeliveryTarget``
+- ``MeshDeliveryState``
+- ``MeshDeliveryDisposition``
+- ``MeshDeliveryStateToken``
+- ``MeshDeliveryRefusal``
+- ``MeshDeliveryOutcome``
+- ``MeshDeliveryRestoreRefusal``
+- ``MeshDeliveryRestoreOutcome``
+- ``MeshContentKey``
+- ``MeshRoutedManifestFormat``
+- ``MeshRecipientKeyWrap``
+- ``MeshRoutedManifest``
+- ``MeshRoutedManifestPayload``
+- ``MeshRoutedManifestMintError``
+- ``MeshRoutedManifestVerifier``
+- ``MeshRoutedManifestRejection``
+- ``MeshRoutedWrapBinding``
+- ``MeshRoutedKeyWrapError``
+- ``MeshRoutedContentKeyWrapper``
+- ``MeshRoutedItemSealFormat``
+- ``MeshRoutedItemSealError``
+- ``MeshRoutedItemSealer``
+- ``MeshRoutedItemBodyFormat``
+- ``MeshRoutedShareSkip``
+- ``MeshRoutedShareRefusal``
+- ``MeshRoutedOriginationOutcome``
+- ``MeshRoutedDeliveryError``
+- ``MeshRoutedOriginQuotaKey``
+- ``MeshRoutedProjectionVerdict``
+- ``MeshTranscriptLiveness``
+- ``MeshRoutedItemDelivery``
+- ``MeshChunkFormat``
+- ``MeshRoutedContentDigest``
+- ``MeshChunk``
+- ``MeshChunkPayload``
+- ``MeshChunkRejection``
+- ``MeshChunkVerifier``
+- ``MeshChunkMintError``
+- ``MeshChunker``
+- ``MeshChunkRefusal``
+- ``MeshChunkAdmission``
+- ``MeshChunkBinding``
+- ``MeshChunkCompletion``
+- ``MeshChunkAssembly``
+- ``MeshChunkDescriptor``
+- ``MeshChunkSetShape``
+- ``MeshChunkAdmissionRule``
+- ``MeshCustodyReceiptFormat``
+- ``MeshCustodyReceipt``
+- ``MeshCustodyReceiptPayload``
+- ``MeshCustodyReceiptMintError``
+- ``MeshCustodyReceiptRejection``
+- ``MeshCustodyReceiptVerifier``
+- ``MeshCustodyDurabilityWitness``
+- ``MeshRoutedContentHasher``
+- ``MeshRoutedStorageScope``
+- ``MeshRoutedSealKeyOutcome``
+- ``MeshRoutedSealKey``
+- ``MeshRoutedIndexSchema``
+- ``MeshRoutedStoreFormat``
+- ``MeshRoutedIndexDecodingError``
+- ``MeshRoutedItemKey``
+- ``MeshRoutedChunkDescriptor``
+- ``MeshRoutedDeliveryProgress``
+- ``MeshRoutedDeliveryRecord``
+- ``MeshRoutedItemRecord``
+- ``MeshRoutedItemRef``
+- ``MeshRoutedIndex``
+- ``MeshRoutedSealRefusal``
+- ``MeshRoutedDeferral``
+- ``MeshRoutedCorruption``
+- ``MeshRoutedLoad``
+- ``MeshRoutedSaveError``
+- ``MeshRoutedChunkFileRead``
+- ``MeshRoutedStore``
+- ``MeshRoutedRetryBounds``
+- ``MeshRoutedUnavailability``
+- ``MeshRoutedStoreRefusal``
+- ``MeshRoutedOutcome``
+- ``MeshRoutedManifestAdmission``
+- ``MeshRoutedCustodyOutcome``
+- ``MeshRoutedSweepReport``
+- ``MeshRoutedIndexLoad``
+- ``MeshRoutedStagedFile``
+- ``MeshRoutedCapacity``
+- ``MeshRoutedCapacityUsage``
+- ``MeshRoutedParkedDrop``
+- ``MeshRoutedDeliveryHold``
+- ``MeshRoutedDeliveryHoldCause``
+- ``MeshRoutedTypeEntry``
+- ``MeshRoutedDestinationSemantics``
+- ``MeshRoutedRelayRetention``
+- ``MeshRoutedExpiryRule``
+- ``MeshRoutedAckStage``
+- ``MeshRoutedTypeRegistry``
+- ``MeshRoutedAccessGate``
+- ``MeshRoutedCapability``
+- ``MeshRoutedAccessEdge``
+- ``MeshRoutedReentryReport``
+- ``MeshSessionCeiling``
+- ``MeshSessionCeilingBound``
+- ``MeshSessionCeilingVerdict``
+- ``MeshSessionPollReport``
+- ``MeshSessionResumePresentation``
+- ``MeshSessionEndingPresentation``
+- ``MeshSessionRestore``
+- ``MeshSessionRestoreOutcome``
+- ``MeshSessionRestoredDisposition``
+- ``MeshSessionRestoreBounds``
+- ``MeshSessionRejoinBar``
+- ``MeshSessionTerminationReason``
+- ``MeshSessionLocalTermination``
+- ``PeerSlot``
+- ``SlotKind``
+- ``MeshGroupKey``
+- ``MeshSessionParticipant``
+- ``MeshSessionRosterEntry``
+
+### Mesh wire payloads
+
+- ``MeshDescriptor``
+- ``MeshMember``
+- ``MeshMode``
+- ``MeshStateChangePayload``
+- ``MeshAdmissionRequestPayload``
+- ``MeshAdmissionGrantPayload``
+- ``MeshAdmissionToken``
+- ``MeshRemovalProposalPayload``
+- ``MeshRemovalSecondPayload``
+- ``MeshFriendVouchListPayload``
+- ``MeshKeyRotationPayload``
+- ``MeshKeyAckPayload``
+- ``MeshRotationSyncPayload``
+- ``MeshCoordinatorBeaconPayload``
+- ``MeshEncryptedMetadataPayload``
+- ``EncryptedMetadataInner``
+
+Membership-event frames are internal to the module and listed above, not here: they carry signed
+records rather than app-visible state.
+
+### Presence
+
+The presence engine wraps the presence radio, the epoch posture it wears and the TXT vocabulary it
+speaks; its host advertises and reads tags and builds each connection's coordinator over the channel
+it is handed. The presence manager, which drives the engine and delivers in-person hearts, and the
+presence tags are `FernletSocial`'s.
+
+- ``ProximityPresenceSession``
+- ``ProximityPeerChannel``
+- ``PresenceEpochPosture``
+- ``PresencePostureError``
+
+### Hearts
+
+The heart dead-drop, its sealer, prekey store and sealed sidecars, the heart ledger with its
+records and its durability proof, and the mesh's session hearts are `FernletSocial`'s; the prekey
+bundle the signed identity introduction carries is this module's wire type.
+
+- ``ProximityPrekeyBundle``
+
+### Protected sidecar persistence
+
+- ``ProtectedSidecar``
+- ``SidecarSeal``
+
+### Pair sessions
+
+A ``ProximityPairSession`` is a one-to-one connection between two devices, driven by a
+``ProximityPairProfile`` its host builds from its own namespace: the radio it runs on (one of the
+namespace's pair-session rows, `family.radios.pair`), the TXT `mode` it advertises and
+believes, and the area its own audit events go under. Fernlet's recipe profile is
+`FernletConnections`' `ProximityPairProfile.recipeShare(in:)`, and Fernlet's recipe share,
+`FernletSocial`'s `ProximityRecipeShareManager`, is its owner. The session owns its radio, this
+device's identity cache and a replay cache; holds at most one verified pairing, under the two-device
+cap's four layers; builds each pairing's ``ProximityCoordinator`` over its host's ranging provider and
+a trust policy it retains, begun in friend mode and committed at the proximity gate with no user step;
+and sends through the coordinator's public token send, sealed to the verified peer. It checks its
+profile against its namespace at construction and refuses one that is not of it, under
+`<auditArea>.profile.namespaceMismatch`, as it refuses an identity of another namespace.
+
+**It composes no copy.** Its ``ProximityPairSession/status`` is typed (``ProximityPairSession/Status``,
+with its ``ProximityPairSession/Status/Failure``), cleared 2.5 s after a terminal value, and what it
+does that a person might be shown is a ``ProximityPairSession/Event``, handed in order to
+``ProximityPairSession/onEvent``. Its owner renders both: Fernlet's recipe share holds the English, one
+renderer whose switches are exhaustive, so a new case is a build error there until it has its sentence.
+The payload the session delivers is its owner's (``ProximityPairSession/Outgoing``: the token, the
+signed summary, the subject the user picked and the bytes, encoded when the pairing has verified), and
+the verified payloads its pairings receive go to its ``ProximityPairSession/payloadHandler``.
+
+**Sent is not received.** Every send ends in exactly one ``ProximityPairSession/lastSendOutcome``: a
+``ProximityPairSendOutcome`` that is either `sent` or `notSent` with a frozen
+``ProximityPairSendFailure`` (seven causes, including a pairing that came up and died before the send,
+and a teardown that cut a send off), naming the picked ``ProximityPairPeer`` row and the send's
+`subject` (the recipe's title, for Fernlet's recipe share). It sits beside the status line, which is
+display state and auto-clears. `sent` means the sealed payload was handed to the transport. A text
+recipe's control-stream send completed; only a picture recipe also reads a one-byte transport ack.
+There is no application receipt and no queued or routed path, so an owner's confirmation may say
+"sent" and never "delivered", and there is no "will arrive later" to report. `sendIncomplete` is the
+one cause where the other person may still have it; every other cause means nothing left this device.
+The causes are tokens: the app maps them to localized copy.
+
+- ``ProximityPairSession``
+- ``ProximityPairProfile``
+- ``ProximityPairPeer``
+- ``ProximityPairSendOutcome``
+- ``ProximityPairSendFailure``
+- ``ProximityPairDiscoveryGate``
+- ``ProximityPairTransfer``
+- ``ProximityPairAdvertisedName``
+
+### Peer names on screen
+
+The identifier filter and the name coercion are this module's; the placeholders a person reads when
+the filter refuses a name are `FernletConnections`' extension of ``PeerNameDisplay``.
+
+- ``PeerNameDisplay``
+- ``ProximityDisplayName``

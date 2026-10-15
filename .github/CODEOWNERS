@@ -1,24 +1,73 @@
-# CODEOWNERS: review gate on ProximityKit's walls and its label registry.
+# CODEOWNERS: review gate on ProximityKit's walls, its label registry and its byte formats.
 #
 # Every path here is load-bearing for a guarantee, as in the Fernlet repository's CODEOWNERS. With
 # branch protection's "Require review from Code Owners" enabled, no change to these paths can merge
 # without the owner's explicit approval, so a wall cannot be weakened in a drive-by commit.
 #
 # Deliberately narrow: ordinary package code is not listed, so this gate cannot rot into a rubber
-# stamp. If a path is added here, say in the PR why it is load-bearing.
+# stamp. If a path is added here, say in the PR why it is load-bearing. GitHub never reports a
+# pattern that matches nothing, so Scripts/codeowners-scan.py does: every rule must resolve to a
+# path, and the paths the walls rest on must keep their rules.
+#
+# The list is the one the Fernlet repository's plan gives for this package, where the code lived
+# before it moved here: the ProximityKit rows of that repository's CODEOWNERS, every wall its plan
+# steps moved into the package's tests, and what those walls read through.
 
 # The label registry: the host-supplied namespace and the domain-separation labels that every
 # signature, seal and key derivation is bound to. Changing a label breaks the wire and on-disk
 # formats of every app built on the package, and two namespaces sharing a label would let one
-# app's bytes validate as another's. The same reasoning puts FernletCrypto/ under the owner in the
-# Fernlet repository, and this rule mirrors that one. The directory arrives with the code, so until
-# then the pattern matches nothing (GitHub does not report that).
-/Sources/ProximityKit/Namespace/              @bowman-mw
+# app's bytes validate as another's. The namespace wall holds every namespace group and purpose
+# construction to this folder. The same reasoning puts FernletCrypto/ under the owner in the
+# Fernlet repository, and this rule mirrors that one.
+/Sources/ProximityKit/Namespace/                                       @bowman-mw
 
-# The dependency list the no-tracking wall pins to empty. It arrives with the code too.
-/Package.swift                                @bowman-mw
+# At-rest formats owned like FernletCrypto's originals: the mesh stores' V3 seal and its device binding.
+/Sources/ProximityKit/Support/ProximityColumnCrypto.swift              @bowman-mw
+/Sources/ProximityKit/Support/ProximityInstallBinding.swift            @bowman-mw
+# The keychain funnel: every identity row's and seal key's query dictionary, the six calls that issue
+# them, and the Debug-only backend door the tests install an in-memory store through.
+/Sources/ProximityKit/Support/ProximityKeychainItem.swift              @bowman-mw
+# The presence engine: the posture mint, the advertised record and self-exclusion by name.
+/Sources/ProximityKit/Presence/ProximityPresenceSession.swift          @bowman-mw
+# The identity's provisioning participant seam a host's escrow key rides.
+/Sources/ProximityKit/Identity/IdentityProvisioningParticipant.swift   @bowman-mw
+
+# The walls that travelled from the Fernlet repository (namespace, platform, keychain door), the
+# presence engine's own cells, and the byte goldens the package holds.
+/Tests/ProximityKitTests/ProximityNamespaceBoundaryTests.swift         @bowman-mw
+/Tests/ProximityKitTests/ProximityPlatformNeutralityTests.swift        @bowman-mw
+/Tests/ProximityKitTests/ProximityKeychainDoorTests.swift              @bowman-mw
+/Tests/ProximityKitTests/ProximityPresenceSessionTests.swift           @bowman-mw
+/Tests/ProximityKitTests/ProximityNamespaceSoundnessTests.swift        @bowman-mw
+
+# The package tests' own walls: their hygiene (what their unhosted bundle cannot serve, their
+# imports, their inventory, no extension of ProximityHost), the walls over the test tree, and the
+# walls over ProximityKit's own sources: the source walls and the memory-lifecycle wall.
+/Tests/ProximityKitTests/PackageTestHygieneTests.swift                 @bowman-mw
+/Tests/ProximityKitTests/PackageTestTreeWallTests.swift                @bowman-mw
+/Tests/ProximityKitTests/ProximitySourceWallTests.swift                @bowman-mw
+/Tests/ProximityKitTests/ProximityMemoryLifecycleTests.swift           @bowman-mw
+# The inventory of the package's tests: the hygiene suite holds it to the test tree, and it is the
+# test-count floor's declared pin, held against the floor literals in .github/workflows/ci.yml.
+/Tests/ProximityKitTests.tsv                                           @bowman-mw
+
+# What every wall reads through (a blind lexer, locator or walker passes every wall vacuously), and
+# the source-scan helper the source walls copied from Fernlet's tests read ProximityKit's code
+# through (a blind `codeOnly` passes them vacuously too), the installer (the audit sink and the
+# in-memory keychain store) and the store it installs, and the test namespace the goldens compute
+# under.
+/Tests/ProximityKitTests/TestSupport/SwiftSourceLexer.swift            @bowman-mw
+/Tests/ProximityKitTests/TestSupport/PackageRoot.swift                 @bowman-mw
+/Tests/ProximityKitTests/TestSupport/PackageSwiftFiles.swift           @bowman-mw
+/Tests/ProximityKitTests/TestSupport/MeshRoutedSourceScan.swift        @bowman-mw
+/Tests/ProximityKitTests/TestSupport/PackageTestEnvironment.swift      @bowman-mw
+/Tests/ProximityKitTests/TestSupport/PackageKeychainStore.swift        @bowman-mw
+/Tests/ProximityKitTests/TestSupport/PackageTestNamespace.swift        @bowman-mw
+
+# The manifest the namespace wall and the no-tracking wall pin (dependencies: [] both ways).
+/Package.swift                                                         @bowman-mw
 
 # The walls, their allowlist, and the CI that runs them (this file included). An allowlist entry is
 # a sanctioned exception, so adding one deserves the same review as weakening a wall.
-/Scripts/                                     @bowman-mw
-/.github/                                     @bowman-mw
+/Scripts/                                                              @bowman-mw
+/.github/                                                              @bowman-mw

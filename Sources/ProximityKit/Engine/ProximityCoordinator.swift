@@ -1,0 +1,1886 @@
+import Foundation
+import Combine
+import Observation
+
+/// Diagnostic sink for a ``ProximityCoordinator``'s session lifecycle: state transitions,
+/// envelope records, ranging samples, transport events, and errors.
+///
+/// The coordinator reports in this module's own value types (``ProximityInspectorEnvelope``,
+/// ``ProximityInspectorDistanceSample``, ``ProximityInspectorPeer``,
+/// ``ProximityInspectorTransportEvent``, ``ProximityRole``, ``ProximityRangingMode``), never in a
+/// host's log type: a conformer that keeps a log converts each into its own record. The app's
+/// Connection Inspector conforms and builds its persisted session log from them. Every requirement
+/// has a default no-op (see the extension) so lightweight conformers like
+/// ``ProximityInspectorEventRecorder`` implement only what they need. Held `weak` by the coordinator.
+@MainActor
+public protocol ProximityInspectorRecording: AnyObject {
+    func beginSession(role: ProximityCoordinator.Role, mode: ProximityCoordinator.Mode, localFingerprint: String)
+    func recordCoordinatorEvent(_ message: String)
+    func recordEnvelope(_ record: ProximityInspectorEnvelope)
+    func recordRangingSample(_ sample: ProximityInspectorDistanceSample)
+    func updatePeer(_ peer: ProximityInspectorPeer)
+    func updateTransport(_ event: ProximityInspectorTransportEvent)
+    func updateRangingMode(_ mode: ProximityCoordinator.RangingMode)
+    func recordError(domain: String, message: String, recoverable: Bool)
+    func endSession(endState: String)
+}
+
+/// The one callback a ``ProximityCoordinator`` delivers verified application payloads through.
+///
+/// Fires only after `ProximityIdentityEnvelope.verify` succeeded and the token is one the host
+/// dispatches (`payloads.known`) but not one of the coordinator's own session messages (identity
+/// intro/ack, heartbeat); `peer` is the handshake-verified
+/// identity when one exists, else the pending identity — receivers must apply their own
+/// committed/blocked gates. Conformers: ``MeshNetworkManager`` here, and FernletSocial's
+/// `PresenceManager` and `ProximityRecipeShareManager` (the one a ``ProximityPairSession`` hands its
+/// pairings' coordinators). Held `weak` by the coordinator.
+@MainActor
+public protocol ProximityPayloadHandling: AnyObject {
+    func proximityCoordinator(
+        _ coordinator: ProximityCoordinator,
+        didReceive envelope: ProximityIdentityEnvelope,
+        plaintext: Data,
+        from peer: ProximityCoordinator.PeerIdentity?
+    )
+}
+
+extension ProximityInspectorRecording {
+    public func beginSession(role: ProximityCoordinator.Role, mode: ProximityCoordinator.Mode, localFingerprint: String) {}
+    public func recordEnvelope(_ record: ProximityInspectorEnvelope) {}
+    public func recordRangingSample(_ sample: ProximityInspectorDistanceSample) {}
+    public func updatePeer(_ peer: ProximityInspectorPeer) {}
+    public func updateTransport(_ event: ProximityInspectorTransportEvent) {}
+    public func updateRangingMode(_ mode: ProximityCoordinator.RangingMode) {}
+    public func recordError(domain: String, message: String, recoverable: Bool) {}
+    public func endSession(endState: String) {}
+}
+
+/// Minimal ``ProximityInspectorRecording`` that just accumulates coordinator event strings.
+///
+/// Used by tests and lightweight diagnostics; every other requirement takes the protocol's
+/// default no-op.
+@MainActor
+public final class ProximityInspectorEventRecorder: ProximityInspectorRecording {
+    /// R3 (bounded growth): coordinator events are driven by peer envelopes and transport chatter,
+    /// so the log is input-fed and must not be append-only. Oldest-out at the cap.
+    public static let maxEvents = 500
+
+    public private(set) var events: [String] = []
+
+    public init() {}
+
+    public func recordCoordinatorEvent(_ message: String) {
+        events.append(message)
+        if events.count > Self.maxEvents {
+            events.removeFirst(events.count - Self.maxEvents)
+        }
+    }
+}
+
+// WI-9: mesh wire payloads decoded from peer plaintext — `nonisolated, Sendable` so the decode is
+// not pinned to the MainActor by ProximityKit's `.defaultIsolation(MainActor.self)` (see MeshPayloads.swift).
+/// Body of the identity intro/ack envelope: negotiated ranging mode, the UWB discovery token,
+/// the advertised capability tokens, and the optional prekey bundle the host gossips.
+///
+/// All later additions are additive optional keys so old decoders keep working; provenance of
+/// the prekey bundle is the intro envelope's Ed25519 signature.
+private nonisolated struct IdentityRangingPayload: Codable, Sendable {
+    let rangingMode: String
+    let discoveryToken: Data?
+    /// Phase 1 capability advertisement — an ADDITIVE JSON key: old clients' decoders ignore it,
+    /// and an old client's intro decodes here as `nil` (a legacy peer, taken to support what the
+    /// host's `assumedForLegacyPeers` names, see `PeerIdentity.supports(_:in:)`). Raw capability
+    /// tokens, kept as strings so a newer build's capability names survive the round-trip.
+    let capabilities: [String]?
+    /// Prekey bundle gossip (bitchat adoptions Increment 3) — another additive key old decoders
+    /// ignore, carried opaquely: what the host's provider returned, or nil when it returned none
+    /// (Fernlet's when the sender hasn't opted into away hearts, `heartsAway` capability absent too).
+    /// Rides the SIGNED intro envelope, so bundle provenance is the envelope's Ed25519 signature;
+    /// there is no second standalone bundle signature to drift out of sync. The property's name is
+    /// the frozen JSON key, so it keeps the dead-drop's spelling.
+    let heartDropPrekeyBundle: ProximityPrekeyBundle?
+
+    init(rangingMode: String, discoveryToken: Data?, capabilities: [String]?,
+         heartDropPrekeyBundle: ProximityPrekeyBundle? = nil) {
+        self.rangingMode = rangingMode
+        self.discoveryToken = discoveryToken
+        self.capabilities = capabilities
+        self.heartDropPrekeyBundle = heartDropPrekeyBundle
+    }
+}
+
+/// Body of the `.sessionHeartbeat` envelope: a ping (with an id the ack quotes back) or an ack.
+///
+/// Used by ``ProximityCoordinator`` for liveness and RTT measurement on a connected session;
+/// three missed intervals end the session as `transportLost`.
+private nonisolated struct SessionHeartbeatPayload: Codable, Sendable {
+    /// Ping (expects an ack quoting `heartbeatID`) or ack (carries `responseTo`).
+    ///
+    /// The coordinator answers pings with acks and matches acks back to pending pings by id.
+    enum Kind: String, Codable, Sendable {
+        case ping
+        case ack
+    }
+
+    let kind: Kind
+    let heartbeatID: UUID
+    let sentAt: Date
+    let responseTo: UUID?
+}
+
+/// The per-connection handshake + session engine: drives one peer from discovery through the
+/// signed identity exchange and the proximity commit gate to a verified, heartbeat-kept session,
+/// and is the single choke point every inbound envelope passes through.
+///
+/// One coordinator per peer connection, owned by a manager or session (mesh slot, pair-session
+/// pairing, presence heart connection) that injects the transport, ranging provider, trust policy, payload handler,
+/// and shared ``ReplayCache``. The friend-mode state machine: transport connect →
+/// `awaitingIdentityIntroduction` (signed intro/ack with ranging token + capabilities) →
+/// `awaitingProximityCommit` (UWB 15 cm / 0.8 s dwell) or `awaitingManualCommit` (no UWB) →
+/// `connected`, with an immediate heartbeat so the peer can auto-commit. Trainer mode
+/// auto-advances the legacy tap gate on connect and gates on remembered trust / explicit user
+/// confirmation instead of the dwell.
+///
+/// Security invariants: every inbound envelope is checked against the trust policy (revoked →
+/// hard fail, blocked → silent drop) and then `verify`'d (signature/expiry/recipient/replay/
+/// mandatory sealing) before dispatch; a token the host does not dispatch (a newer build's payload
+/// type) is parked, never dispatched; trainer sessions size-gate the raw wire blob BEFORE decode. On a
+/// presence-originated heart connection (`sealedIntroductionPeerKeyAgreementKey` set) the
+/// SEALED-INTRODUCTION rule applies: identity intro/ack travel only inside a
+/// ``SealedIntroductionEnvelope`` sealed to the intended friend's KA key, plain identity
+/// envelopes are rejected, and heartbeats are not answered until the sealed identity verified —
+/// a tag-replay forger learns nothing. Sealed sends/receives negotiate wire2 framing off the
+/// peer's advertised capabilities.
+///
+/// Vocabulary: everything token-shaped comes from the identity's namespace
+/// (`family.vocabulary`), read at each use. The introduction, the acknowledgement and the heartbeat
+/// with its reply are signed under `session`'s tokens and titles and dispatched by them; a token
+/// outside `payloads.known` is parked; and `capabilities` supplies the wire2 token, what a peer that
+/// lists no capabilities supports, and the receive bound on a peer's list (twice `known.count`).
+///
+/// Failure model: connection-phase and proximity-gate timeouts end the session; heartbeat
+/// silence (3× interval) or 3 consecutive send failures end it as `transportLost`; friend mode
+/// auto-reconnects after transport loss while `autoReconnect` holds. `@MainActor @Observable`:
+/// managers observe `state` to drive slot/connection bookkeeping.
+@MainActor
+@Observable
+public final class ProximityCoordinator {
+    // Role, RangingMode and Mode are this module's ProximityRole, ProximityRangingMode and
+    // ProximitySessionMode. The typealiases keep every `ProximityCoordinator.Role` / bare `Role`
+    // reference across the proximity subtree reading as it does.
+    public typealias Role = ProximityRole
+    public typealias Mode = ProximitySessionMode
+
+    public private(set) var state: State = .idle
+    public private(set) var lastKnownDistance: RangingDistance?
+
+    /// When our OWN ranging last saw the peer inside ``friendCommitThresholdMeters``.
+    ///
+    /// This is the local-evidence half of the peer-heartbeat auto-commit: a peer's message is not
+    /// consent, so only a sample THIS device observed may ratify a commit. Cleared on fail/end so
+    /// evidence never survives a session.
+    @ObservationIgnored private var lastCloseRangingSampleAt: Date?
+
+    /// Friend-mode proximity-commit distance (metres). Single source of truth: `commitDetector` is
+    /// constructed with it, and `handleDistance` records local closeness evidence against it.
+    static let friendCommitThresholdMeters = 0.15
+
+    /// How recently our own ranging must have seen the peer close for an inbound heartbeat to
+    /// ratify a commit. Three seconds: longer than the 0.8 s commit dwell, far shorter than the
+    /// 30 s heartbeat interval, so a stale sample can never authorize a commit.
+    static let peerHeartbeatCommitEvidenceWindow: TimeInterval = 3.0
+
+    @ObservationIgnored private let identity: IdentityService
+    @ObservationIgnored private let transport: any PeerTransport
+    @ObservationIgnored private let ranging: any RangingProvider
+    @ObservationIgnored private weak var inspector: (any ProximityInspectorRecording)?
+    @ObservationIgnored private weak var payloadHandler: (any ProximityPayloadHandling)?
+    @ObservationIgnored private weak var trustPolicy: (any ProximityTrustPolicy)?
+    @ObservationIgnored private let replayCache: ReplayCache
+    @ObservationIgnored private let foregroundAnchor: any ProximityForegroundAnchoring
+    /// The local name this side discloses once it has committed, and advertises as `name`: always
+    /// the caller's (the host's resolved name). The engine has no name of its own to fall back on.
+    @ObservationIgnored private let displayName: String
+    // Capability tokens advertised in this radio's identity intro/ack (Phase 1). Empty = this
+    // radio offers none of the mesh feature payloads (e.g. the recipe radio).
+    @ObservationIgnored private let localCapabilities: [String]
+    // SEALED-INTRODUCTION rule (Phase 4b): non-nil ONLY for a presence-originated heart connection.
+    // It is the intended friend's vault KA public key. When set, this coordinator SEALS its outbound
+    // identity intro/ack to that key (never emits identity in the clear) and OPENS an inbound sealed
+    // intro/ack with the local KA private key — closing the tag-replay identity leak. Every other
+    // radio (mesh photo/shop/recipe/admission, trainer) leaves this nil and its handshake unchanged.
+    @ObservationIgnored private let sealedIntroductionPeerKey: Data?
+    @ObservationIgnored private let timeoutSeconds: TimeInterval
+    @ObservationIgnored private let now: () -> Date
+
+    @ObservationIgnored private var cancellables: Set<AnyCancellable> = []
+    @ObservationIgnored private var timeoutTask: Task<Void, Never>?
+    @ObservationIgnored private var heartbeatTask: Task<Void, Never>?
+    @ObservationIgnored private let tapDetector: ProximityCommitDetector        // trainer-mode tap gate (0.05 m / 1.0 s)
+    @ObservationIgnored private let commitDetector: ProximityCommitDetector     // friend-mode proximity gate (0.15 m / 0.8 s)
+    @ObservationIgnored private var rangingStarted = false
+    @ObservationIgnored private var currentRole: Role?
+    @ObservationIgnored private var currentMode: Mode?
+    @ObservationIgnored private var currentTransportPeer: PeerHandle?
+    @ObservationIgnored private var pendingInvite: PeerPendingInvite?
+    @ObservationIgnored private var pendingPeerIdentity: PeerIdentity?
+    @ObservationIgnored private var connectedPeerIdentity: PeerIdentity?
+    @ObservationIgnored private var rangingMode: RangingMode = .none
+    @ObservationIgnored private var lastInboundHeartbeatAt: Date?
+    @ObservationIgnored private var lastTransferCompletedAt: Date?
+    @ObservationIgnored private var bytesSent = 0
+    @ObservationIgnored private var bytesReceived = 0
+    @ObservationIgnored private var heartbeatSendFailures = 0
+    @ObservationIgnored private var pendingHeartbeatSentAtByID: [UUID: Date] = [:]
+    @ObservationIgnored private var autoReconnect = false
+    @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+    /// The single in-flight cleanup task spawned by ``fail(_:)``. R3 (bounded task fan-out): a
+    /// peer that keeps sending malformed envelopes after the first failure would otherwise drive
+    /// one unstructured teardown Task per message. The work (stop ranging, disconnect, stop the
+    /// anchor) is idempotent, so coalescing onto the in-flight one is behavior-preserving.
+    @ObservationIgnored private var teardownTask: Task<Void, Never>?
+    // Ephemeral per-session random ID advertised in Bonjour TXT instead of the persistent fingerprint.
+    @ObservationIgnored private var sessionID = UUID().uuidString
+
+    public init(
+        identity: IdentityService,
+        transport: any PeerTransport,
+        ranging: any RangingProvider,
+        inspector: (any ProximityInspectorRecording)? = nil,
+        payloadHandler: (any ProximityPayloadHandling)? = nil,
+        trustPolicy: (any ProximityTrustPolicy)? = nil,
+        replayCache: ReplayCache,
+        foregroundAnchor: (any ProximityForegroundAnchoring)? = nil,
+        displayName: String,
+        capabilities: [String] = [],
+        sealedIntroductionPeerKeyAgreementKey: Data? = nil,
+        timeoutSeconds: TimeInterval = 30,
+        now: @escaping () -> Date = Date.init
+    ) {
+        self.identity = identity
+        self.transport = transport
+        self.ranging = ranging
+        self.inspector = inspector
+        self.payloadHandler = payloadHandler
+        self.trustPolicy = trustPolicy
+        self.replayCache = replayCache
+        // P9 item 5: the default anchor is the no-op on EVERY platform. It used to be the Live
+        // Activity anchor, on platforms that had the framework, and every request it made was
+        // doomed — the proximity activity's attributes type was internal to this module (the app's
+        // since plan step A0.6) and `App/FernletWidgets/FernletWidgetsBundle.swift` declares no
+        // `ActivityConfiguration` for it, so each call either threw (audited) or spent one of the
+        // per-app Live Activity slots a workout or cooking activity needs on something nothing
+        // draws. Three shipping construction sites take this default by omitting the argument
+        // (`ProximityPairSession.handleChannelReady`, and `PresenceManager`'s heart door
+        // plus its teardown seam), so this one line retires all of them; the mesh's two doors and
+        // the pair session's test seam pass `NoopProximityForegroundAnchor()` explicitly and are left
+        // alone. The app's `ProximityLiveActivityReaper.endOrphans()` still runs once per launch.
+        self.foregroundAnchor = foregroundAnchor ?? NoopProximityForegroundAnchor()
+        self.displayName = displayName
+        self.localCapabilities = capabilities
+        self.sealedIntroductionPeerKey = sealedIntroductionPeerKeyAgreementKey
+        self.timeoutSeconds = timeoutSeconds
+        self.now = now
+        self.tapDetector = ProximityCommitDetector(proximityThreshold: 0.05, dwellSeconds: 1.0, minimumSamples: 3)
+        self.commitDetector = ProximityCommitDetector(proximityThreshold: Self.friendCommitThresholdMeters,
+                                                      dwellSeconds: 0.8,
+                                                      minimumSamples: 3)
+        self.rangingMode = ranging.isHardwareSupported ? .uwb : .rssi
+        subscribeToTransport()
+        subscribeToRanging()
+    }
+
+    deinit {
+        timeoutTask?.cancel()
+        heartbeatTask?.cancel()
+        teardownTask?.cancel()
+    }
+
+    func attachPayloadHandler(_ payloadHandler: any ProximityPayloadHandling) {
+        self.payloadHandler = payloadHandler
+    }
+
+    public func begin(role: Role, mode: Mode) async {
+        await transport.disconnect()
+        do {
+            try prepareSession(role: role, mode: mode)
+
+            switch role {
+            case .advertiser:
+                try await transport.startAdvertising(
+                    discoveryInfo: discoveryInfo(for: role, mode: mode)
+                )
+            case .browser:
+                try await transport.startBrowsing()
+            }
+            transition(to: .discovering)
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    public func beginFriendJoin() async {
+        await transport.disconnect()
+        do {
+            try prepareSession(role: .browser, mode: .friend)
+            try await transport.startAdvertising(
+                discoveryInfo: discoveryInfo(for: .browser, mode: .friend)
+            )
+            try await transport.startBrowsing()
+            transition(to: .discovering)
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    private func prepareSession(role: Role, mode: Mode) throws {
+        sessionID = UUID().uuidString
+        try identity.ensureProvisioned()
+        currentRole = role
+        currentMode = mode
+        inspector?.beginSession(role: role, mode: mode, localFingerprint: identity.localFingerprint)
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
+            kind: .pairingStarted,
+            peerFingerprint: nil,
+            peerDisplayName: nil,
+            message: "Pairing started as \(role.rawValue) in \(mode.rawValue) mode"
+        ))
+        currentTransportPeer = nil
+        connectedPeerIdentity = nil
+        pendingPeerIdentity = nil
+        pendingInvite = nil
+        lastInboundHeartbeatAt = nil
+        lastTransferCompletedAt = nil
+        bytesSent = 0
+        bytesReceived = 0
+        pendingHeartbeatSentAtByID.removeAll()
+        tapDetector.reset()
+        commitDetector.reset()
+        rangingStarted = false
+        rangingMode = ranging.isHardwareSupported ? .uwb : .rssi
+        transition(to: .starting)
+        armTimeoutIfNeeded()
+    }
+
+    public func acceptPendingInvite() async {
+        guard let invite = pendingInvite else {
+            fail("No pending invite to accept")
+            return
+        }
+
+        do {
+            try await transport.accept(invite)
+            currentTransportPeer = invite.peer
+            if currentMode == .friend {
+                transition(to: .awaitingIdentityIntroduction(peer: invite.peer))
+                inspector?.recordCoordinatorEvent("invite accepted — sending intro")
+                await sendIdentityIntroduction(to: invite.peer)
+            } else {
+                transition(to: .awaitingTapConfirmation(peer: invite.peer))
+                inspector?.recordCoordinatorEvent("invite accepted")
+            }
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    public func rejectPendingInvite() async {
+        if case .awaitingUserConfirmation = state {
+            await end(.userCancelled)
+            return
+        }
+
+        pendingInvite?.respond(false)
+        pendingInvite = nil
+        currentTransportPeer = nil
+        transition(to: .idle)
+        inspector?.recordCoordinatorEvent("invite rejected")
+    }
+
+    public func tapToConfirm() async {
+        guard case .awaitingTapConfirmation(let peer) = state else { return }
+        await finishTapConfirmation(for: peer)
+    }
+
+    public func confirmPeerIdentity() async {
+        guard let peer = pendingPeerIdentity else {
+            fail("No peer identity awaiting confirmation")
+            return
+        }
+        pendingPeerIdentity = nil
+        connectedPeerIdentity = peer
+        updateInspectorPeer(identity: peer, transportPeer: currentTransportPeer)
+        updateInspectorRangingMode(peer.rangingMode)
+        transition(to: .connected(peer: peer))
+        timeoutTask?.cancel()
+        lastInboundHeartbeatAt = now()
+        heartbeatSendFailures = 0
+        if currentMode == .friend { autoReconnect = true }
+        startHeartbeatLoop()
+        // Send one immediate ping so the peer can auto-commit without waiting 30 seconds.
+        if currentMode == .friend { Task { [weak self] in await self?.heartbeatTick() } }
+        await foregroundAnchor.start(peerName: peer.displayNameOrFingerprint, startedAt: now())
+        inspector?.recordCoordinatorEvent("identity confirmed \(peer.fingerprint)")
+    }
+
+    public func send(_ envelope: ProximityIdentityEnvelope) async throws {
+        guard let peer = currentTransportPeer, let identity = connectedIdentity else {
+            throw CoordinatorError.notConnected
+        }
+
+        transition(to: .transferring(peer: identity, progress: 0.0))
+        // Restore the CURRENT identity, never the one captured above: the peer may disclose its name
+        // during the `await` below (Option 1b's adoption runs on any verified inbound frame), and
+        // putting the captured, still-withheld identity back into `state` would undo it for good —
+        // `connectedPeerIdentity` is already named, so the adoption never runs again.
+        defer { if case .transferring = state { transition(to: .connected(peer: connectedPeerIdentity ?? identity)) } }
+        let data = try JSONEncoder().encode(envelope)
+        try await transport.send(data, to: peer, mode: .reliable)
+        recordEnvelope(envelope, direction: .sent, byteCount: data.count, signatureVerified: true)
+        bytesSent += data.count
+        await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
+        inspector?.recordCoordinatorEvent("envelope sent \(envelope.payloadTypeToken)")
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
+            kind: .envelopeSent,
+            peerFingerprint: identity.fingerprint,
+            peerDisplayName: identity.displayNameOrFingerprint,
+            payloadType: envelope.payloadTypeToken,
+            message: "Sent \(envelope.payloadTypeToken)"
+        ))
+        lastTransferCompletedAt = now()
+        transition(to: .connected(peer: connectedPeerIdentity ?? identity))
+    }
+
+    /// Signs and sends one payload to the confirmed peer under `payloadTypeToken`, a token its host's
+    /// vocabulary names (`payloads.known`): the per-connection send a host's pairing goes through, the
+    /// pair session's pairings and a host's own connections (presence's heart delivery) alike.
+    ///
+    /// **`summary` must be built from frozen literals — never `String(localized:)`.** Every caller
+    /// hands in a human-sounding title that is nonetheless a wire token: it is folded into the
+    /// envelope's canonical signing bytes AND surfaced in the RECEIVING device's Connection Inspector.
+    /// The rationale, and the receiver-side plan for a localized inspector, live on
+    /// `ProximityIdentityEnvelope.payloadSummary`.
+    ///
+    /// Throws ``CoordinatorError/notConnected`` before signing when no transport peer is connected, and
+    /// from ``send(_:)`` when no identity has been confirmed: it sends to a confirmed peer only. The
+    /// envelope names the confirmed peer's fingerprint as recipient and this side's disclosed name as
+    /// sender, and expires five minutes after it is signed. With `sealed`, the payload is sealed to the
+    /// confirmed peer's key-agreement key, framed when that peer supports the namespace's wire2
+    /// capability (it advertised it, or listed none and the namespace assumes it for such peers) and
+    /// unframed otherwise; a peer that presented no key-agreement key gets it unsealed, which a
+    /// receiver whose rules require sealing refuses.
+    public func sendPayload(
+        payloadTypeToken: String, summary: PayloadSummary, payload: Data, sealed: Bool = false
+    ) async throws {
+        guard currentTransportPeer != nil else { throw CoordinatorError.notConnected }
+        let (finalPayload, encryption) = try sealIfNeeded(payload, sealed: sealed)
+        let sentAt = now()
+        let envelope = try ProximityIdentityEnvelope.signed(
+            identityService: identity,
+            senderDisplayName: disclosedDisplayName,
+            recipientFingerprint: connectedIdentity?.fingerprint,
+            payloadTypeToken: payloadTypeToken,
+            payloadEncryption: encryption,
+            payloadSummary: summary,
+            payload: finalPayload,
+            createdAt: sentAt,
+            expiresAt: sentAt.addingTimeInterval(5 * 60)
+        )
+        try await send(envelope)
+    }
+
+    private func sealIfNeeded(_ payload: Data, sealed: Bool) throws -> (Data, PayloadEncryption) {
+        guard sealed, let kaKey = connectedIdentity?.keyAgreementPublicKey, !kaKey.isEmpty else {
+            return (payload, .none)
+        }
+        let ciphertext = try identity.seal(payload, to: kaKey, format: peerSealedPayloadFormat)
+        return (ciphertext, .sealedTo(recipientKeyAgreementPublicKey: kaKey))
+    }
+
+    /// wire2 gate (bitchat adoptions Increment 2): frame sealed bodies we SEND only when the peer
+    /// advertised the host's wire2 token (`capabilities.wire2`); unframe sealed bodies we RECEIVE
+    /// only when the sender advertised it.
+    /// Both directions key off the same intro exchange, so interpretation is deterministic; the
+    /// tolerant tag check inside `open(format: .wire2)` covers the window where a wire2-capable
+    /// sender hadn't yet learned OUR capabilities and sealed legacy. Intro/ack envelopes evaluate
+    /// before any peer identity exists → `.legacy`, which is exactly right (intros are never
+    /// framed — capabilities are unknown when they're built).
+    private var peerSealedPayloadFormat: SealedPayloadFormat {
+        let capabilities = vocabulary.capabilities
+        return (connectedIdentity ?? pendingPeerIdentity)?.supports(capabilities.wire2, in: capabilities) == true
+            ? .wire2 : .legacy
+    }
+
+    public func cancel() async {
+        autoReconnect = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        await end(.userCancelled)
+    }
+
+    private var connectedIdentity: PeerIdentity? {
+        switch state {
+        case .connected(let peer), .transferring(let peer, _):
+            return peer
+        default:
+            return connectedPeerIdentity
+        }
+    }
+
+    private func subscribeToTransport() {
+        transport.state
+            .sink { [weak self] transportState in
+                Task { @MainActor [weak self] in
+                    await self?.handleTransportState(transportState)
+                }
+            }
+            .store(in: &cancellables)
+
+        transport.inbound
+            .sink { [weak self] message in
+                Task { @MainActor [weak self] in
+                    await self?.handleInbound(message)
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private func subscribeToRanging() {
+        ranging.distance
+            .sink { [weak self] distance in
+                Task { @MainActor [weak self] in
+                    await self?.handleDistance(distance)
+                }
+            }
+            .store(in: &cancellables)
+
+        ranging.state
+            .sink { [weak self] rangingState in
+                Task { @MainActor [weak self] in
+                    self?.handleRangingState(rangingState)
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private var isSessionLive: Bool {
+        switch state {
+        case .connected, .transferring, .awaitingIdentityIntroduction, .awaitingUserConfirmation,
+             .awaitingProximityCommit, .awaitingManualCommit:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func handleTransportState(_ transportState: PeerTransportState) async {
+        switch transportState {
+        case .advertising, .browsing:
+            if isSessionLive { return }
+            transition(to: .discovering)
+        case .discovered(let peers):
+            await handleDiscoveredPeers(peers)
+        case .awaitingPeerAcceptance(let peer):
+            currentTransportPeer = peer
+            updateInspectorPeer(transportPeer: peer)
+            updateInspectorTransport(state: "connecting")
+            transition(to: .awaitingTapConfirmation(peer: peer))
+        case .awaitingLocalAcceptance(let invite):
+            pendingInvite = invite
+            currentTransportPeer = invite.peer
+            updateInspectorPeer(transportPeer: invite.peer)
+            if currentMode == .friend {
+                await acceptPendingInvite()
+            } else {
+                transition(to: .pendingInvite(invite))
+            }
+        case .connecting(let peer):
+            handleTransportConnecting(peer)
+        case .connected(let peer):
+            await handleTransportConnected(peer)
+        case .disconnected:
+            updateInspectorTransport(state: "notConnected", disconnected: true)
+            await end(.transportLost)
+        case .failed(let error):
+            updateInspectorTransport(state: "failed", disconnected: true)
+            inspector?.recordError(domain: "Transport", message: String(describing: error), recoverable: false)
+            fail(String(describing: error))
+        case .idle:
+            break
+        }
+    }
+
+    /// `.discovered`: adopt the first peer, publish it to the inspector, and — as the browser —
+    /// invite it when the deterministic single-inviter rule selects us.
+    private func handleDiscoveredPeers(_ peers: [PeerHandle]) async {
+        if isSessionLive { return }
+        guard let peer = peers.first else {
+            transition(to: .discovering)
+            return
+        }
+        currentTransportPeer = peer
+        updateInspectorPeer(transportPeer: peer)
+        transition(to: .peerInRange(peer: peer, distance: .unknown))
+        guard currentRole == .browser else { return }
+        guard shouldInviteDiscoveredPeer(peer) else { return }
+        do {
+            try await transport.invite(peer)
+            inspector?.recordCoordinatorEvent("invite sent to \(peer.displayHint)")
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    /// `.connecting`: record the peer, and only enter the tap gate when the handshake has not
+    /// already moved past it (a late transport callback must never rewind the state machine).
+    private func handleTransportConnecting(_ peer: PeerHandle) {
+        currentTransportPeer = peer
+        updateInspectorPeer(transportPeer: peer)
+        updateInspectorTransport(state: "connecting")
+        if case .awaitingTapConfirmation = state { return }
+        if case .awaitingIdentityIntroduction = state { return }
+        if case .awaitingProximityCommit = state { return }
+        if case .awaitingManualCommit = state { return }
+        if case .connected = state { return }
+        transition(to: .awaitingTapConfirmation(peer: peer))
+    }
+
+    /// `.connected`: the mode-specific advance into the identity exchange.
+    ///
+    /// Increment 10 (coach path, Plan-Prekeys-ProtectedLoad-CoachMesh-2026-07-26): the pre-identity
+    /// tap gate could never fire on ANY hardware — the distance stream needs an NI ranging session,
+    /// which only starts after the identity exchange this gate blocks (`startRangingIfPossible`
+    /// runs in `handleIdentityEnvelope`), and `tapToConfirm()` has no production caller — so every
+    /// trainer session hung here to timeout. Once the transport is actually connected,
+    /// auto-advance to the identity exchange; the human gate is the explicit post-identity
+    /// confirmation (plus the verification ceremony on a first pairing), mirroring the friend
+    /// path's identity-first architecture.
+    private func handleTransportConnected(_ peer: PeerHandle) async {
+        currentTransportPeer = peer
+        updateInspectorPeer(transportPeer: peer)
+        updateInspectorTransport(state: "connected")
+        if case .connected = state { return }
+        if case .awaitingTapConfirmation(let waiting) = state {
+            if currentMode == .trainer {
+                inspector?.recordCoordinatorEvent("tap gate auto-advanced on connect — explicit confirmation gates the session")
+                await finishTapConfirmation(for: waiting)
+            }
+            return
+        }
+        if case .awaitingIdentityIntroduction = state { return }
+        if case .awaitingProximityCommit = state { return }
+        if case .awaitingManualCommit = state { return }
+        // Friend mode: skip the tap gate; send identity intro immediately so ranging
+        // can start before the commit, and the 15 cm dwell drives auto-connect.
+        if currentMode == .friend {
+            transition(to: .awaitingIdentityIntroduction(peer: peer))
+            await sendIdentityIntroduction(to: peer)
+            return
+        }
+        transition(to: .awaitingTapConfirmation(peer: peer))
+        // Same auto-advance for the fresh entry (see above).
+        inspector?.recordCoordinatorEvent("tap gate auto-advanced on connect — explicit confirmation gates the session")
+        await finishTapConfirmation(for: peer)
+    }
+
+    private func shouldInviteDiscoveredPeer(_ peer: PeerHandle) -> Bool {
+        guard currentMode == .friend else { return true }
+        guard let remoteSID = peer.discoveryInfo?["sid"] else { return true }
+        if sessionID == remoteSID {
+            return displayName < peer.displayHint  // self-discovery tie-break
+        }
+        return sessionID < remoteSID  // deterministic single-inviter selection
+    }
+
+    private func handleRangingState(_ rangingState: RangingState) {
+        switch rangingState {
+        case .fallback(let rssiOnly) where rssiOnly:
+            rangingMode = .rssi
+            updateInspectorRangingMode(.rssi)
+            inspector?.recordCoordinatorEvent("ranging fallback: rssi only")
+        case .running:
+            rangingMode = .uwb
+            updateInspectorRangingMode(.uwb)
+            inspector?.recordCoordinatorEvent("ranging started: uwb")
+        case .invalidated(let reason):
+            rangingStarted = false
+            rangingMode = .rssi
+            updateInspectorRangingMode(.rssi)
+            inspector?.recordError(domain: "Ranging", message: reason, recoverable: true)
+            inspector?.recordCoordinatorEvent("ranging invalidated, falling back to manual commit: \(reason)")
+            if case .awaitingProximityCommit(let peerIdentity) = state {
+                transition(to: .awaitingManualCommit(peer: peerIdentity))
+            }
+        case .idle, .fallback:
+            break
+        }
+    }
+
+    private func handleDistance(_ distance: RangingDistance) async {
+        lastKnownDistance = distance
+        if case .meters(let meters, let direction) = distance {
+            inspector?.recordRangingSample(ProximityInspectorDistanceSample(
+                timestamp: now(),
+                meters: meters,
+                direction: direction
+            ))
+        }
+        guard ranging.isHardwareSupported, case .meters(let meters, _) = distance else { return }
+
+        // Local proximity EVIDENCE, recorded independently of the dwell detector: this is the only
+        // thing that may later authorize an auto-commit triggered by a peer's heartbeat.
+        if meters < Self.friendCommitThresholdMeters {
+            lastCloseRangingSampleAt = now()
+        }
+
+        // Friend mode: 15 cm / 0.8 s average dwell commits the connection.
+        if case .awaitingProximityCommit(let peerIdentity) = state {
+            if commitDetector.ingest(distanceMeters: meters, at: now()) {
+                inspector?.recordCoordinatorEvent("proximity commit at \(String(format: "%.2f", meters)) m")
+                pendingPeerIdentity = peerIdentity
+                await confirmPeerIdentity()
+            }
+            return
+        }
+
+        // Trainer mode: tight tap gate drives manual confirmation
+        guard case .awaitingTapConfirmation(let peer) = state else { return }
+        if tapDetector.ingest(distanceMeters: meters, at: now()) {
+            await finishTapConfirmation(for: peer)
+        }
+    }
+
+    /// Manual proximity confirmation — works for both non-UWB (awaitingManualCommit)
+    /// and UWB devices where the debug Force button overrides the proximity gate.
+    ///
+    /// Confirms the identity the coordinator holds at a proximity gate (`awaitingManualCommit` or
+    /// `awaitingProximityCommit`) and does nothing in any other state: the programmatic commit a
+    /// host's pairing takes with no user step (the pair session's pairings and presence's heart
+    /// connections), the mesh's slot commit and the debug Force button's. Safe to call repeatedly.
+    public func commitManualProximity() async {
+        switch state {
+        case .awaitingManualCommit(let peerIdentity), .awaitingProximityCommit(let peerIdentity):
+            inspector?.recordCoordinatorEvent("manual proximity commit")
+            pendingPeerIdentity = peerIdentity
+            await confirmPeerIdentity()
+        default:
+            return
+        }
+    }
+
+    private func finishTapConfirmation(for peer: PeerHandle) async {
+        currentTransportPeer = peer
+        transition(to: .awaitingIdentityIntroduction(peer: peer))
+        inspector?.recordCoordinatorEvent("tap confirmed")
+        await sendIdentityIntroduction(to: peer)
+    }
+
+    /// True ONLY for a presence-originated heart connection (SEALED-INTRODUCTION rule, Phase 4b):
+    /// identity intro/ack are sealed to the intended friend's KA key and never emitted in the clear.
+    private var usesSealedIntroduction: Bool { sealedIntroductionPeerKey != nil }
+
+    /// Encodes an identity intro/ack for the wire. On an ordinary radio this is the plain signed
+    /// envelope. On a presence-heart connection it is SEALED to the intended friend's KA key and
+    /// wrapped so the wire carries no cleartext identity — fail-closed: a missing/empty expected KA
+    /// key throws (never falls back to unsealed), which fails the connection at the call site.
+    private func encodeIdentityEnvelopeForTransport(_ envelope: ProximityIdentityEnvelope) throws -> Data {
+        guard usesSealedIntroduction else {
+            return try JSONEncoder().encode(envelope)
+        }
+        guard let key = sealedIntroductionPeerKey, !key.isEmpty else {
+            throw CoordinatorError.sealedIntroductionKeyMissing
+        }
+        let inner = try JSONEncoder().encode(envelope)
+        let ciphertext = try identity.seal(inner, to: key)
+        return try JSONEncoder().encode(SealedIntroductionEnvelope(sealedIntroduction: ciphertext))
+    }
+
+    /// Outcome of trying to unwrap an inbound blob as a ``SealedIntroductionEnvelope``.
+    ///
+    /// Consumed only by `handleInbound` on a sealed-introduction coordinator: `.failed` is the
+    /// fail-closed branch (a wrapper the local KA key cannot open, i.e. a tag-replay forger).
+    private enum SealedIntroUnwrap {
+        case notWrapped          // a plain envelope (e.g. a post-commit heartbeat) — process as-is
+        case opened(Data)        // a sealed wrapper opened with the local KA private key
+        case failed              // a wrapper we could NOT open (a tag-replay forger) — fail-closed
+        case legacyWireFormat    // a wrapper with no `FPT2` marker at all — never reached the AEAD
+    }
+
+    /// On a sealed-introduction coordinator, an inbound identity intro/ack arrives as a
+    /// `SealedIntroductionEnvelope`. Open it with the local KA private key, expecting the friend's
+    /// KA key the coordinator was created with.
+    ///
+    /// WHAT `.opened` DOES AND DOES NOT PROVE: `open` is ephemeral-static ECIES, so a successful
+    /// open proves only that the sealer knew OUR public KA key — the friend's static key enters
+    /// as a public HKDF `sharedInfo`/AAD input, never as a key-agreement input. Anyone holding our
+    /// published KA key can mint a wrapper that opens here. Authenticating the SENDER is the
+    /// caller's job: `handleIdentityEnvelope` requires the inner envelope's
+    /// `senderKeyAgreementPublicKey` to equal `sealedIntroductionPeerKey`. A plain envelope (no
+    /// `sealedIntroduction` key) returns `.notWrapped`; a wrapper we cannot decrypt returns
+    /// `.failed` — except a wrapper carrying no `FPT2` marker at all, which returns
+    /// `.legacyWireFormat`. That one never reached the AEAD, so it is a retired-format sender (or
+    /// junk) rather than the tag-replay forger `.failed` describes, and the Connection Inspector
+    /// says which instead of flattening both into "could not be opened".
+    private func unwrapSealedIntroduction(_ data: Data) -> SealedIntroUnwrap {
+        guard let wrapper = try? JSONDecoder().decode(SealedIntroductionEnvelope.self, from: data) else {
+            return .notWrapped
+        }
+        guard let key = sealedIntroductionPeerKey, !key.isEmpty else { return .failed }
+        do {
+            return .opened(try identity.open(wrapper.sealedIntroduction, from: key))
+        } catch IdentityError.legacyWireFormat {
+            // The wrapper never reached the AEAD: it carries no `FPT2` marker, which is the shape
+            // of the retired transport format whose reader Phase 4 deleted (and, since that format
+            // had no marker of its own, of malformed bytes too). Separated from `.failed` — a
+            // wrapper that DID reach the AEAD and was rejected there, i.e. the tag-replay forger —
+            // so the Connection Inspector reports which of the two happened.
+            return .legacyWireFormat
+        } catch {
+            return .failed
+        }
+    }
+
+    /// The local display name **as this side is willing to disclose it right now**: the real name
+    /// once this side has committed, and nothing at all before that.
+    ///
+    /// Stranger-admission Option 1b, the owner's call of 2026-09-22. Every outbound envelope reads
+    /// this instead of ``displayName``, because the disclosure is not the introduction's alone: a
+    /// peer that commits first sends a heartbeat, and the ack this side owes it
+    /// (``sendHeartbeatAcknowledgement(for:to:)``) would have carried the name out before the
+    /// person here had tapped anything. One gate at one property covers the introduction, the
+    /// acknowledgement, both heartbeat directions and every payload, and it cannot be forgotten at
+    /// a send site added later — a reviewer sees `disclosedDisplayName` or a leak.
+    ///
+    /// `connectedPeerIdentity` is the commit: it is set by ``confirmPeerIdentity()`` and by nothing
+    /// else, so this reads the same instant `.connected` does.
+    private var disclosedDisplayName: String {
+        connectedPeerIdentity == nil ? "" : displayName
+    }
+
+    /// The host's payload vocabulary, off this coordinator's identity's namespace: the session
+    /// messages it signs and dispatches by, the payload tokens it dispatches (any other is parked),
+    /// and the capability rules it negotiates wire2 and clamps a peer's list by.
+    private var vocabulary: ProximityNamespace.Vocabulary { identity.namespace.family.vocabulary }
+
+    private func sendIdentityIntroduction(to peer: PeerHandle) async {
+        do {
+            let sentAt = now()
+            let envelope = try ProximityIdentityEnvelope.signed(
+                identityService: identity,
+                senderDisplayName: disclosedDisplayName,
+                recipientFingerprint: peer.advertisedFingerprint,
+                payloadTypeToken: vocabulary.session.identityIntroduction.payloadType,
+                // The host's title is a frozen wire token, never localized — it is signed wire bytes,
+                // and it is rendered in the RECEIVER's Connection Inspector, so a translated sender
+                // would write its own language into a stranger's audit log. Full rationale:
+                // `ProximityIdentityEnvelope.payloadSummary`. Option 1b also took the NAME out of it:
+                // the summary is the one field a receiver renders verbatim, so interpolating the
+                // local name here would have disclosed it in the very frame that withholds it.
+                payloadSummary: PayloadSummary(title: vocabulary.session.identityIntroduction.summaryTitle),
+                payload: try await makeIdentityRangingPayload(),
+                createdAt: sentAt,
+                expiresAt: sentAt.addingTimeInterval(5 * 60)
+            )
+            let data = try encodeIdentityEnvelopeForTransport(envelope)
+            try await transport.send(data, to: peer, mode: .reliable)
+            recordEnvelope(envelope, direction: .sent, byteCount: data.count, signatureVerified: true)
+            inspector?.recordCoordinatorEvent("identity introduction sent")
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    private func handleInbound(_ message: InboundPeerFrame) async {
+        currentTransportPeer = message.peer
+        if rejectsOversizedTrainerBlob(message) { return }
+        guard let unwrapped = unwrapInboundEnvelopeData(message) else { return }
+
+        do {
+            let envelope = try JSONDecoder().decode(ProximityIdentityEnvelope.self, from: unwrapped.data)
+
+            // On a sealed-introduction connection an identity intro/ack MUST arrive sealed. A PLAIN
+            // identity envelope (a forger sending their own intro to bait a cleartext ack) is
+            // rejected outright — the sealed wrapper is the only channel for identity here.
+            if usesSealedIntroduction, !unwrapped.cameFromSealedWrapper,
+               envelope.payloadTypeToken == vocabulary.session.identityIntroduction.payloadType
+                   || envelope.payloadTypeToken == vocabulary.session.identityAcknowledge.payloadType {
+                inspector?.recordCoordinatorEvent("rejected unsealed identity envelope on a sealed connection")
+                fail("unsealed identity envelope on a sealed-introduction connection")
+                return
+            }
+            if isRejectedByTrustPolicy(envelope) { return }
+
+            let plaintext = try envelope.verify(
+                identityService: identity,
+                replayCache: replayCache,
+                sealedPayloadFormat: peerSealedPayloadFormat
+            )
+            await recordVerifiedInbound(envelope, byteCount: message.bytesReceived)
+            try await dispatchVerified(envelope,
+                                       plaintext: plaintext,
+                                       from: message.peer,
+                                       cameFromSealedWrapper: unwrapped.cameFromSealedWrapper)
+        } catch {
+            trustPolicy?.recordSessionAudit(ProximitySessionAudit(
+                kind: .envelopeRejected,
+                peerFingerprint: message.peer.advertisedFingerprint,
+                peerDisplayName: message.peer.displayHint,
+                message: "Envelope verification failed: \(error)"
+            ))
+            inspector?.recordError(domain: "Envelope", message: String(describing: error), recoverable: false)
+            fail("Envelope verification failed: \(error)")
+        }
+    }
+
+    /// The largest inbound blob a trainer-mode session accepts, in bytes (4 MiB), checked before the
+    /// envelope is decoded, decrypted or inflated (`rejectsOversizedTrainerBlob(_:)`).
+    ///
+    /// The mechanism's own bound, and the one a host's coach bodies must fit inside once sealed and
+    /// carried in an envelope: Fernlet's trainer export (`TrainerExportPayload` in
+    /// `FernletConnections`) takes it as its wire cap and half of it as its bundle cap. `nonisolated`
+    /// so a host's `nonisolated` payload types can derive their caps from it.
+    public nonisolated static let maxTrainerModeInboundBytes = 4 * 1024 * 1024
+
+    /// Increment 10 (coach path): hard wire-size gate BEFORE the envelope is decoded, decrypted, or
+    /// inflated — the hearts ordering (`HeartDropSealer.open` gates size before key agreement).
+    /// A host's own shape check on a coach body (Fernlet's `TrainerExportPayload.isWellFormed`) can
+    /// only run after decrypt+inflate, which is the wrong
+    /// layer for a bound: coach payloads are ~1000× a heart, so the inflate-bomb exposure is
+    /// correspondingly worse. Trainer-scoped: this is the MODE-SPECIFIC tightening on top of the
+    /// uniform floor every radio already gets from `NetworkMeshSession.maxInboundWireBytes`
+    /// (16 MiB, dropped before the frame ever reaches a channel — the shipping radio's copy of a
+    /// value both transports pin to `SealedPayloadFraming.maxInflatedByteCount`, deliberately, so
+    /// they refuse the same frame). ``maxTrainerModeInboundBytes`` (4 MiB) ≪ 16 MiB, so the trainer
+    /// bound still binds. True when the session was failed and the caller stops.
+    private func rejectsOversizedTrainerBlob(_ message: InboundPeerFrame) -> Bool {
+        guard currentMode == .trainer,
+              message.data.count > Self.maxTrainerModeInboundBytes else { return false }
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
+            kind: .envelopeRejected,
+            peerFingerprint: message.peer.advertisedFingerprint,
+            peerDisplayName: message.peer.displayHint,
+            message: "Rejected oversized inbound blob (\(message.data.count) bytes) before decode"
+        ))
+        inspector?.recordError(domain: "Envelope", message: "oversized inbound blob", recoverable: false)
+        fail("oversized inbound payload")
+        return true
+    }
+
+    /// SEALED-INTRODUCTION rule (Phase 4b): on a presence-heart connection the identity intro/ack
+    /// arrives sealed to us. Open it first; a wrapper we cannot decrypt is a forger who does not
+    /// hold our KA PUBLIC key — fail with NO identity emitted and no further intro. A forger who
+    /// DOES hold it can still produce an openable wrapper (ephemeral-static ECIES authenticates
+    /// nobody), which is why `handleIdentityEnvelope` additionally binds the inner envelope's
+    /// sender KA key to `sealedIntroductionPeerKey`. A plain envelope (a post-commit heartbeat)
+    /// passes straight through. Nil = already failed.
+    private func unwrapInboundEnvelopeData(_ message: InboundPeerFrame)
+    -> (data: Data, cameFromSealedWrapper: Bool)? {
+        guard usesSealedIntroduction else { return (message.data, false) }
+        switch unwrapSealedIntroduction(message.data) {
+        case .notWrapped:
+            return (message.data, false)
+        case .opened(let inner):
+            return (inner, true)
+        case .legacyWireFormat:
+            inspector?.recordCoordinatorEvent("sealed introduction carries no current wire-format marker — failing")
+            fail("sealed introduction in a retired or unrecognised wire format")
+            return nil
+        case .failed:
+            inspector?.recordCoordinatorEvent("sealed introduction could not be opened — failing")
+            fail("sealed introduction open failed")
+            return nil
+        }
+    }
+
+    /// Trust gate on a decoded (not yet verified) envelope: a revoked key hard-fails the session
+    /// with an audit entry, a blocked key is dropped silently (no signal back to the sender).
+    private func isRejectedByTrustPolicy(_ envelope: ProximityIdentityEnvelope) -> Bool {
+        if trustPolicy?.isRevokedProximitySigningKey(envelope.senderSigningPublicKey) == true {
+            let fingerprint = IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
+            trustPolicy?.recordSessionAudit(ProximitySessionAudit(
+                kind: .revokedPeerBlocked,
+                peerFingerprint: fingerprint,
+                peerDisplayName: Self.auditName(of: envelope, in: identity.namespace),
+                payloadType: envelope.payloadTypeToken,
+                message: "Blocked envelope from revoked key"
+            ))
+            fail("revokedKey")
+            return true
+        }
+        if trustPolicy?.isBlockedProximitySigningKey(envelope.senderSigningPublicKey) == true {
+            return true  // silent drop — no audit entry visible to sender
+        }
+        return false
+    }
+
+    /// Byte/inspector/audit bookkeeping for an envelope that passed `verify`.
+    private func recordVerifiedInbound(_ envelope: ProximityIdentityEnvelope, byteCount: Int) async {
+        recordEnvelope(envelope, direction: .received, byteCount: byteCount, signatureVerified: true)
+        bytesReceived += byteCount
+        await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
+        inspector?.recordCoordinatorEvent("envelope received \(envelope.payloadTypeToken)")
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
+            kind: .envelopeReceived,
+            peerFingerprint: IdentityService.fingerprint(of: envelope.senderSigningPublicKey),
+            peerDisplayName: Self.auditName(of: envelope, in: identity.namespace),
+            payloadType: envelope.payloadTypeToken,
+            message: "Received \(envelope.payloadTypeToken)"
+        ))
+    }
+
+    /// Routes a verified envelope to the coordinator's own handlers or the payload handler, by its
+    /// token against the host's vocabulary: the session messages' tokens to the coordinator's own
+    /// handlers, any other token in `payloads.known` to the payload handler.
+    ///
+    /// Phase 1 forward tolerance: a token outside `payloads.known` — a payload type only a NEWER
+    /// build knows — arrived on a live session. The envelope authenticated
+    /// (schema/expiry/signature/replay were all enforced by `verify`), so this is a well-behaved
+    /// future peer, not an attack — park it and keep the session alive. Never dispatched to the
+    /// payload handler, never `fail()`.
+    private func dispatchVerified(
+        _ envelope: ProximityIdentityEnvelope,
+        plaintext: Data,
+        from peer: PeerHandle,
+        cameFromSealedWrapper: Bool
+    ) async throws {
+        adoptDisclosedDisplayName(from: envelope)
+        guard vocabulary.payloads.known.contains(envelope.payloadTypeToken) else {
+            inspector?.recordCoordinatorEvent("parked unknown payload type \(envelope.payloadTypeToken)")
+            return
+        }
+        switch envelope.payloadTypeToken {
+        case vocabulary.session.identityIntroduction.payloadType, vocabulary.session.identityAcknowledge.payloadType:
+            try await handleIdentityEnvelope(envelope,
+                                             plaintext: plaintext,
+                                             from: peer,
+                                             cameFromSealedWrapper: cameFromSealedWrapper)
+        case vocabulary.session.heartbeat.payloadType:
+            await handleHeartbeat(envelope, plaintext: plaintext, from: peer)
+        default:
+            inspector?.recordCoordinatorEvent("envelope verified \(envelope.payloadTypeToken)")
+            payloadHandler?.proximityCoordinator(self, didReceive: envelope, plaintext: plaintext, from: connectedIdentity ?? pendingPeerIdentity)
+        }
+    }
+
+    /// Takes the peer's display name from the first VERIFIED envelope that discloses one, once
+    /// this side has committed — Option 1b's other half.
+    ///
+    /// **This is the subscriber, not a hook.** Option 1b asks for the name to follow on
+    /// `.connected`; it needs no new frame and no new payload type, because every envelope already
+    /// carries `senderDisplayName` and the peer's own ``disclosedDisplayName`` gate means the field
+    /// is populated exactly when that peer has committed. What was missing was something on this
+    /// side that READS it after the introduction — so a heartbeat (sent immediately on the peer's
+    /// commit, and again every interval after) or any payload delivers the name, and a lost
+    /// best-effort heartbeat costs a few seconds rather than the name.
+    ///
+    /// Four conditions, each load-bearing:
+    /// - **this side has committed** (`connectedPeerIdentity`), so a peer that commits first
+    ///   cannot put a name on the join screen before the person here has tapped;
+    /// - **the name is still withheld**, so this runs once and a later envelope cannot rename a
+    ///   peer mid-session;
+    /// - **the signing key matches** the identity the handshake verified, so a second peer on the
+    ///   same transport cannot name someone else;
+    /// - **the envelope disclosed a name at all** (``ProximityIdentityEnvelope/disclosedSenderDisplayName(in:)``),
+    ///   which an introduction and a pre-commit peer's frames do not.
+    ///
+    /// The state is re-emitted with the named identity because `.connected(peer:)`'s associated
+    /// value is what every surface renders; leaving it holding the withheld identity would adopt
+    /// the name into a property nothing observes.
+    private func adoptDisclosedDisplayName(from envelope: ProximityIdentityEnvelope) {
+        guard let peer = connectedPeerIdentity, peer.isDisplayNameWithheld,
+              peer.signingPublicKey == envelope.senderSigningPublicKey,
+              let disclosed = envelope.disclosedSenderDisplayName(in: identity.namespace) else { return }
+        let named = PeerIdentity(
+            id: peer.id,
+            displayName: disclosed,
+            signingPublicKey: peer.signingPublicKey,
+            keyAgreementPublicKey: peer.keyAgreementPublicKey,
+            fingerprint: peer.fingerprint,
+            rangingMode: peer.rangingMode,
+            firstSeenAt: peer.firstSeenAt,
+            capabilities: peer.capabilities
+        )
+        connectedPeerIdentity = named
+        switch state {
+        case .connected: transition(to: .connected(peer: named))
+        case .transferring(_, let progress): transition(to: .transferring(peer: named, progress: progress))
+        default: break
+        }
+        updateInspectorPeer(identity: named, transportPeer: currentTransportPeer)
+        onPeerDisplayNameDisclosed?(named)
+        inspector?.recordCoordinatorEvent("peer display name disclosed after commit")
+    }
+
+    /// Fires once per session when a committed peer discloses the display name its introduction
+    /// withheld (Option 1b). The owning manager re-records the roster entry it wrote at commit —
+    /// `MeshNetworkManager.recordSessionParticipant(displayName:…)` is last-write-wins by
+    /// fingerprint, which is exactly this case. Nil means nobody is listening and the name lives
+    /// only in the coordinator's state.
+    public var onPeerDisplayNameDisclosed: ((PeerIdentity) -> Void)?
+
+    /// The prekey bundle that rides every identity introduction and acknowledgement this
+    /// coordinator sends (bitchat adoptions Increment 3), set post-init by the owning manager.
+    ///
+    /// Read once per introduction, as it is built, and carried opaquely under the introduction's
+    /// frozen `heartDropPrekeyBundle` key (``ProximityPrekeyBundle``): this module reads no field of
+    /// it. Nil, or a provider that returns nil, means no bundle rides the introduction (Fernlet's
+    /// when away hearts are off).
+    public var introductionPrekeyBundleProvider: (() -> ProximityPrekeyBundle?)?
+
+    /// The receiver of the prekey bundle a peer's introduction carried, with the sender's FULL
+    /// signing key, set post-init by the owning manager.
+    ///
+    /// Fires ONLY after the introduction envelope verified and, on a sealed-introduction connection,
+    /// after its sender matched the friend the connection was opened for, so the bundle's provenance
+    /// is the envelope's signature; once per introduction or acknowledgement that carries one. Nil
+    /// means received bundles are ignored.
+    public var onIntroductionPrekeyBundle: ((_ senderSigningPublicKey: Data, _ bundle: ProximityPrekeyBundle) -> Void)?
+
+    private func makeIdentityRangingPayload() async throws -> Data {
+        let token: Data?
+        if ranging.isHardwareSupported {
+            token = try? await ranging.myDiscoveryToken()
+        } else {
+            token = nil
+        }
+        let payload = IdentityRangingPayload(
+            rangingMode: ranging.isHardwareSupported ? RangingMode.uwb.rawValue : RangingMode.rssi.rawValue,
+            discoveryToken: token,
+            capabilities: localCapabilities,
+            heartDropPrekeyBundle: introductionPrekeyBundleProvider?()
+        )
+        return try JSONEncoder().encode(payload)
+    }
+
+    private func sendIdentityAcknowledgement(to peer: PeerHandle) async {
+        do {
+            let sentAt = now()
+            let envelope = try ProximityIdentityEnvelope.signed(
+                identityService: identity,
+                senderDisplayName: disclosedDisplayName,
+                recipientFingerprint: peer.advertisedFingerprint,
+                payloadTypeToken: vocabulary.session.identityAcknowledge.payloadType,
+                // The host's frozen title — signed wire bytes, rendered in the receiver's Inspector.
+                // See `ProximityIdentityEnvelope.payloadSummary`.
+                payloadSummary: PayloadSummary(title: vocabulary.session.identityAcknowledge.summaryTitle),
+                payload: try await makeIdentityRangingPayload(),
+                createdAt: sentAt,
+                expiresAt: sentAt.addingTimeInterval(5 * 60)
+            )
+            let data = try encodeIdentityEnvelopeForTransport(envelope)
+            try await transport.send(data, to: peer, mode: .reliable)
+            recordEnvelope(envelope, direction: .sent, byteCount: data.count, signatureVerified: true)
+            inspector?.recordCoordinatorEvent("identity acknowledge sent")
+        } catch {
+            // A sealed-introduction connection must NEVER continue past a failed seal — a silent
+            // continue could otherwise proceed toward commit without the acknowledgement the peer
+            // needs. Fail-closed; ordinary radios keep the best-effort log-and-continue behavior.
+            if usesSealedIntroduction {
+                fail("sealed identity acknowledgement failed: \(error.localizedDescription)")
+            } else {
+                inspector?.recordCoordinatorEvent("identity acknowledge failed")
+            }
+        }
+    }
+
+    private func handleHeartbeat(
+        _ envelope: ProximityIdentityEnvelope,
+        plaintext: Data,
+        from peer: PeerHandle
+    ) async {
+        // SEALED-INTRODUCTION rule (Phase 4b): never respond to a heartbeat before the peer's
+        // identity has been verified via the sealed intro. `sendHeartbeatAcknowledgement` emits our
+        // signing/KA keys + display name in the CLEAR, and a connected tag-replay forger (who can't
+        // complete the sealed handshake) could otherwise ping us in `awaitingIdentityIntroduction`
+        // and read that ack — deanonymizing us. Once `pendingPeerIdentity`/`connectedPeerIdentity`
+        // is set, the peer is the real friend — resting on `sealedIntroductionSenderMatches`, which
+        // is what makes "only a valid sealed intro sets it" true: opening the wrapper alone proves
+        // nothing about the sender, so the inner envelope's KA key is bound to the expected friend.
+        if usesSealedIntroduction, pendingPeerIdentity == nil, connectedPeerIdentity == nil {
+            inspector?.recordCoordinatorEvent("dropped a heartbeat before sealed identity verification")
+            return
+        }
+        lastInboundHeartbeatAt = now()
+        inspector?.recordCoordinatorEvent("heartbeat received")
+
+        guard let heartbeat = try? JSONDecoder().decode(SessionHeartbeatPayload.self, from: plaintext) else { return }
+
+        // A peer heartbeat can only RATIFY a commit our own ranging already justifies; the manual
+        // gate is the user's tap alone. Runs after the decode so an undecodable heartbeat — bytes
+        // any connected peer can emit — can never commit anything.
+        await autoCommitOnPeerHeartbeatIfLocallyEvidenced()
+
+        switch heartbeat.kind {
+        case .ping:
+            await sendHeartbeatAcknowledgement(for: heartbeat.heartbeatID, to: peer)
+        case .ack:
+            guard let responseTo = heartbeat.responseTo,
+                  let sentAt = pendingHeartbeatSentAtByID.removeValue(forKey: responseTo) else { return }
+            let rttMs = max(0, now().timeIntervalSince(sentAt) * 1000)
+            inspector?.updateTransport(.roundTrip(milliseconds: rttMs))
+            inspector?.recordCoordinatorEvent(String(format: "heartbeat rtt %.0fms", rttMs))
+        }
+    }
+
+    /// Ratifies a pending friend commit when — and only when — THIS device's ranging saw the peer
+    /// close moments ago.
+    ///
+    /// Heartbeats are only sent after the remote peer commits, so an inbound one used to
+    /// auto-confirm our side outright. But a peer's message is not the local user's consent: a
+    /// connected peer could commit itself and drive us into `.connected` with no user action and
+    /// no proximity of any kind. So the `.awaitingManualCommit` arm is gone entirely — its only
+    /// exit is the on-screen confirm (`commitManualProximity`) — and the `.awaitingProximityCommit`
+    /// arm (the asymmetric-UWB robustness path, where one side's dwell fires and the other's does
+    /// not) survives only behind locally observed closeness.
+    ///
+    /// A missing-evidence heartbeat is DROPPED with an inspector event, never `fail()`ed: a
+    /// legitimate peer whose dwell fired a moment before ours would otherwise kill the session.
+    private func autoCommitOnPeerHeartbeatIfLocallyEvidenced() async {
+        guard currentMode == .friend else { return }
+        guard case .awaitingProximityCommit(let peerIdentity) = state else { return }
+        guard let closeAt = lastCloseRangingSampleAt,
+              now().timeIntervalSince(closeAt) <= Self.peerHeartbeatCommitEvidenceWindow else {
+            inspector?.recordCoordinatorEvent("dropped peer-heartbeat commit: no local proximity evidence")
+            return
+        }
+        inspector?.recordCoordinatorEvent("auto-commit triggered by peer heartbeat (locally evidenced)")
+        pendingPeerIdentity = peerIdentity
+        await confirmPeerIdentity()
+    }
+
+    private func sendHeartbeatAcknowledgement(for heartbeatID: UUID, to peer: PeerHandle) async {
+        do {
+            let now = now()
+            let payload = SessionHeartbeatPayload(
+                kind: .ack,
+                heartbeatID: UUID(),
+                sentAt: now,
+                responseTo: heartbeatID
+            )
+            let envelope = try ProximityIdentityEnvelope.signed(
+                identityService: identity,
+                senderDisplayName: disclosedDisplayName,
+                recipientFingerprint: peer.advertisedFingerprint,
+                payloadTypeToken: vocabulary.session.heartbeat.payloadType,
+                // The host's frozen title — signed wire bytes, rendered in the receiver's Inspector.
+                // See `ProximityIdentityEnvelope.payloadSummary`.
+                payloadSummary: PayloadSummary(title: vocabulary.session.heartbeat.replyTitle),
+                payload: try JSONEncoder().encode(payload),
+                createdAt: now,
+                expiresAt: now.addingTimeInterval(30)
+            )
+            let data = try JSONEncoder().encode(envelope)
+            try await transport.send(data, to: peer, mode: .bestEffort)
+            recordEnvelope(envelope, direction: .sent, byteCount: data.count, signatureVerified: true)
+            bytesSent += data.count
+            await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
+            inspector?.recordCoordinatorEvent("heartbeat ack sent")
+        } catch {
+            inspector?.recordCoordinatorEvent("heartbeat ack failed")
+        }
+    }
+
+    private func recordEnvelope(
+        _ envelope: ProximityIdentityEnvelope,
+        direction: ProximityInspectorEnvelope.Direction,
+        byteCount: Int,
+        signatureVerified: Bool?
+    ) {
+        let encrypted: Bool
+        switch envelope.payloadEncryption {
+        case .none:
+            encrypted = false
+        case .sealedTo:
+            encrypted = true
+        }
+        inspector?.recordEnvelope(ProximityInspectorEnvelope(
+            envelopeID: envelope.envelopeID,
+            direction: direction,
+            payloadType: envelope.payloadTypeToken,
+            payloadByteCount: byteCount,
+            timestamp: now(),
+            signatureVerified: signatureVerified,
+            encrypted: encrypted,
+            // This is THE seam where a sender-authored English string becomes text a (possibly
+            // different-locale) receiving user reads. It stays frozen English on purpose.
+            //
+            // HOW TO LOCALIZE THE INSPECTOR LATER, without touching the wire: both branches below
+            // already have `envelope.payloadTypeToken` in hand — a stable enum rawValue, the same on
+            // every device and in every language. Localize on the RECEIVING side by mapping that
+            // token to a `String(localized:)` label at render time (a `PayloadType` → label switch in
+            // the Inspector view), and keep `summary` as the raw fallback for tokens this build does
+            // not know (the host's typed view says so, Fernlet's `isUnknownPayloadType` — a newer
+            // peer's payload type has no local label).
+            // The sender must keep sending frozen English so signatures and cross-build audit rows
+            // stay comparable; nothing here should ever call `String(localized:)`.
+            summary: encrypted ? envelope.payloadTypeToken : envelope.payloadSummary.title
+        ))
+    }
+
+    private func updateInspectorPeer(identity: PeerIdentity? = nil, transportPeer: PeerHandle? = nil) {
+        // Option 1b: a withheld name reads as the fingerprint, never as an empty label. This is
+        // also the Lane C witness — the Inspector's peer line shows the fingerprint before the
+        // commit and the name after it, from one device's own log.
+        let identityName = identity.map { $0.isDisplayNameWithheld ? $0.fingerprint : $0.displayName }
+        let displayName = identityName ?? transportPeer?.displayHint ?? "Unknown"
+        let advertisedFingerprint = transportPeer?.advertisedFingerprint
+        let confirmedFingerprint = identity?.fingerprint
+        inspector?.updatePeer(ProximityInspectorPeer(
+            displayName: displayName,
+            advertisedFingerprint: advertisedFingerprint,
+            confirmedFingerprint: confirmedFingerprint,
+            signingPublicKey: identity?.signingPublicKey,
+            firstSeenAt: identity?.firstSeenAt ?? now(),
+            lastSeenAt: now()
+        ))
+    }
+
+    /// Reports a transport state change, stamped with this coordinator's clock: `connectedAt` when the
+    /// new state is `connected`, `disconnectedAt` when the channel closed or failed. The inspector
+    /// keeps a session's first connected stamp. With no inspector attached the clock is never read.
+    private func updateInspectorTransport(state: String, disconnected: Bool = false) {
+        inspector?.updateTransport(.stateChanged(
+            state: state,
+            connectedAt: state == "connected" ? now() : nil,
+            disconnectedAt: disconnected ? now() : nil
+        ))
+    }
+
+    private func updateInspectorRangingMode(_ mode: RangingMode) {
+        inspector?.updateRangingMode(mode)
+    }
+
+    /// SEALED-INTRODUCTION binding. ``IdentityService/open(_:from:)`` is ephemeral-static ECIES:
+    /// a successful open proves only that the sealer knew OUR public KA key, because the sender's
+    /// static key is a public HKDF `sharedInfo`/AAD input, NOT a key-agreement input. Anyone
+    /// holding our published KA key can therefore mint a wrapper that opens. The sender is
+    /// authenticated only by this equality — the inner envelope must be signed by the friend whose
+    /// KA key this coordinator was created for, and it must have arrived inside the wrapper.
+    ///
+    /// False means hostile: a wrapper that opens but carries a foreign identity has nothing
+    /// salvageable in it, so the caller fails the whole session (matching the sibling fail-closed
+    /// branches in `handleInbound` and `unwrapInboundEnvelopeData`).
+    private func sealedIntroductionSenderMatches(
+        _ envelope: ProximityIdentityEnvelope,
+        cameFromSealedWrapper: Bool
+    ) -> Bool {
+        guard usesSealedIntroduction else { return true }
+        guard cameFromSealedWrapper, let expected = sealedIntroductionPeerKey else { return false }
+        return envelope.senderKeyAgreementPublicKey == expected
+    }
+
+    private func handleIdentityEnvelope(
+        _ envelope: ProximityIdentityEnvelope,
+        plaintext: Data,
+        from peer: PeerHandle,
+        cameFromSealedWrapper: Bool
+    ) async throws {
+        let fingerprint = IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
+        if let advertised = peer.advertisedFingerprint,
+           !IdentityService.fingerprintsMatch(advertised, fingerprint) {
+            throw CoordinatorError.fingerprintMismatch
+        }
+        // Bind the INNER identity to the friend this sealed coordinator exists for. Placed at the
+        // top so it covers the acknowledge branch as well as the introduction branch, and so it
+        // runs before ranging starts and before any prekey bundle is ingested.
+        guard sealedIntroductionSenderMatches(envelope, cameFromSealedWrapper: cameFromSealedWrapper) else {
+            inspector?.recordCoordinatorEvent("sealed introduction sender key mismatch — failing")
+            fail("sealed introduction sender key mismatch")
+            return
+        }
+
+        let rangingPayload = try? JSONDecoder().decode(IdentityRangingPayload.self, from: plaintext)
+        await startRangingIfPossible(with: rangingPayload, from: peer)
+
+        // Option 1b: an identity built here is PRE-COMMIT by construction, so it carries no
+        // display name — deliberately ignoring whatever the envelope claimed. Reading the peer's
+        // field instead would make the guarantee depend on the PEER's build: an older Fernlet
+        // still interpolates its name into the introduction, and the person on this phone would
+        // see a name for someone they have not yet admitted. The name is adopted later, from the
+        // first post-commit envelope, by `adoptDisclosedDisplayName(from:)`.
+        let peerIdentity = PeerIdentity(
+            id: peer.id,
+            displayName: "",
+            signingPublicKey: envelope.senderSigningPublicKey,
+            keyAgreementPublicKey: envelope.senderKeyAgreementPublicKey,
+            fingerprint: fingerprint,
+            rangingMode: rangingMode,
+            firstSeenAt: now(),
+            capabilities: Self.clamped(rangingPayload?.capabilities, in: vocabulary.capabilities)
+        )
+        updateInspectorPeer(identity: peerIdentity, transportPeer: peer)
+
+        // Prekey gossip (Increment 3): the intro envelope verified above, so the bundle's
+        // provenance is established — hand it to the host's receiver keyed by the FULL signing key.
+        if let bundle = rangingPayload?.heartDropPrekeyBundle {
+            onIntroductionPrekeyBundle?(envelope.senderSigningPublicKey, bundle)
+        }
+
+        if envelope.payloadTypeToken == vocabulary.session.identityAcknowledge.payloadType {
+            if pendingPeerIdentity == nil && connectedPeerIdentity == nil {
+                pendingPeerIdentity = peerIdentity
+            }
+            inspector?.recordCoordinatorEvent("identity acknowledge received \(fingerprint)")
+            // Friend mode: if we sent the intro first and are still waiting, now gate on proximity
+            if currentMode == .friend, case .awaitingIdentityIntroduction = state {
+                transitionToProximityGate(peerIdentity: peerIdentity)
+            }
+            return
+        }
+
+        pendingPeerIdentity = peerIdentity
+        await sendIdentityAcknowledgement(to: peer)
+
+        if currentMode == .friend {
+            // Friend mode: identity verified — now wait for proximity dwell instead of auto-confirming
+            inspector?.recordCoordinatorEvent("identity verified \(fingerprint) — awaiting proximity commit")
+            transitionToProximityGate(peerIdentity: peerIdentity)
+        } else if trustPolicy?.isTrustedProximityPeer(signingPublicKey: peerIdentity.signingPublicKey) == true {
+            inspector?.recordCoordinatorEvent("trusted peer auto-confirmed \(fingerprint)")
+            await confirmPeerIdentity()
+        } else {
+            transition(to: .awaitingUserConfirmation(peer: peerIdentity))
+            inspector?.recordCoordinatorEvent("identity verified \(fingerprint)")
+        }
+    }
+
+    /// Upper bound on peer-advertised capability tokens kept from an intro (R3/R5): the friend
+    /// channel has no wire-size gate at this layer, and `PeerIdentity.supports(_:in:)` scans the list
+    /// linearly on every gate. Twice the host's known capability count leaves room for a newer build.
+    ///
+    /// - Parameter capabilities: The host's capability tokens (`family.vocabulary.capabilities`).
+    /// - Returns: How many of a peer's tokens are kept: twice `capabilities.known.count`.
+    static func maxAdvertisedCapabilities(in capabilities: ProximityNamespace.Capabilities) -> Int {
+        capabilities.known.count * 2
+    }
+    /// Longest capability token retained — no real token is anywhere near this.
+    static let maxCapabilityTokenLength = 32
+
+    /// The name an audit row records for an inbound envelope's sender: the name it disclosed, under
+    /// `namespace`'s peer-name policy, or its fingerprint when it withheld one (Option 1b). Never the
+    /// policy's floor for a withheld name, which would persist a name nobody chose and hide who the
+    /// row is about.
+    private static func auditName(of envelope: ProximityIdentityEnvelope, in namespace: ProximityNamespace) -> String {
+        envelope.disclosedSenderDisplayName(in: namespace) ?? IdentityService.fingerprint(of: envelope.senderSigningPublicKey)
+    }
+
+    /// Clamps a peer-supplied capability list at the boundary (count, by the host's `known`, and
+    /// per-token length), so a hostile intro cannot inflate a `PeerIdentity` that every later gate walks.
+    private static func clamped(
+        _ capabilities: [String]?, in host: ProximityNamespace.Capabilities
+    ) -> [String]? {
+        capabilities.map { tokens in
+            tokens.prefix(maxAdvertisedCapabilities(in: host)).map { String($0.prefix(maxCapabilityTokenLength)) }
+        }
+    }
+
+    private func transitionToProximityGate(peerIdentity: PeerIdentity) {
+        // Identity is verified — cancel the short connection-phase timeout and replace it with a
+        // generous proximity-gate timeout so the coordinator doesn't evict before the peer's
+        // first heartbeat (sent immediately on commit) has a chance to arrive.
+        timeoutTask?.cancel()
+        timeoutTask = Task { [weak self] in
+            // A thrown CancellationError IS the recovery: the gate timer was cancelled by identity
+            // confirmation, a fail, or the session ending — there is nothing left to time out.
+            do { try await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000) } catch { return }
+            guard let self else { return }
+            switch self.state {
+            case .idle, .connected, .transferring, .ended, .failed: break
+            default:
+                self.transition(to: .ended(reason: .timeout))
+                self.inspector?.recordCoordinatorEvent("ended: proximity gate timeout")
+                self.inspector?.endSession(endState: "timeout")
+            }
+        }
+        // Use rangingMode (negotiated with this specific peer) not just local hardware support.
+        // If the peer has no UWB token, startRangingIfPossible already set rangingMode to .rssi,
+        // so we fall back to manual commit even on a UWB-capable device.
+        if rangingMode == .uwb {
+            transition(to: .awaitingProximityCommit(peer: peerIdentity))
+        } else {
+            transition(to: .awaitingManualCommit(peer: peerIdentity))
+        }
+    }
+
+    private func startRangingIfPossible(with payload: IdentityRangingPayload?, from peer: PeerHandle) async {
+        guard !rangingStarted else { return }  // idempotent — NI session must not be restarted mid-session
+        guard ranging.isHardwareSupported else {
+            rangingMode = .rssi
+            updateInspectorRangingMode(.rssi)
+            inspector?.recordCoordinatorEvent("ranging fallback: rssi estimate unavailable")
+            return
+        }
+        guard payload?.rangingMode == RangingMode.uwb.rawValue,
+              let discoveryToken = payload?.discoveryToken else {
+            rangingMode = .rssi
+            updateInspectorRangingMode(.rssi)
+            inspector?.recordCoordinatorEvent("ranging fallback: peer token unavailable")
+            return
+        }
+
+        rangingStarted = true
+        do {
+            try await ranging.start(with: discoveryToken)
+            rangingMode = .uwb
+            updateInspectorRangingMode(.uwb)
+            inspector?.recordCoordinatorEvent("ranging token accepted from \(peer.displayHint)")
+        } catch {
+            rangingMode = .rssi
+            updateInspectorRangingMode(.rssi)
+            inspector?.recordError(domain: "Ranging", message: error.localizedDescription, recoverable: true)
+            inspector?.recordCoordinatorEvent("ranging fallback: \(error.localizedDescription)")
+        }
+    }
+
+    private func discoveryInfo(for role: Role, mode: Mode) -> [String: String] {
+        let advertisedRole: String
+        switch mode {
+        case .trainer:
+            advertisedRole = role == .advertiser ? "trainer" : "client"
+        case .friend:
+            advertisedRole = "peer"
+        }
+
+        // No "caps" entry: the old `"plan,live,delta"`/`"share"` string was stale discovery-info
+        // no reader ever parsed. Real capability negotiation is `IdentityRangingPayload
+        // .capabilities` (wire2 keys off it) — a future coach coordinator must pass a real
+        // `localCapabilities` array there (pattern: `MeshNetworkManager.localCapabilities()`),
+        // or wire2 silently degrades to legacy for the whole channel.
+        return [
+            "v": "1",
+            "role": advertisedRole,
+            "sid": sessionID,
+            "fp": identity.localFingerprint,
+            "name": String(displayName.prefix(32))
+        ]
+    }
+
+    private func transition(to newState: State) {
+        state = newState
+        inspector?.recordCoordinatorEvent("state: \(newState.debugLabel)")
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
+            kind: .stateTransition,
+            peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
+            peerDisplayName: connectedIdentity?.displayNameOrFingerprint ?? pendingPeerIdentity?.displayNameOrFingerprint ?? currentTransportPeer?.displayHint,
+            message: newState.debugLabel
+        ))
+    }
+
+    private func fail(_ reason: String) {
+        timeoutTask?.cancel()
+        heartbeatTask?.cancel()
+        lastKnownDistance = nil
+        lastCloseRangingSampleAt = nil
+        transition(to: .failed(reason: reason))
+        inspector?.recordCoordinatorEvent("failed: \(reason)")
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
+            kind: .error,
+            peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
+            peerDisplayName: connectedIdentity?.displayNameOrFingerprint ?? pendingPeerIdentity?.displayNameOrFingerprint ?? currentTransportPeer?.displayHint,
+            message: reason
+        ))
+        inspector?.endSession(endState: "failed")
+        guard teardownTask == nil else { return }   // R3: at most one teardown in flight
+        // The collaborators are captured STRONGLY on purpose. The `.failed` transition above wakes
+        // the owning manager's observation loop, whose stale sweep may drop this coordinator's last
+        // reference in the same main-actor turn — before this task runs. Reaching them through
+        // `self?` then skipped every stop: the Live Activity anchor stayed live system-side for the
+        // OS maximum lifetime, ranging was never invalidated. All three are `let`s that never
+        // reference the coordinator, so this cannot form a cycle; they live only until the
+        // (fast, idempotent) teardown completes.
+        let ranging = self.ranging
+        let transport = self.transport
+        let anchor = self.foregroundAnchor
+        teardownTask = Task { [weak self] in
+            await ranging.stop()
+            await transport.disconnect()
+            await anchor.stop()
+            self?.teardownTask = nil
+        }
+    }
+
+    private func end(_ reason: EndReason) async {
+        timeoutTask?.cancel()
+        heartbeatTask?.cancel()
+        lastKnownDistance = nil
+        lastCloseRangingSampleAt = nil
+        await ranging.stop()
+        await transport.disconnect()
+        await foregroundAnchor.stop()
+
+        trustPolicy?.recordSessionAudit(ProximitySessionAudit(
+            kind: .sessionEnded,
+            peerFingerprint: connectedIdentity?.fingerprint ?? pendingPeerIdentity?.fingerprint ?? currentTransportPeer?.advertisedFingerprint,
+            peerDisplayName: connectedIdentity?.displayNameOrFingerprint ?? pendingPeerIdentity?.displayNameOrFingerprint ?? currentTransportPeer?.displayHint,
+            message: "\(reason)"
+        ))
+
+        if autoReconnect && reason == .transportLost {
+            inspector?.recordCoordinatorEvent("transport lost, reconnecting")
+            inspector?.endSession(endState: "reconnecting")
+            transition(to: .discovering)
+            reconnectTask = Task { [weak self] in
+                // Cancelled (by `cancel()`) ⇒ no reconnect, which is exactly the intended recovery.
+                do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
+                guard let self, self.autoReconnect,
+                      case .discovering = self.state else { return }
+                await self.beginFriendJoin()
+            }
+            return
+        }
+
+        transition(to: .ended(reason: reason))
+        inspector?.endSession(endState: "ended.\(reason)")
+    }
+
+    private func startHeartbeatLoop() {
+        heartbeatTask?.cancel()
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let interval = await MainActor.run { self?.heartbeatInterval ?? 0 }
+                guard interval > 0 else {
+                    // Cancellation ends the loop here rather than spinning one more iteration.
+                    do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                    continue
+                }
+                let nanoseconds = UInt64(interval * 1_000_000_000)
+                do { try await Task.sleep(nanoseconds: nanoseconds) } catch { return }
+                await self?.heartbeatTick()
+            }
+        }
+    }
+
+    public var heartbeatInterval: TimeInterval {
+        switch state {
+        case .idle, .ended, .failed:
+            return 0
+        case .transferring:
+            return 3
+        case .connected:
+            if let lastTransferCompletedAt,
+               now().timeIntervalSince(lastTransferCompletedAt) < 30 {
+                return 10
+            }
+            return 30
+        default:
+            return 0
+        }
+    }
+
+    public func heartbeatTick() async {
+        let interval = heartbeatInterval
+        guard interval > 0 else { return }
+        if case .connected = state, let lastInboundHeartbeatAt,
+           now().timeIntervalSince(lastInboundHeartbeatAt) > interval * 3 {
+            await end(.transportLost)
+            return
+        }
+        guard let peer = currentTransportPeer else { return }
+        do {
+            let sentAt = now()
+            let heartbeatID = UUID()
+            let payload = SessionHeartbeatPayload(
+                kind: .ping,
+                heartbeatID: heartbeatID,
+                sentAt: sentAt,
+                responseTo: nil
+            )
+            let envelope = try ProximityIdentityEnvelope.signed(
+                identityService: identity,
+                senderDisplayName: disclosedDisplayName,
+                recipientFingerprint: peer.advertisedFingerprint,
+                payloadTypeToken: vocabulary.session.heartbeat.payloadType,
+                // The host's frozen title — signed wire bytes, rendered in the receiver's Inspector.
+                // See `ProximityIdentityEnvelope.payloadSummary`.
+                payloadSummary: PayloadSummary(title: vocabulary.session.heartbeat.pingTitle),
+                payload: try JSONEncoder().encode(payload),
+                createdAt: sentAt,
+                expiresAt: sentAt.addingTimeInterval(interval * 2)
+            )
+            let data = try JSONEncoder().encode(envelope)
+            try await transport.send(data, to: peer, mode: .bestEffort)
+            pendingHeartbeatSentAtByID[heartbeatID] = sentAt
+            let pruneThreshold = sentAt.addingTimeInterval(-(interval * 5))
+            pendingHeartbeatSentAtByID = pendingHeartbeatSentAtByID.filter { $0.value > pruneThreshold }
+            heartbeatSendFailures = 0
+            recordEnvelope(envelope, direction: .sent, byteCount: data.count, signatureVerified: true)
+            bytesSent += data.count
+            await foregroundAnchor.update(bytesSent: bytesSent, bytesReceived: bytesReceived)
+            inspector?.recordCoordinatorEvent("heartbeat sent")
+        } catch {
+            heartbeatSendFailures += 1
+            inspector?.recordCoordinatorEvent("heartbeat send failed (\(heartbeatSendFailures))")
+            if heartbeatSendFailures >= 3 {
+                await end(.transportLost)
+            }
+        }
+    }
+
+    private func armTimeoutIfNeeded() {
+        timeoutTask?.cancel()
+        guard timeoutSeconds > 0 else { return }
+        let timeoutSeconds = self.timeoutSeconds
+        // Task inherits @MainActor from the calling context — no MainActor.run hop needed.
+        timeoutTask = Task { [weak self] in
+            // A cancelled timeout is the recovery — the phase it guarded already advanced.
+            do { try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000)) } catch { return }
+            guard let self else { return }
+            switch self.state {
+            case .idle, .connected, .transferring, .ended, .failed:
+                break
+            default:
+                self.transition(to: .ended(reason: .timeout))
+                self.trustPolicy?.recordSessionAudit(ProximitySessionAudit(
+                    kind: .sessionEnded,
+                    peerFingerprint: self.connectedIdentity?.fingerprint ?? self.pendingPeerIdentity?.fingerprint ?? self.currentTransportPeer?.advertisedFingerprint,
+                    peerDisplayName: self.connectedIdentity?.displayNameOrFingerprint ?? self.pendingPeerIdentity?.displayNameOrFingerprint ?? self.currentTransportPeer?.displayHint,
+                    message: "timeout"
+                ))
+                self.inspector?.recordCoordinatorEvent("ended: timeout")
+                self.inspector?.endSession(endState: "timeout")
+            }
+        }
+    }
+}
+
+extension ProximityCoordinator {
+    /// The coordinator's observable handshake/session state machine.
+    ///
+    /// Managers key their slot/connection bookkeeping off transitions: `awaitingManualCommit` /
+    /// `awaitingProximityCommit` are the commit gates, `connected` carries the verified
+    /// ``PeerIdentity``, and `.ended`/`.failed` drive eviction sweeps.
+    public enum State: Equatable {
+        case idle
+        case starting
+        case discovering
+        case peerInRange(peer: PeerHandle, distance: RangingDistance)
+        case pendingInvite(PeerPendingInvite)
+        case awaitingTapConfirmation(peer: PeerHandle)
+        case awaitingIdentityIntroduction(peer: PeerHandle)
+        case awaitingProximityCommit(peer: PeerIdentity)   // friend mode, UWB: waiting for 15 cm dwell
+        case awaitingManualCommit(peer: PeerIdentity)      // friend mode, no UWB: waiting for on-screen confirm
+        case awaitingUserConfirmation(peer: PeerIdentity)
+        case connected(peer: PeerIdentity)
+        case transferring(peer: PeerIdentity, progress: Double)
+        case ended(reason: EndReason)
+        case failed(reason: String)
+
+        public var debugLabel: String {
+            switch self {
+            case .idle: return "idle"
+            case .starting: return "starting"
+            case .discovering: return "discovering"
+            case .peerInRange: return "peerInRange"
+            case .pendingInvite: return "pendingInvite"
+            case .awaitingTapConfirmation: return "awaitingTapConfirmation"
+            case .awaitingIdentityIntroduction: return "awaitingIdentityIntroduction"
+            case .awaitingProximityCommit: return "awaitingProximityCommit"
+            case .awaitingManualCommit: return "awaitingManualCommit"
+            case .awaitingUserConfirmation: return "awaitingUserConfirmation"
+            case .connected: return "connected"
+            case .transferring: return "transferring"
+            case .ended(let reason): return "ended(\(reason))"
+            case .failed(let reason): return "failed(\(reason))"
+            }
+        }
+    }
+
+    /// The handshake-verified identity of a session peer: both public keys, the derived
+    /// fingerprint, the negotiated ranging mode, and the advertised capabilities.
+    ///
+    /// Built only from a signature-verified identity envelope — its key fields are the ONLY
+    /// legitimate inputs for sealing, key wrapping, and trust decisions (never descriptor gossip
+    /// or wire claims). `displayName` remains peer-supplied and must be sanitized before
+    /// persistence or display.
+    public struct PeerIdentity: Equatable, Identifiable {
+        public let id: UUID
+        public let displayName: String
+        public let signingPublicKey: Data
+        public let keyAgreementPublicKey: Data
+        public let fingerprint: String
+        public let rangingMode: RangingMode
+        public let firstSeenAt: Date
+        /// Raw capability tokens the peer advertised in its identity intro/ack (Phase 1).
+        /// `nil` = a legacy peer whose intro predates capability advertisement.
+        public let capabilities: [String]?
+
+        /// Whether this peer has disclosed no display name yet — Option 1b's pre-commit state.
+        ///
+        /// An empty ``displayName`` means withheld and nothing else: every other ingest runs
+        /// through `ProximityDisplayName.peerDisplayName(_:in:)`, whose floor is the host's and never
+        /// empty in a sound namespace, so a peer whose name sanitizes away to nothing still arrives
+        /// non-empty. A surface that shows a name must read this first and show ``fingerprint``
+        /// instead — a fingerprint two people can compare out loud is the honest thing to show for
+        /// someone nobody has admitted yet.
+        public var isDisplayNameWithheld: Bool { displayName.isEmpty }
+
+        /// What to show for this peer: the disclosed name, or the ``fingerprint`` while it is
+        /// withheld. Every render and every persist site reads this rather than ``displayName``,
+        /// so a pre-commit peer is identified by something two people can compare out loud and
+        /// never by an empty label.
+        public var displayNameOrFingerprint: String {
+            isDisplayNameWithheld ? fingerprint : displayName
+        }
+
+        public init(
+            id: UUID,
+            displayName: String,
+            signingPublicKey: Data,
+            keyAgreementPublicKey: Data,
+            fingerprint: String,
+            rangingMode: RangingMode,
+            firstSeenAt: Date,
+            capabilities: [String]? = nil
+        ) {
+            self.id = id
+            self.displayName = displayName
+            self.signingPublicKey = signingPublicKey
+            self.keyAgreementPublicKey = keyAgreementPublicKey
+            self.fingerprint = fingerprint
+            self.rangingMode = rangingMode
+            self.firstSeenAt = firstSeenAt
+            self.capabilities = capabilities
+        }
+
+        /// Phase 1 capability gate: senders skip payload kinds the peer can't use. Whether the peer
+        /// advertised `token`; for a legacy peer (`nil` capabilities, an intro that predates
+        /// capability advertisement), whether the host takes every such peer to support it
+        /// (`assumedForLegacyPeers`: photos alone for Fernlet, whose pre-capability friend radios
+        /// could only exchange photos).
+        ///
+        /// - Parameters:
+        ///   - token: A capability token.
+        ///   - host: The host's capability tokens (`family.vocabulary.capabilities`).
+        public func supports(_ token: String, in host: ProximityNamespace.Capabilities) -> Bool {
+            guard let capabilities else { return host.assumedForLegacyPeers.contains(token) }
+            return capabilities.contains(token)
+        }
+    }
+
+    public typealias RangingMode = ProximityRangingMode
+
+    /// Why a session reached `.ended`.
+    ///
+    /// Managers branch on the reason during their eviction sweeps; `transportLost` additionally
+    /// triggers the friend-mode auto-reconnect path when it is armed.
+    public enum EndReason: Equatable {
+        case userCancelled
+        case peerCancelled
+        case timeout
+        case verificationFailed
+        case transportLost
+        case completedSuccessfully
+    }
+
+    /// Coordinator-level failures thrown from the send path and the identity handshake.
+    ///
+    /// Callers of ``ProximityCoordinator/send(_:)`` see `notConnected`; the other cases fail the
+    /// session internally.
+    public enum CoordinatorError: Error, Equatable {
+        case notConnected
+        case fingerprintMismatch
+        /// A sealed-introduction connection was asked to emit an identity envelope but the expected
+        /// friend KA key is missing/empty — fail-closed, never send the intro unsealed.
+        case sealedIntroductionKeyMissing
+    }
+}

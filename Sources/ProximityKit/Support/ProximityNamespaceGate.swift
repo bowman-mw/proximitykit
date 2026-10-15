@@ -1,0 +1,170 @@
+// ProximityNamespaceGate.swift
+// ProximityKit/Support
+//
+// ProximityKit plan step A0.3 (Docs/Plan-FernletCoach-ProximityKit-2026-10-01.md §4 A0.3; owner
+// decision 5 on PR #1): ProximityKit refuses an unsound host namespace at run time, failing closed with
+// a named audit event, and a manager acts under one namespace only. A namespace is judged once, when
+// the host builds it (`ProximityNamespace.soundness`); this is where ProximityKit acts on that verdict.
+// The identity checks it before it provisions and before it wraps a group key, each radio before it
+// advertises, and each manager compares the namespace of an identity it is handed with its own.
+
+// MARK: - ProximityNamespaceGate
+
+/// ProximityKit's run-time refusal of an unsound host namespace, and its check that a manager acts
+/// under one namespace only.
+///
+/// **Where an unsound namespace is refused.** At three doors, each before it does anything under the
+/// namespace: ``IdentityService/ensureProvisioned()`` first thing (`identity.namespace.unsound`, at
+/// `provision`), so no device-identity row is read or written and the identity holds no signing or
+/// key-agreement key, without which it signs nothing, seals nothing to a peer and opens nothing a
+/// peer sealed; ``IdentityService/encryptGroupKey(_:for:)`` first thing (the same event, at
+/// `groupKeyWrap`), because the wrap needs no provisioned key; and each radio's `start`
+/// (`mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound`, `recipe.quic.namespaceUnsound`, at
+/// `start`), before it mints a name or a certificate or brings a listener up, so nothing reaches a peer.
+/// Each door throws ``ProximityNamespaceError`` carrying every violation, exactly as
+/// ``ProximityNamespace/soundness`` records them, and writes nothing else.
+///
+/// **Nothing else reads the verdict.** An identity's provisioning participant
+/// (``IdentityProvisioningParticipant``) is called only from inside
+/// ``IdentityService/ensureProvisioned()``, after its refusal, and from ``IdentityService/wipe()``, so
+/// under an unsound namespace no participant is told of a mint. Nor do the paths that use no identity
+/// key read it: the mesh manager's launch restore opens, and may re-seal, the host's sealed session
+/// context under its storage scope, and the presence manager mints its posture before its radio's door
+/// refuses.
+///
+/// **It reads the stored verdict, nothing else.** No rule runs again here: the namespace judged itself
+/// once, when it was built, and the identity and the radios keep that verdict beside the values they
+/// read off it.
+///
+/// **The audit line names the refusal, never a value.** Its context holds `at` (the door),
+/// `violations` (how many rules broke) and `first` (the first violation's case name, such as
+/// `malformedLabel`): no field path, label, token or name, so a host's log says why without repeating
+/// what.
+///
+/// **One namespace per manager.** The mesh and presence managers and the pair session compare the
+/// namespace of the identity they hold with their own: one they are handed (their `identity:` seam, which no
+/// shipping caller uses) or, handed none, the one their host's ``ProximityHost/makeProximityIdentity()``
+/// builds.
+/// On a mismatch a manager still constructs, as it does when provisioning fails, but audits
+/// `<area>.identity.namespaceMismatch` (at `construction`) and refuses with the same event (at
+/// `start`), first thing, every start of its radio and, for the mesh manager, both foundings of a mesh
+/// a caller can begin without a radio (``MeshNetworkManager/startNewMesh(name:)`` and its DEBUG
+/// harness's founder ledger), which would otherwise sign the founder's admission and key advertisement
+/// and seal the session context into the host's storage; its third founding, the promotion at a first
+/// commit, needs a peer the radio linked. So that identity founds no mesh and links no peer.
+///
+/// `nonisolated` against the module's `defaultIsolation(MainActor.self)`: pure reads of `Sendable`
+/// values and one synchronous audit line, called from the main-actor identity, radios and managers.
+///
+/// Public, with its two manager doors, ``checkIdentity(_:isOf:event:)`` and
+/// ``mayStart(identityIsOfNamespace:event:)``, as settled mechanism: "a manager acts under one
+/// namespace", so a host's manager built over this module's identity checks it the way this
+/// module's managers do, with the same audit lines (`at`: `construction`, `start`) written through
+/// this module's sink (``ProximityAudit``). The unsound-namespace refusal, its sites and the
+/// violation names stay internal: only this module's identity and radios refuse a namespace.
+public nonisolated enum ProximityNamespaceGate {
+
+    /// Where a check stands, as its audit line's `at` value spells it: frozen tokens, never display copy.
+    nonisolated enum Site: String, Sendable {
+        /// `IdentityService.ensureProvisioned()`, before any keychain row is read or written.
+        case provision
+        /// `IdentityService.encryptGroupKey(_:for:)`, before a group key is wrapped.
+        case groupKeyWrap
+        /// A radio's `start`, a manager's start of its radio, or the mesh manager's founding of a mesh,
+        /// before anything is signed or advertised.
+        case start
+        /// A manager's initializer, where it compares its identity's namespace with its own.
+        case construction
+    }
+
+    /// Refuses an unsound namespace: when `soundness` is unsound, writes `event` and throws every
+    /// violation; when it is sound, returns and writes nothing.
+    ///
+    /// - Parameters:
+    ///   - soundness: The verdict the caller keeps for its namespace, ``ProximityNamespace/soundness``.
+    ///   - event: The caller's audit event: a frozen token, never display copy.
+    ///   - site: The door, written as the line's `at`.
+    /// - Throws: ``ProximityNamespaceError`` carrying every violation, in the order the rules ran.
+    static func refuseUnsound(
+        _ soundness: ProximityNamespace.Soundness, event: String, at site: Site
+    ) throws(ProximityNamespaceError) {
+        guard case .unsound(let violations) = soundness else { return }
+        ProximityAudit.log(event, context: [
+            "at": site.rawValue,
+            "violations": String(violations.count),
+            "first": violations.first.map(Self.caseName(of:)) ?? "none"
+        ])
+        throw ProximityNamespaceError(violations: violations)
+    }
+
+    /// Whether a manager's `identity` is of the manager's `namespace`, the whole namespace compared:
+    /// an identity of another family signs under other labels, and one of another installation keeps
+    /// its rows under another keychain service.
+    ///
+    /// Reads only the two values and refuses nothing itself: on a mismatch it writes `event` once,
+    /// with `at` = `construction` and no other context, and answers `false`, which the caller keeps.
+    ///
+    /// - Parameters:
+    ///   - identity: The identity the manager was handed.
+    ///   - namespace: The manager's namespace, read from its host.
+    ///   - event: The manager's mismatch event, written at `construction` when the two differ: a
+    ///     frozen token, never display copy.
+    /// - Returns: `true` when the identity was built from `namespace`; otherwise `false`, which the
+    ///   manager keeps and ``mayStart(identityIsOfNamespace:event:)`` reads at every start or founding.
+    public static func checkIdentity(_ identity: IdentityService, isOf namespace: ProximityNamespace, event: String) -> Bool {
+        guard identity.namespace == namespace else {
+            ProximityAudit.log(event, context: ["at": Site.construction.rawValue])
+            return false
+        }
+        return true
+    }
+
+    /// Whether a manager may start its radio, or the mesh manager found a mesh: only when its identity
+    /// is of its namespace.
+    ///
+    /// Called first thing at every start, before anything is signed, sealed or advertised; a refusal
+    /// writes `event` with `at` = `start` and no other context, every time it refuses.
+    ///
+    /// - Parameters:
+    ///   - identityIsOfNamespace: What ``checkIdentity(_:isOf:event:)`` answered at construction.
+    ///   - event: The manager's mismatch event, written at `start` on every refused start or founding:
+    ///     a frozen token, never display copy.
+    /// - Returns: `true` to go ahead; `false`, after the audit line, to sign and advertise nothing.
+    public static func mayStart(identityIsOfNamespace: Bool, event: String) -> Bool {
+        guard identityIsOfNamespace else {
+            ProximityAudit.log(event, context: ["at": Site.start.rawValue])
+            return false
+        }
+        return true
+    }
+
+    /// A violation's case name, without the fields it names: what an audit line may carry. Exhaustive,
+    /// so a rule added to ``ProximityNamespace/Violation`` is named here before it can be audited.
+    ///
+    /// - Parameter violation: A broken soundness rule.
+    /// - Returns: Its case name, a frozen token.
+    static func caseName(of violation: ProximityNamespace.Violation) -> String {
+        switch violation {
+        case .malformedLabel: return "malformedLabel"
+        case .duplicateLabel: return "duplicateLabel"
+        case .labelIsPrefix: return "labelIsPrefix"
+        case .malformedServiceType: return "malformedServiceType"
+        case .malformedALPN: return "malformedALPN"
+        case .duplicateRadioValue: return "duplicateRadioValue"
+        case .malformedHeartbeat: return "malformedHeartbeat"
+        case .malformedURLScheme: return "malformedURLScheme"
+        case .malformedKeychainName: return "malformedKeychainName"
+        case .duplicateKeychainName: return "duplicateKeychainName"
+        case .malformedPathComponent: return "malformedPathComponent"
+        case .duplicateFileName: return "duplicateFileName"
+        case .emptyLogSubsystem: return "emptyLogSubsystem"
+        case .malformedToken: return "malformedToken"
+        case .duplicateToken: return "duplicateToken"
+        case .unknownToken: return "unknownToken"
+        case .malformedSummaryTitle: return "malformedSummaryTitle"
+        case .malformedInstanceNamePrefix: return "malformedInstanceNamePrefix"
+        case .malformedCommonName: return "malformedCommonName"
+        case .malformedPeerNames: return "malformedPeerNames"
+        }
+    }
+}

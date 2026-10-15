@@ -1,0 +1,338 @@
+// ProximityIdentityEnvelope.swift
+// ProximityKit/Wire
+//
+// Wire envelope for all peer-to-peer transfers between devices.
+// Every envelope is Ed25519-signed over a deterministic canonical JSON encoding.
+
+import Foundation
+
+// MARK: - Envelope
+
+// `nonisolated` + `Sendable` (WI-9): ProximityKit sets `.defaultIsolation(MainActor.self)`, which
+// would otherwise make this wire value type — and its synthesized `Codable` conformance —
+// MainActor-isolated. A MainActor-isolated `init(from:)`/`encode(to:)` can only satisfy the
+// `nonisolated` Decodable/Encodable requirements under the `.v5` language-mode escape hatch; under
+// Swift 6 it would forbid decoding these untrusted transport bytes — MCSession's when this was
+// written, the QUIC radio's now — off the main actor. Marking the
+// type `nonisolated, Sendable` (matching the wire types it carries — PayloadEncryption/PayloadSummary)
+// makes decode + signature verification safe from any isolation domain. The two members that touch
+// the `@MainActor` IdentityService/ReplayCache (`verify`, `signed`) stay `@MainActor` explicitly.
+/// The signed wire envelope EVERY peer-to-peer transfer between devices travels in:
+/// sender keys + display name, an optional recipient fingerprint, the (possibly sealed) payload,
+/// and an Ed25519 signature over deterministic canonical bytes.
+///
+/// Minted only via ``signed(identityService:envelopeID:senderDisplayName:recipientFingerprint:payloadTypeToken:payloadEncryption:payloadSummary:payload:createdAt:expiresAt:)``
+/// (a token the host's vocabulary names; a host's typed view of its own payload types, such as
+/// Fernlet's in FernletConnections, signs through it), and consumed only via
+/// ``verify(identityService:replayCache:sealedPayloadFormat:)``, which enforces schema version,
+/// expiry, signature, recipient match, mandatory sealing for the tokens the host's payload rules
+/// name, and replay protection — callers never trust a field before `verify` returns.
+/// The canonical signing bytes are version-gated (legacy v1 JSON vs the v2 cross-platform binary
+/// serializer in `CanonicalSignatureSerializer`). `payloadTypeToken` keeps the raw wire token so
+/// an envelope from a NEWER build still decodes, re-encodes byte-identically, and verifies — a
+/// token outside the host's `payloads.known` is parked and never dispatched, fail-closed. Value type,
+/// `nonisolated`/`Sendable`; only `verify`/`signed` touch main-actor state.
+public nonisolated struct ProximityIdentityEnvelope: Codable, Equatable, Sendable {
+    public let schemaVersion: Int                 // 1
+    public let envelopeID: UUID                   // for replay protection + Inspector log correlation
+    public let senderSigningPublicKey: Data       // Ed25519 raw, 32 B
+    public let senderKeyAgreementPublicKey: Data  // X25519 raw, 32 B
+    public let senderDisplayName: String
+    public let recipientFingerprint: String?      // 16-char SHA-256 prefix; nil = broadcast
+    /// The raw payload-type token exactly as it appears on the wire (the `payloadType` JSON key —
+    /// see `CodingKeys`). Stored as a string, not a host's payload-type enum, so an envelope minted
+    /// by a NEWER build — a token this build has no case for — still decodes, re-encodes
+    /// byte-identically, and signature-verifies (both canonical forms sign the raw token). This is
+    /// the EnumDecodeCompat freeze/park pattern adapted to the wire: a token outside the verifying
+    /// identity's namespace's `payloads.known` is parked by `verify` and never dispatched to payload
+    /// handlers. A host reads it through a typed view of its own (Fernlet's `payloadType` and
+    /// `isUnknownPayloadType` are FernletConnections').
+    public let payloadTypeToken: String
+    public let payloadEncryption: PayloadEncryption
+    /// The sender-authored disclosure summary. **DO NOT LOCALIZE — this is a wire token, not UI copy.**
+    ///
+    /// `PayloadSummary.title` looks exactly like a display string ("Recipe share", "Session ended",
+    /// "Heartbeat"), and it is one — but on the RECEIVER's screen, not the sender's. Two independent
+    /// reasons it is frozen English:
+    ///
+    /// 1. **It is inside the signature.** `CanonicalSignatureSerializer.appendCanonical(_:_:)` writes
+    ///    `summary.title` (and `subtitle`, and every `extraDetails` key/value) into the canonical
+    ///    signing bytes. Localizing the title changes those bytes, so the same logical envelope signs
+    ///    differently per device locale. `verify` re-derives the bytes from the DECODED envelope, so
+    ///    an es-MX sender and an en-US receiver would still agree today — but any future
+    ///    normalization, cross-stack port (the planned Kotlin serializer), or re-sign-on-relay turns
+    ///    a locale difference into a `signatureInvalid` that nobody can reproduce in English.
+    /// 2. **The sender's locale would leak onto the receiver's phone.** `ProximityCoordinator`'s
+    ///    `recordEnvelope` feeds this exact title into the Connection Inspector log the RECEIVING
+    ///    user reads. A localized sender would put Spanish rows in an English user's audit trail —
+    ///    the opposite of what localizing was supposed to buy.
+    ///
+    /// A localized inspector is still possible later, and the mechanism is already on the wire:
+    /// render `payloadTypeToken` through a receiver-side lookup table instead of showing this string.
+    /// See the note at `ProximityCoordinator.recordEnvelope`.
+    public let payloadSummary: PayloadSummary
+    public let payload: Data
+    public let createdAt: Date
+    public let expiresAt: Date?
+    public var signature: Data                     // Ed25519 over canonical JSON (this field is zeroed during signing)
+
+    /// Wire-compatibility mapping: `payloadTypeToken` occupies the original `payloadType` key.
+    ///
+    /// A known type's token IS its rawValue, so the JSON emitted for every pre-existing envelope
+    /// is byte-identical to the previous `PayloadType`-typed encoding (and the legacy v1 canonical
+    /// bytes, which re-encode the envelope, are unchanged too).
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case envelopeID
+        case senderSigningPublicKey
+        case senderKeyAgreementPublicKey
+        case senderDisplayName
+        case recipientFingerprint
+        case payloadTypeToken = "payloadType"
+        case payloadEncryption
+        case payloadSummary
+        case payload
+        case createdAt
+        case expiresAt
+        case signature
+    }
+
+    /// The envelope's initializer, field by field, under a raw payload token: what
+    /// ``signed(identityService:envelopeID:senderDisplayName:recipientFingerprint:payloadTypeToken:payloadEncryption:payloadSummary:payload:createdAt:expiresAt:)``
+    /// mints through (it signs a token the host's vocabulary names, such as the coordinator's session
+    /// messages), what a host's typed view delegates to, and the escape hatch for re-signing/tamper
+    /// fixtures and tests that need an envelope whose token the verifier's vocabulary doesn't know.
+    public init(
+        schemaVersion: Int,
+        envelopeID: UUID,
+        senderSigningPublicKey: Data,
+        senderKeyAgreementPublicKey: Data,
+        senderDisplayName: String,
+        recipientFingerprint: String?,
+        payloadTypeToken: String,
+        payloadEncryption: PayloadEncryption,
+        payloadSummary: PayloadSummary,
+        payload: Data,
+        createdAt: Date,
+        expiresAt: Date?,
+        signature: Data
+    ) {
+        self.schemaVersion = schemaVersion
+        self.envelopeID = envelopeID
+        self.senderSigningPublicKey = senderSigningPublicKey
+        self.senderKeyAgreementPublicKey = senderKeyAgreementPublicKey
+        self.senderDisplayName = senderDisplayName
+        self.recipientFingerprint = recipientFingerprint
+        self.payloadTypeToken = payloadTypeToken
+        self.payloadEncryption = payloadEncryption
+        self.payloadSummary = payloadSummary
+        self.payload = payload
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+        self.signature = signature
+    }
+
+    /// `senderDisplayName` coerced for display or persistence under the host's peer-name policy:
+    /// control/zero-width/bidi scalars out, whitespace collapsed, capped at the policy's cap (24
+    /// characters for Fernlet), and the policy's floor when nothing displayable is left.
+    ///
+    /// The RAW field stays untouched because it is SIGNATURE-COVERED — `verify` recomputes the
+    /// canonical bytes from the decoded fields, so sanitizing in `init(from:)` or before
+    /// `canonicalBytes` would invalidate every signature over a name that changes under
+    /// sanitisation. Every render and every persist site must read THIS instead. A function rather
+    /// than a property: a decoded envelope carries no namespace, so the reader hands it its own.
+    ///
+    /// - Parameter namespace: The reader's namespace, whose `installation.peerNames` gives the cap
+    ///   and the floor.
+    /// - Returns: The sanitized name, or the floor.
+    public func sanitizedSenderDisplayName(in namespace: ProximityNamespace) -> String {
+        ProximityDisplayName.peerDisplayName(senderDisplayName, in: namespace)
+    }
+
+    /// The sender's display name **if it disclosed one**, and `nil` when it deliberately did not.
+    ///
+    /// Stranger-admission Option 1b: a sender withholds its name until it has committed, and an
+    /// empty `senderDisplayName` is how it says so on the wire — no new field and no shape change,
+    /// so every existing golden verifies unchanged.
+    ///
+    /// **An older build is affected, and that is a known cost of the owner's call.** It reads the
+    /// name from the introduction only, has no adoption path, and floors the empty field at "A
+    /// friend" — so it shows a new peer as "A friend" for the whole session, and a pair that keeps
+    /// each other writes "A friend" into its roster and trust vault. The reverse is fine: this build
+    /// ignores an older peer's introduction name and adopts it from the first post-commit frame.
+    /// No install outside the owner's own devices exists (2026-09-22).
+    /// ``sanitizedSenderDisplayName(in:)`` cannot express this: its floor ("A friend" for Fernlet)
+    /// turns an empty name into a name, indistinguishable from a peer whose name sanitized away to
+    /// nothing. Read THIS wherever the difference between "withheld" and "blank" decides what a
+    /// person is shown.
+    ///
+    /// - Parameter namespace: The reader's namespace, as ``sanitizedSenderDisplayName(in:)`` takes it.
+    /// - Returns: The sanitized name (or the floor), or `nil` when the field is empty or blank.
+    public func disclosedSenderDisplayName(in namespace: ProximityNamespace) -> String? {
+        guard !senderDisplayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return sanitizedSenderDisplayName(in: namespace)
+    }
+}
+
+// MARK: - Schema versions
+//
+// The canonical signing bytes are produced by `canonicalBytes(for:)` in CanonicalSignatureSerializer.swift.
+// WI-6 replaced the cross-platform-fragile `JSONEncoder(.sortedKeys)` encoder with a deterministic
+// binary serializer and bumped the schema version. The transition is version-gated:
+//   * `signed` always mints `currentSchemaVersion` (v2) using the new serializer.
+//   * `verify` accepts BOTH v1 (legacy `.iso8601`/`.sortedKeys` bytes) and v2 (new serializer),
+//     so a not-yet-updated in-field Apple peer is never cut off.
+
+extension ProximityIdentityEnvelope {
+    /// Schema version stamped onto newly-signed envelopes (new cross-platform canonical serializer).
+    public static let currentSchemaVersion = 2
+    /// The pre-WI-6 schema version, still accepted on verify for in-field peers.
+    public static let legacySchemaVersion = 1
+    /// Versions `verify` will accept. Anything else throws `schemaVersionUnsupported`.
+    static let supportedSchemaVersions: Set<Int> = [legacySchemaVersion, currentSchemaVersion]
+}
+
+// MARK: - Verification
+
+extension ProximityIdentityEnvelope {
+    /// The distinct ways `verify` rejects an envelope.
+    ///
+    /// Every case means "drop the envelope"; `replayDetected` doubles as the ``ReplayCache``'s
+    /// stale-createdAt rejection.
+    public enum VerifyError: Error, Equatable {
+        case schemaVersionUnsupported
+        case expired
+        case signatureInvalid
+        case recipientMismatch
+        case payloadDecryptionFailed
+        /// The sealed payload carries no `FPT2` marker — the shape of the retired transport
+        /// format, which this build no longer reads (crypto standardization Phase 4). Kept distinct
+        /// from ``payloadDecryptionFailed`` because `ProximityCoordinator.handleInbound` puts the
+        /// thrown error straight into the Connection Inspector and the trainer audit trail: a
+        /// payload that never reached the AEAD must read there as such, not as one the AEAD
+        /// rejected.
+        case payloadLegacyWireFormat
+        case replayDetected
+        case sealingRequired
+    }
+
+    /// Verifies the envelope signature, recipient, expiry, and replay status; returns the plaintext payload.
+    /// `@MainActor`: reads the `@MainActor` IdentityService key state (`open`, `localFingerprint`) and the
+    /// `@MainActor` ReplayCache. The signature math itself (`IdentityService.verify` + `canonicalBytes`) is
+    /// `nonisolated` and could run off-main, but recipient/replay/decrypt need the actor's state.
+    /// `sealedPayloadFormat`: pass `.wire2` only when the SENDER advertised the host's wire2
+    /// capability token (`capabilities.wire2`) — sealed bodies are then unframed (tolerantly) after
+    /// decryption. Unsealed payloads ignore it.
+    /// `replayCache`: nil ONLY for callers with their own durable dedup that must accept envelopes
+    /// older than the cache's 24 h window (the heart dead-drop, whose pickup window is 7 days) —
+    /// every live-radio path keeps passing one.
+    /// The signature is checked under `identityService`'s namespace labels (plan step A0.2.4):
+    /// `purposes.signature.identityEnvelopeV2`, or for a schema-v1 envelope the verify-only
+    /// `legacyV1.identityEnvelopeV1` — which a family that refuses legacy peers does not have, so
+    /// there a schema-v1 envelope is `signatureInvalid`.
+    /// The sealing gate and the park read the same namespace's payload rules
+    /// (`family.vocabulary.payloads`): a token in `sealingRequired` must arrive sealed to the
+    /// recipient, so a misbehaving sender that omits sealing is refused even over an encrypted
+    /// transport, and a token outside `known` is parked.
+    @MainActor
+    public func verify(
+        identityService: IdentityService,
+        replayCache: ReplayCache?,
+        sealedPayloadFormat: SealedPayloadFormat = .legacy
+    ) throws -> Data {
+        guard Self.supportedSchemaVersions.contains(schemaVersion) else {
+            throw VerifyError.schemaVersionUnsupported
+        }
+        if let expiresAt, expiresAt < Date() { throw VerifyError.expired }
+
+        // Version-gated canonical bytes: v1 used the legacy `.sortedKeys`/`.iso8601` JSON encoder;
+        // v2+ uses the cross-platform binary serializer. A family that refuses legacy peers has no v1
+        // label (`legacyV1` is `.refused`), so `label` is nil and the envelope is `signatureInvalid`.
+        let canon = schemaVersion == Self.legacySchemaVersion
+            ? legacyCanonicalBytes(for: self)
+            : canonicalBytes(for: self, in: identityService.purposes)
+        let label = schemaVersion == Self.legacySchemaVersion
+            ? identityService.purposes.signature.legacyV1.identityEnvelopeV1
+            : identityService.purposes.signature.identityEnvelopeV2
+        guard let purpose = label,
+              IdentityService.verify(signature, of: canon, by: senderSigningPublicKey, purpose: purpose) else {
+            throw VerifyError.signatureInvalid
+        }
+
+        if let recipientFingerprint,
+           !IdentityService.fingerprintsMatch(recipientFingerprint, identityService.localFingerprint) {
+            throw VerifyError.recipientMismatch
+        }
+
+        let payloads = identityService.namespace.family.vocabulary.payloads
+        if payloads.sealingRequired.contains(payloadTypeToken), payloadEncryption == .none {
+            throw VerifyError.sealingRequired
+        }
+
+        try replayCache?.recordIfNew(envelopeID: envelopeID, createdAt: createdAt)
+
+        // A token the host does not dispatch (a newer build's payload type): the envelope
+        // authenticated and its ID is now replay-recorded (so unknown-type spam can't bypass replay
+        // protection), but the payload is parked — never decrypted, and the sealing gate above
+        // never names it, because the host's sealing set is drawn from what it knows (soundness
+        // rule `unknownToken`). Fail-closed by non-dispatch: callers dispatch only tokens they know,
+        // and returning empty bytes keeps the payload unreadable even if a caller forgets.
+        guard payloads.known.contains(payloadTypeToken) else { return Data() }
+
+        switch payloadEncryption {
+        case .none:
+            return payload
+        case .sealedTo:
+            do {
+                return try identityService.open(payload, from: senderKeyAgreementPublicKey, format: sealedPayloadFormat)
+            } catch IdentityError.legacyWireFormat {
+                throw VerifyError.payloadLegacyWireFormat
+            } catch {
+                throw VerifyError.payloadDecryptionFailed
+            }
+        }
+    }
+}
+
+// MARK: - Signed factory
+
+extension ProximityIdentityEnvelope {
+    /// Creates a signed envelope under a raw payload token, a token the host's vocabulary names: the
+    /// engine's own session messages, the coordinator's per-connection send and a host's typed view
+    /// all sign through it. `signature` is computed over the canonical bytes of all other fields,
+    /// under `identityService`'s namespace label.
+    /// `@MainActor`: signs with the `@MainActor` IdentityService private key state.
+    @MainActor
+    public static func signed(
+        identityService: IdentityService,
+        envelopeID: UUID = UUID(),
+        senderDisplayName: String,
+        recipientFingerprint: String? = nil,
+        payloadTypeToken: String,
+        payloadEncryption: PayloadEncryption = .none,
+        payloadSummary: PayloadSummary,
+        payload: Data,
+        createdAt: Date = Date(),
+        expiresAt: Date? = nil
+    ) throws -> ProximityIdentityEnvelope {
+        var envelope = ProximityIdentityEnvelope(
+            schemaVersion: currentSchemaVersion,
+            envelopeID: envelopeID,
+            senderSigningPublicKey: identityService.localSigningPublicKey,
+            senderKeyAgreementPublicKey: identityService.localKeyAgreementPublicKey,
+            senderDisplayName: senderDisplayName,
+            recipientFingerprint: recipientFingerprint,
+            payloadTypeToken: payloadTypeToken,
+            payloadEncryption: payloadEncryption,
+            payloadSummary: payloadSummary,
+            payload: payload,
+            createdAt: createdAt,
+            expiresAt: expiresAt,
+            signature: Data()
+        )
+        envelope.signature = try identityService.sign(
+            canonicalBytes(for: envelope, in: identityService.purposes),
+            purpose: identityService.purposes.signature.identityEnvelopeV2)
+        return envelope
+    }
+}

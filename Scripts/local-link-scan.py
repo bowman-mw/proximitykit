@@ -20,8 +20,8 @@ The rule is pinned in both directions:
   * a permitted file that is missing, or no longer names the API, means the scan stopped seeing
     the radios (renamed, moved, or the markers went stale), so it fails too. This direction,
     and the refusal to pass after reading zero files, start once Sources/ProximityKit exists.
-    The code arrives later with its git history from the Fernlet repository; until then an
-    empty tree passes.
+    The code came with its git history from the Fernlet repository; a tree without that
+    folder, as this repository's was until then, passes empty.
 
 The legacy spellings NWConnection and NWBrowser are deliberately absent from LOCAL_LINK_MARKERS.
 They belong to the HTTP-client family in Scripts/no-tracking-scan.py, which permits no file at
@@ -54,9 +54,9 @@ PERMITTED_LOCAL_LINK_FILES = (
     # The QUIC presence radio: the same three, advertising under a PresenceEpochPosture that is
     # replaced whole at every 900 s epoch boundary.
     "Sources/ProximityKit/Transport/NetworkPresenceSession.swift",
-    # The QUIC recipe-share radio: the same three, advertising under a RecipeSharePosture minted per
+    # The QUIC pair radio: the same three, advertising under a ProximityPairPosture minted per
     # start and per resume, and standing the listener and the browser down while a pairing is held.
-    "Sources/ProximityKit/Transport/NetworkRecipeShareSession.swift",
+    "Sources/ProximityKit/Transport/NetworkPairSession.swift",
 )
 
 

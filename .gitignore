@@ -1,0 +1,14 @@
+# SwiftPM's build folder, and the state SwiftPM and Xcode keep per package.
+.build/
+.swiftpm/
+
+# xcodebuild output: result bundles, and a DerivedData folder placed inside the clone.
+*.xcresult
+DerivedData/
+
+# macOS Finder metadata.
+.DS_Store
+
+# Claude Code's folder in a clone (its worktrees and local settings), as the Fernlet repository
+# ignores it.
+.claude/

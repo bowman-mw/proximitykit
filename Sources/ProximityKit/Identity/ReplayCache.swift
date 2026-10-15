@@ -1,0 +1,61 @@
+// ReplayCache.swift
+// ProximityKit/Identity
+//
+// Rolling 24-hour cache of seen envelope IDs for replay-attack prevention.
+// The dateProvider is injectable so tests can simulate clock advancement.
+
+import Foundation
+
+/// Rolling 24-hour cache of seen envelope IDs, the live-radio replay-attack defense.
+///
+/// ``ProximityIdentityEnvelope/verify(identityService:replayCache:sealedPayloadFormat:)`` records
+/// every accepted envelope here and throws `.replayDetected` on a duplicate ID or an envelope
+/// whose `createdAt` predates the retention window (the flush-and-replay defense). Each radio
+/// manager owns one instance shared across its coordinators. Bounded at `maxEntries` with
+/// newest-kept eviction so a flood cannot evict the fingerprints of recent legitimate envelopes.
+/// The heart dead-drop path deliberately passes a nil cache and uses its own durable dedup
+/// instead (drops are legitimately days old). `@MainActor`: mutated from the coordinators'
+/// main-actor verify path.
+@MainActor
+public final class ReplayCache {
+    private var seen: [UUID: Date] = [:]
+    private let retentionInterval: TimeInterval = 24 * 60 * 60
+    private let maxEntries: Int
+    public let dateProvider: @Sendable () -> Date
+
+    public init(maxEntries: Int = 10_000, dateProvider: @escaping @Sendable () -> Date = { Date() }) {
+        self.maxEntries = maxEntries
+        self.dateProvider = dateProvider
+    }
+
+    /// Records `envelopeID` as seen at the current time.
+    /// Throws `.replayDetected` if the same ID was already seen within the retention window,
+    /// or if `createdAt` is older than the retention window (stale envelope, flush-and-replay defence).
+    public func recordIfNew(envelopeID: UUID, createdAt: Date) throws {
+        let now = dateProvider()
+        let cutoff = now.addingTimeInterval(-retentionInterval)
+        guard createdAt >= cutoff else {
+            throw ProximityIdentityEnvelope.VerifyError.replayDetected
+        }
+        purgeIfNeeded()
+        if seen[envelopeID] != nil {
+            throw ProximityIdentityEnvelope.VerifyError.replayDetected
+        }
+        seen[envelopeID] = now
+    }
+
+    private func purgeIfNeeded() {
+        let cutoff = dateProvider().addingTimeInterval(-retentionInterval)
+        seen = seen.filter { $0.value >= cutoff }
+        if seen.count > maxEntries {
+            // Keep the NEWEST entries. The stale-`createdAt` guard above already bounds the
+            // replay window, so dropping old IDs is safe; dropping new ones is not — under a
+            // >maxEntries flood it would evict the fingerprints of recent legitimate envelopes,
+            // letting those recent envelopes be replayed undetected.
+            seen = Dictionary(
+                seen.sorted(by: { $0.value > $1.value }).prefix(maxEntries).map { ($0.key, $0.value) },
+                uniquingKeysWith: { a, _ in a }
+            )
+        }
+    }
+}

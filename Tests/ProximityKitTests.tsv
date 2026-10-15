@@ -1,0 +1,70 @@
+# ProximityKitTests.tsv: every suite of ProximityKit's package test target, the folder `Tests/ProximityKitTests` under
+# the package root, beside which this file sits; the file under that folder whose column-0 line declares the suite;
+# and its declared tests. Held to the tree by ProximityKitTests/PackageTestHygieneTests (theInventoryIsTheTree):
+# I1 its format, I2 its row count, I4 each suite's home, I7 each row's declared tests and their sum. In the package's
+# own repository, CI's test-count floor (Scripts/test-count-floor.py) reads it: the floor is at least the cells' sum
+# and the suite count its rows', and in each xcodebuild lane's result bundle every suite named here runs at least one
+# case and no other suite runs.
+# Columns, tab-separated: suite (the type Swift Testing reports); file (relative to the test target's folder);
+# cells (the suite's @Test attributes, summed over every file of the folder, an extension's included; a
+# parameterized test is one). Rows sorted by suite. A suite added, moved, renamed or deleted edits its row, and the
+# suite's measured row count and declared-test sum, in the same commit.
+suite	file	cells
+EphemeralMeshTLSIdentityTests	NetworkMeshTransportTests.swift	5
+FakePeerTransportTests	PeerTransportNeutralityTests.swift	10
+MeshChannelIntroductionTests	NetworkMeshTransportTests.swift	22
+MeshChannelIntroductionTranscriptTests	NetworkMeshTransportTests.swift	3
+MeshChunkAssemblyTests	MeshChunkAssemblyTests.swift	19
+MeshChunkShapeTests	MeshChunkTests.swift	11
+MeshDerivedRosterTests	MeshMembershipRecordsTests.swift	9
+MeshDialPreferenceTests	NetworkMeshTransportTests.swift	3
+MeshEpochAcceptanceTests	MeshEpochModelTests.swift	4
+MeshEpochGraceTests	MeshRotationTriggerTests.swift	1
+MeshEpochKeyringTests	MeshEpochModelTests.swift	5
+MeshEpochRefTests	MeshEpochModelTests.swift	10
+MeshFrameReplayWindowTests	MeshEpochModelTests.swift	10
+MeshHeartbeatLivenessTests	NetworkMeshTransportTests.swift	5
+MeshHeartbeatScheduleTests	NetworkMeshTransportTests.swift	5
+MeshInboundRankingTests	NetworkMeshTransportTests.swift	4
+MeshIntroductionNonceCacheTests	NetworkMeshTransportTests.swift	3
+MeshIntroductionRosterTests	NetworkMeshTransportTests.swift	4
+MeshInventoryDigestTests	MeshMembershipEventWireTests.swift	5
+MeshKeyRotationCauseWireTests	MeshRotationTriggerTests.swift	5
+MeshLinkAdvertisementTests	NetworkMeshTransportTests.swift	7
+MeshLinkTableTests	NetworkMeshTransportTests.swift	24
+MeshMembershipBoundsTests	MeshMembershipRecordsTests.swift	9
+MeshMembershipMergeTests	MeshMembershipRecordsTests.swift	6
+MeshMergeWindowStateTests	MeshMergeWindowTests.swift	19
+MeshRecipientReceiptShapeTests	MeshRecipientReceiptTests.swift	4
+MeshRotationPolicyTests	MeshRotationTriggerTests.swift	10
+MeshRotationTriggerQueueTests	MeshRotationTriggerTests.swift	6
+MeshRoutedCustodyHandoffWallTests	MeshRoutedCustodyHandoffTests.swift	9
+MeshRoutedDrainPlanTests	MeshRoutedDrainPlanTests.swift	10
+MeshRoutedInventoryDeltaTests	MeshRoutedInventoryDeltaTests.swift	32
+MeshRoutedInventoryShapeTests	MeshRoutedInventoryTests.swift	8
+MeshRoutedRetryPlanTests	MeshRoutedRetryAllowanceTests.swift	6
+MeshSessionCeilingTests	MeshSessionStateMachineTests.swift	7
+MeshSessionIDClaimTests	MeshSessionIDClaimTests.swift	7
+MeshSessionStateMachineTests	MeshSessionStateMachineTests.swift	14
+MeshTransferStreamTableTests	NetworkMeshTransportTests.swift	19
+MeshTunnelConvergenceTests	NetworkMeshTransportTests.swift	11
+MeshTunnelEndReasonTests	NetworkMeshTransportTests.swift	3
+NearbyRangingSessionTests	NearbyRangingSessionTests.swift	9
+NetworkMeshSessionTests	NetworkMeshTransportTests.swift	13
+NetworkMeshWireTests	NetworkMeshTransportTests.swift	6
+ObservationLoopLifecycleTests	MemoryLifecycleTests.swift	3
+PackageKeychainStoreTests	PackageKeychainStoreTests.swift	6
+PackageTestHostTests	PackageTestHostTests.swift	4
+PackageTestHygieneTests	PackageTestHygieneTests.swift	6
+PackageTestSupportTests	PackageTestSupportTests.swift	2
+PackageTestTreeWallTests	PackageTestTreeWallTests.swift	6
+PeerHandleIdentityTests	PeerTransportNeutralityTests.swift	5
+PresenceEpochPostureTests	PresenceEpochPostureTests.swift	9
+ProximityKeychainDoorTests	ProximityKeychainDoorTests.swift	1
+ProximityMemoryLifecycleTests	ProximityMemoryLifecycleTests.swift	5
+ProximityNamespaceBoundaryTests	ProximityNamespaceBoundaryTests.swift	12
+ProximityNamespaceSoundnessTests	ProximityNamespaceSoundnessTests.swift	43
+ProximityPlatformNeutralityTests	ProximityPlatformNeutralityTests.swift	5
+ProximityPresenceSessionTests	ProximityPresenceSessionTests.swift	5
+ProximitySourceWallTests	ProximitySourceWallTests.swift	13
+ReplayCacheTests	ReplayCacheTests.swift	1

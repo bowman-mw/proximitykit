@@ -8,10 +8,5 @@
   "rule": "R9-UNSAFE",
   "path": "Sources/ProximityKit/Ranging/NIRangingSession.swift",
   "reason": "NearbyInteraction delegate bridging seam. Invariant: the invalidated NISession is transferred solely to compare identity (===) against self.niSession on the MainActor; it is never called or mutated after the hop, and holding the strong reference until the comparison runs is precisely what prevents the address-reuse aliasing an ObjectIdentifier comparison would admit."
- },
- {
-  "rule": "R9-UNSAFE",
-  "path": "Sources/ProximityKit/ForegroundAnchor/ProximityForegroundAnchor.swift",
-  "reason": "ActivityKit seam, reaper only: Activity is a non-Sendable class and end(_:dismissalPolicy:) is nonisolated async and documented callable from any context, with no actor-isolated alternative API, so the MainActor-held reference must be transferred across the call. Since the network migration's P9 item 5 retired ActivityKitProximityForegroundAnchor there is exactly ONE such local left in the file, in ProximityLiveActivityReaper.endOrphans. Invariant: one local per stranded activity from the single launch-time enumeration, used for exactly ONE end(_:dismissalPolicy:) call and never stored; endOrphans runs once per launch from FernletStoreLoader.startIfNeeded() before any proximity manager exists, and nothing in the app requests a proximity activity any more, so no other object can ever hold a second reference to the same activity."
  }
 ]

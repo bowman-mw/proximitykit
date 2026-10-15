@@ -1,0 +1,756 @@
+// CanonicalSignatureSerializer.swift
+// ProximityKit/Wire
+//
+// Deterministic, cross-platform-stable canonical byte serializer for Ed25519 signing (WI-6).
+//
+// WHY THIS EXISTS
+// ---------------
+// The original canonical encoder was a Foundation `JSONEncoder` configured with `.sortedKeys`.
+// `.sortedKeys` sorts keys by UTF-16 code units, and Foundation makes NO guarantee that the byte
+// encoding of numbers / strings is identical across Foundation versions or a non-Apple stack (the
+// planned Android port — see Docs/cross-platform-direction). Any divergence in the canonical bytes
+// produces a `signatureInvalid` for an envelope/token that was legitimately signed. That is a
+// latent interoperability fault, not a confidentiality leak, but it must be closed before any
+// cross-stack signing exists.
+//
+// This serializer is a positional, length-prefixed BINARY format with no key names, no
+// number/locale formatting, and a fixed integer/date encoding. It is trivially reproducible
+// byte-for-byte in Swift and Kotlin/Java. Ed25519 signs arbitrary bytes, so the signing input does
+// not need to be (and is not) JSON.
+//
+// FORMAT (canonical v2) — all integers big-endian:
+//   * A leading length-prefixed domain tag distinguishes the two signed types (identity envelope vs
+//     mesh admission token), so a signature computed over one type can never validate over the other.
+//   * Fixed-width fields: Int64 (8 B, two's complement), UUID (16 raw bytes, network order),
+//     bool / enum-discriminant (1 B).
+//   * Variable-width fields: every `Data` / `String` is a UInt64 (8 B) length prefix followed by the
+//     raw bytes (UTF-8 for `String`).
+//   * Optionals: a single presence byte (0 = absent, 1 = present); if present, the value follows.
+//   * Dates: Int64 whole SECONDS since 1970-01-01T00:00:00Z, floored. Whole-second granularity is
+//     deliberate — envelopes transit as JSON and `verify` re-derives canonical bytes from the
+//     DECODED date, so the canonical granularity must be no finer than what survives the wire. It
+//     matches the legacy `.iso8601` precision exactly, so sign-time and verify-time bytes always
+//     agree. The seconds→Int64 conversion saturates (never traps) because `verify` runs over
+//     untrusted, attacker-controlled bytes.
+//   * Maps (`[String: String]`): a UInt64 entry count, then entries sorted by the RAW UTF-8 bytes of
+//     the key (byte-lexicographic — unambiguous and identical on every stack, unlike `.sortedKeys`).
+//
+// This is signing INPUT only. It is never the wire format, never persisted, never transmitted.
+// The wire format remains the types' synthesized `Codable` conformance (unchanged).
+
+import Foundation
+
+// WI-9: every declaration in this file is `nonisolated`. ProximityKit sets
+// `.defaultIsolation(MainActor.self)`, which would otherwise MainActor-isolate this pure signing-byte
+// serializer. The canonical bytes are derived from value-type fields with no actor state, so signing
+// and signature verification must be runnable from any isolation domain — `MeshAdmissionToken.verify`
+// is `nonisolated` and calls straight into `canonicalBytes`/`legacyCanonicalBytes` below.
+
+// MARK: - Canonical byte writer
+
+/// Append-only binary writer for canonical signing bytes. The format is positional and
+/// length-prefixed: the field order in the `canonicalBytes(for:)` functions below IS the schema.
+///
+/// Public so a host's feature writes its own signing input and its routed body framing in the
+/// engine's encodings, never a copy that could drift. The contract: append-only and positional (no
+/// key names, no locale, no number formatting), every integer big-endian, every variable-width field
+/// length-prefixed by a `UInt64`, every optional led by one presence byte; every encoding it writes
+/// is already frozen by the engine's goldens, so none of them ever changes.
+public nonisolated struct CanonicalByteWriter {
+    /// The bytes appended so far, in append order.
+    public private(set) var bytes = Data()
+
+    /// An empty writer.
+    public init() {}
+
+    /// One raw byte (a bool, an enum discriminant or a presence flag).
+    ///
+    /// - Parameter value: The byte.
+    public mutating func appendByte(_ value: UInt8) {
+        bytes.append(value)
+    }
+
+    /// 8-byte big-endian. Endianness is pinned by `bigEndian`, so the on-wire bytes are identical
+    /// regardless of host byte order.
+    ///
+    /// - Parameter value: The integer.
+    public mutating func appendUInt64(_ value: UInt64) {
+        // Pure-Swift shift-out (R9: no pointer seam). Byte-identical to the previous
+        // `withUnsafeBytes(of: value.bigEndian)`: most-significant byte first.
+        for shift in stride(from: 56, through: 0, by: -8) {
+            bytes.append(UInt8(truncatingIfNeeded: value >> UInt64(shift)))
+        }
+    }
+
+    /// 8-byte big-endian two's-complement.
+    ///
+    /// - Parameter value: The integer.
+    public mutating func appendInt64(_ value: Int64) {
+        appendUInt64(UInt64(bitPattern: value))
+    }
+
+    /// UInt64 big-endian length prefix followed by the raw bytes.
+    ///
+    /// - Parameter data: The bytes.
+    public mutating func appendLengthPrefixed(_ data: Data) {
+        appendUInt64(UInt64(data.count))
+        bytes.append(data)
+    }
+
+    /// Length-prefixed UTF-8.
+    ///
+    /// - Parameter string: The string, written as its UTF-8 bytes.
+    public mutating func appendString(_ string: String) {
+        appendLengthPrefixed(Data(string.utf8))
+    }
+
+    /// 16 raw bytes in network order (no length prefix — a UUID is always 16 bytes).
+    ///
+    /// - Parameter uuid: The UUID.
+    public mutating func appendUUID(_ uuid: UUID) {
+        // Same 16 network-order bytes as the previous `withUnsafeBytes(of: uuid.uuid)`, spelled
+        // without a pointer seam (R9). `uuid.uuid` is a 16-tuple in network order by definition.
+        let raw = uuid.uuid
+        bytes.append(contentsOf: [
+            raw.0, raw.1, raw.2, raw.3, raw.4, raw.5, raw.6, raw.7,
+            raw.8, raw.9, raw.10, raw.11, raw.12, raw.13, raw.14, raw.15
+        ])
+    }
+
+    /// Whole seconds since the Unix epoch, floored, as an 8-byte big-endian `Int64`. Saturating: an
+    /// out-of-range or non-finite value (only reachable from a hostile decoded envelope) clamps
+    /// instead of trapping.
+    ///
+    /// - Parameter date: The instant.
+    public mutating func appendDate(_ date: Date) {
+        let seconds = date.timeIntervalSince1970.rounded(.down)
+        let clamped: Int64
+        if !seconds.isFinite {
+            clamped = 0
+        } else if seconds >= Double(Int64.max) {
+            clamped = .max
+        } else if seconds <= Double(Int64.min) {
+            clamped = .min
+        } else {
+            clamped = Int64(seconds)
+        }
+        appendInt64(clamped)
+    }
+
+    /// An optional instant: presence byte `1` then ``appendDate(_:)``'s eight bytes, or a lone `0`.
+    ///
+    /// - Parameter date: The instant, or nil.
+    public mutating func appendOptional(_ date: Date?) {
+        if let date {
+            appendByte(1)
+            appendDate(date)
+        } else {
+            appendByte(0)
+        }
+    }
+
+    /// An optional string: presence byte `1` then ``appendString(_:)``'s bytes, or a lone `0`.
+    ///
+    /// - Parameter string: The string, or nil.
+    public mutating func appendOptional(_ string: String?) {
+        if let string {
+            appendByte(1)
+            appendString(string)
+        } else {
+            appendByte(0)
+        }
+    }
+}
+
+// MARK: - Byte-lexicographic key ordering
+
+/// Orders two strings by their raw UTF-8 bytes. Deterministic and identical across stacks — unlike
+/// Foundation's `.sortedKeys`, which orders by UTF-16 code units (different for non-BMP scalars).
+nonisolated func canonicalUTF8Ordered(_ lhs: String, _ rhs: String) -> Bool {
+    let a = Array(lhs.utf8)
+    let b = Array(rhs.utf8)
+    let shared = min(a.count, b.count)
+    var index = 0
+    while index < shared {
+        if a[index] != b[index] { return a[index] < b[index] }
+        index += 1
+    }
+    return a.count < b.count
+}
+
+// MARK: - Domain tags
+
+// Distinct per signed type so a signature over one type cannot validate over another.
+//
+// Since ProximityKit plan step A0.2.4 ten signed types take their domain from the host's namespace —
+// the `in purposes: ProximityNamespace.Purposes` their overloads below require — and not from a tag
+// here, as does the membership inventory digest's records hash (`purposes.hash.meshInventoryDigestV1`):
+// the identity envelope, the admission token and the membership family. The membership domains
+// (network migration P3, plan §8.3) are one per record kind, so a departure signature can never
+// validate as a termination — the difference between a member removing itself and a member ending the
+// mesh for everyone. The key advertisement's (P6 item 1) must above all differ from the departure's:
+// both are self-signed statements over (mesh, fingerprint, instant), so only the domain stops "here is
+// my key" from being replayable as "I have left", a permanent, grow-only eviction. The quorum's two
+// (P4 item 5, plan §10.4) differ from each other and from the completed removal's: a proposal binds
+// `proposalID → (mesh, target, proposer)`, a vote agrees with one, and `meshMemberRemovalV1` signs the
+// permanent record, so if any two cross-validated one signed object could be replayed as another. The
+// namespace fixes each of them as `.signature(.lengthPrefixed)`, and its soundness rules hold every
+// label pairwise distinct and prefix-free.
+//
+// Since step A0.2.5 the QUIC channel introduction and the six routed transcripts take theirs from the
+// namespace too, `purposes.signature.<field>`. The introduction's (network migration P2) is distinct
+// from the DEBUG probe's spelling by registry construction, so a spike build can never mint bytes a
+// shipping peer would accept. Each routed domain (P5 items 1–6, plan §11) differs from the one it
+// would otherwise be replayed as: the origin-signed manifest from every membership frame's, so "what I
+// am sending" is never "what I hold" (the inventory digest) or "what epoch I am on"; a chunk ("these
+// bytes are part of it") from the manifest ("who it is for, who can open it") it travels beside, or a
+// destination set or a key wrap could be swapped under an authentic-looking transfer; the custody
+// receipt, the one routed record signed by somebody other than the item's origin, from the manifest's
+// and the chunk's; the recipient receipt ("it reached me") from the custody receipt ("I am holding
+// it"), the custody-is-not-delivery distinction plan §11 requires in every surface; the routed
+// inventory digest ("what content I am carrying, and for whom") from the membership one ("what
+// records I hold"); and the drain answer ("we are in sync") from the routed inventory digest ("here is
+// everything I hold"), or a stale quiescence bit could close a merge window that should still be
+// open. No feature's tag is here: the moderation report row's tag and its bytes are FernletSocial's
+// (`FeatureCanonicalBytes.swift`, beside the report relay), and so are the activity feature's three
+// (the descriptor its params hash is taken over, the join token and the roster snapshot), beside
+// the activity manager and its payloads.
+
+// MARK: - Identity envelope
+
+/// Canonical signing bytes for a `ProximityIdentityEnvelope` (schema v2+). The `signature` field is
+/// excluded entirely (it is the output of signing these bytes). The domain is the host namespace's
+/// `purposes.signature.identityEnvelopeV2` (plan step A0.2.4).
+public nonisolated func canonicalBytes(for envelope: ProximityIdentityEnvelope,
+                                       in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.identityEnvelopeV2.data)
+    writer.appendInt64(Int64(envelope.schemaVersion))
+    writer.appendUUID(envelope.envelopeID)
+    writer.appendLengthPrefixed(envelope.senderSigningPublicKey)
+    writer.appendLengthPrefixed(envelope.senderKeyAgreementPublicKey)
+    writer.appendString(envelope.senderDisplayName)
+    writer.appendOptional(envelope.recipientFingerprint)
+    // The RAW wire token, not the enum case: canonical bytes must be computable for payload types
+    // this build doesn't know, so signatures on newer-build envelopes still verify (Phase 1
+    // forward tolerance). For known types the token IS the rawValue — bytes unchanged.
+    writer.appendString(envelope.payloadTypeToken)
+    appendCanonical(&writer, envelope.payloadEncryption)
+    appendCanonical(&writer, envelope.payloadSummary)
+    writer.appendLengthPrefixed(envelope.payload)
+    writer.appendDate(envelope.createdAt)
+    writer.appendOptional(envelope.expiresAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ encryption: PayloadEncryption) {
+    switch encryption {
+    case .none:
+        writer.appendByte(0)
+    case .sealedTo(let recipientKeyAgreementPublicKey):
+        writer.appendByte(1)
+        writer.appendLengthPrefixed(recipientKeyAgreementPublicKey)
+    }
+}
+
+/// Writes a `PayloadSummary` into the canonical signing bytes.
+///
+/// **DO NOT LOCALIZE ANY STRING THAT REACHES THIS FUNCTION.** `title`, `subtitle`, and every
+/// `extraDetails` key and value are hashed into the Ed25519 signature below. They read like UI copy
+/// ("Recipe share", "Session ended", "Good vibes") but they are wire bytes: a `String(localized:)`
+/// anywhere upstream makes the canonical bytes locale-dependent, which is exactly the class of
+/// cross-stack divergence this whole serializer exists to eliminate (see the WHY THIS EXISTS header).
+/// The failure mode is a `signatureInvalid` on a legitimately signed envelope, reproducible only on
+/// a device set to the other language — no crash, no log, just a peer that silently cannot connect.
+/// The receiver-side localization plan is documented on `ProximityIdentityEnvelope.payloadSummary`.
+private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ summary: PayloadSummary) {
+    writer.appendString(summary.title)
+    writer.appendOptional(summary.subtitle)
+    writer.appendInt64(Int64(summary.itemCount))
+    if let dateRange = summary.dateRange {
+        writer.appendByte(1)
+        writer.appendDate(dateRange.start)
+        writer.appendDate(dateRange.end)
+    } else {
+        writer.appendByte(0)
+    }
+    let orderedDetails = summary.extraDetails.sorted { canonicalUTF8Ordered($0.key, $1.key) }
+    writer.appendUInt64(UInt64(orderedDetails.count))
+    for (key, value) in orderedDetails {
+        writer.appendString(key)
+        writer.appendString(value)
+    }
+}
+
+// MARK: - Mesh admission token
+
+/// Canonical signing bytes for a `MeshAdmissionToken` (canonical v2). The `admitterSignature` field
+/// is excluded entirely (it is the output of signing these bytes). The domain is the host namespace's
+/// `purposes.signature.meshAdmissionTokenV2` (plan step A0.2.4).
+public nonisolated func canonicalBytes(for token: MeshAdmissionToken,
+                                       in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshAdmissionTokenV2.data)
+    writer.appendUUID(token.meshID)
+    writer.appendString(token.joinerFingerprint)
+    writer.appendLengthPrefixed(token.joinerSigningPublicKey)
+    writer.appendString(token.admitterFingerprint)
+    writer.appendDate(token.grantedAt)
+    writer.appendDate(token.expiresAt)
+    writer.appendLengthPrefixed(token.admitterSigningPublicKey)
+    // admitterSignature: deliberately excluded.
+    return writer.bytes
+}
+
+// MARK: - QUIC mesh channel introduction (network migration P2)
+
+/// Canonical signing bytes for a ``MeshChannelIntroductionTranscript`` — the mutually-signed QUIC
+/// channel introduction of plan §7.2.
+///
+/// The field order **is** the plan's transcript definition, in the plan's order: purpose ‖ version ‖
+/// meshID ‖ epochRef ‖ both signing public keys ‖ both nonces ‖ TLS-exporter hash. Roles fix the
+/// order of the paired fields — initiator before responder — so both ends of one tunnel produce
+/// byte-identical input without exchanging the transcript itself.
+///
+/// Length-prefixing every variable field makes the encoding injective: no nonce can borrow a byte
+/// from a key, and no epoch reference can shift the fields after it. That is what lets the registry
+/// declare `.lengthPrefixed` for this purpose and have the claim be true —
+/// `CryptographicPurposeBoundaryTests` pins the pair, because a declared-vs-emitted framing
+/// mismatch is what broke silently in `91c3956`.
+///
+/// There is no signature field to exclude: the signature lives on ``MeshChannelIntroduction``, which
+/// is the frame, not the transcript. The domain is the host namespace's
+/// `purposes.signature.meshChannelIntroductionV1` (plan step A0.2.5).
+nonisolated func canonicalBytes(
+    for transcript: MeshChannelIntroductionTranscript, in purposes: ProximityNamespace.Purposes
+) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshChannelIntroductionV1.data)
+    writer.appendInt64(Int64(transcript.protocolVersion))
+    writer.appendUUID(transcript.meshID)
+    writer.appendString(transcript.epochRef)
+    writer.appendLengthPrefixed(transcript.initiatorSigningPublicKey)
+    writer.appendLengthPrefixed(transcript.responderSigningPublicKey)
+    writer.appendLengthPrefixed(transcript.initiatorNonce)
+    writer.appendLengthPrefixed(transcript.responderNonce)
+    writer.appendLengthPrefixed(transcript.channelBindingHash)
+    return writer.bytes
+}
+
+// MARK: - Membership events (network migration P3, plan §8.3)
+
+// Three record encoders and one message encoder, all in the same length-prefixed writer as every
+// other production signature — so all four purposes declare `.lengthPrefixed`, and
+// `CryptographicPurposeBoundaryTests` holds each one to that declaration in the same change that
+// introduced it (the `91c3956` lesson).
+//
+// A record's own `signature` is excluded from its bytes, exactly as `admitterSignature` is on a
+// `MeshAdmissionToken`: the signature is the OUTPUT of signing these bytes. The admission record
+// has no encoder here because it wraps a `MeshAdmissionToken` whole and is signed under the
+// already-registered `meshAdmissionTokenV2` domain — one admission format, not two.
+//
+// Since ProximityKit plan step A0.2.4 every encoder below, through the key advertisement's, writes
+// its domain from the host's namespace: `purposes.signature.<field>`, one field per kind.
+
+/// Canonical signing bytes for a ``SignedDepartureRecord`` — the leaver's own statement that it
+/// left (plan §8.3). The custody summary is bound in: what a leaver claims to have handed to whom
+/// is part of what it signed, so a relay cannot rewrite the hand-off while re-gossiping the record.
+nonisolated func canonicalBytes(for record: SignedDepartureRecord, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshMemberDepartureV1.data)
+    writer.appendUUID(record.meshID)
+    writer.appendString(record.memberFingerprint)
+    writer.appendDate(record.occurredAt)
+    writer.appendUInt64(UInt64(record.custodyHandoff.custodianFingerprints.count))
+    for custodian in record.custodyHandoff.custodianFingerprints {
+        writer.appendString(custodian)
+    }
+    writer.appendInt64(Int64(record.custodyHandoff.handedOffItemCount))
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``SignedRemovalRecord`` — a completed quorum (plan §10.4).
+///
+/// The voter list is bound in array order, which is the order the record's initializer preserves,
+/// so the tallier signs the exact evidence a receiver re-checks. A relay that reordered or trimmed
+/// the voters would invalidate the signature rather than quietly weakening the quorum.
+nonisolated func canonicalBytes(for record: SignedRemovalRecord, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshMemberRemovalV1.data)
+    writer.appendUUID(record.meshID)
+    writer.appendString(record.memberFingerprint)
+    writer.appendUUID(record.proposalID)
+    writer.appendUInt64(UInt64(record.voterFingerprints.count))
+    for voter in record.voterFingerprints {
+        writer.appendString(voter)
+    }
+    writer.appendDate(record.occurredAt)
+    writer.appendString(record.authorFingerprint)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``SignedTerminationRecord`` — a final-pair member ending the mesh
+/// (plan §8.3). `rosterAtSigning` is bound in so the audit trail is signed, not merely carried;
+/// the downgrade rule still judges against the RECEIVER's merged roster (``MeshDerivedRoster``).
+nonisolated func canonicalBytes(for record: SignedTerminationRecord, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshTerminatedV1.data)
+    writer.appendUUID(record.meshID)
+    writer.appendString(record.memberFingerprint)
+    writer.appendUInt64(UInt64(record.rosterAtSigning.count))
+    for fingerprint in record.rosterAtSigning {
+        writer.appendString(fingerprint)
+    }
+    writer.appendDate(record.occurredAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshInventoryDigestPayload`` (plan §10.5). The digest's own
+/// hash is bound as opaque bytes — it was already domain-separated when it was computed, by
+/// ``canonicalInventoryDigestBytes(for:in:)``.
+nonisolated func canonicalBytes(for payload: MeshInventoryDigestPayload, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshInventoryDigestV1.data)
+    writer.appendUUID(payload.digest.meshID)
+    writer.appendString(payload.senderFingerprint)
+    writer.appendDate(payload.sentAt)
+    writer.appendInt64(Int64(payload.digest.admissionCount))
+    writer.appendInt64(Int64(payload.digest.departureCount))
+    writer.appendInt64(Int64(payload.digest.removalCount))
+    writer.appendInt64(Int64(payload.digest.terminationCount))
+    writer.appendLengthPrefixed(payload.digest.recordsHash)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshEpochHeadsPayload`` (plan §10.3, P4 item 3).
+///
+/// Each head contributes its own canonical string — the exact spelling
+/// ``MeshEpochRef/canonicalString`` produces and the one a peer parses back — so two devices
+/// holding the same head set sign over identical bytes, and the count is written first so a
+/// re-partitioning of the same characters cannot produce the same transcript.
+nonisolated func canonicalBytes(for payload: MeshEpochHeadsPayload, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshEpochHeadsV1.data)
+    writer.appendUUID(payload.meshID)
+    writer.appendString(payload.senderFingerprint)
+    writer.appendDate(payload.sentAt)
+    writer.appendUInt64(UInt64(payload.heads.count))
+    for head in payload.heads {
+        writer.appendString(head.canonicalString)
+    }
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``SignedKeyAgreementAdvertisement`` (P6 item 1, plan §11.3 item
+/// 13(ii)).
+///
+/// `meshID` is bound first so a valid advertisement for another mesh is not a valid transcript
+/// here; the fingerprint comes before the key so the pair can never be transposed; the key is bound
+/// as **opaque length-prefixed bytes**, never as a string, so a 32-byte blob can never be read as a
+/// count; and `advertisedAt` is bound because it is the set's dedup and order input — an unbound
+/// stamp could be re-dated by a relay.
+nonisolated func canonicalBytes(
+    for advertisement: SignedKeyAgreementAdvertisement, in purposes: ProximityNamespace.Purposes
+) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshKeyAgreementV1.data)
+    writer.appendUUID(advertisement.meshID)
+    writer.appendString(advertisement.memberFingerprint)
+    writer.appendLengthPrefixed(advertisement.keyAgreementPublicKey)
+    writer.appendDate(advertisement.advertisedAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``SignedRemovalProposal`` (plan §10.4, P4 item 5).
+///
+/// The target is bound before the proposer so the two fingerprints can never be transposed into a
+/// valid transcript for the mirror-image proposal, and `issuedAt` is bound because it is audited —
+/// the five-minute window is measured at the receiver from first-seen, so binding the stamp costs
+/// nothing and an unbound one could be rewritten by a relay.
+nonisolated func canonicalBytes(for proposal: SignedRemovalProposal, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshRemovalProposalV1.data)
+    writer.appendUUID(proposal.meshID)
+    writer.appendUUID(proposal.proposalID)
+    writer.appendString(proposal.targetFingerprint)
+    writer.appendString(proposal.proposerFingerprint)
+    writer.appendDate(proposal.issuedAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``SignedRemovalVote`` (plan §10.4, P4 item 5).
+///
+/// The same field order as the proposal's, with the voter where the proposer sits — and a different
+/// domain, so the two transcripts cannot be mistaken for one another even though they are the same
+/// shape. Binding the target here is what makes a vote countable only against the proposal it
+/// actually agrees with.
+nonisolated func canonicalBytes(for vote: SignedRemovalVote, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshRemovalVoteV1.data)
+    writer.appendUUID(vote.meshID)
+    writer.appendUUID(vote.proposalID)
+    writer.appendString(vote.targetFingerprint)
+    writer.appendString(vote.voterFingerprint)
+    writer.appendDate(vote.castAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+// MARK: - Routed content (network migration P5 item 1, plan §11)
+
+// Since ProximityKit plan step A0.2.5 every encoder below writes its domain from the host's namespace:
+// `purposes.signature.<field>`, one field per routed type.
+
+/// Canonical signing bytes for a ``MeshRoutedManifest`` — the origin's description of one routed
+/// item (plan §11). **Field order IS the schema**: identity first (mesh, item, origin), then the
+/// descriptor (type token, hash, size), then the two instants, then the two count-prefixed lists.
+///
+/// The destinations and the wraps are bound in the ORIGIN's authored order, each wrap field by
+/// field, so a relay that reordered, trimmed, relabelled or re-clamped either list would
+/// invalidate the signature rather than quietly changing who the item is for or who can open it.
+/// Signed by the origin only; a custodian forwards these exact fields and never re-derives them.
+nonisolated func canonicalBytes(for manifest: MeshRoutedManifest, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshRoutedManifestV1.data)
+    writer.appendUUID(manifest.meshID)
+    writer.appendUUID(manifest.itemID)
+    writer.appendString(manifest.originFingerprint)
+    writer.appendString(manifest.typeToken)
+    writer.appendLengthPrefixed(manifest.contentHash)
+    writer.appendUInt64(manifest.size)
+    writer.appendDate(manifest.createdAt)
+    writer.appendDate(manifest.expiresAt)
+    writer.appendUInt64(UInt64(manifest.destinations.count))
+    for destination in manifest.destinations {
+        writer.appendString(destination)
+    }
+    writer.appendUInt64(UInt64(manifest.keyWraps.count))
+    for wrap in manifest.keyWraps {
+        appendCanonical(&writer, wrap)
+    }
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshChunk`` — one origin-signed slice of a routed item's
+/// ciphertext (plan §11, P5 item 2). **Field order IS the schema**: identity first (mesh, item,
+/// origin), then the descriptor (the item's content hash, this slice's position and its own hash),
+/// then the instant.
+///
+/// The **payload is deliberately excluded** and bound through `chunkHash` instead: 32 bytes in the
+/// transcript rather than 256 KiB copied into a signing buffer, with the same authenticity, since a
+/// receiver checks the hash against the bytes it holds. The `signature` is excluded as ever.
+/// Signed by the origin only; a custodian forwards these exact fields and never re-derives them.
+nonisolated func canonicalBytes(for chunk: MeshChunk, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshRoutedChunkV1.data)
+    writer.appendUUID(chunk.meshID)
+    writer.appendUUID(chunk.itemID)
+    writer.appendString(chunk.originFingerprint)
+    writer.appendLengthPrefixed(chunk.contentHash)
+    writer.appendUInt64(UInt64(chunk.chunkIndex))
+    writer.appendUInt64(UInt64(chunk.chunkCount))
+    writer.appendLengthPrefixed(chunk.chunkHash)
+    writer.appendDate(chunk.expiresAt)
+    // payload: bound by chunkHash, deliberately excluded.
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshCustodyReceipt`` — a custodian's statement that it durably
+/// holds one routed item's complete ciphertext (plan §11, P5 item 3). **Field order IS the schema**:
+/// identity first (mesh, item, the item's ORIGIN), then the content hash, then the CUSTODIAN, then
+/// the two instants.
+///
+/// The origin and the custodian are two different fingerprints in two fixed positions, so a receipt
+/// cannot be re-read as being about the signer's own item, and one lifted onto another origin's item
+/// fails the signature. There is no destination set, no chunk index and no partial count: a receipt
+/// exists only for a COMPLETE item, so a count would be a second source of truth under one signature.
+/// The `signature` is excluded as ever. Signed by the custodian only; relays forward these exact
+/// fields and never re-derive them.
+nonisolated func canonicalBytes(for receipt: MeshCustodyReceipt, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshCustodyReceiptV1.data)
+    writer.appendUUID(receipt.meshID)
+    writer.appendUUID(receipt.itemID)
+    writer.appendString(receipt.originFingerprint)
+    writer.appendLengthPrefixed(receipt.contentHash)
+    writer.appendString(receipt.custodianFingerprint)
+    writer.appendDate(receipt.custodiedAt)
+    writer.appendDate(receipt.expiresAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshRecipientReceipt`` — a destination's statement that one
+/// routed item reached it, finally (plan §11, P5 item 4). **Field order IS the schema**: identity
+/// first (mesh, item, the item's ORIGIN), then the content hash, then the RECIPIENT, then the two
+/// instants — the custody receipt's layout with the signer's role changed, under its own domain.
+///
+/// The origin and the recipient are two different fingerprints in two fixed positions, so a receipt
+/// cannot be re-read as being about the signer's own item, and one lifted onto another origin's item
+/// fails the signature. There is no ack STAGE — what made the item final is resolved from the
+/// origin-signed type token, never signed by the recipient — and no chunk index or partial count: a
+/// recipient receipt is whole-item, one per `(recipient, item)`. The `signature` is excluded as ever.
+/// Signed by the recipient only; relays forward these exact fields and never re-derive them.
+nonisolated func canonicalBytes(for receipt: MeshRecipientReceipt, in purposes: ProximityNamespace.Purposes) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshRecipientReceiptV1.data)
+    writer.appendUUID(receipt.meshID)
+    writer.appendUUID(receipt.itemID)
+    writer.appendString(receipt.originFingerprint)
+    writer.appendLengthPrefixed(receipt.contentHash)
+    writer.appendString(receipt.recipientFingerprint)
+    writer.appendDate(receipt.receivedAt)
+    writer.appendDate(receipt.expiresAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshRoutedInventoryPayload`` — an advertiser's summary of the
+/// routed content it holds (plan §11, P5 item 5). **Field order IS the schema**: the mesh, then the
+/// minimal fingerprint table, then one block per entry, then the ADVERTISER and the instant.
+///
+/// The digest carries no rollup hash, so these bytes are the only representation of the holdings
+/// set: the entry list travels because the consumer needs the elements to compute a difference. The
+/// held-chunk bitmap is length-prefixed rather than fixed-width because its width is
+/// `ceil(chunkCount / 8)`, pinned to the entry's own `chunkCount` by the shape check — which is also
+/// what makes two encodings of one held set impossible. `sentAt` is bound in, so a stale digest
+/// cannot be replayed as fresh; the `signature` is excluded as ever. Signed by the advertiser only:
+/// it is a statement about that device's own disk and nobody forwards it on its behalf.
+nonisolated func canonicalBytes(
+    for payload: MeshRoutedInventoryPayload, in purposes: ProximityNamespace.Purposes
+) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshRoutedInventoryDigestV1.data)
+    writer.appendUUID(payload.inventory.meshID)
+    writer.appendUInt64(UInt64(payload.inventory.members.count))
+    for member in payload.inventory.members {
+        writer.appendString(member)
+    }
+    writer.appendUInt64(UInt64(payload.inventory.entries.count))
+    for entry in payload.inventory.entries {
+        appendCanonical(&writer, entry)
+    }
+    writer.appendString(payload.senderFingerprint)
+    writer.appendDate(payload.sentAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// Canonical signing bytes for a ``MeshRoutedDrainAnswerPayload`` — one device's answer to another's
+/// routed-inventory advertisement (plan §11, P5 item 6). **Field order IS the schema**: the mesh,
+/// the ADVERTISER being answered, that advertisement's instant, the bit, then the ANSWERER and its
+/// own instant.
+///
+/// Both instants are floored to whole seconds at the value's own initializers, so the stored bytes
+/// and these bytes agree; `advertisedAt` is the advertisement's own signed instant copied verbatim,
+/// which is what makes the receiver's exact-equality binding check possible at all. The bit is one
+/// byte, `1` or `0`, never a string — a frozen token would be a second spelling of a Bool. The
+/// `signature` is excluded as ever.
+nonisolated func canonicalBytes(
+    for payload: MeshRoutedDrainAnswerPayload, in purposes: ProximityNamespace.Purposes
+) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.signature.meshRoutedDrainAnswerV1.data)
+    writer.appendUUID(payload.answer.meshID)
+    writer.appendString(payload.answer.advertiserFingerprint)
+    writer.appendDate(payload.answer.advertisedAt)
+    writer.appendByte(payload.answer.quiescent ? 1 : 0)
+    writer.appendString(payload.senderFingerprint)
+    writer.appendDate(payload.sentAt)
+    // signature: deliberately excluded.
+    return writer.bytes
+}
+
+/// One ``MeshRoutedInventoryEntry`` inside a routed-inventory transcript: the signed pair's origin
+/// INDEX and item id, the parked flag, the chunk count, the length-prefixed held-chunk bitmap, and
+/// the two signer index lists, each counted then written byte by byte.
+private nonisolated func appendCanonical(
+    _ writer: inout CanonicalByteWriter, _ entry: MeshRoutedInventoryEntry
+) {
+    writer.appendByte(entry.originIndex)
+    writer.appendUUID(entry.itemID)
+    writer.appendByte(entry.holdsManifest ? 1 : 0)
+    writer.appendUInt64(UInt64(entry.chunkCount))
+    writer.appendLengthPrefixed(entry.heldChunks)
+    writer.appendUInt64(UInt64(entry.custodySigners.count))
+    for index in entry.custodySigners {
+        writer.appendByte(index)
+    }
+    writer.appendUInt64(UInt64(entry.recipientSigners.count))
+    for index in entry.recipientSigners {
+        writer.appendByte(index)
+    }
+}
+
+/// One ``MeshRecipientKeyWrap`` inside a manifest's transcript: recipient, then the three
+/// fixed-width wrap fields, each length-prefixed so the layout is unambiguous even though the
+/// widths are fixed.
+private nonisolated func appendCanonical(_ writer: inout CanonicalByteWriter, _ wrap: MeshRecipientKeyWrap) {
+    writer.appendString(wrap.recipientFingerprint)
+    writer.appendLengthPrefixed(wrap.ephemeralPublicKey)
+    writer.appendLengthPrefixed(wrap.nonce)
+    writer.appendLengthPrefixed(wrap.sealedKey)
+}
+
+/// The bytes a ``MeshInventoryDigest`` hashes, under the Hash-family purpose that names them: the
+/// host namespace's `purposes.hash.meshInventoryDigestV1` (plan step A0.2.4).
+///
+/// Every record contributes its kind's token (the host's, resolved when its identity was built) and
+/// the four fields that give the record set its total order, in that set's own deterministic order —
+/// so two ledgers holding the same records produce the same bytes on any device, and one extra or one
+/// missing record changes them.
+nonisolated func canonicalInventoryDigestBytes(
+    for identities: [MeshRecordIdentity], in purposes: ProximityNamespace.Purposes
+) -> Data {
+    var writer = CanonicalByteWriter()
+    writer.appendLengthPrefixed(purposes.hash.meshInventoryDigestV1.data)
+    writer.appendUInt64(UInt64(identities.count))
+    for identity in identities {
+        writer.appendString(identity.kindToken)
+        writer.appendString(identity.memberFingerprint)
+        writer.appendDate(identity.occurredAt)
+        writer.appendString(identity.authorFingerprint)
+        writer.appendLengthPrefixed(identity.signature)
+    }
+    return writer.bytes
+}
+
+// MARK: - Legacy (pre-WI-6) canonical encoder
+
+// Retained ONLY to verify signatures minted by in-field peers that predate WI-6 (envelope schema
+// v1 / unversioned tokens). It is never used to SIGN. Removing it would silently reject every
+// not-yet-updated Apple peer, so it stays until those builds age out.
+
+/// The exact Foundation encoder configuration used before WI-6. Do not change — its byte output is a
+/// compatibility contract with already-signed, in-field data.
+private nonisolated func makeLegacyCanonicalSignatureEncoder() -> JSONEncoder {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    encoder.dateEncodingStrategy = .iso8601
+    return encoder
+}
+
+/// Legacy (schema v1) canonical bytes for an envelope. `try?`/`?? Data()` keeps the untrusted
+/// verify path non-throwing; an empty result simply fails the signature check.
+public nonisolated func legacyCanonicalBytes(for envelope: ProximityIdentityEnvelope) -> Data {
+    var copy = envelope
+    copy.signature = Data()
+    return (try? makeLegacyCanonicalSignatureEncoder().encode(copy)) ?? Data()
+}
+
+/// Legacy (pre-WI-6) canonical bytes for an admission token.
+public nonisolated func legacyCanonicalBytes(for token: MeshAdmissionToken) -> Data {
+    var copy = token
+    copy.admitterSignature = Data()
+    return (try? makeLegacyCanonicalSignatureEncoder().encode(copy)) ?? Data()
+}

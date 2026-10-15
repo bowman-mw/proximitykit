@@ -1,0 +1,218 @@
+import Foundation
+
+/// Failures of the mesh group-key photo/metadata AES-GCM crypto.
+///
+/// Thrown by ``MeshNetworkManager``'s static encrypt/decrypt helpers; callers treat every case
+/// as "drop the payload".
+enum MeshEncryptionError: Error, Equatable {
+    case decryptionFailed
+    case encryptionFailed
+    /// The bytes carry no `FMGP2` / `FMGM2` format marker — the shape of the retired mesh wire
+    /// format a peer on an older build sends.
+    ///
+    /// Named separately from ``decryptionFailed`` on purpose: the crypto standardization round's
+    /// Phase 4 deleted the reader for that format, and a peer that still speaks it must be refused
+    /// with a reason the receiving surface can explain rather than folded into the generic "this
+    /// did not decrypt" that also covers a wrong key, a stale epoch and a tampered payload. The
+    /// retired format had no marker of its own, so this case cannot separate an older build from
+    /// malformed bytes — it separates both from a payload that reached the AEAD and was rejected
+    /// there, which is the distinction the audit trail actually needs.
+    case legacyWireFormat
+}
+
+/// A slot's traffic class in the capped mesh session.
+///
+/// ``MeshNetworkManager`` re-ranks slots by stable distance: the nearest peers get the three
+/// `active` slots (full payload routing) and the rest fall to `lightweight` (heartbeats only).
+public enum SlotKind {
+    case active      // full payload routing, up to 3
+    case lightweight // heartbeats only, up to 2
+}
+
+/// What the returning-member re-seat has concluded about one slot's gated peer (2026-09-22).
+///
+/// Two of the three answers are final for the life of the slot and one is not, which is why this
+/// is not a flag: a peer that is simply not (yet) a member stays ``open`` and is judged again when
+/// the roster or the session state moves — a member admitted by somebody else while this device
+/// was away becomes re-seatable the moment its admission lands here.
+enum MeshReturningMemberReseat: Equatable {
+
+    /// Not re-seated: never judged, or judged and not (yet) a returning member.
+    case open
+
+    /// The coordinator was asked to commit the peer whose signing key is `signingPublicKey` — the
+    /// key the re-seat judged, which was both the gated identity's and the one the tunnel proved.
+    /// The commit lands a main-actor hop later; nothing more is asked of this slot.
+    ///
+    /// The key is kept because the coordinator commits whatever identity it holds when the ask
+    /// lands, and a second identity introduction in between re-gates it: the slot is seated only as
+    /// this key (`MeshNetworkManager.reseatRefusal(at:identity:)`), or evicted.
+    case commitRequested(signingPublicKey: Data)
+
+    /// The identity the coordinator verified is not the key the transport's channel introduction
+    /// proved for this link — a replayed or borrowed identity introduction. Refused, and audited
+    /// once, for the life of the slot. (A link with no proven key YET stays ``open``: that is
+    /// "cannot tell", not "mismatched".)
+    ///
+    /// The re-seat's refusal only: the gated identity is left where only a gesture could commit
+    /// it, and a gesture that does is refused one step later at the seat, whose transport check
+    /// every commit answers to (`MeshNetworkManager.seatTransportRefusal(at:identity:)`,
+    /// 2026-09-23) — the link is then evicted.
+    case refusedMismatchedKey
+}
+
+/// One peer's seat in the live mesh session: the transport channel, its ``ProximityCoordinator``,
+/// and the handshake-verified identity captured at commit.
+///
+/// Owned exclusively by ``MeshNetworkManager``, which appends a slot when a peer channel comes up
+/// and fills `fingerprint` / the verified key fields only when the coordinator reaches
+/// `.connected` — a nil `fingerprint` means an UNCOMMITTED candidate, which the feature-payload
+/// registry gate must drop. `verifiedKeyAgreementPublicKey` is the sealing target for every
+/// pairwise-sealed send (never descriptor gossip); `peerCapabilities` gates room broadcasts.
+/// Memory-only session state, never persisted.
+///
+/// **Read that against ``MeshSessionContext`` (P3 item 2), which is the documented reversal of the
+/// module's old blanket "ProximityKit persists nothing" rule (plan §17.3).** What is durable now is
+/// *membership* — the signed records a mesh's roster is derived from — sealed by
+/// ``MeshSessionStore``. A slot is not membership: it is one live channel plus the keys that
+/// channel verified, and losing sockets never ends membership (plan §8.2). So this stays
+/// memory-only, and after a process death the slots are rebuilt by reconnecting, not reloaded.
+public struct PeerSlot: Identifiable {
+    public let id: UUID  // == peer.id
+    public let peer: PeerHandle
+    /// The peer's channel on whichever radio the manager is running — `NetworkPeerChannel` on the
+    /// QUIC radio that ships, a detached one in unit tests. (The retired MultipeerConnectivity
+    /// radio's `PeerChannelTransport` left the tree with it.) Held as the neutral protocol so a
+    /// slot never names a radio.
+    let channel: any MeshPeerChannel
+    public let coordinator: ProximityCoordinator
+    public var kind: SlotKind
+    public var fingerprint: String?
+    // Handshake-verified Ed25519 key used for key-based block operations.
+    var verifiedSigningPublicKey: Data? = nil
+    // Handshake-verified X25519 key agreement public key used for group key wrapping.
+    // Set from ProximityCoordinator.PeerIdentity after identity exchange, never descriptor gossip.
+    var verifiedKeyAgreementPublicKey: Data?
+    /// Raw capability tokens the peer advertised in its identity intro/ack (Phase 1), captured at slot
+    /// commit from `ProximityCoordinator.PeerIdentity`. `nil` = a legacy peer whose intro predates
+    /// capability advertisement (taken to support what the host's `assumedForLegacyPeers` names:
+    /// photos alone for Fernlet). Lets a room broadcast (e.g. temp messages) skip slots whose peer
+    /// can't use the payload, without re-plumbing the PeerIdentity to the sender.
+    var peerCapabilities: [String]? = nil
+    var joinedEpoch: Int = 0
+    var distanceSamples: [MeshDistanceSample] = []
+    var stableDistanceMeters: Double?
+    var isOverflowCandidate = false
+    /// Where `MeshNetworkManager.reseatReturningMembers()` has got to with this slot's gated peer
+    /// (2026-09-22). Per slot, so it dies with the slot and a peer that re-dials is judged afresh.
+    var returningMemberReseat: MeshReturningMemberReseat = .open
+
+    /// Phase 1 capability gate for room broadcasts, mirroring
+    /// `ProximityCoordinator.PeerIdentity.supports(_:in:)`: whether the peer advertised `token`, and
+    /// for a legacy peer with no advertised capabilities, whether the host takes every such peer to
+    /// support it (`assumedForLegacyPeers`).
+    ///
+    /// Public so a host's feature gates a send to a seat by the capability token it names. The
+    /// contract: the answer reads the capabilities the peer advertised in the identity introduction
+    /// its seat was committed with; a seat holding none — a peer that advertised nothing, or a seat
+    /// not yet committed — answers by the host's `assumedForLegacyPeers`.
+    ///
+    /// - Parameters:
+    ///   - token: A capability token.
+    ///   - host: The host's capability tokens (`family.vocabulary.capabilities`).
+    /// - Returns: whether the seat's peer supports `token`.
+    public func supports(_ token: String, in host: ProximityNamespace.Capabilities) -> Bool {
+        guard let peerCapabilities else { return host.assumedForLegacyPeers.contains(token) }
+        return peerCapabilities.contains(token)
+    }
+}
+
+/// In-memory symmetric group key for the current mesh session, tagged with its rotation epoch.
+///
+/// Distributed pairwise-wrapped by the elected coordinator (`encryptGroupKey`) and rotated every
+/// 15 minutes; used for closed-mode photo/metadata AES-GCM. Never written to disk or keychain;
+/// lost on app termination or mesh leave.
+///
+/// ## "Never persisted" is now load-bearing, not incidental (plan §8.1, §17.3)
+///
+/// Until P3 nothing in this module was persisted, so this sentence cost nothing. P3 added
+/// ``MeshSessionContext`` — a sealed, on-disk record of a session's membership — and this key is
+/// **deliberately excluded from it**. The exclusion is safe because content does not depend on the
+/// control key (design invariant 3): after a process death the session resumes by reconnecting and
+/// performing a fresh membership-driven rotation, so persisting the key would buy nothing and
+/// would put a live group secret in a file whose whole justification is that it holds only signed,
+/// already-public membership records.
+///
+/// Concretely: do not add `Codable` here, do not add a field for it to ``MeshSessionContext``, and
+/// do not cache it in the keychain "just for resume". `MeshSessionStoreTests` pins the absence.
+///
+/// The same guard extends to ``MeshEpochKeyring``, which holds this key and up to three
+/// predecessors: the keyring is memory-only too, and what `MeshSessionContext.epochHeads` persists
+/// is ``MeshEpochRef`` values — the *names* of epochs, which are already public — never their keys.
+public struct MeshGroupKey {
+    public let epoch: Int
+    public let keyBytes: Data   // 32 bytes
+    public let activeSince: Date
+
+    public init(epoch: Int, keyBytes: Data, activeSince: Date) {
+        self.epoch = epoch
+        self.keyBytes = keyBytes
+        self.activeSince = activeSince
+    }
+}
+
+/// One timestamped UWB distance reading for a slot.
+///
+/// ``MeshNetworkManager`` keeps a 10-second rolling window of these per slot to compute the
+/// stable distance that drives slot ranking and overflow eviction.
+struct MeshDistanceSample: Equatable {
+    let recordedAt: Date
+    let meters: Double
+}
+
+/// A handshake-committed participant of the current proximity session, retained for the
+/// post-session keep-as-friend prompt (Phase 2, Docs/Proximity-Mesh-Redesign-2026-07-10.md).
+/// Deliberately NOT Codable: this is memory-only key material — never persisted, never synced,
+/// never part of a snapshot. Entries survive slot teardown (the review UI fires after
+/// `leaveSession` clears slots, and the non-initiating side of a 2-person session loses its slot
+/// before its review fires) and reset only when the next session begins or the UI consumes them.
+public nonisolated struct MeshSessionRosterEntry: Identifiable, Equatable, Sendable {
+    /// Stable per-peer identity within the session; the roster dedupes on it.
+    public var id: String { fingerprint }
+    /// Last write wins across re-commits within a session.
+    public internal(set) var displayName: String
+    public let fingerprint: String
+    public let signingPublicKey: Data
+    public let keyAgreementPublicKey: Data
+
+    public init(
+        displayName: String,
+        fingerprint: String,
+        signingPublicKey: Data,
+        keyAgreementPublicKey: Data
+    ) {
+        self.displayName = displayName
+        self.fingerprint = fingerprint
+        self.signingPublicKey = signingPublicKey
+        self.keyAgreementPublicKey = keyAgreementPublicKey
+    }
+}
+
+/// Display row for one member of the current session (mesh members or committed pairwise slots),
+/// including the local device.
+///
+/// Derived on demand by `MeshNetworkManager.sessionParticipants` for the session UI and photo
+/// metadata; identity is the fingerprint. Not persisted.
+public struct MeshSessionParticipant: Identifiable, Equatable {
+    public var id: String { fingerprint }
+
+    public let fingerprint: String
+    public let displayName: String
+    public let isLocal: Bool
+
+    public init(fingerprint: String, displayName: String, isLocal: Bool) {
+        self.fingerprint = fingerprint
+        self.displayName = displayName
+        self.isLocal = isLocal
+    }
+}
