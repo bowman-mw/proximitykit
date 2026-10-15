@@ -83,9 +83,16 @@ jobs:
     # repository's plan steps A1.1.14 to A1.1.17 added after the layout it measured:
     # PackageTestTreeWallTests 6, ProximitySourceWallTests 13 and ProximityMemoryLifecycleTests 5.
     # Each lane passed at these floors and refused MIN_TESTS 204.
+    # RAISED 203 -> 508 and 25 -> 58 on a Mac, 2026-10-14 (the same Xcode, Swift and simulator), for
+    # the 33 suites and 305 tests copied from the Fernlet repository's tests, over this repository's
+    # tree with the copies: swift test "Test run with 508 tests in 58 suites passed"; the macOS and
+    # the iOS result bundle each totalTestCount 508, 0 failed, 0 skipped, the same 58 suites by name,
+    # 547 cases with four parameterized tests' 43 arguments expanded; the inventory 58 rows declaring
+    # 508 tests. Each lane passed at these floors and refused MIN_TESTS 509. ARITHMETIC CHECK:
+    # 203 + 305 = 508 and 25 + 33 = 58.
     env:
-      MIN_TESTS: 203
-      MIN_SUITES: 25
+      MIN_TESTS: 508
+      MIN_SUITES: 58
     steps:
       - uses: actions/checkout@v4
 

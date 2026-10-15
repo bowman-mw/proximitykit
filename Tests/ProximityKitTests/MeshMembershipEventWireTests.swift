@@ -21,10 +21,10 @@
 //    make eviction forgeable by anyone who can reach the link, with no way to undo it.
 //
 // A partial copy (ProximityKit plan step A1, the split's first batch of copied suites): of the
-// Fernlet repository's FernletTests file of the same name, this holds only the fixtures the
-// package's copied suites read (`MeshMembershipEventFixtures` and `extension
-// MeshInventoryDigestPayload`), unchanged; its suites stay there, so what this header says of them
-// is not held here.
+// Fernlet repository's FernletTests file of the same name, this holds only
+// `MeshInventoryDigestTests`, with its name and tests unchanged, and the fixtures the package's
+// copied suites read (`MeshMembershipEventFixtures` and `extension MeshInventoryDigestPayload`);
+// its other suites stay there, so what this header says of them is not held here.
 
 import Foundation
 import Testing
@@ -186,6 +186,78 @@ enum MeshMembershipEventFixtures {
 
     static func hex(_ data: Data) -> String {
         data.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+// MARK: - Inventory digest
+
+/// The digest is a pure function of the record SET (plan §10.5): equal ledgers agree no matter how
+/// they were assembled, and one differing record is visible.
+@Suite(.serialized)
+struct MeshInventoryDigestTests {
+
+    private func ledger(_ indices: [Int]) -> MeshMembershipLedger {
+        MeshMembershipLedger(
+            admissions: MeshMembershipRecordSet(indices.map { MeshMembershipFixtures.admission($0) })
+        )
+    }
+
+    @Test func equalLedgersProduceEqualDigests() {
+        let meshID = MeshMembershipEventFixtures.meshID
+        let forward = MeshInventoryDigest(meshID: meshID, ledger: ledger([1, 2, 3]))
+        let reversed = MeshInventoryDigest(meshID: meshID, ledger: ledger([3, 2, 1]))
+        #expect(forward == reversed)
+        #expect(forward.recordsHash == reversed.recordsHash)
+        #expect(forward.isWellFormed)
+        #expect(forward.recordCount == 3)
+    }
+
+    @Test func oneExtraRecordChangesTheDigest() {
+        let meshID = MeshMembershipEventFixtures.meshID
+        let smaller = MeshInventoryDigest(meshID: meshID, ledger: ledger([1, 2]))
+        let larger = MeshInventoryDigest(meshID: meshID, ledger: ledger([1, 2, 3]))
+        #expect(smaller != larger)
+        #expect(smaller.recordsHash != larger.recordsHash)
+    }
+
+    /// The counts alone are not the digest. Two ledgers with the same SHAPE but different records
+    /// must differ, or a peer could hide a substitution behind a matching count.
+    @Test func sameCountsWithDifferentRecordsDiffer() {
+        let meshID = MeshMembershipEventFixtures.meshID
+        let first = MeshInventoryDigest(meshID: meshID, ledger: ledger([1, 2]))
+        let second = MeshInventoryDigest(meshID: meshID, ledger: ledger([1, 5]))
+        #expect(first.admissionCount == second.admissionCount)
+        #expect(first.recordsHash != second.recordsHash)
+    }
+
+    /// Every kind contributes, and it contributes UNDER ITS KIND: a departure and a removal of the
+    /// same member at the same instant are different records, and a digest that conflated them
+    /// would report convergence between two ledgers that disagree about why somebody is out.
+    @Test func theDigestCoversEveryRecordKind() {
+        let meshID = MeshMembershipEventFixtures.meshID
+        let base = ledger([1, 2])
+        var withDeparture = base
+        withDeparture.departures = MeshMembershipRecordSet([MeshMembershipEventFixtures.departure()])
+        var withTermination = base
+        withTermination.terminations = MeshMembershipRecordSet([MeshMembershipEventFixtures.termination()])
+        let digests = [base, withDeparture, withTermination]
+            .map { MeshInventoryDigest(meshID: meshID, ledger: $0) }
+        #expect(Set(digests.map(\.recordsHash)).count == 3)
+        #expect(MeshInventoryDigest(meshID: meshID, ledger: withDeparture).departureCount == 1)
+    }
+
+    /// Counts arrive from a peer, so they are clamped on decode exactly as on init — a digest is
+    /// bounded input like every other record (plan §9).
+    @Test func decodedCountsAreClamped() throws {
+        let json = """
+        {"meshID":"1F1F1F1F-2E2E-4D4D-8C8C-0B0B0B0B0B0B","admissionCount":9999,\
+        "departureCount":-4,"removalCount":0,"terminationCount":77,"recordsHash":""}
+        """
+        let decoded = try JSONDecoder().decode(MeshInventoryDigest.self, from: Data(json.utf8))
+        #expect(decoded.admissionCount == MeshMembershipBounds.maxRecordsPerKind)
+        #expect(decoded.departureCount == 0)
+        #expect(decoded.terminationCount == MeshMembershipBounds.maxTerminationRecords)
+        #expect(!decoded.isWellFormed)   // a zero-length hash is malformed, not a cheap collision
     }
 }
 

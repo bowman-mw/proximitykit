@@ -998,7 +998,8 @@ platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
 (`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`), the tests' own
 hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`), the source walls
 over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
-(`ProximityMemoryLifecycleTests`): twenty-five suites, 203 tests. The
+(`ProximityMemoryLifecycleTests`); and thirty-three suites copied from Fernlet's tests, described
+below: fifty-eight suites, 508 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1045,7 +1046,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all twenty-five passing `swift test` with this module and its tests laid out as in the package
+Mac too, all fifty-eight passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
@@ -1178,6 +1179,21 @@ worn names forgets only its oldest name past its cap; a failed mint drops the wo
 is re-advertised under the previous epoch's name; a start and a republish advertise the tags they are
 handed, with all six of the radio's hooks wired before it starts; each hook reaches the host's own; and
 the engine and its radio are released when the host lets go of them without a stop.
+
+The suites copied from Fernlet's tests at plan step A1, the split's first batch, are the thirty-three
+of its ProximityKit suites that need no keychain: the transport's decision tables and its channel
+introduction (every suite of `NetworkMeshTransportTests.swift`), epoch rotation's triggers, plan, wire
+cause and grace, the session state machine and its ceiling, the observation loop's lifecycle, the
+presence posture, the routed chunk's shape and assembly, the routed inventory's shape and delta, the
+recipient receipt's shape, the membership inventory digest, the merge window's state, the retry plan,
+and the custody hand-off's source wall. Each keeps its name and its tests, so it reads beside its
+original, which Fernlet keeps. A copy differs from its original only where the package's tests must:
+it imports nothing of Fernlet's, computes under `.packageTest` where the original named Fernlet's
+namespace or labels, and reads a source through `PackageRoot`; where Fernlet's file holds suites that
+need the keychain, a store, or Fernlet's types or bytes, the copy holds only the others, and says so in
+its header. Their fixtures keep the file names they have in Fernlet's tests, the call shapes they were
+written against join `PackageTestBindings.swift`, and the helper the source-reading cells share is
+`TestSupport/MeshRoutedSourceScan.swift`.
 
 Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the

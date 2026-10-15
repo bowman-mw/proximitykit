@@ -24,11 +24,12 @@
 // Nothing here sleeps or reads a wall clock for a decision.
 //
 // A partial copy (ProximityKit plan step A1, the split's first batch of copied suites): of the
-// Fernlet repository's FernletTests file of the same name, this holds only the fixtures the
+// Fernlet repository's FernletTests file of the same name, this holds only
+// `MeshRoutedInventoryShapeTests`, with its name and tests unchanged, and the fixtures the
 // package's copied suites read (`MeshRoutedInventoryFixtures`, `extension
 // MeshRoutedInventoryEntry`, `extension MeshRoutedInventory`, `extension
-// MeshRoutedInventoryPayload`, `MeshRoutedInventoryShapeFault` and `MeshRoutedInventoryCapFault`),
-// unchanged; its suites stay there, so what this header says of them is not held here.
+// MeshRoutedInventoryPayload`, `MeshRoutedInventoryShapeFault` and `MeshRoutedInventoryCapFault`);
+// its other suites stay there, so what this header says of them is not held here.
 
 import Foundation
 import Testing
@@ -249,5 +250,107 @@ enum MeshRoutedInventoryCapFault: String, CaseIterable, Sendable {
             let wide = String(repeating: "f", count: MeshRoutedInventoryFormat.maxFingerprintLength + 1)
             return base.replacing(members: [base.members[0], wide])
         }
+    }
+}
+
+// MARK: - Shape
+
+/// The untrusted-bytes half: one non-canonical encoding per case, refused and never repaired, and
+/// the two caps that are deliberately different numbers.
+@Suite(.serialized)
+struct MeshRoutedInventoryShapeTests {
+
+    /// A verifier whose ledger knows nobody: the caps and shape steps run before any lookup, so a
+    /// well-formed payload reaches `.senderNotAdmitted` and a broken one does not.
+    private func door() -> MeshRoutedInventoryVerifier {
+        MeshRoutedInventoryVerifier(meshID: MeshRoutedInventoryFixtures.meshID, ledger: .empty)
+    }
+
+    @Test func theGoldenFixtureIsCanonical() {
+        let inventory = MeshRoutedInventoryFixtures.inventory()
+        #expect(inventory.isWithinCaps)
+        #expect(inventory.isWellFormed)
+        #expect(MeshRoutedInventoryFixtures.payload().isWellFormed)
+        #expect(door().verify(MeshRoutedInventoryFixtures.payload()) == .senderNotAdmitted)
+    }
+
+    @Test(arguments: MeshRoutedInventoryShapeFault.allCases)
+    func everyShapeFaultIsMalformed(fault: MeshRoutedInventoryShapeFault) {
+        let broken = fault.applied(to: MeshRoutedInventoryFixtures.inventory())
+        #expect(broken.isWellFormed == false, "\(fault)")
+        let payload = MeshRoutedInventoryFixtures.payload().replacing(inventory: broken)
+        #expect(door().verify(payload) == .malformed, "\(fault)")
+    }
+
+    @Test(arguments: MeshRoutedInventoryCapFault.allCases)
+    func everyCapFaultIsOverCapacityByName(fault: MeshRoutedInventoryCapFault) {
+        let broken = fault.applied(to: MeshRoutedInventoryFixtures.inventory())
+        #expect(broken.isWithinCaps == false, "\(fault)")
+        let payload = MeshRoutedInventoryFixtures.payload().replacing(inventory: broken)
+        #expect(door().verify(payload) == .overCapacity, "\(fault)")
+    }
+
+    /// A decode repairs nothing: a mis-ordered or over-cap value survives the wire unchanged, which
+    /// is what makes the refusal reachable at the verifier rather than unreachable behind a clamp.
+    @Test func aDecodeNeitherSortsNorClampsNorRepairs() throws {
+        let unordered = MeshRoutedInventoryShapeFault.entriesOutOfCanonicalOrder
+            .applied(to: MeshRoutedInventoryFixtures.inventory())
+        let wire = try JSONEncoder().encode(unordered)
+        let decoded = try JSONDecoder().decode(MeshRoutedInventory.self, from: wire)
+        #expect(decoded == unordered)
+        #expect(decoded.entries.map(\.originIndex) == [1, 0])
+        #expect(decoded.isWellFormed == false)
+    }
+
+    /// The two payload scalars no door clamps, checked BEFORE the ledger lookup.
+    @Test func aWrongWidthSignatureIsMalformed() {
+        let narrow = MeshRoutedInventoryFixtures.payload()
+            .replacing(signature: Data(repeating: 0xAB, count: 63))
+        #expect(narrow.isWellFormed == false)
+        #expect(door().verify(narrow) == .malformed)
+    }
+
+    @Test func anEmptyOrOverLongSenderFingerprintIsMalformed() {
+        let empty = MeshRoutedInventoryFixtures.payload().replacing(senderFingerprint: "")
+        let wide = MeshRoutedInventoryFixtures.payload().replacing(
+            senderFingerprint: String(repeating: "s", count: MeshRoutedInventoryFormat.maxFingerprintLength + 1)
+        )
+        #expect(empty.isWellFormed == false)
+        #expect(wide.senderFingerprint.utf8.count
+                == MeshRoutedInventoryFormat.maxFingerprintLength + 1, "the door must NOT clamp the scalar")
+        #expect(wide.isWellFormed == false)
+        #expect(door().verify(empty) == .malformed)
+        #expect(door().verify(wide) == .malformed)
+    }
+
+    /// The bitmap's frozen bit order and its derived reads, for every width shape.
+    @Test func theBitmapIsCanonicalForEveryChunkCount() {
+        for count in [1, 7, 8, 9, MeshRoutedInventoryFormat.maxChunkCount] {
+            let width = MeshRoutedInventoryEntry.bitmapByteCount(forChunkCount: UInt32(count))
+            #expect(width == (count + 7) / 8, "\(count)")
+            let full = Data((0..<width).map { byte in
+                var value: UInt8 = 0
+                for bit in 0..<8 where byte * 8 + bit < count { value |= UInt8(1) << UInt8(bit) }
+                return value
+            })
+            #expect(MeshRoutedInventoryEntry.bitmapIsCanonical(full, for: UInt32(count)), "\(count)")
+            let entry = MeshRoutedInventoryFixtures.completeEntry()
+                .replacing(chunkCount: UInt32(count), heldChunks: full)
+            #expect(entry.heldChunkCount == count, "\(count)")
+            #expect(entry.isComplete, "\(count)")
+        }
+    }
+
+    /// The reads the delta depends on, over a hole-punched set: `{0, 2}` of 4.
+    @Test func partialHoldingsReportTheExactHeldSet() {
+        let entry = MeshRoutedInventoryFixtures.completeEntry()
+            .replacing(chunkCount: 4, heldChunks: Data([0b0000_0101]))
+        #expect(entry.heldChunkCount == 2)
+        #expect(entry.isComplete == false)
+        #expect(entry.holdsChunk(0))
+        #expect(entry.holdsChunk(1) == false)
+        #expect(entry.holdsChunk(2))
+        #expect(entry.holdsChunk(3) == false)
+        #expect(entry.holdsChunk(9) == false, "an index past the map is not held, never a crash")
     }
 }

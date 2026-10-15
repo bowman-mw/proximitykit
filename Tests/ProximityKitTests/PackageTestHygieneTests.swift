@@ -366,10 +366,13 @@ import Testing
     /// can check against the line it names, and a row whose line is gone or changed is a failure, so no row
     /// outlives the line it excuses. 23 rows since ProximityKit plan step A1.1.10, when the per-file rule
     /// (``packageKeychainFiles``) replaced the per-line rows of the files that reach the keychain; moved here
-    /// at A1.1.13. The rows spell a needle the per-file rule does not cover: the soundness suite's
-    /// storage cell, which reads `URL.applicationSupportDirectory` as a value; the package's file locator's
-    /// one read of its own source's path; and the namespace and platform walls' needles inside literals
-    /// (``packageNamespaceWallLines``, ``packagePlatformWallLines``), each set under one invariant.
+    /// at A1.1.13; 43 since plan step A1, when the suites copied from Fernlet's tests brought 20. The rows
+    /// spell a needle the per-file rule does not cover: the soundness suite's storage cell, which reads
+    /// `URL.applicationSupportDirectory` as a value; the package's file locator's one read of its own
+    /// source's path; the namespace and platform walls' needles inside literals
+    /// (``packageNamespaceWallLines``, ``packagePlatformWallLines``); and the copied suites' reads of a
+    /// keychain-reaching type's statics and their source walls' needles inside literals
+    /// (``packageCopiedStaticLines``, ``packageCopiedSourceTextLines``), each set under one invariant.
     static let packageHazardAllowlist: [(file: String, line: String, invariant: String)] = [
         (file: "ProximityNamespaceSoundnessTests.swift",
          line: "for base in [URL.applicationSupportDirectory, scratch] {",
@@ -389,7 +392,84 @@ import Testing
         (file: packageNamespaceWallFile, line: $0, invariant: packageNamespaceWallInvariant)
     } + packagePlatformWallLines.map {
         (file: packagePlatformWallFile, line: $0, invariant: packagePlatformWallInvariant)
+    } + packageCopiedStaticLines.map {
+        (file: $0.file, line: $0.line, invariant: packageCopiedStaticInvariant)
+    } + packageCopiedSourceTextLines.map {
+        (file: $0.file, line: $0.line, invariant: packageCopiedSourceTextInvariant)
     }
+
+    /// What makes every line of ``packageCopiedStaticLines`` safe in the unhosted bundle (rule I9).
+    static let packageCopiedStaticInvariant = """
+        the needle is a type's name in front of one of its statics: a constant \
+        (MeshNetworkManager.maxReGossipFrames, IdentityService.presenceEpochSeconds, and \
+        MeshRoutedStoreFormat.maxItems, whose type's name holds the store's) or a nonisolated pure \
+        function of its arguments (MeshNetworkManager.shouldInitiateInvite(localSessionID:peerSessionID:), \
+        IdentityService.fingerprint(of:)); nothing on the line builds an instance, so no identity \
+        provisions, no store opens and nothing reaches the keychain
+        """
+
+    /// The copied suites' lines that read a keychain-reaching type's static, each exact as trimmed (rule
+    /// I9; ProximityKit plan step A1, the split's first batch of copied suites).
+    static let packageCopiedStaticLines: [(file: String, line: String)] = [
+        (file: "MeshMergeWindowTests.swift",
+         line: "#expect(MeshMergeWindow.maxProofs == MeshNetworkManager.maxReGossipFrames,"),
+        (file: "MeshRoutedRetryAllowanceTests.swift",
+         line: "for position in 0..<MeshRoutedStoreFormat.maxItems where !refusedInsideTheCap {"),
+        (file: "MeshRoutedRetryAllowanceTests.swift",
+         line: "#expect(rotation.attempted.count == MeshRoutedStoreFormat.maxItems)"),
+        (file: "MeshRoutedRetryAllowanceTests.swift",
+         line: "let overCap = try Self.key(MeshRoutedStoreFormat.maxItems)"),
+        (file: "MeshRoutedRetryAllowanceTests.swift",
+         line: #"#expect(rotation.attempted.count == MeshRoutedStoreFormat.maxItems, "and does not grow")"#),
+        (file: "MeshRoutedRetryAllowanceTests.swift",
+         line: "#expect(rotation.order.count == MeshRoutedStoreFormat.maxItems)"),
+        (file: "NetworkMeshTransportTests.swift",
+         line: "let dials = MeshNetworkManager.shouldInitiateInvite("),
+        (file: "NetworkMeshTransportTests.swift",
+         line: #"#expect(MeshNetworkManager.shouldInitiateInvite(localSessionID: "aaaa", peerSessionID: nil))"#),
+        (file: "NetworkMeshTransportTests.swift",
+         line: #"#expect(!MeshNetworkManager.shouldInitiateInvite(localSessionID: "aaaa", peerSessionID: "aaaa"))"#),
+        (file: "NetworkMeshTransportTests.swift",
+         line: "run.initiatorOutcome?.verifiedPeer?.fingerprint == IdentityService.fingerprint(of: bob.publicKey)"),
+        (file: "PresenceEpochPostureTests.swift",
+         line: "at: Self.anchor.addingTimeInterval(IdentityService.presenceEpochSeconds + 431),"),
+        (file: "PresenceEpochPostureTests.swift",
+         line: "#expect(mintInstants.last == Self.anchor.addingTimeInterval(IdentityService.presenceEpochSeconds),"),
+        (file: "PresenceEpochPostureTests.swift",
+         line: #"#expect(IdentityService.presenceEpochSeconds == 900, "the one named constant")"#)
+    ]
+
+    /// What makes every line of ``packageCopiedSourceTextLines`` safe in the unhosted bundle (rule I9).
+    static let packageCopiedSourceTextInvariant = """
+        the needle stands only inside a literal a copied source wall reads as text and never runs: the \
+        package-relative path of a ProximityKit source the wall reads through PackageRoot, a needle it \
+        looks for in that source's code (PresenceEpochPostureTests' list of what the posture must never \
+        reach, the retry planner's forbidden types), or a failure message; the code around it only reads \
+        and matches text, so the line reaches no keychain, opens no store and reads, writes and creates \
+        nothing at any location
+        """
+
+    /// The copied suites' lines that spell a needle inside a source wall's literal, each exact as trimmed
+    /// (rule I9; ProximityKit plan step A1, the split's first batch of copied suites).
+    static let packageCopiedSourceTextLines: [(file: String, line: String)] = [
+        (file: "MeshRoutedCustodyHandoffTests.swift",
+         line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift")"#),
+        (file: "MeshRoutedCustodyHandoffTests.swift",
+         line: #""\(door) is gone from MeshNetworkManager.swift")"#),
+        // The routed store's name and its parenthesis are two literals here, so the package's store walls
+        // (`PackageTestTreeWallTests`), which read every package file's raw text for a construction of the
+        // store, read none in this file.
+        (file: "MeshRoutedRetryAllowanceTests.swift",
+         line: #""MeshRoutedStore"# + #"(", "MeshRoutedIndex(", "ProximityAudit"] {"#),
+        (file: "PresenceEpochPostureTests.swift",
+         line: #""the posture must not write 900 down again — IdentityService.presenceEpochSeconds is the one home")"#),
+        (file: "PresenceEpochPostureTests.swift",
+         line: #"#expect(code.contains { $0.contains("IdentityService.presenceEpoch(at:") },"#),
+        (file: "PresenceEpochPostureTests.swift",
+         line: #""fingerprint", "Keychain", "KeychainItem", "SecItem", "kSecAttrService","#),
+        (file: "PresenceEpochPostureTests.swift",
+         line: #""UserDefaults", "FileManager", "write(to:", "JSONSidecarFile","#)
+    ]
 
     /// The wall files rule I9 reads as code (ProximityKit plan step A1.1.13): a wall's file holds the
     /// needles it reads, their reasons and its fixtures as data in literals, which a line-by-line read of
@@ -937,9 +1017,11 @@ import Testing
     /// suites the package held at A1.1.10 and this one. RAISED at A1.1.14 (2026-10-14): 22 → 23, for the
     /// package's NEW `PackageTestTreeWallTests`. RAISED at A1.1.15 (2026-10-14): 23 → 24, for the
     /// package's NEW `ProximitySourceWallTests`. RAISED at A1.1.17 (2026-10-14): 24 → 25, for the
-    /// package's NEW `ProximityMemoryLifecycleTests`. A suite added, moved out or deleted changes it in the
-    /// same commit, argued and measured; a deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 25
+    /// package's NEW `ProximityMemoryLifecycleTests`. RAISED at plan step A1 (2026-10-14): 25 → 58, for
+    /// the 33 suites copied from Fernlet's tests (the split's first batch), each run on macOS and the iOS
+    /// simulator. A suite added, moved out or deleted changes it in the same commit, argued and measured;
+    /// a deletion lowers it only with the retirement argued.
+    static let measuredInventoryRows = 58
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -947,8 +1029,9 @@ import Testing
     /// `ProximitySourceWallTests`' 6. RAISED at A1.1.16 (2026-10-14): 191 → 197, for the six cells the
     /// purpose wall and the escape-hatch census add to `ProximitySourceWallTests`. RAISED at A1.1.17
     /// (2026-10-14): 197 → 203, for `ProximityMemoryLifecycleTests`' 5 and the identity-construction cell
-    /// `ProximitySourceWallTests` gains. A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 203
+    /// `ProximitySourceWallTests` gains. RAISED at plan step A1 (2026-10-14): 203 → 508, for the copied
+    /// suites' 305. A test added or removed changes it in the same commit.
+    static let measuredDeclaredTests = 508
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

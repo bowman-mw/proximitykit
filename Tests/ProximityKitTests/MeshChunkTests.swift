@@ -23,10 +23,10 @@
 // Nothing here sleeps, touches disk, or reads a wall clock for a decision.
 //
 // A partial copy (ProximityKit plan step A1, the split's first batch of copied suites): of the
-// Fernlet repository's FernletTests file of the same name, this holds only the fixtures the
-// package's copied suites read (`MeshChunkFixtures`, `extension MeshChunk` and
-// `MeshChunkShapeFault`), unchanged; its suites stay there, so what this header says of them is not
-// held here.
+// Fernlet repository's FernletTests file of the same name, this holds only `MeshChunkShapeTests`,
+// with its name and tests unchanged, and the fixtures the package's copied suites read
+// (`MeshChunkFixtures`, `extension MeshChunk` and `MeshChunkShapeFault`); its other suites stay
+// there, so what this header says of them is not held here.
 
 import Foundation
 import Testing
@@ -150,6 +150,42 @@ extension MeshChunk {
     }
 }
 
+/// A chunk's JSON with NO floor on the instant and no bound on the payload — what a re-encoded or
+/// hostile frame from a peer looks like on the wire. Same coding keys and encoder strategy as the
+/// real type, so decoding it as a ``MeshChunk`` exercises `init(from:)` exactly.
+private struct UnclampedChunkWire: Encodable {
+    let meshID: UUID
+    let itemID: UUID
+    let originFingerprint: String
+    let contentHash: Data
+    let chunkIndex: UInt32
+    let chunkCount: UInt32
+    let chunkHash: Data
+    let expiresAt: Date
+    let payload: Data
+    let signature: Data
+
+    /// `chunk`, optionally with a different (unfloored) instant and a different payload — the two
+    /// things the real type can no longer put on the wire itself.
+    init(_ chunk: MeshChunk, expiresAt: Date? = nil, payload: Data? = nil) {
+        meshID = chunk.meshID
+        itemID = chunk.itemID
+        originFingerprint = chunk.originFingerprint
+        contentHash = chunk.contentHash
+        chunkIndex = chunk.chunkIndex
+        chunkCount = chunk.chunkCount
+        chunkHash = chunk.chunkHash
+        self.expiresAt = expiresAt ?? chunk.expiresAt
+        self.payload = payload ?? chunk.payload
+        signature = chunk.signature
+    }
+
+    /// Encodes this wire form and decodes it through the real type's door.
+    func decodedChunk() throws -> MeshChunk {
+        try JSONDecoder().decode(MeshChunk.self, from: JSONEncoder().encode(self))
+    }
+}
+
 /// One wrong width or count per case — each a refusal, never a repair.
 enum MeshChunkShapeFault: String, CaseIterable, Sendable {
     case signature63, signature65, chunkHash31, chunkHash33, contentHash31, contentHash33
@@ -173,6 +209,143 @@ enum MeshChunkShapeFault: String, CaseIterable, Sendable {
         case .countOverCap:
             return base.replacing(chunkCount: UInt32(MeshChunkFormat.maxChunkCount + 1))
         case .indexAtCount: return base.replacing(chunkIndex: base.chunkCount)
+        }
+    }
+}
+
+// MARK: - Shape, bounds and derivations
+
+/// The chunk's own bounds: what a wrong width does, what the derived caps must equal, and what the
+/// boundary rule computes. Pure — no keychain, no clock, no disk.
+@Suite(.serialized)
+struct MeshChunkShapeTests {
+
+    @Test func aWellFormedChunkPassesTheShapeCheck() {
+        #expect(MeshChunkFixtures.chunk().isWellFormed)
+    }
+
+    @Test(arguments: MeshChunkShapeFault.allCases)
+    func everyShapeFaultIsRefused(fault: MeshChunkShapeFault) {
+        #expect(MeshChunkFixtures.chunk().isWellFormed)
+        #expect(fault.applied(to: MeshChunkFixtures.chunk()).isWellFormed == false, "\(fault)")
+    }
+
+    /// An over-long payload on the wire is NOT trimmed into a valid-looking chunk: it decodes whole
+    /// and fails the shape check, which is the difference between a refusal and a repair.
+    @Test func anUnclampedWireChunkIsRefusedOnDecode() throws {
+        let oversize = Data(repeating: 0x5A, count: MeshChunkFormat.maxChunkPayloadBytes + 1)
+        let decoded = try UnclampedChunkWire(MeshChunkFixtures.chunk(), payload: oversize).decodedChunk()
+        #expect(decoded.payload.count == MeshChunkFormat.maxChunkPayloadBytes + 1)
+        #expect(decoded.isWellFormed == false)
+    }
+
+    /// Both doors floor the instant, so a relay re-encoding the wire with `expiresAt + 0.999`
+    /// decodes to a chunk `==` the origin's whose canonical bytes are unchanged.
+    @Test func aDecodedChunkFloorsItsExpiryLikeTheMemberwiseDoor() throws {
+        let signed = MeshChunkFixtures.chunk()
+        let fractional = try UnclampedChunkWire(
+            signed, expiresAt: signed.expiresAt.addingTimeInterval(0.999)
+        ).decodedChunk()
+        #expect(fractional == signed)
+        #expect(fractional.expiresAt == MeshChunkFixtures.expiresAt)
+        #expect(canonicalBytes(for: fractional) == canonicalBytes(for: signed))
+        #expect(fractional.isLive(at: MeshChunkFixtures.expiresAt))
+        #expect(fractional.isLive(at: MeshChunkFixtures.expiresAt.addingTimeInterval(1)) == false)
+    }
+
+    /// The id is a function of `(itemID, index)` only: a retransmission with different payload
+    /// bytes is the SAME id (dedup works), a different index or item is a different id.
+    @Test func theChunkIDIsStableAcrossARetransmission() {
+        let chunk = MeshChunkFixtures.chunk()
+        let repayloaded = chunk.replacing(payload: Data([0x01, 0x02, 0x03, 0x04]))
+        #expect(repayloaded.chunkID == chunk.chunkID)
+        #expect(chunk.replacing(chunkIndex: 2).chunkID != chunk.chunkID)
+        #expect(chunk.replacing(itemID: MeshMembershipEventFixtures.proposalID).chunkID != chunk.chunkID)
+        // Origin-free by design: two origins squatting one itemID produce equal ids, and the replay
+        // window separates them on its own sender axis (item 12's F3-ii).
+        #expect(chunk.replacing(originFingerprint: "fp002").chunkID == chunk.chunkID)
+    }
+
+    /// Not vacuous: it fires the day 256 KiB stops dividing 256 MiB evenly.
+    @Test func theDerivedChunkCapMatchesTheContentCap() {
+        let contentCap = MeshRoutedManifestFormat.maxContentByteCount
+        let expected = (Int(contentCap) + MeshChunkFormat.maxChunkPayloadBytes - 1)
+            / MeshChunkFormat.maxChunkPayloadBytes
+        #expect(MeshChunkFormat.maxChunkCount == expected)
+        #expect(MeshChunkFormat.maxChunkCount == 1024)
+        #expect(MeshChunkFormat.maxChunkPayloadBytes == 256 * 1024)
+        #expect(MeshChunkFormat.chunkCount(forSize: contentCap) == MeshChunkFormat.maxChunkCount)
+    }
+
+    /// C15: pin the NUMBER and the strict INEQUALITY, never the equality with the constant it is
+    /// defined from — that would be true by construction and could never fail. The inequality is
+    /// the decision: one slot of headroom in a budget the photo path shares.
+    @Test func theInFlightBoundLeavesHeadroomInTheSharedBudget() {
+        #expect(MeshChunkFormat.maxChunksInFlightPerPeer == 3)
+        #expect(MeshChunkFormat.maxChunksInFlightPerPeer < MeshTransferStreamTable.maxConcurrentOutbound)
+        #expect(MeshChunkFormat.maxChunksInFlightPerPeer >= 1)
+    }
+
+    @Test func theExpectedPayloadLengthRuleIsExact() {
+        let full = MeshChunkFormat.maxChunkPayloadBytes
+        let size = UInt64(2 * full + 1_000)
+        #expect(MeshChunk.expectedPayloadByteCount(index: 0, count: 3, size: size) == full)
+        #expect(MeshChunk.expectedPayloadByteCount(index: 1, count: 3, size: size) == full)
+        #expect(MeshChunk.expectedPayloadByteCount(index: 2, count: 3, size: size) == 1_000)
+        // Out of range, and a count that disagrees with the size, are both nil.
+        #expect(MeshChunk.expectedPayloadByteCount(index: 3, count: 3, size: size) == nil)
+        #expect(MeshChunk.expectedPayloadByteCount(index: 0, count: 4, size: size) == nil)
+        // An exact multiple: the last chunk is full, not zero.
+        #expect(MeshChunk.expectedPayloadByteCount(index: 1, count: 2, size: UInt64(2 * full)) == full)
+        // A single chunk shorter than the cap.
+        #expect(MeshChunk.expectedPayloadByteCount(index: 0, count: 1, size: 1) == 1)
+    }
+
+    @Test func theChunkCountRuleIsExactAtEveryBoundary() {
+        let full = UInt64(MeshChunkFormat.maxChunkPayloadBytes)
+        #expect(MeshChunkFormat.chunkCount(forSize: 0) == nil)
+        #expect(MeshChunkFormat.chunkCount(forSize: 1) == 1)
+        #expect(MeshChunkFormat.chunkCount(forSize: full - 1) == 1)
+        #expect(MeshChunkFormat.chunkCount(forSize: full) == 1)
+        #expect(MeshChunkFormat.chunkCount(forSize: full + 1) == 2)
+        #expect(MeshChunkFormat.chunkCount(forSize: MeshRoutedManifestFormat.maxContentByteCount + 1) == nil)
+        // A hostile size never traps: the cap guard runs before the ceil addition.
+        #expect(MeshChunkFormat.chunkCount(forSize: UInt64.max) == nil)
+    }
+
+    @Test func everyRejectionHasAFrozenDiagnostic() {
+        #expect(MeshChunkRejection.allCases.count == 11)
+        #expect(MeshChunkRefusal.allCases.count == 10)
+        let rejectionsNamed = MeshChunkRejection.allCases.allSatisfy { !$0.diagnosticDescription.isEmpty }
+        #expect(rejectionsNamed)
+        let refusalsNamed = MeshChunkRefusal.allCases.allSatisfy { !$0.diagnosticDescription.isEmpty }
+        #expect(refusalsNamed)
+        #expect(Set(MeshChunkRejection.allCases.map(\.rawValue)).count == MeshChunkRejection.allCases.count)
+        #expect(Set(MeshChunkRefusal.allCases.map(\.rawValue)).count == MeshChunkRefusal.allCases.count)
+        let mintErrors: [MeshChunkMintError] = [
+            .emptyBlob, .sizeMismatch(blobByteCount: 1, manifestSize: 2), .contentHashMismatch,
+            .notTheOrigin(origin: "fp001"), .tooManyChunks(size: 1), .indexOutOfRange(index: 9, count: 3)
+        ]
+        let mintErrorsNamed = mintErrors.allSatisfy { !$0.diagnosticDescription.isEmpty }
+        #expect(mintErrorsNamed)
+    }
+
+    /// The ten fields, and nothing receiver-local, custodial or increment-2 shaped.
+    @Test func aChunkCarriesNoCustodyNoHopAndNoEpoch() {
+        let labels = Mirror(reflecting: MeshChunkFixtures.chunk()).children.compactMap(\.label)
+        #expect(labels == [
+            "meshID", "itemID", "originFingerprint", "contentHash", "chunkIndex", "chunkCount",
+            "chunkHash", "expiresAt", "payload", "signature"
+        ])
+        for label in labels.map({ $0.lowercased() }) {
+            #expect(label.contains("epoch") == false)
+            #expect(label.contains("branch") == false)
+            #expect(label.contains("partition") == false)
+            #expect(label.contains("custod") == false)
+            #expect(label.contains("hop") == false)
+            #expect(label.contains("ttl") == false)
+            #expect(label.contains("seen") == false)
+            #expect(label.contains("size") == false)
         }
     }
 }

@@ -51,9 +51,11 @@ Checks:
     TF-XCRESULT   The result bundle's checks, above.
     TF-SWIFT-TEST The summary line's checks, above.
 
-The numbers agree across lanes because no package test is parameterized: Swift Testing counts a
-parameterized test once in its summary line and in the inventory's cells. If one ever is, measure
-what each lane reports before raising the literals.
+The numbers agree across lanes although four package tests are parameterized (in MeshChunkShapeTests,
+MeshRecipientReceiptShapeTests and MeshRoutedInventoryShapeTests): Swift Testing counts a
+parameterized test once in its summary line, a result bundle counts it once in totalTestCount and in
+its census (its arguments are children of its one test case), and the inventory's cells count it
+once. If a lane ever counts otherwise, measure what each lane reports before raising the literals.
 
 Before the import: the code came with its git history from the Fernlet repository. On a tree
 without Package.swift, as this repository's was until then, `declared` reads the literals only and

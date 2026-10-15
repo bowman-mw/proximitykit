@@ -31,10 +31,11 @@
 // Nothing here sleeps or reads a wall clock for a decision.
 //
 // A partial copy (ProximityKit plan step A1, the split's first batch of copied suites): of the
-// Fernlet repository's FernletTests file of the same name, this holds only the fixtures the
+// Fernlet repository's FernletTests file of the same name, this holds only
+// `MeshRecipientReceiptShapeTests`, with its name and tests unchanged, and the fixtures the
 // package's copied suites read (`MeshRecipientReceiptFixtures`, `extension MeshRecipientReceipt`
-// and `MeshRecipientReceiptShapeFault`), unchanged; its suites stay there, so what this header says
-// of them is not held here.
+// and `MeshRecipientReceiptShapeFault`); its other suites stay there, so what this header says of
+// them is not held here.
 
 import Foundation
 import Testing
@@ -138,5 +139,76 @@ enum MeshRecipientReceiptShapeFault: String, CaseIterable, Sendable {
         case .receivedAtExpiry: return base.replacing(receivedAt: base.expiresAt)
         case .receivedPastExpiry: return base.replacing(receivedAt: base.expiresAt.addingTimeInterval(1))
         }
+    }
+}
+
+// MARK: - Shape
+
+/// The untrusted-bytes half: one wrong width per case, and the guards this check deliberately does
+/// NOT pre-empt.
+@Suite(.serialized)
+struct MeshRecipientReceiptShapeTests {
+
+    @Test(arguments: MeshRecipientReceiptShapeFault.allCases)
+    func everyShapeFaultIsMalformed(fault: MeshRecipientReceiptShapeFault) {
+        #expect(MeshRecipientReceiptFixtures.receipt().isWellFormed)
+        #expect(fault.applied(to: MeshRecipientReceiptFixtures.receipt()).isWellFormed == false, "\(fault)")
+    }
+
+    /// A receipt whose recipient IS the origin is well-formed, so `recipientIsOrigin` stays a
+    /// reachable, differently named refusal instead of collapsing into `malformed`.
+    @Test func isWellFormedDoesNotPreEmptTheVerifiersOriginCheck() {
+        let selfSigned = MeshRecipientReceiptFixtures.receipt()
+            .replacing(recipientFingerprint: MeshRecipientReceiptFixtures.originFingerprint)
+        #expect(selfSigned.isWellFormed)
+    }
+
+    /// Liveness is an injected instant at every door; nothing here reads a clock.
+    @Test func livenessIsAnInjectedInstant() {
+        let receipt = MeshRecipientReceiptFixtures.receipt()
+        #expect(receipt.isLive(at: MeshRecipientReceiptFixtures.expiresAt.addingTimeInterval(-1)))
+        #expect(receipt.isLive(at: MeshRecipientReceiptFixtures.expiresAt))
+        #expect(receipt.isLive(at: MeshRecipientReceiptFixtures.expiresAt.addingTimeInterval(1)) == false)
+    }
+
+    /// Both doors floor the instants to the signed whole seconds, so a relay's re-encoding cannot
+    /// produce a receipt `!=` the recipient's that still verifies.
+    @Test func bothDoorsFloorTheInstantsToTheSignedWholeSeconds() throws {
+        let signed = MeshRecipientReceiptFixtures.receipt()
+        let fractional = signed.replacing(
+            receivedAt: signed.receivedAt.addingTimeInterval(0.999),
+            expiresAt: signed.expiresAt.addingTimeInterval(0.999)
+        )
+        #expect(fractional == signed)
+        let wire = try JSONEncoder().encode(UnclampedRecipientReceiptWire(signed))
+        let decoded = try JSONDecoder().decode(MeshRecipientReceipt.self, from: wire)
+        #expect(decoded == signed)
+        #expect(canonicalBytes(for: decoded) == canonicalBytes(for: signed))
+    }
+}
+
+/// A receipt's JSON with NO floor on either instant — what a re-encoded frame from a peer looks like
+/// on the wire. Same coding keys and encoder strategy as the real type, so decoding it as a
+/// ``MeshRecipientReceipt`` exercises `init(from:)` exactly.
+private struct UnclampedRecipientReceiptWire: Encodable {
+    let meshID: UUID
+    let itemID: UUID
+    let originFingerprint: String
+    let contentHash: Data
+    let recipientFingerprint: String
+    let receivedAt: Date
+    let expiresAt: Date
+    let signature: Data
+
+    /// `receipt`, with both instants pushed a fraction of a second past the signed value.
+    init(_ receipt: MeshRecipientReceipt) {
+        meshID = receipt.meshID
+        itemID = receipt.itemID
+        originFingerprint = receipt.originFingerprint
+        contentHash = receipt.contentHash
+        recipientFingerprint = receipt.recipientFingerprint
+        receivedAt = receipt.receivedAt.addingTimeInterval(0.999)
+        expiresAt = receipt.expiresAt.addingTimeInterval(0.999)
+        signature = receipt.signature
     }
 }
