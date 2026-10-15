@@ -36,12 +36,12 @@ The import matcher reads more than the one in Fernlet's S3BoundaryTests.imported
 and only ever more: Swift 6 access-level imports (`internal import X`), scoped imports
 (`import struct X.Y`) and `;`-separated imports are read too.
 
-Before the import: the code arrives later with its git history from the Fernlet repository.
-Each root has its own floor, as each root does in Fernlet's scan. Once Sources/ProximityKit
-exists, a scan that reads zero Swift files under Sources/ fails instead of passing over nothing,
-and once Tests/ProximityKitTests exists, so does one that reads zero under Tests/: NT-SDK and
-NT-SYMBOL read the tests, and an emptied test folder must not pass them vacuously. Until then an
-empty tree passes.
+Before the import: the code came with its git history from the Fernlet repository. Each root has
+its own floor, as each root does in Fernlet's scan. Once Sources/ProximityKit exists, a scan that
+reads zero Swift files under Sources/ fails instead of passing over nothing, and once
+Tests/ProximityKitTests exists, so does one that reads zero under Tests/: NT-SDK and NT-SYMBOL read
+the tests, and an emptied test folder must not pass them vacuously. A tree without them, as this
+repository's was until then, passes empty.
 """
 import json
 import os

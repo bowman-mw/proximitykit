@@ -24,8 +24,9 @@
 # simulator. After each test leg, the test-count floor reads what ran: swift test's summary line,
 # and the result bundle each xcodebuild test leg writes to $RUNNER_TEMP.
 #
-# The code arrives later with its git history from the Fernlet repository. Until Package.swift
-# exists, the build and test steps are skipped with a notice and the job is the walls alone.
+# The code came with its git history from the Fernlet repository. On a tree without Package.swift,
+# as this repository's was until then, the build and test steps are skipped with a notice and the
+# job is the walls alone; once Sources/ProximityKit exists, manifest-scan fails such a tree.
 #
 # RUNNER: macOS with Xcode 26 or newer, for Swift tools 6.2 and the iOS 26 and macOS 26 SDKs. The
 # job picks the newest Xcode 26+ on the image and fails in seconds when a floor is unmet. It never
@@ -73,9 +74,18 @@ jobs:
     # suites by name; the inventory 22 rows declaring 179 tests. Each lane passed at these floors and
     # refused MIN_TESTS 180; with one suite's file deleted, each lane refused the run. The import
     # commit measures again over the imported tree and sets both for it.
+    # RAISED 179 -> 203 and 22 -> 25 at the import, MEASURED on a Mac, 2026-10-14 (Xcode 26.5, Swift
+    # 6.3.2; an iPhone 17 simulator on iOS 26.5), over this repository's tree with the code imported
+    # from the Fernlet repository at its plan step A1.1.20, this workflow's steps run as written:
+    # swift test "Test run with 203 tests in 25 suites passed"; the macOS and the iOS result bundle
+    # each totalTestCount 203, 0 failed, 0 skipped, the same 25 suites by name; the inventory 25 rows
+    # declaring 203 tests. The 24 tests and 3 suites over the note above are the suites that
+    # repository's plan steps A1.1.14 to A1.1.17 added after the layout it measured:
+    # PackageTestTreeWallTests 6, ProximitySourceWallTests 13 and ProximityMemoryLifecycleTests 5.
+    # Each lane passed at these floors and refused MIN_TESTS 204.
     env:
-      MIN_TESTS: 179
-      MIN_SUITES: 22
+      MIN_TESTS: 203
+      MIN_SUITES: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -142,9 +152,9 @@ jobs:
             fi
           done
 
-      # Runs on every push and pull request, before and after the code arrives. Every wall runs
-      # even when one fails, so a single run reports every wall that broke. The last is the
-      # test-count floor's declared half, which needs no build.
+      # Runs on every push and pull request, before any build. Every wall runs even when one
+      # fails, so a single run reports every wall that broke. The last is the test-count floor's
+      # declared half, which needs no build.
       - name: Walls
         run: |
           set -uo pipefail
@@ -174,7 +184,7 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Walls only::There is no Package.swift yet. The code arrives later with its history from the Fernlet repository; until then CI runs the walls only and skips the build and test steps."
+            echo "::notice title=Walls only::There is no Package.swift, so CI runs the walls only and skips the build and test steps. Once Sources/ProximityKit exists, manifest-scan fails the Walls step for it."
           fi
 
       # `swift package describe` loads the manifest and resolves the package graph. Its JSON form

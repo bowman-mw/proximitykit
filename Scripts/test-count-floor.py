@@ -55,8 +55,9 @@ The numbers agree across lanes because no package test is parameterized: Swift T
 parameterized test once in its summary line and in the inventory's cells. If one ever is, measure
 what each lane reports before raising the literals.
 
-Before the import: the code arrives later with its git history from the Fernlet repository. Until
-Package.swift exists, `declared` reads the literals only and holds the rest with a notice.
+Before the import: the code came with its git history from the Fernlet repository. On a tree
+without Package.swift, as this repository's was until then, `declared` reads the literals only and
+holds the rest with a notice.
 """
 import json
 import os

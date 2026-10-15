@@ -9,11 +9,9 @@
 # pattern that matches nothing, so Scripts/codeowners-scan.py does: every rule must resolve to a
 # path, and the paths the walls rest on must keep their rules.
 #
-# The code arrives later with its git history from the Fernlet repository. Until Package.swift
-# exists, the rules under Sources/ and Tests/ match nothing, and the scan holds them. The list
-# follows that repository's plan and the walls its plan steps A1.1.13 to A1.1.15 move into the
-# package's tests. Later steps there, A1.1.17 among them, move more walls in files not named yet:
-# the commit that imports the code completes this list.
+# The list is the one the Fernlet repository's plan gives for this package, where the code lived
+# before it moved here: the ProximityKit rows of that repository's CODEOWNERS, every wall its plan
+# steps moved into the package's tests, and what those walls read through.
 
 # The label registry: the host-supplied namespace and the domain-separation labels that every
 # signature, seal and key derivation is bound to. Changing a label breaks the wire and on-disk
@@ -44,10 +42,11 @@
 
 # The package tests' own walls: their hygiene (what their unhosted bundle cannot serve, their
 # imports, their inventory, no extension of ProximityHost), the walls over the test tree, and the
-# walls over ProximityKit's own sources.
+# walls over ProximityKit's own sources: the source walls and the memory-lifecycle wall.
 /Tests/ProximityKitTests/PackageTestHygieneTests.swift                 @bowman-mw
 /Tests/ProximityKitTests/PackageTestTreeWallTests.swift                @bowman-mw
 /Tests/ProximityKitTests/ProximitySourceWallTests.swift                @bowman-mw
+/Tests/ProximityKitTests/ProximityMemoryLifecycleTests.swift           @bowman-mw
 # The inventory of the package's tests: the hygiene suite holds it to the test tree, and it is the
 # test-count floor's declared pin, held against the floor literals in .github/workflows/ci.yml.
 /Tests/ProximityKitTests.tsv                                           @bowman-mw

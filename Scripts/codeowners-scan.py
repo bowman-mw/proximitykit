@@ -24,10 +24,11 @@ Checks:
                  path that moves fails CO-RESOLVE, and this fails even if the rule is deleted to
                  "fix" that), and the file holds at least RULE_FLOOR rules.
 
-Before the import: the code arrives later with its git history from the Fernlet repository. Until
-Package.swift exists, CO-RESOLVE is held for the paths the import brings (IMPORTED_PREFIXES); the
-rules for the scaffolding (Scripts/, .github/) resolve from the start, and CO-FORM and CO-REQUIRED
-run in full. Once Package.swift exists, a rule naming a file the import did not bring fails.
+Before the import: the code came with its git history from the Fernlet repository. On a tree
+without Package.swift, as this repository's was until then, CO-RESOLVE is held for the paths the
+import brings (IMPORTED_PREFIXES); the rules for the scaffolding (Scripts/, .github/) resolve from
+the start, and CO-FORM and CO-REQUIRED run in full. Once Package.swift exists, a rule naming a file
+that is not there fails.
 """
 import os
 import sys
@@ -46,10 +47,12 @@ REQUIRED_PATTERNS = (
     "/Tests/ProximityKitTests/ProximityNamespaceBoundaryTests.swift",
     "/Tests/ProximityKitTests/ProximityPlatformNeutralityTests.swift",
     "/Tests/ProximityKitTests/ProximityKeychainDoorTests.swift",
-    # The package tests' own walls: their hygiene, the test tree's walls, the source walls.
+    # The package tests' own walls: their hygiene, the test tree's walls, the source walls and the
+    # memory-lifecycle wall.
     "/Tests/ProximityKitTests/PackageTestHygieneTests.swift",
     "/Tests/ProximityKitTests/PackageTestTreeWallTests.swift",
     "/Tests/ProximityKitTests/ProximitySourceWallTests.swift",
+    "/Tests/ProximityKitTests/ProximityMemoryLifecycleTests.swift",
     # The inventory of the package's tests, the test-count floor's declared pin.
     "/Tests/ProximityKitTests.tsv",
     # The manifest, the walls and the CI that runs them (CODEOWNERS included).

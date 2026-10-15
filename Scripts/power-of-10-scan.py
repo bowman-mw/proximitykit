@@ -37,9 +37,9 @@ Roots:
               TEST_ADVISORY_RULES is the whole change when tests should be held to it.
 
 Before the import:
-    The code arrives later with its git history from the Fernlet repository. Until
-    Sources/ProximityKit exists (IMPORT_ROOT), three checks that need the code are held, and each
-    starts by itself the moment that directory appears:
+    The code came with its git history from the Fernlet repository. On a tree without
+    Sources/ProximityKit (IMPORT_ROOT), as this repository's was until then, three checks that
+    need the code are held, and each starts by itself the moment that directory appears:
       * the refusal to pass after scanning zero Swift files;
       * the unused-entry check, which fails the scan on an allowlist entry that matches nothing,
         an entry whose file is missing included;

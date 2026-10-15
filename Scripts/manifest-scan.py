@@ -29,8 +29,8 @@ Comment-only lines are skipped, so prose that explains the ban passes; a trailin
 not hide a setting. The names are matched at identifier boundaries, so a longer identifier that
 contains one is not the setting.
 
-Before the import: the code arrives later with its git history from the Fernlet repository. Until
-then there is no Package.swift and no Sources/ProximityKit, and an empty tree passes.
+Before the import: the code came with its git history from the Fernlet repository. A tree with
+neither Package.swift nor Sources/ProximityKit, as this repository's was until then, passes.
 """
 import os
 import sys

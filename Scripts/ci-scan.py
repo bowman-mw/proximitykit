@@ -37,8 +37,8 @@ Checks:
                Python script in Scripts/ and `test-count-floor.py declared`, so a wall cannot be
                dropped from CI by leaving it out of the loop.
 
-Before the import: ci.yml exists from the start, so nothing here is held. The legs are skipped in
-CI until Package.swift exists, and this scan holds their text all the same.
+Before the import: ci.yml existed from the start, so nothing here is held. On a tree without
+Package.swift the legs are skipped in CI, and this scan holds their text all the same.
 """
 import os
 import re

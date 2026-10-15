@@ -20,8 +20,8 @@ The rule is pinned in both directions:
   * a permitted file that is missing, or no longer names the API, means the scan stopped seeing
     the radios (renamed, moved, or the markers went stale), so it fails too. This direction,
     and the refusal to pass after reading zero files, start once Sources/ProximityKit exists.
-    The code arrives later with its git history from the Fernlet repository; until then an
-    empty tree passes.
+    The code came with its git history from the Fernlet repository; a tree without that
+    folder, as this repository's was until then, passes empty.
 
 The legacy spellings NWConnection and NWBrowser are deliberately absent from LOCAL_LINK_MARKERS.
 They belong to the HTTP-client family in Scripts/no-tracking-scan.py, which permits no file at

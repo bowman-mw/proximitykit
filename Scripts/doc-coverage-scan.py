@@ -13,9 +13,9 @@ Prints one line per undocumented declaration (path:line:TypeName: decl) and a
 TOTAL to stderr; exits 1 if any are found. The enforced baseline is zero: every
 struct/class/protocol/enum/actor carries a /// doc comment.
 
-Before the import: the code arrives later with its git history from the Fernlet repository.
-Once Sources/ProximityKit exists, a default scan that reads zero Swift files fails instead of
-passing over nothing; until then an empty tree passes.
+Before the import: the code came with its git history from the Fernlet repository. Once
+Sources/ProximityKit exists, a default scan that reads zero Swift files fails instead of passing
+over nothing; a tree without it, as this repository's was until then, passes empty.
 
 Heuristic: a declaration is documented if, walking upward past attribute lines
 (@...), the nearest preceding line is a /// line or the end of a /** */ block.
