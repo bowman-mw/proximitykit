@@ -1001,10 +1001,11 @@ hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests
 over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
 (`ProximityMemoryLifecycleTests`); thirty-three suites copied from Fernlet's tests, described
 below, and, copied at plan step A1.3 and described after them, the source walls of nine of its routed
-suites, thirteen suites holding the cells of its mesh tests and six holding those of its session,
-continuation and photo-review suites that read this module's sources; and, in the package repository,
-the example app's namespace held apart (`ExampleNamespaceTests`, plan step A1.2): eighty-eight
-suites, 583 tests. The
+suites, thirteen suites holding the cells of its mesh tests, six holding those of its session,
+continuation and photo-review suites and ten holding those of its pair-session, presence, identity,
+golden, wipe, audit-bridge, transport and localization tests that read this module's sources; and, in
+the package repository, the example app's namespace held apart (`ExampleNamespaceTests`, plan step
+A1.2): ninety-eight suites, 618 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1057,7 +1058,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all eighty-eight passing `swift test` with this module and its tests laid out as in the package
+Mac too, all ninety-eight passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
@@ -1241,6 +1242,18 @@ search telling it a session begins (`LastMemberPhotoReviewSourceWallTests`); the
 generation's one writer and its three callers, each before its observer moment
 (`SessionMessageTests`); and a refused share leaving this module as its frozen token, never a
 sentence (`RoutedShareRefusalCopyTests`).
+
+Of its pair-session, presence, identity, golden, wipe, audit-bridge, transport and localization tests
+these are thirty-five cells in ten suites: the pair and presence radios' source walls (their tasks'
+cancellation guards, the withdrawn registration's republish, the retired radio gone from the pair
+session and every file extending it, the ALPN the session binds, the discovery gate as its one door
+and the advertised name's byte cap), the identity's fail-closed read, the namespace golden's source
+pins (the radios' log subsystem, the mesh radio's heartbeat and channel binding) and its keychain-copy
+walk, the feature golden's recipe-copy stray scan and the pair session's recipe constants, the
+identity holders' wipe seams, the audit bridge's scan for a host's own log, transport neutrality over
+this module, and the localization wall's rules over it with the fixtures that prove its matchers fire.
+Where a Fernlet cell also read Fernlet's own files or values, the copy says in its doc comment what
+stays there.
 
 Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the

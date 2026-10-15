@@ -47,6 +47,15 @@
 /Tests/ProximityKitTests/PackageTestTreeWallTests.swift                @bowman-mw
 /Tests/ProximityKitTests/ProximitySourceWallTests.swift                @bowman-mw
 /Tests/ProximityKitTests/ProximityMemoryLifecycleTests.swift           @bowman-mw
+# The walls copied from the Fernlet repository's tests at its plan step A1.3 (every cell there that
+# read this module's sources) whose originals that repository's CODEOWNERS owns: the feature and
+# namespace goldens' source pins, the identity's fail-closed read, the localization wall's rules
+# over this module and the audit bridge's scan for a host's own log.
+/Tests/ProximityKitTests/FernletFeatureGoldenTests.swift               @bowman-mw
+/Tests/ProximityKitTests/IdentityProvisioningReadTests.swift           @bowman-mw
+/Tests/ProximityKitTests/LocalizationBoundaryTests.swift               @bowman-mw
+/Tests/ProximityKitTests/ProximityAuditBridgeTests.swift               @bowman-mw
+/Tests/ProximityKitTests/ProximityNamespaceGoldenTests.swift           @bowman-mw
 # The inventory of the package's tests: the hygiene suite holds it to the test tree, and it is the
 # test-count floor's declared pin, held against the floor literals in .github/workflows/ci.yml.
 /Tests/ProximityKitTests.tsv                                           @bowman-mw

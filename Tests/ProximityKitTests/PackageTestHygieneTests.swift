@@ -375,14 +375,15 @@ import Testing
     /// at A1.1.13; 43 since plan step A1, when the suites copied from Fernlet's tests brought 20; 76 since
     /// plan step A1.3's batch D (the routed track), when the routed source walls copied from Fernlet's tests
     /// brought 33; 89 since its mesh track, when the cells of Fernlet's mesh tests that read this module's
-    /// sources brought 13; 97 since its session track, when the session copies brought 8. The rows spell a
-    /// needle the per-file rule does not cover: the soundness suite's storage cell, which reads
-    /// `URL.applicationSupportDirectory` as a value; the package's file locator's one read of its own
-    /// source's path; the routed store isolation walls' suite, whose own name spells the store's; the
-    /// namespace and platform walls' needles inside literals (``packageNamespaceWallLines``,
-    /// ``packagePlatformWallLines``); and the copied suites' reads of a keychain-reaching type's statics and
-    /// their source walls' needles inside literals (``packageCopiedStaticLines``,
-    /// ``packageCopiedSourceTextLines``, ``packageCopiedRoutedWallLines``), each set under one invariant.
+    /// sources brought 13; 97 since its session track, when the session copies brought 8; 121 since its pair
+    /// track, when the pair copies brought 24. The rows spell a needle the per-file rule does not cover: the
+    /// soundness suite's storage cell, which reads `URL.applicationSupportDirectory` as a value; the
+    /// package's file locator's one read of its own source's path; the routed store isolation walls' suite,
+    /// whose own name spells the store's; the namespace and platform walls' needles inside literals
+    /// (``packageNamespaceWallLines``, ``packagePlatformWallLines``); and the copied suites' reads of a
+    /// keychain-reaching type's statics and their source walls' needles inside literals
+    /// (``packageCopiedStaticLines``, ``packageCopiedSourceTextLines``, ``packageCopiedRoutedWallLines``),
+    /// each set under one invariant.
     static let packageHazardAllowlist: [(file: String, line: String, invariant: String)] = [
         (file: "ProximityNamespaceSoundnessTests.swift",
          line: "for base in [URL.applicationSupportDirectory, scratch] {",
@@ -467,9 +468,11 @@ import Testing
         ProximityKit source file the wall expects a walk of the module's sources to read or a home list \
         to find a needle in, a needle it looks for in that source's code (PresenceEpochPostureTests' and \
         MeshP9EphemeralPostureAcceptanceTests' lists of what a posture must never reach, the retry \
-        planner's forbidden types, the presence clock's two calls), or a failure message; the code around \
-        it only reads and matches text, so the line reaches no keychain, opens no store and reads, writes \
-        and creates nothing at any location
+        planner's forbidden types, the presence clock's two calls, the identity's keychain reads, the \
+        keychain item type the namespace golden counts), a sample line a copied matcher must read or pass \
+        (the localization rules' fixtures), or a failure message; the code around it only reads and \
+        matches text, so the line builds, provisions and installs nothing, reaches no keychain, opens no \
+        store and reads, writes and creates nothing at any location
         """
 
     /// The copied suites' lines that spell a needle inside a source wall's literal, each exact as trimmed
@@ -536,7 +539,57 @@ import Testing
         (file: "RoutedShareRefusalCopyTests.swift",
          line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift")"#),
         (file: "SessionMessageTests.swift",
-         line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift"))"#)
+         line: #"try PackageRoot.source("Sources/ProximityKit/Mesh/MeshNetworkManager.swift"))"#),
+        // Plan step A1.3, batch D's pair copies: the source walls of the Fernlet repository's pair-session,
+        // identity, golden, wipe, transport and localization tests that read this module's sources.
+        (file: "FernletFeatureGoldenTests.swift",
+         line: #"static let recipeDoorPath = "Sources/ProximityKit/PairSession/ProximityPairSession.swift""#),
+        (file: "IdentityProvisioningReadTests.swift",
+         line: #"let source = try PackageRoot.source("Sources/ProximityKit/Identity/IdentityService.swift")"#),
+        (file: "IdentityProvisioningReadTests.swift",
+         line: #"#expect(!source.contains("KeychainItem.load(account: accounts.\(row)"),"#),
+        (file: "IdentityProvisioningReadTests.swift",
+         line: #"let distinguishingReads = source.components(separatedBy: "KeychainItem.loadDistinguishingAbsence(").count - 1"#),
+        (file: "LocalizationBoundaryTests.swift",
+         line: #"Inside a package that resolves against Bundle.main, finds no catalog entry, and silently \"#),
+        (file: "LocalizationBoundaryTests.swift",
+         line: #"Bundle.main and will render untranslated English FOREVER — clean build, no warning, no \"#),
+        (file: "LocalizationBoundaryTests.swift",
+         line: #"own. A key carries no bundle, so it resolves against Bundle.main and never sees the \"#),
+        (file: "LocalizationBoundaryTests.swift",
+         line: ##"#expect(Self.localizedCalls(in: #"String(localized: "Saved", bundle: Bundle.main)"#).first?.passesBundle == false)"##),
+        (file: "PrivacyWipeCoverageTests.swift",
+         line: #""Sources/ProximityKit/Mesh/MeshNetworkManager.swift","#),
+        (file: "PrivacyWipeCoverageTests.swift",
+         line: #""Sources/ProximityKit/PairSession/ProximityPairSession.swift","#),
+        (file: "PrivacyWipeCoverageTests.swift",
+         line: #"#expect(source.contains("func wipeIdentityForDeleteAll"), "\(file) owns a live IdentityService but lost its wipe seam.")"#),
+        (file: "ProximityNamespaceGoldenTests.swift",
+         line: ##"let original = try NSRegularExpression(pattern: #"(?<![A-Za-z0-9_])KeychainItem\b"#)"##),
+        (file: "ProximityNamespaceGoldenTests.swift",
+         line: #"copyUses += code.components(separatedBy: "ProximityKeychainItem.").count - 1"#),
+        (file: "ProximityNamespaceGoldenTests.swift",
+         line: #"#expect(copyUses > 0, "the sweep found no `ProximityKeychainItem.` use: wrong tree?")"#),
+        (file: "ProximityNamespaceGoldenTests.swift",
+         line: #"ProximityKit code names FernletFoundation's KeychainItem in \(offenders). Reach the keychain \"#),
+        (file: "ProximityNamespaceGoldenTests.swift",
+         line: #"through `ProximityKeychainItem`, which issues the same queries."#),
+        (file: "RecipeShareOverQUICTests.swift",
+         line: #"#expect(!code.contains(needle), "ProximityPairSession still names `\(needle)` in code")"#),
+        (file: "RecipeShareOverQUICTests.swift",
+         line: #""a ProximityPairSession comment still describes `\(needle)` machinery")"#),
+        (file: "RecipeShareOverQUICTests.swift",
+         line: #"private static let managerPath = "Sources/ProximityKit/PairSession/ProximityPairSession.swift""#),
+        (file: "RecipeShareOverQUICTests.swift",
+         line: #"!$0.path.hasPrefix("PairSession/") && $0.text.contains("extension ProximityPairSession")"#),
+        (file: "RecipeShareTransferTests.swift",
+         line: #"try PackageRoot.source("Sources/ProximityKit/PairSession/ProximityPairSession.swift")"#),
+        (file: "TransportNeutralityBoundaryTests.swift",
+         line: #""Sources/ProximityKit/Engine/ProximityCoordinator.swift","#),
+        (file: "TransportNeutralityBoundaryTests.swift",
+         line: #""Sources/ProximityKit/Mesh/MeshNetworkManager.swift","#),
+        (file: "TransportNeutralityBoundaryTests.swift",
+         line: #""Sources/ProximityKit/PairSession/ProximityPairSession.swift","#)
     ]
 
     /// What makes every line of ``packageCopiedRoutedWallLines`` safe in the unhosted bundle (rule I9).
@@ -1176,9 +1229,12 @@ import Testing
     /// six suites of batch D's session copies, each holding the cells of the Fernlet suite of its name
     /// that read ProximityKit's sources (`LastMemberPhotoReviewSourceWallTests`,
     /// `MeshContinuationRaiseWallTests`, `MeshContinuationTaskHostWallTests`, `MeshHeldSessionPhotoTests`,
-    /// `RoutedShareRefusalCopyTests`, `SessionMessageTests`). A suite added, moved out or deleted changes
-    /// it in the same commit, argued and measured; a deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 88
+    /// `RoutedShareRefusalCopyTests`, `SessionMessageTests`). RAISED at plan step A1.3's batch D, pair
+    /// (2026-10-15): 88 → 98, for the ten suites holding the cells of Fernlet's pair, presence, identity,
+    /// golden, wipe, audit, transport and localization tests that read ProximityKit's sources. A suite
+    /// added, moved out or deleted changes it in the same commit, argued and measured; a deletion lowers
+    /// it only with the retirement argued.
+    static let measuredInventoryRows = 98
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -1193,9 +1249,11 @@ import Testing
     /// 514 → 557, for the 43 routed source walls copied from Fernlet's tests. RAISED at plan step A1.3's
     /// batch D, mesh (2026-10-15): 557 → 575, for the 18 cells of Fernlet's mesh tests that read this
     /// module's sources. RAISED at plan step A1.3's batch D, session (2026-10-15): 575 → 583, for batch
-    /// D's session copies' 8 (2 + 2 + 1 + 1 + 1 + 1). A test added or removed changes it in the same
+    /// D's session copies' 8 (2 + 2 + 1 + 1 + 1 + 1). RAISED at plan step A1.3's batch D, pair
+    /// (2026-10-15): 583 → 618, for the 35 tests of the ten suites holding the pair track's cells of
+    /// Fernlet's tests that read ProximityKit's sources. A test added or removed changes it in the same
     /// commit.
-    static let measuredDeclaredTests = 583
+    static let measuredDeclaredTests = 618
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three
