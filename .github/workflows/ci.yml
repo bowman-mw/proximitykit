@@ -109,9 +109,16 @@ jobs:
     # skipped, the same 60 suites by name, 553 cases with arguments expanded; the inventory 60 rows
     # declaring 514 tests. Each lane passed at these floors and refused MIN_TESTS 515. ARITHMETIC
     # CHECK: 513 + 1 = 514 and 59 + 1 = 60.
+    # RAISED 514 -> 557 and 60 -> 69 at plan step A1.3's batch D, the routed track, on a Mac, 2026-10-15
+    # (the same Xcode and Swift), for the 43 source walls of nine routed suites copied from the Fernlet
+    # repository's tests (MeshRoutedDrainWallTests 19, MeshRoutedStoreIsolationTests 11,
+    # MeshRoutedLockedDeviceTests 6, MeshRoutedCapacityTests 2 and five suites of one), over this
+    # repository's tree with them: swift test "Test run with 557 tests in 69 suites passed"; the
+    # inventory 69 rows declaring 557 tests. The swift test lane passed at these floors and refused
+    # MIN_TESTS 558. ARITHMETIC CHECK: 514 + 43 = 557 and 60 + 9 = 69.
     env:
-      MIN_TESTS: 514
-      MIN_SUITES: 60
+      MIN_TESTS: 557
+      MIN_SUITES: 69
     steps:
       - uses: actions/checkout@v4
 
