@@ -24,7 +24,10 @@ Checks:
     CI-STRICT  Every SwiftPM leg passes `-Xswiftc -warnings-as-errors`; every xcodebuild leg passes
                XCODEBUILD_OVERRIDES; no leg passes a flag in CONTRARY_FLAGS.
     CI-LEG     Every leg in REQUIRED_LEGS exists: the Debug and Release builds, both macOS test
-               lanes (swift test and xcodebuild test), the iOS Simulator build and its test lane.
+               lanes (swift test and xcodebuild test), the iOS Simulator build and its test lane,
+               and the example app's builds for macOS and the iOS Simulator (plan step A1.2). The
+               package's xcodebuild legs name no `-project` and the example's name EXAMPLE_PROJECT,
+               so a leg of one kind never stands in for a required leg of the other.
                A leg's own status decides its step: nothing follows it on its line but an optional
                `| tee <file>`, and a piped leg sits after `set -o pipefail` in its step.
     CI-GATE    A step holding a test leg runs if TEST_CONDITION, any other leg's step if
@@ -79,6 +82,21 @@ def is_release(leg):
         "--configuration=release" in tokens
 
 
+# The example app's project (plan step A1.2). Its legs build the example, never the package, so a
+# package leg's predicate refuses them, and the example's own two legs are required by shape.
+EXAMPLE_PROJECT = "Examples/ProximityPing/ProximityPing.xcodeproj"
+
+
+def is_package(leg):
+    """A leg of the package itself: xcodebuild finds the package's scheme with no `-project`."""
+    return leg["project"] is None
+
+
+def is_example(leg):
+    """A leg of the example app: it names the example's project."""
+    return leg["project"] == EXAMPLE_PROJECT
+
+
 def is_ios(leg):
     destination = leg["destination"] or ""
     return destination == IOS_DESTINATION or "platform=iOS Simulator" in destination
@@ -93,12 +111,21 @@ REQUIRED_LEGS = (
     ("the macOS test lane through SwiftPM (swift test)",
      lambda leg: leg["tool"] == "swift" and is_test(leg)),
     ("the macOS test lane through Xcode (xcodebuild test, platform=macOS)",
-     lambda leg: leg["tool"] == "xcodebuild" and is_test(leg) and leg["destination"] == "platform=macOS"),
+     lambda leg: leg["tool"] == "xcodebuild" and is_test(leg) and leg["destination"] == "platform=macOS"
+     and is_package(leg)),
     ("the iOS Simulator build (xcodebuild build, generic/platform=iOS Simulator)",
-     lambda leg: leg["tool"] == "xcodebuild" and leg["action"] == "build"
+     lambda leg: leg["tool"] == "xcodebuild" and leg["action"] == "build" and is_package(leg)
      and leg["destination"] == "generic/platform=iOS Simulator"),
     ("the iOS Simulator test lane (xcodebuild test on the pinned iPhone 17)",
-     lambda leg: leg["tool"] == "xcodebuild" and is_test(leg) and is_ios(leg)),
+     lambda leg: leg["tool"] == "xcodebuild" and is_test(leg) and is_ios(leg) and is_package(leg)),
+    ("the example app's macOS build (xcodebuild build -project " + EXAMPLE_PROJECT
+     + ", generic/platform=macOS)",
+     lambda leg: leg["tool"] == "xcodebuild" and leg["action"] == "build" and is_example(leg)
+     and leg["destination"] == "generic/platform=macOS"),
+    ("the example app's iOS Simulator build (xcodebuild build -project " + EXAMPLE_PROJECT
+     + ", generic/platform=iOS Simulator)",
+     lambda leg: leg["tool"] == "xcodebuild" and leg["action"] == "build" and is_example(leg)
+     and leg["destination"] == "generic/platform=iOS Simulator"),
 )
 
 
@@ -246,7 +273,8 @@ def read_leg(step_index, number, text, findings):
         findings.append(f"CI-LEG {where}: `{' '.join(rest)}` follows the leg; its own status must decide the "
                         f"step, so only `| tee <file>` (under pipefail) may follow it")
     return {"step": step_index, "line": number, "tool": tool, "action": action, "tokens": command,
-            "destination": after("-destination"), "bundle": after("-resultBundlePath"), "tee": tee}
+            "destination": after("-destination"), "bundle": after("-resultBundlePath"), "tee": tee,
+            "project": after("-project")}
 
 
 def check_flags(leg, findings):

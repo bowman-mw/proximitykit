@@ -11,6 +11,7 @@
 # suite's measured row count and declared-test sum, in the same commit.
 suite	file	cells
 EphemeralMeshTLSIdentityTests	NetworkMeshTransportTests.swift	5
+ExampleNamespaceTests	ExampleNamespaceTests.swift	5
 FakePeerTransportTests	PeerTransportNeutralityTests.swift	10
 MeshChannelIntroductionTests	NetworkMeshTransportTests.swift	22
 MeshChannelIntroductionTranscriptTests	NetworkMeshTransportTests.swift	3
@@ -64,6 +65,7 @@ ProximityKeychainDoorTests	ProximityKeychainDoorTests.swift	1
 ProximityMemoryLifecycleTests	ProximityMemoryLifecycleTests.swift	5
 ProximityNamespaceBoundaryTests	ProximityNamespaceBoundaryTests.swift	12
 ProximityNamespaceSoundnessTests	ProximityNamespaceSoundnessTests.swift	43
+ProximityPairSessionTests	ProximityPairSessionTests.swift	1
 ProximityPlatformNeutralityTests	ProximityPlatformNeutralityTests.swift	5
 ProximityPresenceSessionTests	ProximityPresenceSessionTests.swift	5
 ProximitySourceWallTests	ProximitySourceWallTests.swift	13

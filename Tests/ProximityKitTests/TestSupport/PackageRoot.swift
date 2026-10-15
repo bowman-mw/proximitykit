@@ -22,7 +22,9 @@ import Foundation
 /// resolves or stops the run.
 ///
 /// **What it reads.** It only locates the root. A package suite reads only `Package.swift`,
-/// `Sources/ProximityKit/**` and `Tests/**` under it, never a path above it: the invariant
+/// `Sources/ProximityKit/**`, `Tests/**` and, in ProximityKit's own repository, the example app's
+/// namespace file (`Examples/ProximityPing/ProximityPing/PingNamespace.swift`, which
+/// `ExampleNamespaceTests` holds its twin to) under it, never a path above it: the invariant
 /// `PackageTestHygieneTests.packageHazardAllowlist` states for this file's one line that reads the
 /// compiler's path of its own source.
 ///

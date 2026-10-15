@@ -5,14 +5,15 @@ Ported from Scripts/power-of-10-scan.py in the Fernlet repository
 (https://github.com/bowman-mw/fernlet), where this code lived and was held to Gerard Holzmann's
 Power of 10 rules as that repository's Docs/Power-of-10-Swift.md adapts them to Swift. The
 tokenizer, the body finder and every check are copied unchanged. What is this repository's own:
-the roots, the test-code policy, the pre-import mode and the density floor, all described below.
+the roots, the test-code and example-code policies, the pre-import mode and the density floor, all
+described below.
 
 Scans Swift for the checks that a line-level tokenizer can decide, and exits 1 on any violation
 not covered by Scripts/power-of-10-allowlist.json. The enforced baseline is ZERO for every
 enforced check; the allowlist is the only escape hatch and every entry carries a reason.
 
 Usage:
-    Scripts/power-of-10-scan.py                 # scan Sources/ and Tests/, human-readable
+    Scripts/power-of-10-scan.py                 # scan Sources/, Tests/ and Examples/, human-readable
     Scripts/power-of-10-scan.py --json          # same, machine-readable (one JSON object)
     Scripts/power-of-10-scan.py --advisory      # ALSO print the review-only signals (all `while`
                                                 #   loops, `_ =` discards, @discardableResult,
@@ -35,6 +36,13 @@ Roots:
               package's suites at the split), so enforcing it in tests would ask for allowlist
               entries the shipping code does not need. Deleting a rule ID from
               TEST_ADVISORY_RULES is the whole change when tests should be held to it.
+    Examples/ The example apps (plan step A1.2: Examples/ProximityPing), hosts built from the
+              package's public API alone, which a reader copies from. Every enforced check applies
+              to them exactly as to Sources/, so an example never shows a pattern the package
+              refuses. They stay out of the R5-DENSITY ratio (EXAMPLE_ROOTS), which is the
+              library's ratchet: an app's view fragments and one-line handlers measure differently
+              from the library's logic, and folding them in would move the library's floor for a
+              reason that is not the library's.
 
 Before the import:
     The code came with its git history from the Fernlet repository. On a tree without
@@ -88,6 +96,7 @@ MAX_BODY_LINES = 60           # NASA rule 4: one printed page
 
 SHIPPING_ROOTS = ("Sources",)
 TEST_ROOTS = ("Tests",)
+EXAMPLE_ROOTS = ("Examples",)   # held to every enforced check, outside the density ratio
 IMPORT_ROOT = os.path.join("Sources", "ProximityKit")   # the held checks start once this exists
 
 # The standard's test exemption: tests trap on purpose. Never reported for test code.
@@ -480,6 +489,11 @@ def is_test_path(rel):
     return rel.split(os.sep, 1)[0] in TEST_ROOTS
 
 
+def is_example_path(rel):
+    """True when the repo-relative path `rel` lies under one of EXAMPLE_ROOTS."""
+    return rel.split(os.sep, 1)[0] in EXAMPLE_ROOTS
+
+
 def apply_test_policy(hits, advisory):
     """Apply the test-code policy to one test file's findings: TEST_EXEMPT_RULES are dropped,
     TEST_ADVISORY_RULES move to the advisory list, and every other enforced hit stays enforced."""
@@ -508,12 +522,12 @@ def main(argv):
     # produce the repo-relative paths the allowlist names.
     repo = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     imported = os.path.isdir(os.path.join(repo, IMPORT_ROOT))
-    roots = args or [os.path.join(repo, r) for r in SHIPPING_ROOTS + TEST_ROOTS]
+    roots = args or [os.path.join(repo, r) for r in SHIPPING_ROOTS + TEST_ROOTS + EXAMPLE_ROOTS]
     allowlist = load_allowlist(repo, override)
 
     hits, advisory = [], []
     total_funcs = total_checks = 0
-    n_files = 0
+    n_files = n_example_files = 0
     for path in iter_swift(roots):
         n_files += 1
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -523,6 +537,9 @@ def main(argv):
         if is_test_path(rel):
             h, a = apply_test_policy(h, a)
             nf = nc = 0   # R5 is lifted for tests, so test bodies stay out of the density ratio
+        elif is_example_path(rel):
+            n_example_files += 1
+            nf = nc = 0   # every enforced check holds; the density ratio is the library's own
         hits.extend(h)
         advisory.extend(a)
         total_funcs += nf
@@ -542,7 +559,8 @@ def main(argv):
 
     if as_json:
         out = {
-            "files": n_files, "violations": violations, "allowed": allowed_hits,
+            "files": n_files, "example_files": n_example_files, "violations": violations,
+            "allowed": allowed_hits,
             "imported": imported,
             "unused_allowlist": [strip_used(e) for e in unused],
             "unused_allowlist_check": "enforced" if imported else "held until " + IMPORT_ROOT + " exists",
@@ -575,7 +593,8 @@ def main(argv):
             else:
                 print(f"held until {IMPORT_ROOT} exists: allowlist entry {e['rule']} {e['path']}",
                       file=sys.stderr)
-        print(f"\nfiles scanned: {n_files}; violations: {len(violations)}; allowlisted hits: {allowed_hits}; "
+        print(f"\nfiles scanned: {n_files} ({n_example_files} under Examples/, outside the density); "
+              f"violations: {len(violations)}; allowlisted hits: {allowed_hits}; "
               f"assertion density: {total_checks}/{total_funcs} = {density:.3f} (floor {DENSITY_FLOOR}, "
               f"{density_note})", file=sys.stderr)
     bad = bool(violations) or not density_ok

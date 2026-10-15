@@ -60,7 +60,9 @@ protocol ProximityPairRadioSession: AnyObject {
     func hasConnectingPeers(besides peer: PeerHandle?) -> Bool
     /// Stands the listener and the browser down, keeping every live tunnel.
     func pauseDiscovery()
-    /// Reopens a paused radio under a freshly minted posture.
+    /// Reopens a paused radio under a freshly minted posture, announcing again each peer it browses
+    /// after the resume, changed or not: the owner forgets a peer whose disconnect it heard while the
+    /// radio was paused.
     func resumeDiscovery()
     /// The channel this radio would hand the owner for `peer`, built exactly as the live path
     /// builds one — the seam a unit test uses to stand a connection up with no radio.
@@ -367,6 +369,21 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     /// mint, so at most two names are ever excluded.
     private var previousInstanceName: String?
 
+    /// The browsed records a resume owes the owner a sighting of: the next browse result for each is
+    /// announced whether or not its advertisement changed, once.
+    ///
+    /// While this radio is paused its browser is down, but the owner still hears from it: a tunnel that
+    /// ends reports a disconnect, and the owner forgets a disconnected peer, its picker row and its
+    /// discovered handle both. A peer whose failure was one-sided (it refused the hello, so it never
+    /// paired, never paused and never re-minted its posture) then comes back to the resumed browser
+    /// under the very record ``recordBrowsed(key:instanceName:advertisement:at:)`` already holds, and an
+    /// announcement on change alone would keep it out of the owner's picker, and its dial unresolvable,
+    /// until a refresh or a stop. So ``resumeDiscovery()`` files every record here. A peer the owner
+    /// still lists is announced under the handle id it already has, which the owner files over the same
+    /// row. ``noteLost(_:)`` and ``stop()`` drop entries; bounded by ``browsedRecords``, whose keys it
+    /// is a subset of when filed.
+    private var owedSightings: Set<MeshLinkKey> = []
+
     /// The inbound connection whose hello is being adjudicated right now, excluded from the
     /// connecting window for exactly that adjudication.
     ///
@@ -494,6 +511,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
         pendingInbound.removeAll()
         browsedEndpoints.removeAll()
         browsedRecords.removeAll()
+        owedSightings.removeAll()
         identities.removeAll()
         ownerFields.removeAll()
         posture = nil
@@ -530,6 +548,10 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     /// the device that came back at 19:11", which is exactly the link the ephemeral posture exists
     /// to break. The cost is one key pair per pairing, on a radio that mints one per tab visit
     /// anyway.
+    ///
+    /// It also files every browsed record in ``owedSightings``, so the resumed browser's first
+    /// sighting of each is announced even when the record is unchanged: the owner may have forgotten
+    /// that peer while the radio was paused.
     func resumeDiscovery() {
         guard isRunning, isDiscoveryPaused else { return }
         do {
@@ -542,6 +564,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
             previousInstanceName = posture?.instanceName
             posture = fresh
             isDiscoveryPaused = false
+            owedSightings = Set(browsedRecords.keys)
             try startListener()
             ProximityAudit.log("recipe.quic.resumed", context: auditContext(for: fresh))
         } catch {
@@ -1097,7 +1120,8 @@ private extension NetworkPairSession {
         }
     }
 
-    /// Records a browsed endpoint and announces it when it is new or its advertisement changed.
+    /// Records a browsed endpoint and announces it when it is new, its advertisement changed, or a
+    /// resume owes the owner its sighting (``owedSightings``).
     ///
     /// Re-announcing on change is load-bearing: a Bonjour peer is routinely seen before its TXT
     /// record arrives, so a first sighting can carry no `name` and no `sid` at all, and the owner
@@ -1121,13 +1145,14 @@ private extension NetworkPairSession {
         at now: Date
     ) {
         let previous = browsedRecords[key]?.advertisement
+        let owed = owedSightings.remove(key) != nil
         browsedRecords[key] = MeshEndpointRecord(
             key: key,
             instanceName: instanceName,
             advertisement: advertisement,
             lastSeenAt: now
         )
-        guard previous != advertisement else { return }
+        guard owed || previous != advertisement else { return }
         // The line names the peer by ``peerLabel(for:)`` and never by the endpoint key, which
         // CONTAINS the instance name the peer advertises; and it says only whether the record was
         // a recipe advertisement at all. Neither the peer's chosen name nor its session id is a
@@ -1147,6 +1172,7 @@ private extension NetworkPairSession {
     func noteLost(_ key: MeshLinkKey) {
         let peer = handle(for: key)
         browsedEndpoints.removeValue(forKey: key)
+        owedSightings.remove(key)
         if tunnels[key] == nil { browsedRecords.removeValue(forKey: key) }
         onPeerLost?(peer)
     }

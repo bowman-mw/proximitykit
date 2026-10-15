@@ -1,15 +1,19 @@
 # ProximityKit CI: on every pull request into main and every push to main, the walls, then the
-# package build and tests.
+# package build and tests, and the example app's build.
 #
 # The walls are the Python scripts in Scripts/ (Python 3, standard library only). Each one runs
 # locally with `python3 Scripts/<name>.py` and exits 1 on a violation. They are ports of the checks
 # that guard this code in the Fernlet repository today, or counterparts of them:
 #   * power-of-10-scan.py: the Power of 10 rules a line tokenizer can decide, with the exceptions in
-#     Scripts/power-of-10-allowlist.json (every entry states the invariant that makes it safe);
-#   * doc-coverage-scan.py: every struct, class, protocol, enum and actor carries a /// comment;
-#   * no-tracking-scan.py: no tracking SDK in Sources/ or Tests/, no HTTP client in Sources/, and no
-#     package dependency in Package.swift or Package.resolved;
-#   * local-link-scan.py: Network.framework's local-link API only in the three radio files;
+#     Scripts/power-of-10-allowlist.json (every entry states the invariant that makes it safe), over
+#     Sources/, Tests/ and the example app in Examples/;
+#   * doc-coverage-scan.py: every struct, class, protocol, enum and actor in Sources/ and Examples/
+#     carries a /// comment;
+#   * no-tracking-scan.py: no tracking SDK in Sources/, Tests/ or Examples/, no HTTP client in
+#     Sources/ or Examples/, no package dependency in Package.swift or Package.resolved, and none in
+#     the example's project but this package;
+#   * local-link-scan.py: Network.framework's local-link API only in the three radio files, never in
+#     the example app;
 #   * manifest-scan.py: Package.swift carries no unsafe flags and no warnings setting, and exists
 #     once the sources do;
 #   * codeowners-scan.py: every rule in .github/CODEOWNERS resolves to a path, and the
@@ -20,9 +24,10 @@
 #
 # Once Package.swift exists, every build leg treats warnings as errors (Power of 10 rule 10, set on
 # the command line and never in the manifest): a Debug and a Release build with SwiftPM, the tests
-# on macOS through both SwiftPM and Xcode, an iOS Simulator build, and the tests on an iPhone 17
-# simulator. After each test leg, the test-count floor reads what ran: swift test's summary line,
-# and the result bundle each xcodebuild test leg writes to $RUNNER_TEMP.
+# on macOS through both SwiftPM and Xcode, an iOS Simulator build, the example app's builds for
+# macOS and the iOS Simulator, and the tests on an iPhone 17 simulator. After each test leg, the
+# test-count floor reads what ran: swift test's summary line, and the result bundle each xcodebuild
+# test leg writes to $RUNNER_TEMP.
 #
 # The code came with its git history from the Fernlet repository. On a tree without Package.swift,
 # as this repository's was until then, the build and test steps are skipped with a notice and the
@@ -90,9 +95,23 @@ jobs:
     # 547 cases with four parameterized tests' 43 arguments expanded; the inventory 58 rows declaring
     # 508 tests. Each lane passed at these floors and refused MIN_TESTS 509. ARITHMETIC CHECK:
     # 203 + 305 = 508 and 25 + 33 = 58.
+    # RAISED 508 -> 513 and 58 -> 59 at plan step A1.2 on a Mac, 2026-10-15 (the same Xcode, Swift and
+    # simulator), for ExampleNamespaceTests, the suite that holds the example app's namespace sound and
+    # apart from the package tests' (5 tests), over this repository's tree with it: swift test "Test run
+    # with 513 tests in 59 suites passed"; the macOS and the iOS result bundle each totalTestCount 513,
+    # 0 failed, 0 skipped, the same 59 suites by name, 552 cases with arguments expanded; the inventory
+    # 59 rows declaring 513 tests. Each lane passed at these floors and refused MIN_TESTS 514.
+    # ARITHMETIC CHECK: 508 + 5 = 513 and 58 + 1 = 59.
+    # RAISED 513 -> 514 and 59 -> 60 on a Mac, 2026-10-15 (the same Xcode, Swift and simulator), for
+    # the pair session's new suite, ProximityPairSessionTests, and its one test, over this
+    # repository's tree with it and with ExampleNamespaceTests: swift test "Test run with 514 tests in
+    # 60 suites passed"; the macOS and the iOS result bundle each totalTestCount 514, 0 failed, 0
+    # skipped, the same 60 suites by name, 553 cases with arguments expanded; the inventory 60 rows
+    # declaring 514 tests. Each lane passed at these floors and refused MIN_TESTS 515. ARITHMETIC
+    # CHECK: 513 + 1 = 514 and 59 + 1 = 60.
     env:
-      MIN_TESTS: 508
-      MIN_SUITES: 58
+      MIN_TESTS: 514
+      MIN_SUITES: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -262,6 +281,26 @@ jobs:
         if: steps.package.outputs.present == 'true'
         run: |
           xcodebuild build -scheme ProximityKit -destination 'generic/platform=iOS Simulator' \
+            SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES
+
+      # The example app, Examples/ProximityPing: a host built from ProximityKit's public API alone, under
+      # a namespace of its own, for iOS and native macOS. Built, never run (a connection needs two
+      # devices or simulators and a local-network grant), on both platforms it targets, under rule 10
+      # like every leg. Xcode signs it to run locally, so no team or profile is needed to build it.
+      # Each leg names the example's project, which the package's legs never do: Scripts/ci-scan.py
+      # requires both, and refuses to count either as one of the package's.
+      - name: Build the example app for macOS (xcodebuild)
+        if: steps.package.outputs.present == 'true'
+        run: |
+          xcodebuild build -project Examples/ProximityPing/ProximityPing.xcodeproj -scheme ProximityPing \
+            -destination 'generic/platform=macOS' \
+            SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES
+
+      - name: Build the example app for the iOS Simulator (xcodebuild)
+        if: steps.package.outputs.present == 'true'
+        run: |
+          xcodebuild build -project Examples/ProximityPing/ProximityPing.xcodeproj -scheme ProximityPing \
+            -destination 'generic/platform=iOS Simulator' \
             SUPPRESS_WARNINGS=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES
 
       # iPhone 17 is the one simulator the iOS tests run on. The package has no appearance baselines,

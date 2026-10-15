@@ -53,6 +53,9 @@ REQUIRED_PATTERNS = (
     "/Tests/ProximityKitTests/PackageTestTreeWallTests.swift",
     "/Tests/ProximityKitTests/ProximitySourceWallTests.swift",
     "/Tests/ProximityKitTests/ProximityMemoryLifecycleTests.swift",
+    # The suite that holds the example app's namespace sound and apart from the package tests', and
+    # its twin of the example's namespace file equal to that file byte for byte (plan step A1.2).
+    "/Tests/ProximityKitTests/ExampleNamespaceTests.swift",
     # The inventory of the package's tests, the test-count floor's declared pin.
     "/Tests/ProximityKitTests.tsv",
     # The manifest, the walls and the CI that runs them (CODEOWNERS included).
