@@ -1,0 +1,174 @@
+{
+  "aead.meshEncryptedMetadataV2" : {
+    "label" : "pktest.mesh.encrypted-metadata.aead.v2",
+    "prefix" : "706b746573742e6d6573682e656e637279707465642d6d657461646174612e616561642e7632"
+  },
+  "aead.meshGroupKeyWrapV2" : {
+    "label" : "pktest.mesh.groupkey.wrap.aead.v2",
+    "prefix" : "706b746573742e6d6573682e67726f75706b65792e777261702e616561642e7632"
+  },
+  "aead.meshRoutedContentKeyWrapV1" : {
+    "label" : "pktest.mesh.routed.content-key.wrap.aead.v1",
+    "prefix" : "706b746573742e6d6573682e726f757465642e636f6e74656e742d6b65792e777261702e616561642e7631"
+  },
+  "aead.meshRoutedItemV1" : {
+    "label" : "pktest.mesh.routed.item.aead.v1",
+    "prefix" : "706b746573742e6d6573682e726f757465642e6974656d2e616561642e7631"
+  },
+  "aead.proximityTransportV2" : {
+    "label" : "pktest.proximity.transport.aead.v2",
+    "prefix" : "706b746573742e70726f78696d6974792e7472616e73706f72742e616561642e7632"
+  },
+  "feature.dropPairV1" : {
+    "label" : "pktest.feature.drop-pair.v1",
+    "prefix" : "706b746573742e666561747572652e64726f702d706169722e7631"
+  },
+  "feature.nearPairV1" : {
+    "label" : "pktest.feature.near-pair.v1",
+    "prefix" : "706b746573742e666561747572652e6e6561722d706169722e7631"
+  },
+  "featureSignature.lengthPrefixed" : {
+    "label" : "pktest.fixture.prefixed-signature.v1",
+    "prefix" : "0000000000000024706b746573742e666978747572652e70726566697865642d7369676e61747572652e7631"
+  },
+  "featureSignature.rawPrefix" : {
+    "label" : "pktest.fixture.raw-signature.v1",
+    "prefix" : "706b746573742e666978747572652e7261772d7369676e61747572652e7631"
+  },
+  "hash.meshCustodyReceiptIDV1" : {
+    "label" : "pktest.mesh.custody-receipt-id.hash.v1",
+    "prefix" : "0000000000000026706b746573742e6d6573682e637573746f64792d726563656970742d69642e686173682e7631"
+  },
+  "hash.meshEpochIDV1" : {
+    "label" : "pktest.mesh.epoch.v1",
+    "prefix" : "706b746573742e6d6573682e65706f63682e7631"
+  },
+  "hash.meshInventoryDigestV1" : {
+    "label" : "pktest.mesh.inventory-digest.hash.v1",
+    "prefix" : "0000000000000024706b746573742e6d6573682e696e76656e746f72792d6469676573742e686173682e7631"
+  },
+  "hash.meshRecipientReceiptIDV1" : {
+    "label" : "pktest.mesh.recipient-receipt-id.hash.v1",
+    "prefix" : "0000000000000028706b746573742e6d6573682e726563697069656e742d726563656970742d69642e686173682e7631"
+  },
+  "hash.meshRoutedChunkIDV1" : {
+    "label" : "pktest.mesh.routed-chunk-id.hash.v1",
+    "prefix" : "0000000000000023706b746573742e6d6573682e726f757465642d6368756e6b2d69642e686173682e7631"
+  },
+  "hash.meshRoutedChunkV1" : {
+    "label" : "pktest.mesh.routed-chunk.hash.v1",
+    "prefix" : "0000000000000020706b746573742e6d6573682e726f757465642d6368756e6b2e686173682e7631"
+  },
+  "hash.meshRoutedContentV1" : {
+    "label" : "pktest.mesh.routed-content.hash.v1",
+    "prefix" : "0000000000000022706b746573742e6d6573682e726f757465642d636f6e74656e742e686173682e7631"
+  },
+  "keyDerivation.meshGroupKeyWrapV1" : {
+    "label" : "pktest.mesh.groupkey.v1",
+    "prefix" : "706b746573742e6d6573682e67726f75706b65792e7631"
+  },
+  "keyDerivation.meshRoutedContentKeyWrapV1" : {
+    "label" : "pktest.mesh.routed.content-key.v1",
+    "prefix" : "706b746573742e6d6573682e726f757465642e636f6e74656e742d6b65792e7631"
+  },
+  "keyDerivation.meshRoutedStoreV1" : {
+    "label" : "pktest.mesh.routed-store.v1",
+    "prefix" : "706b746573742e6d6573682e726f757465642d73746f72652e7631"
+  },
+  "keyDerivation.meshSessionContextV1" : {
+    "label" : "pktest.mesh.session-context.v1",
+    "prefix" : "706b746573742e6d6573682e73657373696f6e2d636f6e746578742e7631"
+  },
+  "keyDerivation.meshTLSExporterV1" : {
+    "label" : "pktest.mesh.tls-exporter.v1",
+    "prefix" : "706b746573742e6d6573682e746c732d6578706f727465722e7631"
+  },
+  "keyDerivation.proximityTransportV1" : {
+    "label" : "pktest.proximity.v1",
+    "prefix" : "706b746573742e70726f78696d6974792e7631"
+  },
+  "signature.identityEnvelopeV2" : {
+    "label" : "pktest.canonical.identity-envelope.v2",
+    "prefix" : "0000000000000025706b746573742e63616e6f6e6963616c2e6964656e746974792d656e76656c6f70652e7632"
+  },
+  "signature.legacyV1.identityEnvelopeV1" : {
+    "label" : "pktest.canonical.identity-envelope.v1",
+    "prefix" : ""
+  },
+  "signature.legacyV1.meshAdmissionTokenV1" : {
+    "label" : "pktest.canonical.mesh-admission-token.v1",
+    "prefix" : ""
+  },
+  "signature.meshAdmissionTokenV2" : {
+    "label" : "pktest.canonical.mesh-admission-token.v2",
+    "prefix" : "0000000000000028706b746573742e63616e6f6e6963616c2e6d6573682d61646d697373696f6e2d746f6b656e2e7632"
+  },
+  "signature.meshChannelIntroductionV1" : {
+    "label" : "pktest.mesh.channel-introduction.v1",
+    "prefix" : "0000000000000023706b746573742e6d6573682e6368616e6e656c2d696e74726f64756374696f6e2e7631"
+  },
+  "signature.meshCustodyReceiptV1" : {
+    "label" : "pktest.mesh.custody-receipt.v1",
+    "prefix" : "000000000000001e706b746573742e6d6573682e637573746f64792d726563656970742e7631"
+  },
+  "signature.meshEpochHeadsV1" : {
+    "label" : "pktest.mesh.epoch-heads.v1",
+    "prefix" : "000000000000001a706b746573742e6d6573682e65706f63682d68656164732e7631"
+  },
+  "signature.meshInventoryDigestV1" : {
+    "label" : "pktest.mesh.inventory-digest.v1",
+    "prefix" : "000000000000001f706b746573742e6d6573682e696e76656e746f72792d6469676573742e7631"
+  },
+  "signature.meshKeyAgreementV1" : {
+    "label" : "pktest.mesh.key-agreement.v1",
+    "prefix" : "000000000000001c706b746573742e6d6573682e6b65792d61677265656d656e742e7631"
+  },
+  "signature.meshMemberDepartureV1" : {
+    "label" : "pktest.mesh.member-departure.v1",
+    "prefix" : "000000000000001f706b746573742e6d6573682e6d656d6265722d6465706172747572652e7631"
+  },
+  "signature.meshMemberRemovalV1" : {
+    "label" : "pktest.mesh.member-removal.v1",
+    "prefix" : "000000000000001d706b746573742e6d6573682e6d656d6265722d72656d6f76616c2e7631"
+  },
+  "signature.meshRecipientReceiptV1" : {
+    "label" : "pktest.mesh.recipient-receipt.v1",
+    "prefix" : "0000000000000020706b746573742e6d6573682e726563697069656e742d726563656970742e7631"
+  },
+  "signature.meshRemovalProposalV1" : {
+    "label" : "pktest.mesh.removal-proposal.v1",
+    "prefix" : "000000000000001f706b746573742e6d6573682e72656d6f76616c2d70726f706f73616c2e7631"
+  },
+  "signature.meshRemovalVoteV1" : {
+    "label" : "pktest.mesh.removal-vote.v1",
+    "prefix" : "000000000000001b706b746573742e6d6573682e72656d6f76616c2d766f74652e7631"
+  },
+  "signature.meshRoutedChunkV1" : {
+    "label" : "pktest.mesh.routed-chunk.v1",
+    "prefix" : "000000000000001b706b746573742e6d6573682e726f757465642d6368756e6b2e7631"
+  },
+  "signature.meshRoutedDrainAnswerV1" : {
+    "label" : "pktest.mesh.routed-drain-answer.v1",
+    "prefix" : "0000000000000022706b746573742e6d6573682e726f757465642d647261696e2d616e737765722e7631"
+  },
+  "signature.meshRoutedInventoryDigestV1" : {
+    "label" : "pktest.mesh.routed-inventory-digest.v1",
+    "prefix" : "0000000000000026706b746573742e6d6573682e726f757465642d696e76656e746f72792d6469676573742e7631"
+  },
+  "signature.meshRoutedManifestV1" : {
+    "label" : "pktest.mesh.routed-manifest.v1",
+    "prefix" : "000000000000001e706b746573742e6d6573682e726f757465642d6d616e69666573742e7631"
+  },
+  "signature.meshTerminatedV1" : {
+    "label" : "pktest.mesh.terminated.v1",
+    "prefix" : "0000000000000019706b746573742e6d6573682e7465726d696e617465642e7631"
+  },
+  "signature.proximityQRIdentityV1" : {
+    "label" : "pktest.verify.qr.v1",
+    "prefix" : "706b746573742e7665726966792e71722e7631"
+  },
+  "signature.proximityQRResponseV1" : {
+    "label" : "pktest.verify.response.v1",
+    "prefix" : "706b746573742e7665726966792e726573706f6e73652e7631"
+  }
+}

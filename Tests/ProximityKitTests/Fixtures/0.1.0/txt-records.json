@@ -1,0 +1,17 @@
+{
+  "meshLink" : {
+    "mode" : "mesh",
+    "name" : "Alice",
+    "sid" : "alice-sid"
+  },
+  "pair" : {
+    "mode" : "pair",
+    "name" : "Alice",
+    "sid" : "alice-sid",
+    "v" : "1"
+  },
+  "presence" : {
+    "t" : "tag0001,tag0002,tag0003",
+    "v" : "1"
+  }
+}

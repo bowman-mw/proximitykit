@@ -305,6 +305,9 @@ import Testing
             invariant: packageKeychainSuiteInvariant),
         PackageKeychainFile(
             file: "ProximityPairSessionTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "CrossVersionFixtureTests.swift", kind: .suite,
             invariant: packageKeychainSuiteInvariant)
     ]
 
@@ -377,13 +380,16 @@ import Testing
     /// brought 33; 89 since its mesh track, when the cells of Fernlet's mesh tests that read this module's
     /// sources brought 13; 97 since its session track, when the session copies brought 8; 121 since its pair
     /// track, when the pair copies brought 24; 122 since its review, when the goodbye walls' home list
-    /// brought 1. The rows spell a needle the per-file rule does not cover: the soundness suite's storage
-    /// cell, which reads `URL.applicationSupportDirectory` as a value; the package's file locator's one read
-    /// of its own source's path; the routed store isolation walls' suite, whose own name spells the store's;
-    /// the namespace and platform walls' needles inside literals (``packageNamespaceWallLines``,
-    /// ``packagePlatformWallLines``); and the copied suites' reads of a keychain-reaching type's statics and
-    /// their source walls' needles inside literals (``packageCopiedStaticLines``,
-    /// ``packageCopiedSourceTextLines``, ``packageCopiedRoutedWallLines``), each set under one invariant.
+    /// brought 1; 124 since plan step A2's groundwork, when the cross-version fixture suite's two store
+    /// constructions brought 2. The rows spell a needle the per-file rule does not cover: the soundness
+    /// suite's storage cell, which reads `URL.applicationSupportDirectory` as a value; the package's file
+    /// locator's one read of its own source's path; the routed store isolation walls' suite, whose own name
+    /// spells the store's; the namespace and platform walls' needles inside literals
+    /// (``packageNamespaceWallLines``, ``packagePlatformWallLines``); the copied suites' reads of a
+    /// keychain-reaching type's statics and their source walls' needles inside literals
+    /// (``packageCopiedStaticLines``, ``packageCopiedSourceTextLines``, ``packageCopiedRoutedWallLines``);
+    /// and the cross-version fixture suite's two stores over copies of a tag's fixture folders
+    /// (``packageCrossVersionStoreLines``); each set under one invariant.
     static let packageHazardAllowlist: [(file: String, line: String, invariant: String)] = [
         (file: "ProximityNamespaceSoundnessTests.swift",
          line: "for base in [URL.applicationSupportDirectory, scratch] {",
@@ -418,7 +424,28 @@ import Testing
         (file: $0.file, line: $0.line, invariant: packageCopiedSourceTextInvariant)
     } + packageCopiedRoutedWallLines.map {
         (file: $0.file, line: $0.line, invariant: packageCopiedRoutedWallInvariant)
+    } + packageCrossVersionStoreLines.map {
+        (file: $0.file, line: $0.line, invariant: packageCrossVersionStoreInvariant)
     }
+
+    /// What makes every line of ``packageCrossVersionStoreLines`` safe in the unhosted bundle (rule I9).
+    static let packageCrossVersionStoreInvariant = """
+        the store is built in a cell of CrossVersionFixtureTests, a file on packageKeychainFiles whose suite \
+        reads PackageTestEnvironment.keychain first, over a scope of the cell's own: a fresh folder under the \
+        temporary directory named for the suite instance, holding a copy of a released tag's fixture \
+        folder, and a keychain service of the instance's own (the fixture's service and the instance's \
+        suffix) that the cell seeded with the fixture's seal-key row just before; so the store reads and \
+        writes only that copy and that row, never the bundle's fixtures, a production directory or a row \
+        another cell holds
+        """
+
+    /// The cross-version fixture suite's store constructions, each exact as trimmed (rule I9; ProximityKit
+    /// plan step A2's groundwork): Bob's routed store and session store, opened over copies of the
+    /// `0.1.0` fixture folders his stores wrote.
+    static let packageCrossVersionStoreLines: [(file: String, line: String)] = [
+        (file: "CrossVersionFixtureTests.swift", line: "let store = MeshRoutedStore(scope: scope)"),
+        (file: "CrossVersionFixtureTests.swift", line: "return MeshSessionStore(scope: scope).load()")
+    ]
 
     /// What makes every line of ``packageCopiedStaticLines`` safe in the unhosted bundle (rule I9).
     static let packageCopiedStaticInvariant = """
@@ -1238,10 +1265,12 @@ import Testing
     /// (2026-10-15): 88 → 98, for the ten suites holding the cells of Fernlet's pair, presence, identity,
     /// golden, wipe, audit, transport and localization tests that read ProximityKit's sources. RAISED at
     /// plan step A1.3's final review (2026-10-15): 98 → 99, for the NEW `MeshP9HonestyAcceptanceTests`,
-    /// which holds the `.remove` branch's stand-in that Fernlet's P9 honesty cell can no longer read. A
-    /// suite added, moved out or deleted changes it in the same commit, argued and measured; a deletion
-    /// lowers it only with the retirement argued.
-    static let measuredInventoryRows = 99
+    /// which holds the `.remove` branch's stand-in that Fernlet's P9 honesty cell can no longer read.
+    /// RAISED at plan step A2's groundwork (2026-10-15): 99 → 100, for the NEW `CrossVersionFixtureTests`,
+    /// which decodes tag 0.1.0's wire and on-disk fixtures with today's code. A suite added, moved out or
+    /// deleted changes it in the same commit, argued and measured; a deletion lowers it only with the
+    /// retirement argued.
+    static let measuredInventoryRows = 100
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -1259,9 +1288,10 @@ import Testing
     /// D's session copies' 8 (2 + 2 + 1 + 1 + 1 + 1). RAISED at plan step A1.3's batch D, pair
     /// (2026-10-15): 583 → 618, for the 35 tests of the ten suites holding the pair track's cells of
     /// Fernlet's tests that read ProximityKit's sources. RAISED at plan step A1.3's final review
-    /// (2026-10-15): 618 → 619, for `MeshP9HonestyAcceptanceTests`' 1. A test added or removed changes it
-    /// in the same commit.
-    static let measuredDeclaredTests = 619
+    /// (2026-10-15): 618 → 619, for `MeshP9HonestyAcceptanceTests`' 1. RAISED at plan step A2's
+    /// groundwork (2026-10-15): 619 → 643, for `CrossVersionFixtureTests`' 24. A test added or removed
+    /// changes it in the same commit.
+    static let measuredDeclaredTests = 643
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

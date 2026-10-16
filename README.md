@@ -45,6 +45,44 @@ The test target is unhosted: no app and no keychain entitlement. Its support fol
 the tests a namespace of their own, `.packageTest`, and a host built from the public API alone.
 `Tests/ProximityKitTests.tsv` lists every suite with its file and its number of tests.
 
+## Versioning
+
+ProximityKit uses semantic versioning, and while its version is 0.y it reads the rule this way:
+
+- **y** moves for a break. After 1.0 that is the major version.
+- **z** moves for everything else: additions and fixes. After 1.0 those are the minor and patch
+  versions.
+
+A break is any change a host or another device running a released version would notice:
+
+- the public API: a type, member or parameter removed or renamed, a signature, a default or a
+  documented behavior changed, or a new requirement a host must state;
+- a wire format: any byte a released version writes, or any byte it accepted and now would not, for
+  an envelope, a frame, a payload, a TXT record, a seal, a signature's canonical bytes or a label's
+  framing;
+- an on-disk format: a sealed store's schema, marker or seal, a sidecar's encoding, or a keychain
+  row's service, account, accessibility class or encoding;
+- a frozen token: a payload type, record kind, routed type, capability, audit or TXT key, which a host
+  supplies or matches by its exact spelling.
+
+A new format goes in beside the old one, and the old one keeps decoding, so a release never strands a
+device still running the last one. That makes breaks rare: a new optional JSON key that an older
+decoder ignores, or a new schema a newer reader accepts beside the old, is an addition. Retiring the
+old reader is the break.
+
+A consumer pins an exact version, `.package(url: "https://github.com/bowman-mw/proximitykit", exact:
+"0.1.0")`, as the Fernlet repository does, and moves to a new one deliberately, reading its entry in
+[CHANGELOG.md](CHANGELOG.md). SwiftPM's `from: "0.1.0"` means anything below 1.0.0, so it would take
+0.2.0, a break, on the next resolve without a word.
+
+Each tag's wire and on-disk bytes are committed under `Tests/ProximityKitTests/Fixtures/<tag>/`,
+generated once from that tag's code and never regenerated, each file's SHA-256 pinned in
+`CrossVersionFixtureTests`. Its cells decode every tag's fixtures with the current code: they check the
+fields, the signatures and seals under the keys the tag stored, the deterministic encodings re-encoded
+byte for byte, and the retired formats still refused. So a break fails in this repository's CI before
+a tag exists, rather than first in a host's update to the tag (tags never move). A later tag adds its
+own folder beside the older ones, and the older ones keep decoding.
+
 ## Example app
 
 `Examples/ProximityPing` is a small app for iOS and macOS that uses ProximityKit the way any app
@@ -134,8 +172,9 @@ script in `Scripts/` that uses only the standard library. You can run one locall
 - `local-link-scan.py` checks that the local network API appears only in the three radio files in
   `Sources/ProximityKit/Transport/`, and never in the example app, which reaches the radios only
   through the package.
-- `manifest-scan.py` checks that `Package.swift` has no unsafe flags and no warnings setting, and
-  that it exists beside the sources.
+- `manifest-scan.py` checks that `Package.swift` has no unsafe flags and no warnings setting, that
+  its one resource is the test target's fixture folder, copied whole (`.copy("Fixtures")`), and that
+  it exists beside the sources.
 - `codeowners-scan.py` checks that every rule in `.github/CODEOWNERS` names a path that exists,
   because GitHub never reports a rule that matches nothing, and that the walls, the manifest, the
   label registry and the inventory of the tests keep their rules.
@@ -168,13 +207,15 @@ Other walls are suites in the package's own tests, so they run on every test lan
 wall, the platform wall (which also keeps CloudKit out), the keychain door's wall, the tests' own
 hygiene and their tree walls, the source walls over ProximityKit's code (launch hooks read only in
 Debug builds, keychain rows that never sync, a purpose named beside every raw cryptographic call, and
-the one escape hatch counted), the memory-lifecycle wall, and the example app's namespace held apart.
+the one escape hatch counted), the memory-lifecycle wall, the example app's namespace held apart, and
+the cross-version fixtures (see "Versioning").
 The source walls copied from the Fernlet repository's tests, which read ProximityKit's code there
 before it moved, run on every test lane too.
 `.github/CODEOWNERS` puts the package's own walls, the files they read through, the label registry,
 the example's namespace and its copy, the keychain funnel and the byte formats under the owner's
-review, and of the source walls copied from the Fernlet repository's tests the five whose originals
-that repository's CODEOWNERS owns; the other copies are not under it.
+review, as are the fixtures each tag wrote and the suite that pins and decodes them, and of the
+source walls copied from the Fernlet repository's tests the five whose originals that repository's
+CODEOWNERS owns; the other copies are not under it.
 
 ## History
 

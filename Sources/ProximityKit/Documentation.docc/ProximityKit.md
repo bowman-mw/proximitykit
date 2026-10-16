@@ -1006,7 +1006,8 @@ continuation and photo-review suites and ten holding those of its pair-session, 
 golden, wipe, audit-bridge, transport and localization tests that read this module's sources, and one
 from that step's final review holding the P9 battery's honesty pin on the `.remove` branch's stand-in
 (`MeshP9HonestyAcceptanceTests`); and, in the package repository, the example app's namespace held
-apart (`ExampleNamespaceTests`, plan step A1.2): ninety-nine suites, 619 tests. The
+apart (`ExampleNamespaceTests`, plan step A1.2) and every released tag's bytes decoded by today's code
+(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred suites, 643 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1059,7 +1060,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all ninety-nine passing `swift test` with this module and its tests laid out as in the package
+Mac too, all one hundred passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
@@ -1282,6 +1283,24 @@ transport neutrality over this module, and the localization wall's rules over it
 prove its matchers fire. Where a Fernlet cell also read Fernlet's own files or values, the copy says in
 its doc comment what stays there.
 
+`CrossVersionFixtureTests` reads the test target's one resource, `Fixtures/` (`.copy("Fixtures")` in
+the manifest, which the package repository's manifest wall holds), through `Bundle.module`, so it runs
+on every lane, the iOS simulator's included. `Fixtures/0.1.0/` holds 53 files of tag 0.1.0's wire
+and on-disk bytes, generated once under `.packageTest` from a tree whose `Sources/` was that tag's: four
+identities' keychain rows and Bob's two seal keys as 0.1.0 wrote them; schema-2, schema-1 and sealed
+envelopes, both payload framings, a sealed introduction and a prekey bundle; a mesh wire frame, the
+channel introduction's three frames, both dial hellos, the three radios' TXT fields and every label's
+framing; the mesh payloads; the membership frames of a four-member mesh through a quorum removal, a
+departure and a termination; one routed item from manifest to drain answer; and Bob's sealed session
+and routed stores, the session file with its column marker retired two ways, and a protected sidecar.
+Its twenty-four cells pin each file's SHA-256 and decode them with today's code: each identity adopts
+its rows, every signature verifies under its label through the verifiers a receiver uses, every seal
+opens with the keys the rows hold, the deterministic encodings re-encode byte for byte, the derived ids
+(epoch, chunk and receipt ids, the content and chunk hashes, the membership and routed inventories)
+are the ones 0.1.0 derived, and the retired column formats are refused by name. A cell that needs a
+key seeds the rows under services of its own, and a cell that opens a store opens it over a copy of its
+folder, so the cells run in parallel and the bundle's fixtures are never written.
+
 Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
 mesh-message spelling helper, the test namespace, the epoch fixtures, whose one mint binds in each
@@ -1303,6 +1322,20 @@ over a literal namespace that belongs to no app, and it imports this module plai
 so it sees only what a host sees. The mesh-message spelling helper it builds its fixtures with
 (`ProximityNamespaceMeshMessagesSpelling.swift`) is the fourth helper: the namespace and vocabulary
 goldens and the runtime gate, which stay in `FernletTests`, build their fixtures with it too.
+
+### Versioning
+
+The package repository's README states the version rule and its `CHANGELOG.md` the releases. While the
+version is 0.y, y moves for a break, z for additions and fixes. A break is a change to the public API,
+to any wire byte a released version writes or accepts, to an on-disk format (a store's schema, marker
+or seal, a sidecar's encoding, a keychain row), or to a frozen token. A new format is added beside the
+old one, which keeps decoding, so retiring a reader is the break. A host pins `exact:`, as Fernlet does,
+since SwiftPM's `from:` would take the next 0.y.
+
+Every tag's wire and on-disk bytes are committed under the test target's `Fixtures/<tag>/`, generated
+once from that tag's code and pinned by SHA-256 in `CrossVersionFixtureTests` (see "Its tests"), which
+decodes every tag's folder with the code of today. A break therefore fails in this module's own tests
+before a tag exists. The formats and their markers are listed in the changelog's entry for 0.1.0.
 
 ## Topics
 

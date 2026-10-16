@@ -63,6 +63,9 @@ REQUIRED_PATTERNS = (
     "/Tests/ProximityKitTests/ExampleNamespaceTests.swift",
     # The inventory of the package's tests, the test-count floor's declared pin.
     "/Tests/ProximityKitTests.tsv",
+    # The bytes each released tag wrote and the suite that pins and decodes them (plan step A2).
+    "/Tests/ProximityKitTests/Fixtures/",
+    "/Tests/ProximityKitTests/CrossVersionFixtureTests.swift",
     # The manifest, the walls and the CI that runs them (CODEOWNERS included).
     "/Package.swift",
     "/Scripts/",

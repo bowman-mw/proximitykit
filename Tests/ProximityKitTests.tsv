@@ -10,6 +10,7 @@
 # parameterized test is one). Rows sorted by suite. A suite added, moved, renamed or deleted edits its row, and the
 # suite's measured row count and declared-test sum, in the same commit.
 suite	file	cells
+CrossVersionFixtureTests	CrossVersionFixtureTests.swift	24
 EphemeralMeshTLSIdentityTests	NetworkMeshTransportTests.swift	5
 ExampleNamespaceTests	ExampleNamespaceTests.swift	5
 FakePeerTransportTests	PeerTransportNeutralityTests.swift	10

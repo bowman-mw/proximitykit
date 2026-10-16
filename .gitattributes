@@ -1,0 +1,3 @@
+# The fixtures each released tag wrote are bytes, pinned by SHA-256 in CrossVersionFixtureTests: git
+# never converts their line endings, whatever a checkout's core.autocrlf says.
+/Tests/ProximityKitTests/Fixtures/** -text

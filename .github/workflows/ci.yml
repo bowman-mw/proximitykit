@@ -17,8 +17,8 @@
 #     scans held this code to until that repository consumed this package's tag);
 #   * local-link-scan.py: Network.framework's local-link API only in the three radio files, never in
 #     the example app;
-#   * manifest-scan.py: Package.swift carries no unsafe flags and no warnings setting, and exists
-#     once the sources do;
+#   * manifest-scan.py: Package.swift carries no unsafe flags and no warnings setting, declares no
+#     resource but the test target's fixture folder, copied whole, and exists once the sources do;
 #   * codeowners-scan.py: every rule in .github/CODEOWNERS resolves to a path, and the
 #     wall-critical paths stay owned;
 #   * ci-scan.py: this file keeps its legs, their warnings-as-errors flags and the floor checks;
@@ -167,9 +167,23 @@ jobs:
     # test leg was not run for this raise. swift test and the macOS bundle passed at these floors and
     # each refused MIN_TESTS 620; swift test and the Walls step's declared floor refused MIN_SUITES
     # 100. ARITHMETIC CHECK: 618 + 1 = 619 and 98 + 1 = 99.
+    # RAISED 619 -> 643 and 99 -> 100 at plan step A2's groundwork on a Mac, 2026-10-15 (the same Xcode
+    # and Swift), for CrossVersionFixtureTests, whose 24 cells decode tag 0.1.0's wire and on-disk
+    # bytes (Tests/ProximityKitTests/Fixtures/0.1.0/, the test target's one resource, each file's
+    # SHA-256 pinned) with today's code, over this repository's tree with it, this workflow's steps run
+    # as written but the iOS simulator's test leg: swift test "Test run with 643 tests in 100 suites
+    # passed"; the macOS result bundle totalTestCount 643, 0 failed, 0 skipped, the same 100 suites by
+    # name, 682 cases with arguments expanded; the Release build, the iOS simulator build and the
+    # example app's macOS and iOS simulator builds passed with warnings as errors; the inventory 100
+    # rows declaring 643 tests. The iOS simulator's test leg was not run for this raise; an iOS
+    # Simulator build-for-testing, with no simulator booted, carried the 53 fixtures byte-identical in
+    # the test bundle's resource bundle, where the suite reads them through Bundle.module. swift test
+    # and the macOS bundle passed at these floors and each refused MIN_TESTS 644; swift test
+    # and the Walls step's declared floor refused MIN_SUITES 101. ARITHMETIC CHECK: 619 + 24 = 643 and
+    # 99 + 1 = 100.
     env:
-      MIN_TESTS: 619
-      MIN_SUITES: 99
+      MIN_TESTS: 643
+      MIN_SUITES: 100
     steps:
       - uses: actions/checkout@v4
 

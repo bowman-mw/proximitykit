@@ -1,0 +1,128 @@
+[
+  {
+    "accessibility" : "cku",
+    "account" : "agreement.private",
+    "data" : "wEBc5lAmJDaPaihNX/QoGo8x4hk/0Z0YQAbqvlqWfUU=",
+    "service" : "org.example.pktest.identity.fixture.alice",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "agreement.public",
+    "data" : "hoJzQYyc3cjCRktetFlOqcKPjvPTHt2rB6/9bo+MYVI=",
+    "service" : "org.example.pktest.identity.fixture.alice",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "signing.private",
+    "data" : "GUNxYe7tLNb+sXeJwBsqIm4O91SVgyRwy1dxtbNN0qA=",
+    "service" : "org.example.pktest.identity.fixture.alice",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "signing.public",
+    "data" : "znAzL69SLzIrsggG/py3aFRzFqfxase2cPvD62Z1RH4=",
+    "service" : "org.example.pktest.identity.fixture.alice",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "agreement.private",
+    "data" : "SBYVQZs4xrtHZUFzioJM3vSinGMlu2hGF3gE3Auj+XE=",
+    "service" : "org.example.pktest.identity.fixture.bob",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "agreement.public",
+    "data" : "TH/WMRkuM15N6xoiB6AwVYM0/Px6ZYSGJ5TqvUldegc=",
+    "service" : "org.example.pktest.identity.fixture.bob",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "signing.private",
+    "data" : "TBJML3eiezo1WJRcQGfEgAD2FlX3iiOQ6jANSOYqdD8=",
+    "service" : "org.example.pktest.identity.fixture.bob",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "signing.public",
+    "data" : "vEBdJRrzQDPicObUfCv9mAWYDA1DsIJrIjtsqS1s4ow=",
+    "service" : "org.example.pktest.identity.fixture.bob",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "agreement.private",
+    "data" : "+CBHZ2/LW1Zevs/9PcviAYgo9Jz26NM4IpF8b09rcmY=",
+    "service" : "org.example.pktest.identity.fixture.carol",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "agreement.public",
+    "data" : "mBhEMBkB0WYJA4k1ag8cDtL49bD9C7x4QghX+b1g2xQ=",
+    "service" : "org.example.pktest.identity.fixture.carol",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "signing.private",
+    "data" : "Cyvi5jYvMd8iDe0Z73TsFKQqVSEu7QG1sjlfKa9eJtg=",
+    "service" : "org.example.pktest.identity.fixture.carol",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "signing.public",
+    "data" : "KX6xC/3dtaigHMt4KDrEOpaRPhy9JKTkGr9Kl4zBjbU=",
+    "service" : "org.example.pktest.identity.fixture.carol",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "agreement.private",
+    "data" : "4NXF2tZk95hTgFmt7ERorPPcY8akMfGEzpIOyE8VYE4=",
+    "service" : "org.example.pktest.identity.fixture.dave",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "agreement.public",
+    "data" : "hDNKfLDhLjO6RRK+tsO/eowklQKUTMuBnpuj3Dzpci4=",
+    "service" : "org.example.pktest.identity.fixture.dave",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "signing.private",
+    "data" : "xZx3LR3XTu4wnN5VW89EIOBtAexDswMg7XQQ0JjhxqU=",
+    "service" : "org.example.pktest.identity.fixture.dave",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "signing.public",
+    "data" : "bDfxY0awWV5piwxaO+GqBtIfrMcUVEa5PUwPVGUonwA=",
+    "service" : "org.example.pktest.identity.fixture.dave",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "session.seal",
+    "data" : "Z16nqlcdhrSTA6h7H8RGoEPnGX+EZQ9JKuFbBjCchxg=",
+    "service" : "org.example.pktest.mesh-session.fixture.bob",
+    "synchronizable" : false
+  },
+  {
+    "accessibility" : "cku",
+    "account" : "routed.seal",
+    "data" : "+pFWWdd+ZuFt8kwwbVM6cIpmg2eLvXZv34JuwNslh50=",
+    "service" : "org.example.pktest.mesh-routed.fixture.bob",
+    "synchronizable" : false
+  }
+]
