@@ -17,13 +17,22 @@
 // label), so they are made here with CryptoKit over 0.1.0's own `legacyCanonicalBytes`, as a pre-WI-6
 // peer made them.
 //
-// How to run one test, from this repository's root, with <scratch> a folder outside it:
+// What ran is this file but for this header: generateVerification() ran as it stands, and generate()
+// as it stands but for its paths, which that run held as literals where this file reads them from the
+// environment and requires them.
+//
+// How to run one test, from this repository's root, with <scratch> a folder outside it. Set up the tree:
 //   mkdir -p <scratch>/tree && git archive 0.1.0 Package.swift Sources Tests/ProximityKitTests/TestSupport \
 //     Tests/ProximityKitTests/ProximityNamespaceMeshMessagesSpelling.swift | tar -x -C <scratch>/tree
 //   cp Scripts/cross-version-fixtures/generate-0.1.0.swift.txt <scratch>/tree/Tests/ProximityKitTests/FixtureGenerator.swift
+// Then run the one test, anchored, since `--filter` is a regular expression and an unanchored
+// 'FixtureGenerator/generate()' also selects generateVerification(). generate():
 //   cd <scratch>/tree && FIXTURE_OUT=<scratch>/out/0.1.0 FIXTURE_WORK=<scratch>/work \
+//     swift test --filter 'FixtureGenerator/generate\(\)$'
+// generateVerification():
+//   cd <scratch>/tree && FIXTURE_OUT=<scratch>/out/0.1.0 \
 //     FIXTURE_ROWS=<this repository>/Tests/ProximityKitTests/Fixtures/0.1.0/keychain-rows.json \
-//     swift test --filter 'FixtureGenerator/generateVerification()'
+//     swift test --filter 'FixtureGenerator/generateVerification\(\)$'
 // Then copy only the files the run added into the folder, and pin each one's SHA-256 in
 // CrossVersionFixtureTests' `digests` beside the others, raising its `fixtureFloor`.
 

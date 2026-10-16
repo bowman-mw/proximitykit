@@ -268,9 +268,21 @@ jobs:
     # the macOS bundle passed at these floors and each refused MIN_TESTS 1000; swift test and the Walls
     # step's declared floor refused MIN_SUITES 139. ARITHMETIC CHECK: 815 + 184 = 999 and
     # 118 + 20 = 138.
+    # RAISED 999 -> 1003 and 138 -> 139 at the verification ceremony's cross-version cells and the
+    # custody commit's partial-item cell on a Mac, 2026-10-16 (the same Xcode and Swift), for the
+    # three cells CrossVersionFixtureTests gains (today's QR writer, today's scanner and today's
+    # displayer against tag 0.1.0's ceremony) and the package's NEW MeshRoutedCustodyCommitGuardTests
+    # and its one cell, over this repository's tree with them, this workflow's steps run as written but
+    # the iOS simulator's test leg: swift test "Test run with 1003 tests in 139 suites passed"; the
+    # macOS result bundle totalTestCount 1003, 0 failed, 0 skipped, the same 139 suites by name, 1091
+    # cases with arguments expanded; the Release build, the iOS simulator build and the example app's
+    # macOS and iOS simulator builds passed with warnings as errors; the inventory 139 rows declaring
+    # 1003 tests. The iOS simulator's test leg was not run for this raise. swift test and the macOS
+    # bundle passed at these floors and each refused MIN_TESTS 1004; swift test and the Walls step's
+    # declared floor refused MIN_SUITES 140. ARITHMETIC CHECK: 999 + 4 = 1003 and 138 + 1 = 139.
     env:
-      MIN_TESTS: 999
-      MIN_SUITES: 138
+      MIN_TESTS: 1003
+      MIN_SUITES: 139
     steps:
       - uses: actions/checkout@v4
 

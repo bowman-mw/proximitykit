@@ -3,20 +3,22 @@
 ProximityKit's releases, newest first. The version rule is the README's "Versioning" section: while
 the version is 0.y, y moves for a break (of the public API, a wire format, an on-disk format or a
 frozen token) and z for additions and fixes; from 1.0 those become the major and the minor version. A
-consumer pins `exact:`. Every tag that moves a format adds `Tests/ProximityKitTests/Fixtures/<tag>/`,
-that tag's wire and on-disk bytes generated once from its code by a generator committed beside the
-others in `Scripts/cross-version-fixtures/` (0.1.0's is `generate-0.1.0.swift.txt`, which no target
-compiles), and `CrossVersionFixtureTests` decodes every folder with today's code, so a break in what a
-tag wrote is a test failure in this repository before it is a release. The cells hold the read
-direction, today's decoders on a tag's bytes, and the write direction where an encoding is
-deterministic (re-encoded byte for byte) and for the verification ceremony's JSON payloads (the same
-JSON object); a format a tag's table marks "no fixture" is not held.
+consumer pins `exact:`. Every tag that writes a format, or a version of one, that no earlier folder
+holds adds `Tests/ProximityKitTests/Fixtures/<tag>/` with those bytes, generated once from its code by
+a generator committed beside the others in `Scripts/cross-version-fixtures/` (0.1.0's is
+`generate-0.1.0.swift.txt`, which no target compiles), and `CrossVersionFixtureTests` decodes every
+folder with today's code, so a break in what a tag wrote is a test failure in this repository before it
+is a release. The cells hold the read direction, today's decoders on a tag's bytes, and the write
+direction where an encoding is deterministic (re-encoded byte for byte) and for the verification
+ceremony, through today's QR writer and ceremony on both sides (each JSON payload holding every key and
+value the tag wrote, a fresh nonce or signature aside); a format a tag's table marks "no fixture" is
+not held.
 
 ## Unreleased
 
 Planned as 0.1.1, a fix release: no public API, wire format, on-disk format or frozen token is
-changed or removed, and every 0.1.0 API is kept, so z moves. No format moves, so it adds no fixture
-folder: `Fixtures/0.1.0/` holds the bytes it reads and writes.
+changed or removed, and every 0.1.0 API is kept, so z moves. It writes no format, and no version of
+one, that `Fixtures/0.1.0/` does not hold, so it adds no fixture folder.
 
 ### Fixed
 
@@ -99,14 +101,31 @@ folder: `Fixtures/0.1.0/` holds the bytes it reads and writes.
   declares unless it is a literal constant, and the readers follow a declaration past a line ending
   in `=`. `PackageSwitchableInstallBinding` gains the scripted override, an answer a cell changes
   partway through the work it wraps, and `PackageTestHost` can be built over it.
-- The package's tests hold the 22 suites of the Fernlet repository's tests that reach the keychain
-  and open a store (plan step A1's batch C, 184 tests), under their Fernlet names: the routed store's
-  load, durability and error vocabulary, the inventory builder, every cap at every door it guards, the
-  parked-set drop rule and the sweeps, custody's parity with the reassembler, the persisted delivery
-  map and the evidence behind each custodied rung, the custody and recipient receipts' signing and
-  doors, the routed inventory's signing and door, the hand-off's batch doors, the session store's
-  round trip and durability, the session's restore mapping, and the removal frame and rotation
-  through a live manager.
+- The package's tests hold batch C's 22 suites of the Fernlet repository's tests that reach the
+  keychain and open a store (plan step A1, 184 tests; others that do both, such as
+  `MeshSessionLifecycleManagerTests`, stay in Fernlet's tests), under their Fernlet names: the routed
+  store's load, durability and error vocabulary, the inventory builder, every cap at every door it
+  guards, the parked-set drop rule and the sweeps, custody's parity with the reassembler, the
+  persisted delivery map and the evidence behind each custodied rung, the custody and recipient
+  receipts' signing and doors, the routed inventory's signing and door, the hand-off's batch doors,
+  the session store's round trip and durability, the session's restore mapping, and the removal frame
+  and rotation through a live manager.
+- `CrossVersionFixtureTests` drives today's verification ceremony against tag 0.1.0's:
+  `ProximityVerifyQR.makeURL` writes the QR a 0.1.0 scanner reads, and `CoachVerificationCeremony`,
+  as the scanner and as the displayer, interoperates with 0.1.0's response transcript, its layout read
+  from the fixture; each of the ceremony's JSON payloads holds every key and value 0.1.0 wrote, a
+  fresh nonce or signature aside, so a key added since is an addition, not a failure.
+  `MeshRoutedCustodyCommitGuardTests` holds the custody commit's answer to a partly staged item:
+  `.incomplete` from the index alone, nothing read, repaired or written.
+- Rule I9 follows a keychain line through the members that name it: in a suite file, no static member
+  or nested type, at any depth and in an extension too, that holds one or names one that does is
+  reachable from another type unless it is `private` or nested in a `private` type; in every listed
+  file but the installer's, no static stored property reaches the keychain or holds a storage scope,
+  a test host or a listed fixture's or support type's value, directly or through a typealias; a
+  support type holds no keychain line in a nested type; a bare declaration that a member access
+  continues is a keychain line; and a fixture member's first statement ends at its first `;`. What it
+  does not read is stated beside it: a parameter's default value, a `lazy` or closure-wrapped ready
+  marker, and a `@Suite` nested in another type, which the inventory and the test-count floor refuse.
 
 ### Consumers
 

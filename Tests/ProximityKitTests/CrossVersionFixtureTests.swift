@@ -9,13 +9,22 @@
 // derived, and the refusals of the retired formats. That is the read direction, today's decoders on a
 // tag's bytes. The write direction is held where an encoding is deterministic, re-encoded byte for
 // byte (the sealed payload's raw frame, the wire headers, the pair dial hello, the TXT fields, every
-// label's prefix and the verification ceremony's two transcripts), and for the verification
-// ceremony's three JSON payloads, which today's encoder must write as the same JSON object, key order
-// aside. So a wire or on-disk break fails here, in this repository, before a tag exists, instead of
-// first in a host's re-pin of the tag (tags never move); a JSON key renamed elsewhere under a decoding
+// label's prefix and the verification ceremony's two transcripts), and for the verification ceremony
+// through the code that writes and answers it: today's `ProximityVerifyQR.makeURL` writes the QR a
+// 0.1.0 scanner reads, and today's `CoachVerificationCeremony`, as the scanner, challenges 0.1.0's QR
+// and accepts a response signed over 0.1.0's response transcript and, as the displayer, signs that
+// transcript, its layout taken from the fixture rather than from today's transcript builder. Each of
+// the ceremony's three JSON payloads, as today's writer or the payload's own `Codable` encoding writes
+// it (the mesh's `sendEnvelopeCore` encodes a payload with a plain `JSONEncoder`), holds every key and
+// value 0.1.0 wrote, unchanged, but a value a run mints fresh (a nonce, a signature), which keeps only
+// its JSON type; a key today adds is an addition the version rule allows, and key order is no part of
+// it. So a wire or on-disk break fails here, in this repository, before a tag exists, instead of first
+// in a host's re-pin of the tag (tags never move); a JSON key renamed elsewhere under a decoding
 // fallback passes the read direction, and is a review's to catch. Not here: the session coordinator's
-// own introduction and heartbeat payloads, private types only a running session writes and reads, and
-// the `FMGM2` metadata seal and its inner payload, which 0.1.0 opens but never writes.
+// own introduction and heartbeat payloads, private types only a running session writes and reads; the
+// `FMGM2` metadata seal and its inner payload, which 0.1.0 opens but never writes; and the mesh's own
+// slot-bound ceremony (`MeshNetworkManager`), held only through the `makeURL` and the transcript
+// builder it shares with the coach ceremony.
 //
 // `Fixtures/0.1.0/` is tag 0.1.0 (6648094f), generated under `.packageTest`
 // (TestSupport/PackageTestNamespace.swift) on a tree whose `Sources/` was `git archive 0.1.0` by the
@@ -38,10 +47,11 @@
 // THE RULE (README "Versioning", CHANGELOG.md): a fixture is never regenerated or edited. A digest that
 // stops matching is a fixture someone changed, and the change is reviewed as a change to this file's
 // pin. A format a folder missed joins it as new files, generated from that tag's code over the same
-// cast and pinned beside the others, as the verification ceremony's joined 0.1.0's. A later tag that
-// moves a format adds `Fixtures/<tag>/` and its own cells beside these, and one that moves none adds no
-// folder; every older folder keeps decoding, because a new format is added beside the old one and only
-// retiring a reader is a break (a `y` bump while the version is 0.y). The test bundle carries the
+// cast and pinned beside the others, as the verification ceremony's joined 0.1.0's. Every later tag that
+// writes a format, or a version of one, that no earlier folder holds adds `Fixtures/<tag>/` with those
+// bytes and its own cells beside these, and one that writes none adds no folder; every older folder
+// keeps decoding, because a new format is added beside the old one and only retiring a reader is a
+// break (a `y` bump while the version is 0.y). The test bundle carries the
 // folder as a resource (`Package.swift`, `resources: [.copy("Fixtures")]`, which
 // `Scripts/manifest-scan.py` holds), so the cells read it through `Bundle.module` on every test lane, the
 // iOS simulator's included.
@@ -477,9 +487,9 @@ import Testing
     /// **The verification QR verifies over its transcript.** Alice's QR for Bob, as 0.1.0's ceremony
     /// displayed it, parses under `.packageTest`'s scheme to her two keys, its instant and a 16-byte
     /// nonce; today's transcript over those fields is the one 0.1.0 signed, byte for byte, and the gate
-    /// every scanner runs accepts the QR at its instant; and today's encoding of the payload is the JSON
-    /// object the QR carries. The same QR with its instant moved a second is refused, at that instant:
-    /// the signature covers the transcript's fields, not only its label.
+    /// every scanner runs accepts the QR at its instant; and today's encoding of the payload holds every
+    /// key and value of the JSON the QR carries. The same QR with its instant moved a second is refused,
+    /// at that instant: the signature covers the transcript's fields, not only its label.
     @Test func theVerificationQRVerifiesOverItsTranscript() throws {
         let cast = try provisionedCast()
         let purposes = ProximityNamespace.Purposes.packageTest
@@ -494,8 +504,8 @@ import Testing
             timestamp: qr.timestamp, nonce: qr.nonce, in: purposes) == (try fixture("0.1.0/verify-qr-transcript.bin")),
                 "today's QR transcript is not the one 0.1.0 signed")
         #expect(ProximityVerifyQR.isValid(qr, at: issued, in: purposes), "the scanner's gate refused Alice's QR")
-        #expect(try sameJSONObject(qr, as: try verificationQRJSON(url)),
-                "today's encoding of the QR's payload is not the JSON object 0.1.0 put in it")
+        #expect(try holdsEveryField(of: try verificationQRJSON(url), in: JSONEncoder().encode(qr)),
+                "today's encoding of the QR's payload drops or changes a field 0.1.0 put in it")
         let moved = ProximityVerifyQR.Payload(
             version: qr.version, signingPublicKey: qr.signingPublicKey, keyAgreementPublicKey: qr.keyAgreementPublicKey,
             timestamp: qr.timestamp + 1, nonce: qr.nonce, signature: qr.signature)
@@ -508,8 +518,9 @@ import Testing
     /// displayer runs on Bob's key-agreement key before it signs; Alice's response names that challenge;
     /// today's response transcript (Bob's key-agreement key, the challenge nonce, the QR nonce) is the one
     /// 0.1.0 signed, byte for byte, and her signature verifies over it by her signing key, as a scanner
-    /// checks it; and today's encodings of both payloads are the JSON objects 0.1.0 sent. Her signature
-    /// verifies over no other transcript: not with the two nonces swapped, and not as an answer to Carol.
+    /// checks it; and today's encodings of both payloads hold every key and value of the JSON 0.1.0 sent.
+    /// Her signature verifies over no other transcript: not with the two nonces swapped, and not as an
+    /// answer to Carol.
     @Test func theVerifyChallengeAndResponseVerifyOverTheirTranscript() throws {
         let cast = try provisionedCast()
         let purposes = ProximityNamespace.Purposes.packageTest
@@ -535,10 +546,105 @@ import Testing
         #expect(!verifies(transcript(cast.bob, challenge.qrNonce, challenge.challengeNonce))
                 && !verifies(transcript(cast.carol, challenge.challengeNonce, challenge.qrNonce)),
                 "Alice's response verified over a transcript she did not sign")
-        #expect(try sameJSONObject(challenge, as: try fixture("0.1.0/verify-challenge.json")),
-                "today's encoding of the challenge is not the JSON object 0.1.0 sent")
-        #expect(try sameJSONObject(response, as: try fixture("0.1.0/verify-response.json")),
-                "today's encoding of the response is not the JSON object 0.1.0 sent")
+        #expect(try holdsEveryField(of: try fixture("0.1.0/verify-challenge.json"), in: JSONEncoder().encode(challenge)),
+                "today's encoding of the challenge drops or changes a field 0.1.0 sent")
+        #expect(try holdsEveryField(of: try fixture("0.1.0/verify-response.json"), in: JSONEncoder().encode(response)),
+                "today's encoding of the response drops or changes a field 0.1.0 sent")
+    }
+
+    /// **Today's QR is written as the tag wrote it.** `ProximityVerifyQR.makeURL`, today's writer, for
+    /// Alice at the instant 0.1.0's ceremony displayed her QR, writes a URL a 0.1.0 scanner reads: the
+    /// tag's scheme and host `verify`, and one query item, the tag's `d`, in unpadded base64url; its JSON
+    /// holds every key and value 0.1.0's held but the nonce and the signature, which a display mints
+    /// fresh; and today's parse reads it to Alice's keys, the tag's version and instant and the nonce the
+    /// writer returned, which the scanner's gate accepts.
+    @Test func todaysQRIsWrittenAsTheTagWroteIt() throws {
+        let cast = try provisionedCast()
+        let issued = base.addingTimeInterval(1_000)
+        let tagged = try verificationQRURL()
+        let made = try ProximityVerifyQR.makeURL(identity: cast.alice, now: issued)
+        let tagParts = try #require(URLComponents(url: tagged, resolvingAgainstBaseURL: false))
+        let parts = try #require(URLComponents(url: made.url, resolvingAgainstBaseURL: false))
+        #expect(parts.scheme == tagParts.scheme && parts.host == tagParts.host && tagParts.host == "verify",
+                "today's QR is not under 0.1.0's scheme and host: \(made.url)")
+        #expect(parts.queryItems?.map(\.name) == tagParts.queryItems?.map(\.name) && tagParts.queryItems?.map(\.name) == ["d"],
+                "today's QR does not carry 0.1.0's one query item: \(made.url)")
+        let item = try #require(parts.queryItems?.first?.value)
+        #expect(!item.isEmpty && !item.contains { "=+/".contains($0) }, "today's QR item is not unpadded base64url: \(item)")
+        #expect(try holdsEveryField(of: try verificationQRJSON(tagged), in: try verificationQRJSON(made.url),
+                                    fresh: ["nonce", "signature"]),
+                "today's QR drops or changes a field 0.1.0's QR carried")
+        let old = try #require(ProximityVerifyQR.parse(tagged, in: .packageTest))
+        let qr = try #require(ProximityVerifyQR.parse(made.url, in: .packageTest), "today's parse refused today's QR")
+        #expect(qr.version == old.version && qr.timestamp == old.timestamp && qr.nonce == made.nonce
+                && qr.nonce.count == old.nonce.count)
+        #expect(qr.signingPublicKey == old.signingPublicKey && qr.keyAgreementPublicKey == old.keyAgreementPublicKey)
+        #expect(ProximityVerifyQR.isValid(qr, at: issued, in: .packageTest), "the scanner's gate refused today's QR")
+    }
+
+    /// **Today's scanner answers the tag's QR and accepts a response over the tag's transcript.** Bob's
+    /// ceremony, today's code at the QR's instant, scanning Alice's 0.1.0 QR with her signing key
+    /// expected, sends a challenge that quotes the QR's nonce beside a fresh one of the same length and,
+    /// encoded as the mesh encodes it, holds every key and value 0.1.0's challenge held but that fresh
+    /// nonce; and it accepts Alice's response signed over 0.1.0's response transcript with that nonce in
+    /// it, as a 0.1.0 displayer signs it, laid out as the fixture lays it out. The same transcript signed
+    /// by Carol is refused, so the scanner checks what it accepts.
+    @Test func todaysScannerChallengesTheTagsQRAndAcceptsAResponseOverItsTranscript() throws {
+        let cast = try provisionedCast()
+        let issued = base.addingTimeInterval(1_000)
+        let tagged = try decode(VerifyChallengePayload.self, "0.1.0/verify-challenge.json")
+        let alice = cast.alice.localSigningPublicKey
+        let scan = { () throws -> (CoachVerificationCeremony, VerifyChallengePayload) in
+            let scanner = CoachVerificationCeremony(identity: cast.bob, now: { issued })
+            let sent = try #require(scanner.beginVerification(scannedURL: try self.verificationQRURL(), expectedPeerSigningKey: alice),
+                                    "today's scanner sent no challenge for 0.1.0's QR")
+            return (scanner, sent)
+        }
+        let (scanner, challenge) = try scan()
+        #expect(challenge.qrNonce == tagged.qrNonce && challenge.challengeNonce.count == tagged.challengeNonce.count)
+        #expect(try holdsEveryField(of: try fixture("0.1.0/verify-challenge.json"), in: JSONEncoder().encode(challenge),
+                                    fresh: ["challengeNonce"]),
+                "today's challenge drops or changes a field 0.1.0's challenge carried")
+        let response = { (signer: IdentityService, sent: VerifyChallengePayload) throws -> VerifyResponsePayload in
+            let transcript = try self.taggedResponseTranscript(replacing: tagged.challengeNonce, with: sent.challengeNonce)
+            let purpose = ProximityNamespace.Purposes.packageTest.signature.proximityQRResponseV1
+            return VerifyResponsePayload(challengeNonce: sent.challengeNonce, signature: try signer.sign(transcript, purpose: purpose))
+        }
+        #expect(scanner.handleResponse(try response(cast.alice, challenge), senderSigningPublicKey: alice),
+                "today's scanner refused Alice's response over 0.1.0's transcript")
+        let (control, sent) = try scan()
+        #expect(!control.handleResponse(try response(cast.carol, sent), senderSigningPublicKey: alice),
+                "today's scanner accepted a response Alice did not sign")
+    }
+
+    /// **Today's displayer signs the tag's transcript.** Alice's ceremony, today's code, displaying a QR
+    /// for Bob, answers his challenge for it (0.1.0's challenge nonce beside the displayed QR's) with a
+    /// response that names that challenge nonce, whose signature verifies under the response label by
+    /// her signing key over 0.1.0's response transcript with the displayed nonce in it, laid out as the
+    /// fixture lays it out, as a 0.1.0 scanner checks it, and which holds every key and value 0.1.0's
+    /// response held but the signature it mints fresh.
+    @Test func todaysDisplayerSignsTheTagsTranscript() throws {
+        let cast = try provisionedCast()
+        let issued = base.addingTimeInterval(1_000)
+        let tagged = try decode(VerifyChallengePayload.self, "0.1.0/verify-challenge.json")
+        let displayer = CoachVerificationCeremony(identity: cast.alice, now: { issued })
+        let shown = try #require(displayer.makeDisplayURL(forPeerSigningKey: cast.bob.localSigningPublicKey))
+        let qr = try #require(ProximityVerifyQR.parse(shown, in: .packageTest), "today's displayer showed no QR: \(shown)")
+        let verdict = displayer.handleChallenge(
+            VerifyChallengePayload(qrNonce: qr.nonce, challengeNonce: tagged.challengeNonce),
+            senderSigningPublicKey: cast.bob.localSigningPublicKey, senderKeyAgreementPublicKey: cast.bob.localKeyAgreementPublicKey)
+        guard case .respond(let response) = verdict else {
+            Issue.record("today's displayer did not answer Bob's challenge: \(verdict)")
+            return
+        }
+        #expect(response.challengeNonce == tagged.challengeNonce)
+        let transcript = try taggedResponseTranscript(replacing: tagged.qrNonce, with: qr.nonce)
+        #expect(IdentityService.verify(response.signature, of: transcript, by: cast.alice.localSigningPublicKey,
+                                       purpose: ProximityNamespace.Purposes.packageTest.signature.proximityQRResponseV1),
+                "today's displayer did not sign 0.1.0's response transcript")
+        #expect(try holdsEveryField(of: try fixture("0.1.0/verify-response.json"), in: JSONEncoder().encode(response),
+                                    fresh: ["signature"]),
+                "today's response drops or changes a field 0.1.0's response carried")
     }
 
     // MARK: - Membership
@@ -823,13 +929,35 @@ import Testing
         return try #require(item.flatMap(ProximityVerifyQR.base64URLDecode), "the QR's URL carries no readable `d` item")
     }
 
-    /// Whether today's encoding of `value` is the JSON object `written` holds, key order aside: the
-    /// write direction, which decoding a tag's bytes does not hold. `JSONEncoder` promises no key order,
-    /// so the bytes themselves are never compared.
-    func sameJSONObject(_ value: some Encodable, as written: Data) throws -> Bool {
-        let tagged = try JSONSerialization.jsonObject(with: written) as? NSDictionary
-        let today = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? NSDictionary
-        return tagged != nil && tagged == today
+    /// Whether the JSON object `today` holds every key of the JSON object a tag `written`, each with the
+    /// value the tag gave it, unchanged, but each key of `fresh`, a value a run mints anew (a nonce, a
+    /// signature), which need only be there with a value of the same JSON type: the write direction,
+    /// which decoding a tag's bytes does not hold. A key `today` adds is an addition the version rule
+    /// allows, so the key sets are not compared, and `JSONEncoder` promises no key order, so neither are
+    /// the bytes.
+    func holdsEveryField(of written: Data, in today: Data, fresh: Set<String> = []) throws -> Bool {
+        let tagged = try #require(try JSONSerialization.jsonObject(with: written) as? [String: Any], "the tag's JSON is no object")
+        let current = try #require(try JSONSerialization.jsonObject(with: today) as? [String: Any], "today's JSON is no object")
+        guard !tagged.isEmpty, fresh.isSubset(of: tagged.keys) else { return false }
+        // R2: bounded by the tag's keys.
+        return tagged.allSatisfy { key, value in
+            guard let now = current[key] as? NSObject, let was = value as? NSObject else { return false }
+            guard fresh.contains(key) else { return now.isEqual(was) }
+            return (now is NSString) == (was is NSString) && (now is NSNumber) == (was is NSNumber)
+                && (now is NSArray) == (was is NSArray) && (now is NSDictionary) == (was is NSDictionary)
+        }
+    }
+
+    /// 0.1.0's response transcript with one of its 16-byte fields, `field`, which occurs in it exactly
+    /// once, replaced by `value`: the layout 0.1.0 signs, taken from the fixture, whatever today's
+    /// transcript builder writes.
+    func taggedResponseTranscript(replacing field: Data, with value: Data) throws -> Data {
+        var transcript = try fixture("0.1.0/verify-response-transcript.bin")
+        let at = try #require(transcript.range(of: field), "0.1.0's response transcript does not hold the field")
+        try #require(transcript.range(of: field, options: .backwards) == at && field.count == value.count,
+                     "0.1.0's response transcript holds the field more than once, or the value is another length")
+        transcript.replaceSubrange(at, with: value)
+        return transcript
     }
 
     // MARK: - The keychain and the cast

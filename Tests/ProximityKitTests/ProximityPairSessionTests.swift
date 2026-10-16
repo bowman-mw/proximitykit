@@ -18,8 +18,11 @@
 //     owner's gate included; the hello deadline drops a connection silent past it, on a clock the cell
 //     hands in; every ruling applies the deadline to the connections beside it first, a read hello's
 //     only after marking it read, so a late hello is still admitted and an unreadable one still refused
-//     by its own reason; two connections that have both delivered hellos still refuse, the two-device
-//     cap; and every refusal's line names its reason and how many connections were pending;
+//     by its own reason; the connecting window counts a connection whose hello has been read, so two
+//     such connections still refuse, a state only the test seam books, since a read hello is ruled on
+//     and ended in one run; and every refusal's line names its reason and how many connections were
+//     pending, the two-device cap among them: a second device's hello beside a tunnel to another one is
+//     refused `tunnelHeld`;
 //   - the diagnostics (0.1.1): the radio's `connected` line names the kind of interface its connection
 //     runs over, and every pairing reports to the inspector its session was built with.
 //
@@ -272,14 +275,20 @@ import Testing
         radio.stop()
     }
 
-    /// **Two connections that have both delivered hellos still refuse: the two-device cap holds.**
+    /// **Two connections that have both delivered hellos still refuse: the connecting window counts a
+    /// read hello.**
     ///
     /// Blair's hello and Casey's have both been read, booked through the seam the Fernlet repository's
     /// `aSecondDialerArrivingWhileOneIsMidHelloIsRefused` books through, which books a connection at
-    /// that stage now. That cell's bare adjudication still refuses Blair beside Casey and drops nothing,
-    /// the session's own gate refuses her too, and the ruling the live path runs refuses her with a line
-    /// that says the owner refused and that two were pending, drops her connection, and leaves Casey's.
-    /// The deadline never touches a read hello, so the instant the ruling is handed does not matter.
+    /// that stage now. Only that seam reaches this state: a live ruling marks a connection's hello read
+    /// and ends it as pending in one run, so no other ruling finds it, and the two-device cap rests on the
+    /// owner's held connection and the one-tunnel floor, which
+    /// `everyRefusedHelloNamesWhyAndHowManyConnectionsWerePending`'s `tunnelHeld` refusal holds. What this
+    /// cell holds is the window's count: that cell's bare adjudication still refuses Blair beside Casey
+    /// and drops nothing, the session's own gate refuses her too, and the ruling the live path runs
+    /// refuses her with a line that says the owner refused and that two were pending, drops her
+    /// connection, and leaves Casey's. The deadline never touches a read hello, so the instant the ruling
+    /// is handed does not matter.
     @Test func twoConnectionsThatHaveBothDeliveredHellosStillRefuse() throws {
         let host = PackageTestHost()
         let (radio, session) = try makeSession(on: host)
@@ -318,7 +327,8 @@ import Testing
     /// One connection at a time, each ruled on alone (`pending=1`), through every refusal the ruling
     /// has: no readable hello; a session id no browsed peer carries, and this device's own; the owner's
     /// gate saying no; a tunnel to the same peer that the glare rule keeps; and a tunnel to another
-    /// device, the radio's own one-tunnel floor. Then the same hello with nothing in its way is admitted.
+    /// device, the radio's own one-tunnel floor, on which the two-device cap rests (`tunnelHeld`). Then the
+    /// same hello with nothing in its way is admitted.
     /// Before 0.1.1 all five wrote one line with no reason, so a device log could not say which it was.
     @Test func everyRefusedHelloNamesWhyAndHowManyConnectionsWerePending() throws {
         let (radio, posture) = try makeRadio()

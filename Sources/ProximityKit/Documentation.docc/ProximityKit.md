@@ -1000,7 +1000,8 @@ session over its own radio (`ProximityPairSessionTests`), the radios' listeners 
 connections they hand over (`ProximityRadioListenerTests`), the tests' own
 hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`), the source walls
 over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
-(`ProximityMemoryLifecycleTests`); thirty-three suites copied from Fernlet's tests, described
+(`ProximityMemoryLifecycleTests`), and the custody commit on a partly staged item
+(`MeshRoutedCustodyCommitGuardTests`); thirty-three suites copied from Fernlet's tests, described
 below, seventeen more that reach the keychain and open no store, described after them, and twenty that
 also open a store, described after those, and, copied at plan step A1.3 and described after them, the
 source walls of nine of its routed
@@ -1010,7 +1011,7 @@ golden, wipe, audit-bridge, transport and localization tests that read this modu
 from that step's final review holding the P9 battery's honesty pin on the `.remove` branch's stand-in
 (`MeshP9HonestyAcceptanceTests`); and, in the package repository, the example app's namespace held
 apart (`ExampleNamespaceTests`, plan step A1.2) and every released tag's bytes decoded by today's code
-(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred thirty-eight suites, 999 tests. The
+(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred thirty-nine suites, 1003 tests. The
 target is unhosted: the package repository's CI runs it under `swift test` and `xcodebuild test` on
 macOS and in an iOS simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator
 a `SecItem` call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on
@@ -1070,7 +1071,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all one hundred thirty-eight passing `swift test` with this module and its tests laid out as in the package
+Mac too, all one hundred thirty-nine passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
@@ -1137,18 +1138,26 @@ holds four rules, each reader fixtured both ways. Nothing reaches what the unhos
 (rule I9): a keychain call outside a file listed with the structure that keeps it behind the
 installer's read (a suite whose first stored property reads it, which runs nothing that reaches the
 keychain before an instance exists, `.serialized`, a display name and a literal or `.allCases` argument
-collection naming no static member of the file but a literal constant aside, and which holds no
-keychain line in a static member or a nested type another type can reach, a `fileprivate` one
-included; the installer; a support type whose initializers read it first; or a fixture enum whose
-every member that reaches the keychain reads it first, a file holding a suite and a fixture
-listed under both, and a bare declaration of a keychain type and a fixture's or support type's own
-head line, which run nothing, read past), a raw `SecItem` call anywhere, a store outside such a file (a
+collection naming no static member of the file but a literal constant aside, and in which no static
+member or nested type, at any depth, that holds a keychain line or names one that does, a wrapper over
+a `private` helper included, is reachable from another type, a `fileprivate` one included; the
+installer; a support type whose initializers read it first and whose keychain lines sit in its instance
+members, never a nested type; or a fixture enum whose every member that reaches the keychain reads it
+first; a file holding a suite and a fixture listed under both, every listed file but the installer's
+holding no static stored property that reaches the keychain or holds a scope, a test host or a
+fixture's value, and a bare declaration of a keychain type and a fixture's or support type's own head
+line, which run nothing, read past), a raw `SecItem` call anywhere, a store outside such a file (a
 line that names one in a listed file is a keychain line there, since a store reads its seal key from
 the keychain, and one of the file's rows states why every store it builds is on a scope of the cell's
 own), a production scope's shorthand anywhere, a production or process-shared location, or a path of a
 host repository, each excused only by an exact allowlisted line with its invariant; a wall file, the
 suite's own first, is read as code, so the needles it holds in its literals are data and a needle in
-its code is refused, and so is a literal of it that starts with a host repository's folder. Every import travels with the package (rule I11): this module, Foundation,
+its code is refused, and so is a literal of it that starts with a host repository's folder. What I9
+does not read, and says so: a parameter's default value runs at the call, before a fixture member's
+first statement (no default in a listed file reaches the keychain); the ready marker is matched in a
+suite's first stored property's text, so a `lazy var` or an uncalled closure would pass; and a `@Suite`
+nested in another type is read as that type's member, while the inventory and the test-count floor
+refuse one. Every import travels with the package (rule I11): this module, Foundation,
 Testing, Combine, CryptoKit, Observation, Security, simd and Synchronization; a file that imports
 Security still reaches the keychain only through this module's funnel, since rule I9 refuses a raw
 `SecItem` call in every file. The target's own inventory, `Tests/ProximityKitTests.tsv` beside this
@@ -1240,10 +1249,11 @@ and the custody hand-off's source wall. Each keeps its name and its tests, so it
 original, which Fernlet keeps. A copy differs from its original only where the package's tests must:
 it imports nothing of Fernlet's, computes under `.packageTest` where the original named Fernlet's
 namespace or labels, and reads a source through `PackageRoot`; where Fernlet's file holds suites that
-need the keychain, a store, or Fernlet's types or bytes, the copy holds only the others, and says so in
-its header. Their fixtures keep the file names they have in Fernlet's tests, the call shapes they were
-written against join `PackageTestBindings.swift`, and the helper the source-reading cells share is
-`TestSupport/MeshRoutedSourceScan.swift`.
+need the keychain, a store, or Fernlet's types or bytes, the copy held only the others, and said so in
+its header, until a later batch joined more of them (`MeshRotationTriggerTests.swift` now holds every
+suite of its original); each header says what its file holds now. Their fixtures keep the file names they
+have in Fernlet's tests, the call shapes they were written against join `PackageTestBindings.swift`, and
+the helper the source-reading cells share is `TestSupport/MeshRoutedSourceScan.swift`.
 
 The suites copied at plan step A1's second batch are the seventeen that reach the keychain and open no
 store: the routed chunker, the manifest's mint and door, the recipient key wrap, the membership record
@@ -1265,8 +1275,10 @@ they have in Fernlet's tests (`MeshDeliveryTargetTests.swift` holds only `MeshDe
 `MeshDeliveryFixtures`), and the two mocks they need, `FakeMeshTransportSession` and
 `MockMultipeerTransport`, join `Mocks/`.
 
-The suites copied at plan step A1's third batch are the twenty-two that reach the keychain and open a
-store: the routed store's five-state load, its durability and its error vocabulary, the inventory
+The suites copied at plan step A1's third batch (batch C) are twenty-two of the suites that reach the
+keychain and open a store (others that do both, `MeshSessionStoreLoadStateTests`,
+`MeshSessionLifecycleManagerTests` and `MeshRoutedCustodyHandoffTests` among them, stay in Fernlet's
+tests): the routed store's five-state load, its durability and its error vocabulary, the inventory
 builder, every cap at every door it guards, the parked-set drop rule and the sweeps, custody's parity
 with the in-memory reassembler, the persisted delivery map and the evidence behind every custodied
 rung, the custody and recipient receipts' signing and doors, the routed inventory's signing and door,
@@ -1280,8 +1292,10 @@ under `.packageTest` and `PackageSwitchableInstallBinding`, whose override a cel
 original binds Fernlet's `DeviceBindingID` override; the two suites that build a manager build it over a
 `PackageTestHost` handed that binding. Rule I9 holds a line that names a store as it holds a keychain
 line, so each such suite reads `PackageTestEnvironment.keychain` in its first stored property and each
-fixture member that names a store reads it in its first statement, and each such file's rows state
-where its stores' scopes come from. Beyond the earlier batches' edits, a copy reads the routed chunk
+fixture member that names a store on a line that runs reads it in its first statement (a member that
+names one only in a bare declaration of a parameter, as the two store fixtures' `save` do, holds no
+store line, and is handed a store built behind a read), and each such file's rows state where its
+stores' scopes come from. Beyond the earlier batches' edits, a copy reads the routed chunk
 folder by `.packageTest`'s name, opens a seal key by `.packageTest`'s account, and mints, measures and
 checks receipts and inventories through bindings over `.packageTest`'s labels (the two receipt doors,
 their ids, the canonical bytes of a custody receipt and of an inventory digest, the streaming content
@@ -1293,11 +1307,12 @@ receipt's).
 
 Before Fernlet deleted its in-tree copy of this module (plan step A1.3), every cell of its tests that
 read this module's sources was copied here too, so no check was lost when those files left its tree
-(batch D). Each copy keeps its suite's and its test's names, in a file named as its original's, and
-holds only those cells, read through `PackageRoot` and the walls' walker (`PackageSwiftFiles`); where
-the original's verdict also read Fernlet's code, docs or bundle, or swept this module beside one of
-Fernlet's modules, the copy holds the half that reads this module, at the same counts, and Fernlet
-keeps the rest; and every walk or zero-list is held to a floor on the files it read.
+(batch D). Each copy keeps its suite's and its test's names, in a file named as its original's, and held
+only those cells, until the third batch joined the rest of two of those suites (`MeshRoutedCapacityTests`
+and `MeshRoutedCustodyEvidenceTests`, above), read through `PackageRoot` and the walls' walker
+(`PackageSwiftFiles`); where the original's verdict also read Fernlet's code, docs or bundle, or swept
+this module beside one of Fernlet's modules, the copy holds the half that reads this module, at the same
+counts, and Fernlet keeps the rest; and every walk or zero-list is held to a floor on the files it read.
 
 Of its routed suites these are forty-three source walls in nine suites: the drain's walls
 (`MeshRoutedDrainWallTests`), the routed store's witnesses, one ack-stage table, one type registry and
@@ -1363,16 +1378,19 @@ removal, a departure and a termination; one routed item from manifest to drain a
 session and routed stores, the session file with its column marker retired two ways, and a protected
 sidecar; and the verification ceremony, generated over the same four identities seeded from those
 rows: Alice's QR, Bob's challenge, her response and the two transcripts their signatures cover. Its
-twenty-six cells pin each file's SHA-256 and decode them with today's code: each identity adopts its
+twenty-nine cells pin each file's SHA-256 and decode them with today's code: each identity adopts its
 rows, every signature verifies under its label through the verifiers a receiver uses, every seal opens
 with the keys the rows hold, the routed store's delivery map restores in its frozen spelling, the
-deterministic encodings and the verification transcripts re-encode byte for byte, the verification
-payloads re-encode to the same JSON object, the derived ids (epoch, chunk and receipt ids, the content
-and chunk hashes, the membership and routed inventories) are the ones 0.1.0 derived, and the retired
-column formats are refused by name; the other JSON is held in the read direction, today's decoders on
-0.1.0's bytes. A cell that needs a key seeds the rows under services of its own, and a cell that opens a
-store opens it over a copy of its folder, so the cells run in parallel and the bundle's fixtures are
-never written.
+deterministic encodings and the verification transcripts re-encode byte for byte, today's
+``ProximityVerifyQR/makeURL(identity:now:)`` writes the QR a 0.1.0 scanner reads and today's
+``CoachVerificationCeremony`` challenges 0.1.0's QR, accepts a response signed over 0.1.0's transcript
+and signs that transcript, the layout read from the fixture, each verification payload holds every key
+and value 0.1.0 wrote (a fresh nonce or signature aside, and a key added since is an addition), the
+derived ids (epoch, chunk and receipt ids, the content and chunk hashes, the membership and routed
+inventories) are the ones 0.1.0 derived, and the retired column formats are refused by name; the other
+JSON is held in the read direction, today's decoders on 0.1.0's bytes. A cell that needs a key seeds the
+rows under services of its own, and a cell that opens a store opens it over a copy of its folder, so the
+cells run in parallel and the bundle's fixtures are never written.
 
 Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
@@ -1408,13 +1426,13 @@ or seal, a sidecar's encoding, a keychain row), or to a frozen token. A new form
 old one, which keeps decoding, so retiring a reader is the break. A host pins `exact:`, as Fernlet does,
 since SwiftPM's `from:` would take the next 0.y.
 
-Every tag that moves a format commits its wire and on-disk bytes under the test target's
-`Fixtures/<tag>/`, generated once from that tag's code by a generator the package repository keeps in
-`Scripts/cross-version-fixtures/` (0.1.0's is `generate-0.1.0.swift.txt`, which no target compiles), and
-pinned by SHA-256 in `CrossVersionFixtureTests` (see "Its tests"), which decodes every folder with the
-code of today; a tag that moves no format adds no folder. A break in what a tag wrote therefore fails
-in this module's own tests before a tag exists. The formats and their markers are listed in the
-changelog's entry for 0.1.0, which marks those with no fixture.
+Every tag that writes a format, or a version of one, that no earlier folder holds commits those bytes
+under the test target's `Fixtures/<tag>/`, generated once from that tag's code by a generator the package
+repository keeps in `Scripts/cross-version-fixtures/` (0.1.0's is `generate-0.1.0.swift.txt`, which no
+target compiles), and pinned by SHA-256 in `CrossVersionFixtureTests` (see "Its tests"), which decodes
+every folder with the code of today; a tag that writes none adds no folder. A break in what a tag wrote
+therefore fails in this module's own tests before a tag exists. The formats and their markers are listed
+in the changelog's entry for 0.1.0, which marks those with no fixture.
 
 ## Topics
 

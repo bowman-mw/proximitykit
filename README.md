@@ -76,16 +76,19 @@ A consumer pins an exact version, `.package(url: "https://github.com/bowman-mw/p
 [CHANGELOG.md](CHANGELOG.md). SwiftPM's `from: "0.1.0"` means anything below 1.0.0, so it would take
 0.2.0, a break, on the next resolve without a word.
 
-Every tag that moves a format commits its wire and on-disk bytes under
-`Tests/ProximityKitTests/Fixtures/<tag>/`, generated once from that tag's code and never regenerated,
-each file's SHA-256 pinned in `CrossVersionFixtureTests`; a tag that moves none adds no folder. Its
-generator is committed as a file no target compiles,
+Every tag that writes a format, or a version of one, that no earlier folder holds commits those bytes
+under `Tests/ProximityKitTests/Fixtures/<tag>/`, generated once from that tag's code and never
+regenerated, each file's SHA-256 pinned in `CrossVersionFixtureTests`; a tag that writes none adds no
+folder. Its generator is committed as a file no target compiles,
 `Scripts/cross-version-fixtures/generate-<tag>.swift.txt` (0.1.0's is `generate-0.1.0.swift.txt`),
 whose header says how to run it in a tree holding that tag's sources. The suite's cells decode every
 tag's fixtures with the current code: they check the fields, the signatures and seals under the keys
-the tag stored, the deterministic encodings re-encoded byte for byte, the verification ceremony's JSON
-payloads re-encoded to the same JSON object, and the retired formats still refused; other JSON is held
-in the read direction only, today's decoders on the tag's bytes. So a break fails in this repository's
+the tag stored, the deterministic encodings re-encoded byte for byte, and the retired formats still
+refused, and they drive today's verification ceremony against the tag's: today's QR writer writes the
+QR a tag's scanner reads, today's scanner and displayer interoperate with the tag's transcript, and
+each of the ceremony's JSON payloads holds every key and value the tag wrote (a fresh nonce or
+signature aside, and a key added since is an addition); other JSON is held in the read direction only,
+today's decoders on the tag's bytes. So a break fails in this repository's
 CI before a tag exists, rather than first in a host's update to the tag (tags never move). A later
 tag's folder sits beside the older ones, and the older ones keep decoding. The CHANGELOG's table for
 each tag names its formats, and marks those with no fixture.
