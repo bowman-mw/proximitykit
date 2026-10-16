@@ -88,7 +88,7 @@ ObservationLoopLifecycleTests	MemoryLifecycleTests.swift	3
 PackageKeychainStoreTests	PackageKeychainStoreTests.swift	6
 PackageTestHostTests	PackageTestHostTests.swift	4
 PackageTestHygieneTests	PackageTestHygieneTests.swift	6
-PackageTestSupportTests	PackageTestSupportTests.swift	2
+PackageTestSupportTests	PackageTestSupportTests.swift	3
 PackageTestTreeWallTests	PackageTestTreeWallTests.swift	6
 PeerHandleIdentityTests	PeerTransportNeutralityTests.swift	5
 PresenceEpochPostureTests	PresenceEpochPostureTests.swift	9

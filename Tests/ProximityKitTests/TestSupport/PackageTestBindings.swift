@@ -8,20 +8,47 @@
 // were written against the old shapes, which FernletTests restores over Fernlet's namespace in
 // Tests/FernletTests/ProximityNamespaceTestBindings.swift. Each shape here is that file's binding, its
 // code copied verbatim with `.fernlet` replaced by `.packageTest` and its doc comment saying what it
-// binds to here.
+// binds to here, but for those named below, which restore a shape from another of Fernlet's files.
 //
 // A REPLACEMENT, NOT A TWIN. A twin is one file both test targets compile alike; this file and Fernlet's
 // cannot be one, because this half binds to the package tests' namespace and Fernlet's to Fernlet's,
-// which the package cannot name. CIGateSelectorBoundaryTests.everyTwinMatchesItsOriginal() holds the
-// pair as a replacement: every declaration here equals one declaration of Fernlet's file once
-// `.packageTest` reads `.fernlet`, so a shape cannot drift from the one the suites were written
-// against, and the extensions both files declare are declared nowhere else. THE RULE is Fernlet's
-// file's: a binding restores a call SHAPE, never a value, passing `.packageTest`, the one namespace the
-// package's suites compute under. Only the shapes a package suite fails to compile without are here.
+// which the package cannot name. Until Fernlet's plan step A1.3 deleted its in-tree copy of this
+// target, CIGateSelectorBoundaryTests.everyTwinMatchesItsOriginal() held the pair as a replacement:
+// every declaration here equalled one declaration of Fernlet's file once `.packageTest` read `.fernlet`,
+// so a shape could not drift from the one the suites were written against. Since then review holds it.
+// THE RULE is Fernlet's file's: a binding restores a call SHAPE, never a value, passing `.packageTest`,
+// the one namespace the package's suites compute under. Only the shapes a package suite fails to compile
+// without are here.
+//
+// From another of Fernlet's files (ProximityKit plan step A1's second batch of copied suites), over the
+// package's own stand-in for the Fernlet value it bound: the identity's `init(keychainService:)`, which
+// Fernlet's FernletAppTestBindings.swift restores with Fernlet's sealed-backup escrow and this file with
+// no provisioning participant.
 
 import CryptoKit
 import Foundation
 @testable import ProximityKit
+
+// MARK: - IdentityService
+
+/// The identity initializer the suites were written against, restored over
+/// `init(namespace:keychainService:provisioningParticipant:)` with the package tests' namespace and no
+/// provisioning participant. Fernlet's tests restore the same shape with Fernlet's namespace and Fernlet's
+/// sealed-backup escrow (`FernletAppTestBindings.swift`), which is the app's and which this package cannot
+/// name; no copied suite reads the participant, so the package's identity is ProximityKit's alone, as the
+/// one `PackageTestHost.makeProximityIdentity()` builds.
+extension IdentityService {
+
+    /// `IdentityService(namespace: .packageTest, keychainService:)`: an identity on a keychain service of
+    /// the test's own with no participant, the identity the retired `init(keychainService:)` built. Reads
+    /// and writes nothing: provisioning it reaches the keychain, so its caller reads
+    /// `PackageTestEnvironment.keychain` first.
+    ///
+    /// - Parameter keychainService: The test's own service, usually a throwaway one.
+    convenience init(keychainService: String) {
+        self.init(namespace: .packageTest, keychainService: keychainService)
+    }
+}
 
 // MARK: - Signed transcripts I: verifiers and helpers
 

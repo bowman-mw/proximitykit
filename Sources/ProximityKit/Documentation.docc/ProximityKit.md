@@ -1007,7 +1007,7 @@ golden, wipe, audit-bridge, transport and localization tests that read this modu
 from that step's final review holding the P9 battery's honesty pin on the `.remove` branch's stand-in
 (`MeshP9HonestyAcceptanceTests`); and, in the package repository, the example app's namespace held
 apart (`ExampleNamespaceTests`, plan step A1.2) and every released tag's bytes decoded by today's code
-(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred suites, 643 tests. The
+(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred suites, 644 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1028,7 +1028,14 @@ Fernlet's namespace takes (its legacy peers accepted, two feature salts, a two-l
 installation, each level a call may hand this module. `PackageTestSupportTests` holds it sound, and
 Fernlet's `ProximityNamespaceGoldenTests`, which can name both, holds it disjoint from `.fernlet`
 everywhere. The call shapes the suites moved from `FernletTests` were written against come back in
-`PackageTestBindings.swift`, each Fernlet's test binding with `.packageTest` for `.fernlet`. A suite that
+`PackageTestBindings.swift`, each Fernlet's test binding with `.packageTest` for `.fernlet`; the
+identity's `init(keychainService:)`, which Fernlet's tests restore with Fernlet's sealed-backup escrow
+as its provisioning participant, comes back with none, since the escrow is the app's and no copied suite
+reads the participant. `PackageSwitchableInstallBinding.swift` is an install binding whose answer a
+cell switches for the work it wraps, through a task-local override: another install's bytes, an absent
+binding, or a read that fails (nothing for a seal, a retryable error for an open), case for case as
+Fernlet's adapter over `DeviceBindingID` answers under that type's own override, which the store suites
+copied from Fernlet's tests switch; `PackageTestSupportTests` holds it to those answers. A suite that
 reads one of this module's sources names it relative to the package root through `PackageRoot`
 (`PackageRoot.swift`), which walks up from its own file to the first folder holding both `Package.swift`
 and `Sources/ProximityKit`: `FernletKit/` in Fernlet's repository, the root of ProximityKit's own.
@@ -1123,7 +1130,12 @@ every Swift file of this target through `PackageRoot` and the walls' walker
 (`TestSupport/PackageSwiftFiles.swift`), which each cell that reads through it holds to a file floor, and
 holds four rules, each reader fixtured both ways. Nothing reaches what the unhosted bundle cannot serve
 (rule I9): a keychain call outside a file listed with the structure that keeps it behind the
-installer's read, a raw `SecItem` call anywhere, a store or its production scope, a production or
+installer's read (a suite whose first stored property reads it and which runs nothing that reaches the
+keychain before an instance exists, `.serialized`, a display name and a literal or `.allCases` argument
+collection aside; the installer; a support type whose initializers read it first; or a fixture enum
+whose every member that reaches the keychain reads it first, a file holding a suite and a fixture
+listed under both, and a bare declaration of a keychain type, which runs nothing, read past), a raw
+`SecItem` call anywhere, a store or its production scope, a production or
 process-shared location, or a path of a host repository, each excused only by an exact allowlisted line
 with its invariant; a wall file, the suite's own first, is read as code, so the needles it holds in its
 literals are data and a needle in its code is refused, and so is a literal of it that starts with a
@@ -1307,10 +1319,11 @@ mesh-message spelling helper, the test namespace, the epoch fixtures, whose one 
 target to that target's namespace, and the source walls' lexer, each copy held to the same fixtures in
 its own target (the package repository's lexer differs from Fernlet's two in its header only, which also
 names the package suites that read through it). The test bindings are a replacement, not a twin: this
-target's bind to
-`.packageTest` and Fernlet's to `.fernlet`, so `CIGateSelectorBoundaryTests` holds each declaration of
-this target's to one of Fernlet's with that one token read across, and lets the extensions both declare
-live nowhere else. CI names its suites `ProximityKitTests/<Suite>`. In Fernlet's repository,
+target's bind to `.packageTest` and Fernlet's to `.fernlet`, so, while this module lived in Fernlet's
+repository, `CIGateSelectorBoundaryTests` held each declaration of this target's to one of Fernlet's with
+that one token read across, and let the extensions both declare live nowhere else. A shape this target
+restores from another of Fernlet's binding files since (plan step A1's second batch of copied suites)
+binds to this package's own stand-in instead: the identity with no provisioning participant. CI names its suites `ProximityKitTests/<Suite>`. In Fernlet's repository,
 `Tests/suite-inventory.tsv` and `CIGateSelectorBoundaryTests` hold every suite to one target, one file
 and its lines, and hold its rows to this target's own inventory, while this target's hygiene suite
 refuses what the bundle cannot serve and an import of the closure.

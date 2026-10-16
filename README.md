@@ -42,7 +42,8 @@ in-memory keychain, exists only under `#if DEBUG`, so `swift test -c release` do
 
 The test target is unhosted: no app and no keychain entitlement. Its support folder,
 `Tests/ProximityKitTests/TestSupport`, installs an in-memory keychain store and an audit sink, and gives
-the tests a namespace of their own, `.packageTest`, and a host built from the public API alone.
+the tests a namespace of their own, `.packageTest`, a host built from the public API alone, and an
+install binding a test can switch for the work it wraps.
 `Tests/ProximityKitTests.tsv` lists every suite with its file and its number of tests.
 
 ## Versioning

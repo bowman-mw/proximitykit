@@ -27,6 +27,13 @@ changed, so nothing below needs a tag.
   the test target's one resource (`.copy("Fixtures")`), which `Scripts/manifest-scan.py` holds,
   CODEOWNERS owns the folder and the suite, and `.gitattributes` keeps git from converting the
   fixtures' line endings.
+- The hygiene rule I9 hosts the keychain suites of the Fernlet repository's tests as they are
+  written: a suite admits `.serialized`, a display name and a literal or `.allCases` argument
+  collection; a fixture enum whose every member that reaches the keychain reads the in-memory
+  keychain's installer first is a kind of its own; and a file may be listed under more than one kind.
+  The test support gains a participant-less `IdentityService(keychainService:)` binding and
+  `PackageSwitchableInstallBinding`, an install binding a cell can switch, held to the answers of
+  Fernlet's adapter case for case.
 
 ## 0.1.0 — 2026-10-15
 

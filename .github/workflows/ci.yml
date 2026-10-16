@@ -181,8 +181,16 @@ jobs:
     # and the macOS bundle passed at these floors and each refused MIN_TESTS 644; swift test
     # and the Walls step's declared floor refused MIN_SUITES 101. ARITHMETIC CHECK: 619 + 24 = 643 and
     # 99 + 1 = 100.
+    # RAISED 643 -> 644 at plan step A1's second batch of copied suites, its support, on a Mac,
+    # 2026-10-16 (the same Xcode and Swift), for PackageTestSupportTests' cell that holds the install
+    # binding a cell can switch to the answers of Fernlet's adapter over DeviceBindingID, case for case;
+    # MIN_SUITES stays 100, since the cell joins a suite the inventory already lists. Over this
+    # repository's tree with it: the Walls step passed, and swift test "Test run with 644 tests in 100
+    # suites passed", its floor passed; the inventory 100 rows declaring 644 tests. The xcodebuild lanes
+    # were not run for this note; the batch's copies commit measures the macOS lanes and the builds.
+    # swift test's floor refused MIN_TESTS 645. ARITHMETIC CHECK: 643 + 1 = 644.
     env:
-      MIN_TESTS: 643
+      MIN_TESTS: 644
       MIN_SUITES: 100
     steps:
       - uses: actions/checkout@v4
