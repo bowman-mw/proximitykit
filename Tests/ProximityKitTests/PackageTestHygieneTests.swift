@@ -1236,10 +1236,12 @@ import Testing
     /// `MeshContinuationRaiseWallTests`, `MeshContinuationTaskHostWallTests`, `MeshHeldSessionPhotoTests`,
     /// `RoutedShareRefusalCopyTests`, `SessionMessageTests`). RAISED at plan step A1.3's batch D, pair
     /// (2026-10-15): 88 → 98, for the ten suites holding the cells of Fernlet's pair, presence, identity,
-    /// golden, wipe, audit, transport and localization tests that read ProximityKit's sources. A suite
-    /// added, moved out or deleted changes it in the same commit, argued and measured; a deletion lowers
-    /// it only with the retirement argued.
-    static let measuredInventoryRows = 98
+    /// golden, wipe, audit, transport and localization tests that read ProximityKit's sources. RAISED at
+    /// plan step A1.3's final review (2026-10-15): 98 → 99, for the NEW `MeshP9HonestyAcceptanceTests`,
+    /// which holds the `.remove` branch's stand-in that Fernlet's P9 honesty cell can no longer read. A
+    /// suite added, moved out or deleted changes it in the same commit, argued and measured; a deletion
+    /// lowers it only with the retirement argued.
+    static let measuredInventoryRows = 99
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -1256,9 +1258,10 @@ import Testing
     /// module's sources. RAISED at plan step A1.3's batch D, session (2026-10-15): 575 → 583, for batch
     /// D's session copies' 8 (2 + 2 + 1 + 1 + 1 + 1). RAISED at plan step A1.3's batch D, pair
     /// (2026-10-15): 583 → 618, for the 35 tests of the ten suites holding the pair track's cells of
-    /// Fernlet's tests that read ProximityKit's sources. A test added or removed changes it in the same
-    /// commit.
-    static let measuredDeclaredTests = 618
+    /// Fernlet's tests that read ProximityKit's sources. RAISED at plan step A1.3's final review
+    /// (2026-10-15): 618 → 619, for `MeshP9HonestyAcceptanceTests`' 1. A test added or removed changes it
+    /// in the same commit.
+    static let measuredDeclaredTests = 619
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

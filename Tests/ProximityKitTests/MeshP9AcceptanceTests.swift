@@ -52,6 +52,10 @@
 // rigs, the behaviour cells, the Bonjour partition, the record-survival cell and clause (e), the
 // honesty suite) and each cell's other half (Fernlet's namespace, its Info.plist, its docs, its
 // presence manager and its roots) stay there, so what this header says of the rest is not held here.
+// One more cell joined at that step's final review: of the honesty suite's lane-record cell, the half
+// that holds the `.remove` branch's source-level stand-in in existence, since the stand-in is this
+// target's cell now (`MeshP9HonestyAcceptanceTests`, at the end of this file); the runbook's lanes, the
+// ledger's rows and the record of where the stand-in stands stay in Fernlet's copy.
 
 import Foundation
 import Testing
@@ -450,6 +454,63 @@ struct MeshP9McRetirementAcceptanceTests {
         for symbol in ["MCNearbyServiceAdvertiser", "MCNearbyServiceBrowser", "MCSessionState"] {
             let anywhere = Set(MeshP7Acceptance.homes(of: symbol, in: kit)).sorted()
             #expect(anywhere.isEmpty, "`\(symbol)` is named in \(anywhere); the framework is gone")
+        }
+    }
+}
+
+// MARK: - (e) Honesty — the stand-in's half
+
+/// **(e) What no CI machine can run, by its record: the half that is this target's.** Of the original
+/// suite this holds one half of one cell, the `.remove` branch's source-level stand-in
+/// (`RecipeShareOverQUICTests.theRegistrationRemoveBranchIsNotABareAssignment`) still a test of this
+/// target that reads the branch. The stand-in reads the pair session's source, so since ProximityKit
+/// plan step A1.3 it is this target's cell, and the Fernlet repository's honesty cell, which required
+/// it while it was a cell of Fernlet's recipe suite, can no longer read it; without this cell only the
+/// inventory's count, editable in the same commit, would notice it gone. The rest of the suite (the
+/// runbook's lanes, the ledger's unobserved branches and accepted residuals, the device rows and owner
+/// decisions, the digests' one home, the CI gate's census) reads Fernlet's docs and workflow and stays
+/// in Fernlet's copy, which keeps the record of where the stand-in stands.
+@Suite(.serialized)
+struct MeshP9HonestyAcceptanceTests {
+
+    /// The stand-in's file, by its path under the test target's folder (`PackageSwiftFiles.testFolder`).
+    static let standInFile = "RecipeShareOverQUICTests.swift"
+
+    /// How the stand-in's declaration opens its code line: a `@Test` with no trait, so a stand-in
+    /// demoted to a helper or disabled fails as a deleted one does.
+    static let standInDeclaration = "@Test func theRegistrationRemoveBranchIsNotABareAssignment("
+
+    /// The needles the stand-in's body must still read: the branch, and the republish it must reach.
+    static let standInNeedles = ["case .remove:", "republishListener()"]
+
+    /// **Every lane row this battery cannot run is still named in its record: the stand-in's half.**
+    ///
+    /// The original reads the runbook's Lane C and D sections and the ledger's unobserved rows, and
+    /// requires the stand-in that holds the `.remove` → republish branch as a source assertion because
+    /// no execution reaches it. This cell holds that requirement over this target's file, with the
+    /// original's message, and reads more than its bare name (which a comment or a literal would
+    /// satisfy): the declaration on a code line as a test with no trait, and its body still reading the
+    /// branch and the republish. Renaming, demoting, disabling or gutting the stand-in fails here,
+    /// whatever its inventory row says.
+    @Test func everyLaneRowThisBatteryCannotRunIsStillNamedInItsRecord() throws {
+        let file = PackageRoot.url("Tests").appendingPathComponent(PackageSwiftFiles.testFolder)
+            .appendingPathComponent(Self.standInFile)
+        let code = MeshRoutedSourceScan.codeOnly(try String(contentsOf: file, encoding: .utf8))
+        let declared = code.split(separator: "\n").contains {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix(Self.standInDeclaration)
+        }
+        #expect(declared, """
+            the source-level stand-in for the `.remove` → republish branch is gone. That cell is a \
+            SHAPE assertion, not an execution: it exists because the branch never fires on a \
+            Simulator, and deleting it leaves the branch covered by nothing at all
+            """)
+        let body = MeshRoutedSourceScan.bracedBody(after: Self.standInDeclaration, in: code) ?? ""
+        // R2: bounded by the two needles the stand-in must read.
+        for needle in Self.standInNeedles {
+            #expect(body.contains(needle), """
+                the `.remove` branch's stand-in no longer reads `\(needle)`: a cell of its name that does \
+                not read the branch and the republish is no stand-in for it
+                """)
         }
     }
 }

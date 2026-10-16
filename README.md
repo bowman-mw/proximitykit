@@ -125,7 +125,12 @@ script in `Scripts/` that uses only the standard library. You can run one locall
 - `no-tracking-scan.py` checks that no file imports a tracking, analytics, advertising or
   attribution SDK. It also checks that nothing in `Sources/` or the example app uses `URLSession`
   or any other HTTP client, that the package has no dependencies, and that the example's project
-  depends on nothing but this package.
+  depends on nothing but this package. And it holds the package's own code in `Sources/` to four
+  rules that the Fernlet repository's whole-tree privacy scans held it to while it lived there:
+  no URL scheme (`scheme://`) written on a line of code, no pasteboard, no web view or in-app
+  browser, and no `UserDefaults`, `@AppStorage` or iCloud key-value store, because the host app
+  owns persistence. Comments may name any of them. None has an exception: one would be a permit
+  row in the script, with the reason it is safe, argued in review.
 - `local-link-scan.py` checks that the local network API appears only in the three radio files in
   `Sources/ProximityKit/Transport/`, and never in the example app, which reaches the radios only
   through the package.
@@ -143,7 +148,9 @@ script in `Scripts/` that uses only the standard library. You can run one locall
   declares, but only a check outside the run can see that they ran.
 
 The walls are ports of the checks that guard this code in the Fernlet repository, or counterparts
-of them. Then CI builds and tests the package, and every warning fails the build. The warnings
+of them. The no-tracking scan's four `Sources/` rules carry checks that guarded this code there
+until the Fernlet repository came to depend on this package's tag, when its scans stopped reading
+this code. Then CI builds and tests the package, and every warning fails the build. The warnings
 setting lives on the build commands, never in `Package.swift`, as in the Fernlet repository. CI:
 
 - builds the package with `swift build`, and the library alone in Release with

@@ -1003,9 +1003,10 @@ over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycl
 below, and, copied at plan step A1.3 and described after them, the source walls of nine of its routed
 suites, thirteen suites holding the cells of its mesh tests, six holding those of its session,
 continuation and photo-review suites and ten holding those of its pair-session, presence, identity,
-golden, wipe, audit-bridge, transport and localization tests that read this module's sources; and, in
-the package repository, the example app's namespace held apart (`ExampleNamespaceTests`, plan step
-A1.2): ninety-eight suites, 618 tests. The
+golden, wipe, audit-bridge, transport and localization tests that read this module's sources, and one
+from that step's final review holding the P9 battery's honesty pin on the `.remove` branch's stand-in
+(`MeshP9HonestyAcceptanceTests`); and, in the package repository, the example app's namespace held
+apart (`ExampleNamespaceTests`, plan step A1.2): ninety-nine suites, 619 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1058,7 +1059,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all ninety-eight passing `swift test` with this module and its tests laid out as in the package
+Mac too, all ninety-nine passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
@@ -1184,6 +1185,21 @@ goes through the file's one `spawnHostPinned(_:)` or carries a `// host-pin:` ma
 with its reason. In Fernlet's repository, `MemoryLifecycleBoundaryTests` holds the same rules over
 Fernlet's shipping code and not this folder.
 
+Four privacy rules over this module's code are held outside this target: the package repository's
+no-tracking scan (`Scripts/no-tracking-scan.py`, which its CI's Walls step runs before any build) reads
+every Swift file under `Sources/`, at a floor of four fifths of the module's files, and holds it to them.
+NT-URL: no URL scheme separator (`scheme://`) is written on a line of code, so this module names no
+destination; the one URL it builds, the verification QR's, takes its scheme from its host's namespace.
+NT-WEBVIEW: nothing imports WebKit or SafariServices or names a web view, a web data store or an in-app
+browser. NT-PASTEBOARD: nothing names a pasteboard. NT-DEFAULTS: nothing names `UserDefaults`,
+`@AppStorage`, `@SceneStorage` or the iCloud key-value store, because the host owns persistence. Comment
+lines may name any of them; each rule's matcher is held to its samples on every run, and each permit set
+is empty, so a need is a permit row argued in review. Until plan step A1.3 Fernlet's whole-tree scans
+read this module where it sat under `FernletKit/Sources` (`NoTrackingBoundaryTests`' destination
+allowlist and web-view pin, `PasteboardBoundaryTests` and `PersistedSurfaceWipeBoundaryTests`); these
+four rules carry what those held it to, each stricter, and in Fernlet's repository those scans hold
+Fernlet's own code and not this module.
+
 The presence engine's own contract is held here too, by `ProximityPresenceSessionTests`, over an
 in-memory radio of the suite's own, under `.packageTest` and the engine's own posture mint: a sighting
 under a name the session wore, or of another record version, never reaches the host, and the ring of
@@ -1232,6 +1248,15 @@ the schema's record of the retired field), so a walk that read nothing cannot pa
 original, the two goodbye walls hold every code spelling of the goodbye's role to its four homes, so a
 goodbye sent through another door than the one their needle names fails too. The P7, P8 and P9 copies
 and the drain's parked-text cell share `MeshP7Acceptance`, the module's walker and home list.
+
+One more cell of the P9 battery joined at plan step A1.3's final review, in a suite of its original's
+name, `MeshP9HonestyAcceptanceTests`. Fernlet's honesty cell required the source-level stand-in for the
+recipe radio's `.remove` branch, a branch no simulator reaches, while that stand-in was a cell of
+Fernlet's recipe suite; the stand-in reads the pair session's source, so it is this target's cell now
+(`RecipeShareOverQUICTests.theRegistrationRemoveBranchIsNotABareAssignment`), and this cell holds it in
+existence with its original's message: declared on a code line as a test with no trait, its body still
+reading the branch and the republish. Fernlet's copy keeps the runbook's lanes, the ledger's rows and
+the record of where the stand-in stands.
 
 Of its session, continuation and photo-review suites these are eight cells in six suites: the scene
 events' one raiser each, inside its public door, and neither door reading the gate

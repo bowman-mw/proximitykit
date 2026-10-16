@@ -11,7 +11,10 @@
 #     carries a /// comment;
 #   * no-tracking-scan.py: no tracking SDK in Sources/, Tests/ or Examples/, no HTTP client in
 #     Sources/ or Examples/, no package dependency in Package.swift or Package.resolved, and none in
-#     the example's project but this package;
+#     the example's project but this package; and on a line of code in Sources/, no URL scheme
+#     (`scheme://`), no web view or in-app browser, no pasteboard and no UserDefaults, @AppStorage
+#     or iCloud key-value store, each permit set empty (what the Fernlet repository's whole-tree
+#     scans held this code to until that repository consumed this package's tag);
 #   * local-link-scan.py: Network.framework's local-link API only in the three radio files, never in
 #     the example app;
 #   * manifest-scan.py: Package.swift carries no unsafe flags and no warnings setting, and exists
@@ -151,9 +154,22 @@ jobs:
     # swift test and the macOS bundle passed at these floors and each refused MIN_TESTS 619; swift
     # test and the Walls step's declared floor refused MIN_SUITES 99. ARITHMETIC CHECK: 583 + 35 = 618
     # and 88 + 10 = 98.
+    # RAISED 618 -> 619 and 98 -> 99 at plan step A1.3's final review on a Mac, 2026-10-15 (the same
+    # Xcode and Swift), for MeshP9HonestyAcceptanceTests, whose one cell holds in existence the source
+    # stand-in for the recipe radio's `.remove` branch (RecipeShareOverQUICTests'
+    # theRegistrationRemoveBranchIsNotABareAssignment), which the Fernlet repository's P9 honesty cell
+    # required while the stand-in was that repository's cell and can no longer read, over this
+    # repository's tree with it, this workflow's steps run as written but the iOS simulator's test leg:
+    # swift test "Test run with 619 tests in 99 suites passed"; the macOS result bundle totalTestCount
+    # 619, 0 failed, 0 skipped, the same 99 suites by name, 658 cases with arguments expanded; the
+    # Release build, the iOS simulator build and the example app's macOS and iOS simulator builds
+    # passed with warnings as errors; the inventory 99 rows declaring 619 tests. The iOS simulator's
+    # test leg was not run for this raise. swift test and the macOS bundle passed at these floors and
+    # each refused MIN_TESTS 620; swift test and the Walls step's declared floor refused MIN_SUITES
+    # 100. ARITHMETIC CHECK: 618 + 1 = 619 and 98 + 1 = 99.
     env:
-      MIN_TESTS: 618
-      MIN_SUITES: 98
+      MIN_TESTS: 619
+      MIN_SUITES: 99
     steps:
       - uses: actions/checkout@v4
 
