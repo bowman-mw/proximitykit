@@ -1009,18 +1009,17 @@ golden, wipe, audit-bridge, transport and localization tests that read this modu
 from that step's final review holding the P9 battery's honesty pin on the `.remove` branch's stand-in
 (`MeshP9HonestyAcceptanceTests`); and, in the package repository, the example app's namespace held
 apart (`ExampleNamespaceTests`, plan step A1.2) and every released tag's bytes decoded by today's code
-(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred eighteen suites, 810 tests. The
-target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
-the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
-call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
-app installs a ``ProximityAuditSink`` (with none installed, this module drops every audit line). Its
-keychain is therefore an in-memory store its test support installs as this module's keychain backend,
-and its audit sink one its test support installs too, both described below.
+(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred eighteen suites, 814 tests. The
+target is unhosted: the package repository's CI runs it under `swift test` and `xcodebuild test` on
+macOS and in an iOS simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator
+a `SecItem` call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on
+macOS") and no app installs a ``ProximityAuditSink`` (with none installed, this module drops every
+audit line). Its keychain is therefore an in-memory store its test support installs as this module's
+keychain backend, and its audit sink one its test support installs too, both described below.
 It builds in Swift 6 language mode with no default isolation; with the three upcoming features it
 declares, that is every upcoming feature Fernlet's own tests use, though they build in Swift 5 mode.
-It declares this module as its one dependency, and its files import nothing else of the package,
-whose other modules hold Fernlet's values and do not travel (this module depends on none of them). Fernlet's CI runs it on
-the iOS simulator; the package repository's CI has a macOS lane (`swift test`) beside its iOS simulator lane.
+It declares this module, the package's one library, as its one dependency. Fernlet, which consumes
+the tagged package (plan step A1.3), builds and runs none of it.
 
 Its test support lives in `TestSupport/`. The suites compute under a namespace of their own,
 `.packageTest` (`PackageTestNamespace.swift`), built from this module's public API alone out of
@@ -1258,8 +1257,8 @@ they have in Fernlet's tests (`MeshDeliveryTargetTests.swift` holds only `MeshDe
 `MeshDeliveryFixtures`), and the two mocks they need, `FakeMeshTransportSession` and
 `MockMultipeerTransport`, join `Mocks/`.
 
-Before Fernlet deletes its in-tree copy of this module (plan step A1.3), every cell of its tests that
-reads this module's sources is copied here too, so no check is lost when those files leave its tree
+Before Fernlet deleted its in-tree copy of this module (plan step A1.3), every cell of its tests that
+read this module's sources was copied here too, so no check was lost when those files left its tree
 (batch D). Each copy keeps its suite's and its test's names, in a file named as its original's, and
 holds only those cells, read through `PackageRoot` and the walls' walker (`PackageSwiftFiles`); where
 the original's verdict also read Fernlet's code, docs or bundle, or swept this module beside one of
@@ -1319,21 +1318,27 @@ its doc comment what stays there.
 
 `CrossVersionFixtureTests` reads the test target's one resource, `Fixtures/` (`.copy("Fixtures")` in
 the manifest, which the package repository's manifest wall holds), through `Bundle.module`, so it runs
-on every lane, the iOS simulator's included. `Fixtures/0.1.0/` holds 53 files of tag 0.1.0's wire
-and on-disk bytes, generated once under `.packageTest` from a tree whose `Sources/` was that tag's: four
-identities' keychain rows and Bob's two seal keys as 0.1.0 wrote them; schema-2, schema-1 and sealed
-envelopes, both payload framings, a sealed introduction and a prekey bundle; a mesh wire frame, the
-channel introduction's three frames, both dial hellos, the three radios' TXT fields and every label's
-framing; the mesh payloads; the membership frames of a four-member mesh through a quorum removal, a
-departure and a termination; one routed item from manifest to drain answer; and Bob's sealed session
-and routed stores, the session file with its column marker retired two ways, and a protected sidecar.
-Its twenty-four cells pin each file's SHA-256 and decode them with today's code: each identity adopts
-its rows, every signature verifies under its label through the verifiers a receiver uses, every seal
-opens with the keys the rows hold, the deterministic encodings re-encode byte for byte, the derived ids
-(epoch, chunk and receipt ids, the content and chunk hashes, the membership and routed inventories)
-are the ones 0.1.0 derived, and the retired column formats are refused by name. A cell that needs a
-key seeds the rows under services of its own, and a cell that opens a store opens it over a copy of its
-folder, so the cells run in parallel and the bundle's fixtures are never written.
+on every lane, the iOS simulator's included. `Fixtures/0.1.0/` holds 58 files of tag 0.1.0's wire
+and on-disk bytes, generated under `.packageTest` from a tree whose `Sources/` was that tag's by the
+package repository's `Scripts/cross-version-fixtures/generate-0.1.0.swift.txt`, which no target
+compiles: four identities' keychain rows and Bob's two seal keys as 0.1.0 wrote them; schema-2,
+schema-1 and sealed envelopes, both payload framings, a sealed introduction and a prekey bundle; a mesh
+wire frame, the channel introduction's three frames, both dial hellos, the three radios' TXT fields and
+every label's framing; the mesh payloads; the membership frames of a four-member mesh through a quorum
+removal, a departure and a termination; one routed item from manifest to drain answer; Bob's sealed
+session and routed stores, the session file with its column marker retired two ways, and a protected
+sidecar; and the verification ceremony, generated over the same four identities seeded from those
+rows: Alice's QR, Bob's challenge, her response and the two transcripts their signatures cover. Its
+twenty-six cells pin each file's SHA-256 and decode them with today's code: each identity adopts its
+rows, every signature verifies under its label through the verifiers a receiver uses, every seal opens
+with the keys the rows hold, the routed store's delivery map restores in its frozen spelling, the
+deterministic encodings and the verification transcripts re-encode byte for byte, the verification
+payloads re-encode to the same JSON object, the derived ids (epoch, chunk and receipt ids, the content
+and chunk hashes, the membership and routed inventories) are the ones 0.1.0 derived, and the retired
+column formats are refused by name; the other JSON is held in the read direction, today's decoders on
+0.1.0's bytes. A cell that needs a key seeds the rows under services of its own, and a cell that opens a
+store opens it over a copy of its folder, so the cells run in parallel and the bundle's fixtures are
+never written.
 
 Seven helpers both test targets use live in each, held identical but for their imports, because a test
 target cannot import another: the fake peer transport, the ranging mock, the membership fixtures, the
@@ -1368,10 +1373,13 @@ or seal, a sidecar's encoding, a keychain row), or to a frozen token. A new form
 old one, which keeps decoding, so retiring a reader is the break. A host pins `exact:`, as Fernlet does,
 since SwiftPM's `from:` would take the next 0.y.
 
-Every tag's wire and on-disk bytes are committed under the test target's `Fixtures/<tag>/`, generated
-once from that tag's code and pinned by SHA-256 in `CrossVersionFixtureTests` (see "Its tests"), which
-decodes every tag's folder with the code of today. A break therefore fails in this module's own tests
-before a tag exists. The formats and their markers are listed in the changelog's entry for 0.1.0.
+Every tag that moves a format commits its wire and on-disk bytes under the test target's
+`Fixtures/<tag>/`, generated once from that tag's code by a generator the package repository keeps in
+`Scripts/cross-version-fixtures/` (0.1.0's is `generate-0.1.0.swift.txt`, which no target compiles), and
+pinned by SHA-256 in `CrossVersionFixtureTests` (see "Its tests"), which decodes every folder with the
+code of today; a tag that moves no format adds no folder. A break in what a tag wrote therefore fails
+in this module's own tests before a tag exists. The formats and their markers are listed in the
+changelog's entry for 0.1.0, which marks those with no fixture.
 
 ## Topics
 
@@ -1916,12 +1924,18 @@ ruled on, so a dialer's own silent second connection (on a cold start, Network.f
 second attempt across the service's addresses is the likeliest source) refused that dialer's hello,
 and any device on the network that opened a connection and said nothing refused every hello for as
 long as it stayed pending, which was until the radio stopped: QUIC's idle timeout fails such a
-connection but does not end it (see the next paragraph). A connection that delivers no readable hello within five
-seconds is dropped at the next arrival or ruling, so the radio still owns no timer; and the two-device
-cap still holds, at the radio's one-tunnel floor and at the owner's held connection, which a promotion
-meets in the run that read its hello. Every booking and every end of a pending connection writes a
-line (`recipe.quic.pendingBooked`; `recipe.quic.pendingEnded`, with why and how far it got),
-`recipe.quic.helloRefused` names its reason (`unreadable`, `unresolved`, `ownerRefused`,
+connection but does not end it (see the next paragraph). A connection that delivers no readable hello
+within five seconds is dropped at the next arrival or the next ruling on another connection, whether
+or not that ruling read a hello, so the radio still owns no timer, and a connection whose own ruling
+has begun is ruled on however long its read took; and the two-device cap still holds, at the radio's
+one-tunnel floor and at the owner's held connection, which a promotion meets in the run that read its
+hello. A hello-bearing pending connection exists only inside its own ruling, so the pair session's two
+other reads of the window narrow too: a silent connection no longer fails the user's sends as
+connecting to another device, and no longer keeps a browser or listener failure at runtime from
+standing the radio down to retry, which then also cancels an inbound dial whose hello is still being
+read. Every booking and every end of a pending connection writes a line (`recipe.quic.pendingBooked`;
+`recipe.quic.pendingEnded`, with why and how far it got), `recipe.quic.helloRefused` names its reason
+(`unreadable`, `unresolved`, `ownerRefused`,
 `keptEstablished` or `tunnelHeld`) and how many connections were pending, and `recipe.quic.connected`
 names the kind of interface its connection runs over (`interface`: `wifi`, `wiredEthernet`, `loopback`,
 `cellular`, `other` or `unknown`).
@@ -1934,7 +1948,7 @@ one ends, and at zero the listener stops handing connections over, so each radio
 many inbound connections since its listener was last built (refused, failed and closed ones included)
 until a start, resume, republish or epoch boundary built it again, and a peer's dial into it neither
 connected nor failed. Measured on macOS 26.6.2 over loopback under the radios' own QUIC and TLS
-parameters, twice: limited to 2, the third and fourth dials were never handed over though the first two
+parameters, three times: limited to 2, the third and fourth dials were never handed over though the first two
 had closed and ended; with no limit all four were. The listeners are now unlimited
 (`ProximityQUICParameters.listenerNewConnectionLimit`, the framework's infinite marker), and what bounds
 an inbound flood is what bounded it before: each radio books a connection as pending only under its cap

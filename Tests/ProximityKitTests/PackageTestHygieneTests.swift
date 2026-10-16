@@ -1711,8 +1711,13 @@ import Testing
     /// `ProximityPairSessionTests` gains (the stream-less connection, the hello deadline, the two-hello
     /// cap, the refusal reasons, the interface key and the inspector). RAISED at the 0.1.1 listener fix
     /// (2026-10-16): 807 → 810, for `ProximityRadioListenerTests`' 3 (the unlimited listeners, the caps and
-    /// deadlines, presence's hello deadline). A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 810
+    /// deadlines, presence's hello deadline). RAISED at the 0.1.1 hello deadline applied at every ruling
+    /// and tag 0.1.0's verification ceremony fixtures (2026-10-16): 810 → 814, for the two cells
+    /// `ProximityPairSessionTests` gains (a ruling's deadline after its own hello is marked read, and
+    /// before an unreadable hello's refusal) and the two `CrossVersionFixtureTests` gains (the
+    /// verification QR, and the challenge and response). A test added or removed changes it in the same
+    /// commit.
+    static let measuredDeclaredTests = 814
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

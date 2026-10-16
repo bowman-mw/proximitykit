@@ -227,8 +227,21 @@ jobs:
     # iOS simulator's test leg was not run for this raise. swift test and the macOS bundle passed at
     # these floors and each refused MIN_TESTS 811; swift test and the Walls step's declared floor
     # refused MIN_SUITES 119. ARITHMETIC CHECK: 807 + 3 = 810 and 117 + 1 = 118.
+    # RAISED 810 -> 814, MIN_SUITES unchanged at 118, at the 0.1.1 hello deadline applied at every
+    # ruling and tag 0.1.0's verification ceremony fixtures on a Mac, 2026-10-16 (the same Xcode and
+    # Swift), for the two cells ProximityPairSessionTests gains (a ruling's deadline after its own hello
+    # is marked read, and before an unreadable hello's refusal) and the two CrossVersionFixtureTests
+    # gains (the verification QR; the challenge and response), over this repository's tree with them,
+    # this workflow's steps run as written but the iOS simulator's test leg: swift test "Test run with
+    # 814 tests in 118 suites passed"; the macOS result bundle totalTestCount 814, 0 failed, 0 skipped,
+    # the same 118 suites by name, 886 cases with arguments expanded; the Release build, the iOS
+    # simulator build and the example app's macOS and iOS simulator builds passed with warnings as
+    # errors; the inventory 118 rows declaring 814 tests. The iOS simulator's test leg was not run for
+    # this raise. swift test and the macOS bundle passed at these floors and each refused MIN_TESTS
+    # 815; swift test and the Walls step's declared floor refused MIN_SUITES 119. ARITHMETIC CHECK:
+    # 810 + 4 = 814 and 118 + 0 = 118.
     env:
-      MIN_TESTS: 810
+      MIN_TESTS: 814
       MIN_SUITES: 118
     steps:
       - uses: actions/checkout@v4

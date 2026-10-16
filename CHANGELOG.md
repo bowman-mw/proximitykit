@@ -3,15 +3,20 @@
 ProximityKit's releases, newest first. The version rule is the README's "Versioning" section: while
 the version is 0.y, y moves for a break (of the public API, a wire format, an on-disk format or a
 frozen token) and z for additions and fixes; from 1.0 those become the major and the minor version. A
-consumer pins `exact:`. Every tag's wire and on-disk bytes are committed under
-`Tests/ProximityKitTests/Fixtures/<tag>/`, generated once from that tag's code, and
-`CrossVersionFixtureTests` decodes every tag's folder with today's code, so a break is a test failure
-in this repository before it is a release.
+consumer pins `exact:`. Every tag that moves a format adds `Tests/ProximityKitTests/Fixtures/<tag>/`,
+that tag's wire and on-disk bytes generated once from its code by a generator committed beside the
+others in `Scripts/cross-version-fixtures/` (0.1.0's is `generate-0.1.0.swift.txt`, which no target
+compiles), and `CrossVersionFixtureTests` decodes every folder with today's code, so a break in what a
+tag wrote is a test failure in this repository before it is a release. The cells hold the read
+direction, today's decoders on a tag's bytes, and the write direction where an encoding is
+deterministic (re-encoded byte for byte) and for the verification ceremony's JSON payloads (the same
+JSON object); a format a tag's table marks "no fixture" is not held.
 
 ## Unreleased
 
 Planned as 0.1.1, a fix release: no public API, wire format, on-disk format or frozen token is
-changed or removed, and every 0.1.0 API is kept, so z moves.
+changed or removed, and every 0.1.0 API is kept, so z moves. No format moves, so it adds no fixture
+folder: `Fixtures/0.1.0/` holds the bytes it reads and writes.
 
 ### Fixed
 
@@ -19,22 +24,30 @@ changed or removed, and every 0.1.0 API is kept, so z moves.
   built with a finite new-connection limit (the mesh 8, the recipe radio 3, presence 4), which
   Network.framework spends one per connection created and never refunds, so each went deaf after
   that many inbound connections since its listener was last built (refused, failed and twin
-  connections included) until a start, resume, republish or epoch boundary: the recipe radio after
-  a few stray dials on a long-open screen, the mesh after eight reconnections in a stable session,
-  presence after a fifth heart inside an epoch. The radios' own pending caps and identification
-  deadlines bound an inbound flood instead (`ProximityRadioListenerTests`).
+  connections included) until a start, resume, republish or epoch boundary: the mesh after eight
+  inbound connections, the recipe radio after three and presence after four. The radios' own pending
+  caps and identification deadlines bound an inbound flood instead (`ProximityRadioListenerTests`).
 - Presence drops a pending inbound connection that delivers no dial hello within 5 s, at the next
   arrival (no timer). A connection that never opened a stream used to keep its place until the
   radio stopped, because QUIC's idle timeout fails such a connection without ending it; four of
   them refused every friend's dial for the rest of the session.
 - The pair radio no longer refuses a dialer's hello because another inbound connection is pending
-  without one. Only a pending connection whose dial hello has been read counts as connecting (the
-  session's inbound gate asks `hasConnectingPeers(besides:)`). Before, a dialer's own silent second
-  connection (likeliest a dual-stack race on a cold start), or any device that opened a connection
-  and stayed silent, refused every hello until QUIC's idle timeout, up to 90 s. The two-device cap
-  holds: two connections whose hellos have both been read still refuse.
+  without one. Only a pending connection whose dial hello has been read counts as connecting
+  (`hasConnectingPeers(besides:)`, which the session's inbound gate asks), and one exists only inside
+  its own ruling. Before, a dialer's own silent second connection (likeliest a dual-stack race on a
+  cold start), or any device that opened a connection and stayed silent, refused every hello for as
+  long as it held its place: until the radio stopped, for one that never opened a stream, or up to
+  QUIC's 90 s idle timeout, for one that did. The two-device cap holds, at the radio's one-tunnel
+  floor and the owner's held connection. The narrower window changes the session's two other reads
+  of it too: such a connection no longer fails the user's own sends as `.connectingToAnother`; and a
+  browser or listener failure at runtime now stands the radio down to retry, where such a connection
+  kept it from standing down for as long as it stayed pending, and so also cancels an inbound dial
+  whose hello is still being read at that moment (accepted: that dialer's share fails and can be
+  retried).
 - The pair radio drops a pending inbound connection that delivers no readable hello within 5 s, at
-  the next arrival or ruling. The radio still owns no timer.
+  the next arrival or the next ruling on another connection, whether or not that ruling read a hello;
+  a connection whose own ruling has begun is ruled on however long its read took. The radio still owns
+  no timer.
 
 ### Added
 
@@ -59,11 +72,13 @@ changed or removed, and every 0.1.0 API is kept, so z moves.
   pasteboard, and no defaults or iCloud key-value store. A P9 honesty cell holds the recipe radio's
   `.remove` stand-in in existence.
 - Versioning (plan step A2's groundwork): this file, the README's "Versioning" section, and
-  `CrossVersionFixtureTests` over `Fixtures/0.1.0/`: 53 files of 0.1.0's wire and on-disk bytes, each
-  SHA-256 pinned, decoded, verified and opened with today's code. The manifest declares the folder as
-  the test target's one resource (`.copy("Fixtures")`), which `Scripts/manifest-scan.py` holds,
-  CODEOWNERS owns the folder and the suite, and `.gitattributes` keeps git from converting the
-  fixtures' line endings.
+  `CrossVersionFixtureTests` over `Fixtures/0.1.0/`: 58 files of 0.1.0's wire and on-disk bytes, each
+  SHA-256 pinned, decoded, verified and opened with today's code, the verification ceremony's QR,
+  challenge, response and two signed transcripts among them, and the generator that wrote them,
+  `Scripts/cross-version-fixtures/generate-0.1.0.swift.txt`. The manifest declares the folder as the
+  test target's one resource (`.copy("Fixtures")`), which `Scripts/manifest-scan.py` holds whatever
+  qualifies or spaces another rule, CODEOWNERS owns the folder and the suite, and `.gitattributes`
+  keeps git from converting the fixtures' line endings.
 - The hygiene rule I9 hosts the keychain suites of the Fernlet repository's tests as they are
   written: a suite admits `.serialized`, a display name and a literal or `.allCases` argument
   collection; a fixture enum whose every member that reaches the keychain reads the in-memory
@@ -80,9 +95,13 @@ changed or removed, and every 0.1.0 API is kept, so z moves.
 
 ### Consumers
 
-- Fernlet: re-pin to 0.1.1. `RecipeShareOverQUICTests.aSecondDialerArrivingWhileOneIsMidHelloIsRefused`
-  stays green and now means "a second connection whose hello has been read refuses"; re-word it, its
-  sibling's message and the fake radio's window doc. 0.1.1 changes radio behaviour, so device-check
+- Fernlet: re-pin to 0.1.1, moving its four pin sites together (`FernletKit/Package.swift`, the app
+  project's `exactVersion` and both `Package.resolved`). Its DEBUG feasibility probe
+  (`App/Fernlet/Proximity/Feasibility/NetworkMeshFeasibilityProbe.swift`) still sets the finite
+  `newConnectionLimit` the radios dropped.
+  `RecipeShareOverQUICTests.aSecondDialerArrivingWhileOneIsMidHelloIsRefused` stays green and now
+  means "a second connection whose hello has been read refuses"; re-word it, its sibling's message
+  and the fake radio's window doc. 0.1.1 changes radio behaviour, so device-check
   it on a second device before it ships: the pair radio, presence hearts past four in one epoch, and
   a long mesh session.
 
@@ -125,7 +144,7 @@ Wire (each message's labels, radios and tokens are the host namespace's):
 | `SealedIntroductionEnvelope` (JSON) | its one key, `sealedIntroduction` | carries only ciphertext; the signed envelope is inside |
 | `ProximityPrekeyBundle` (JSON) | keys and values, in no fixed order | `signedPrekey` optional and additive |
 | Group-key wrap | `FGK2` prefix, 96 bytes | the unmarked 92-byte layout is refused by name |
-| Mesh metadata seal | `FMGM2` prefix | read only; 0.1.0 writes none |
+| Mesh metadata seal | `FMGM2` prefix | read only; 0.1.0 writes none, so no fixture |
 | Mesh frames on a QUIC stream (`NetworkMeshWire`) | 4-byte big-endian length | at most 16 MiB; handshake frames at most 4096 bytes |
 | Mesh channel introduction (hello, signed introduction) | `protocolVersion` 1 | signed over the transcript bound to the TLS exporter's channel binding |
 | Mesh payloads (`MeshPayloads.swift`): state change, admission request and grant, admission token, removal proposal and second, vouch list, key rotation, key ack, rotation sync, coordinator beacon | admission token canonical v2; the legacy JSON signature verified | JSON |
@@ -135,6 +154,9 @@ Wire (each message's labels, radios and tokens are the host namespace's):
 | Pair dial hello, presence dial hello (JSON) | `v` = `1` | |
 | TXT records: pair, presence, mesh link | `v` = `1` for pair and presence | the mesh link's `fp` is withheld |
 | Framed labels | raw prefix, 8-byte big-endian length prefix, or none (verify-only) | per label role |
+| Verification QR (`<host scheme>://verify?d=`, the base64url JSON of `ProximityVerifyQR.Payload`) | `version` 1 | Ed25519 over a fixed-width transcript: the namespace's QR label, the version byte, both public keys, the big-endian timestamp and the 16-byte nonce |
+| Verification challenge and response (JSON, sealed) | none | the response signs the namespace's response label, the scanner's key-agreement key, the challenge nonce and the QR nonce, every field fixed-length |
+| The session coordinator's introduction and heartbeat payloads (JSON inside its signed envelopes) | additive optional keys | private types only a running session writes and reads, so no fixture |
 
 On disk:
 

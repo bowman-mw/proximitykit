@@ -32,18 +32,22 @@ Checks:
                      Bundle.module: copied whole, because `.process` flattens a folder and two tags'
                      files of one name would collide, and only in the tests, because a resource in
                      the library would ship inside every host's app. Any other resource rule
-                     (`.copy(`, `.process(`, `.embedInCode(`) or `resources:` label is refused, and so
-                     is a fixture folder on disk that the manifest does not declare (SwiftPM would
-                     warn about its unhandled files and the suite would have no Bundle.module).
+                     (`.copy(`, `.process(` or `.embedInCode(`, whatever qualifies it, as in
+                     `Resource.process(`, and however it is spaced before its `(`) or `resources:`
+                     label is refused, and so is a fixture folder on disk that the manifest does not
+                     declare (SwiftPM would warn about its unhandled files and the suite would have no
+                     Bundle.module).
 
 Comment-only lines are skipped, so prose that explains the ban passes; a trailing comment does
 not hide a setting. The names are matched at identifier boundaries, so a longer identifier that
-contains one is not the setting.
+contains one is not the setting; a resource rule's name is bounded by the `.` before it and the `(`
+after it.
 
 Before the import: the code came with its git history from the Fernlet repository. A tree with
 neither Package.swift nor Sources/ProximityKit, as this repository's was until then, passes.
 """
 import os
+import re
 import sys
 
 MANIFEST = "Package.swift"
@@ -52,6 +56,7 @@ IMPORT_ROOT = os.path.join("Sources", "ProximityKit")   # MF-MISSING starts once
 UNSAFE_SETTINGS = ("unsafeFlags",)
 # MF-RESOURCES: the one resource rule, the tests' fixture folder, and where it sits.
 RESOURCE_RULES = ("copy", "process", "embedInCode")
+RESOURCE_CALL = re.compile(r"\.(" + "|".join(RESOURCE_RULES) + r")\s*\(")
 ALLOWED_RESOURCE = '.copy("Fixtures")'
 TEST_TARGET_CALL = ".testTarget("
 FIXTURE_FOLDER = os.path.join("Tests", "ProximityKitTests", "Fixtures")
@@ -105,17 +110,9 @@ def scan_manifest(lines):
 
 
 def resource_calls(text):
-    """The resource rules `text` calls: each RESOURCE_RULES name right after a `.`, at an identifier
-    boundary, with its `(` next."""
-    calls = []
-    for name in RESOURCE_RULES:
-        start = text.find("." + name + "(")
-        while start != -1:
-            left_clear = start == 0 or not is_identifier_char(text[start - 1])
-            if left_clear:
-                calls.append(name)
-            start = text.find("." + name + "(", start + 1)
-    return calls
+    """The resource rules `text` calls: each RESOURCE_RULES name right after a `.`, whatever qualifies
+    it (`.process(`, `Resource.process(`), with its `(` next after any blanks (`.process (`)."""
+    return [match.group(1) for match in RESOURCE_CALL.finditer(text)]
 
 
 def scan_resources(lines, fixture_folder_exists):

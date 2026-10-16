@@ -5,20 +5,21 @@
 // and presence's `NetworkPresenceSession`), and what bounds the inbound connections each one hands its
 // radio (0.1.1).
 //
-// Each radio used to build its listener with a finite new-connection limit (the mesh 8, the recipe radio
-// 3, presence 4), read as a cap on connections at once. Network.framework spends it instead: the limit
-// counts down by one for every connection the listener creates and never back up when one ends, and at
-// zero the listener stops handing connections over. Measured on macOS 26.6.2, with a throwaway package
-// running a real `NetworkListener` over loopback under the radios' own QUIC and TLS parameters, twice:
-// limited to 2, the limit read back 1 and then 0 after the first two dials, each closed and ended before
-// the next, and the third and fourth were never handed over (the third's dialer, watched for 30 s, never
-// became ready and never failed); with no limit, and with the limit re-armed from the live count at each
-// end, all four were; a limit set again while a dial waited handed over a connection that had already
-// failed (`Connection refused`); and a connection that never opened a stream, closed by its dialer or
-// failed by QUIC's idle timeout, never ended its `inboundStreams` (over 20 s past the failure) until its
-// owning task was cancelled. So each radio went deaf after that many inbound connections since its
-// listener was last built, and presence, whose only reaper was meant to be that idle timeout, kept a
-// silent connection's pending place until it stopped.
+// Each radio used to build its listener with a finite new-connection limit (the mesh 8, the recipe
+// radio 3, presence 4), read as a cap on connections at once. Network.framework spends it instead: the
+// limit counts down by one for every connection the listener creates and never back up when one ends,
+// and at zero the listener stops handing connections over. Measured on macOS 26.6.2, with a throwaway
+// package running a real `NetworkListener` over loopback under the radios' own QUIC and TLS
+// parameters, three times: limited to 2, the limit read back 1 and then 0 after the first two dials,
+// each closed and ended before the next, and the third and fourth were never handed over (the third's
+// dialer, watched for 30 s, never became ready and never failed); with no limit, and with the limit
+// re-armed from the live count at each end, all four were; a limit set again while a dial waited
+// handed over a connection that had already failed (`Connection refused`); and a connection that never
+// opened a stream, closed by its dialer or failed by QUIC's idle timeout, never ended its
+// `inboundStreams` (over 20 s past the failure) until its owning task was cancelled. So each radio
+// went deaf after that many inbound connections since its listener was last built, and presence, whose
+// only reaper was meant to be that idle timeout, kept a silent connection's pending place until it
+// stopped.
 //
 // The package's tests cannot run that listener: they import no `Network` (rule I11 of
 // `PackageTestHygieneTests`), and a radio's listener advertises over Bonjour, which no cell may start. So

@@ -10,7 +10,7 @@
 # parameterized test is one). Rows sorted by suite. A suite added, moved, renamed or deleted edits its row, and the
 # suite's measured row count and declared-test sum, in the same commit.
 suite	file	cells
-CrossVersionFixtureTests	CrossVersionFixtureTests.swift	24
+CrossVersionFixtureTests	CrossVersionFixtureTests.swift	26
 EphemeralMeshTLSIdentityTests	NetworkMeshTransportTests.swift	5
 ExampleNamespaceTests	ExampleNamespaceTests.swift	5
 FakePeerTransportTests	PeerTransportNeutralityTests.swift	10
@@ -117,7 +117,7 @@ ProximityMemoryLifecycleTests	ProximityMemoryLifecycleTests.swift	5
 ProximityNamespaceBoundaryTests	ProximityNamespaceBoundaryTests.swift	12
 ProximityNamespaceGoldenTests	ProximityNamespaceGoldenTests.swift	3
 ProximityNamespaceSoundnessTests	ProximityNamespaceSoundnessTests.swift	43
-ProximityPairSessionTests	ProximityPairSessionTests.swift	7
+ProximityPairSessionTests	ProximityPairSessionTests.swift	9
 ProximityPlatformNeutralityTests	ProximityPlatformNeutralityTests.swift	5
 ProximityPresenceSessionTests	ProximityPresenceSessionTests.swift	5
 ProximityRadioListenerTests	ProximityRadioListenerTests.swift	3

@@ -1,37 +1,50 @@
 // CrossVersionFixtureTests.swift
 // ProximityKitTests
 //
-// ProximityKit plan step A2: the bytes a released tag wrote, read back by the code of today. Each wire
-// and on-disk format ProximityKit owns has fixtures under `Fixtures/<tag>/`, generated ONCE from that
-// tag's own code and committed with their SHA-256 pinned here, and each cell decodes its fixtures with
-// the current code and asserts what they hold: the fields, the signatures under the namespace's
-// labels, the seals opening with the keys the tag stored, the re-encodings of the deterministic
-// encodings byte for byte, and the refusals of the retired formats. A wire or on-disk break therefore
-// fails here, in this repository, before a tag exists, instead of first in a host's re-pin of the tag
-// (tags never move). Not here: the session coordinator's own introduction and heartbeat payloads,
-// private types only a running session reads, and the `FMGM2` metadata seal, which 0.1.0 opens but
-// never writes.
+// ProximityKit plan step A2: the bytes a released tag wrote, read back by the code of today. Every wire
+// and on-disk format a tag writes has fixtures under `Fixtures/<tag>/` but those named below, generated
+// ONCE from that tag's own code and committed with their SHA-256 pinned here, and each cell decodes its
+// fixtures with the current code and asserts what they hold: the fields, the signatures under the
+// namespace's labels, the seals opening with the keys the tag stored, the ids and digests the tag
+// derived, and the refusals of the retired formats. That is the read direction, today's decoders on a
+// tag's bytes. The write direction is held where an encoding is deterministic, re-encoded byte for
+// byte (the sealed payload's raw frame, the wire headers, the pair dial hello, the TXT fields, every
+// label's prefix and the verification ceremony's two transcripts), and for the verification
+// ceremony's three JSON payloads, which today's encoder must write as the same JSON object, key order
+// aside. So a wire or on-disk break fails here, in this repository, before a tag exists, instead of
+// first in a host's re-pin of the tag (tags never move); a JSON key renamed elsewhere under a decoding
+// fallback passes the read direction, and is a review's to catch. Not here: the session coordinator's
+// own introduction and heartbeat payloads, private types only a running session writes and reads, and
+// the `FMGM2` metadata seal and its inner payload, which 0.1.0 opens but never writes.
 //
-// `Fixtures/0.1.0/` is tag 0.1.0 (6648094f): generated once under `.packageTest`
-// (TestSupport/PackageTestNamespace.swift) on a tree whose `Sources/` was `git archive 0.1.0`, by a
-// throwaway generator that is not part of this repository, on 2026-10-15. Its cast is four identities
-// 0.1.0 minted into the in-memory keychain (Alice, Bob, Carol and Dave) and two seal keys Bob's
-// stores minted, and `keychain-rows.json` holds those rows exactly as 0.1.0 wrote them (service,
-// account, accessibility class, sync flag, bytes), so every signature, seal and sealed file below is
-// checked against the keys that made it. Every byte is 0.1.0's own output but two signatures:
-// 0.1.0 verifies a schema-1 envelope and a legacy-signed admission token but cannot mint either (its
-// identity refuses to sign under the verify-only legacy label), so the generator signed those two
-// with the private key from the rows, over 0.1.0's own `legacyCanonicalBytes`, as a pre-WI-6 peer did.
-// The retired column formats are 0.1.0's sealed session file with its marker replaced (v2) or dropped
-// (unprefixed), the shapes those retired writers left on disk.
+// `Fixtures/0.1.0/` is tag 0.1.0 (6648094f), generated under `.packageTest`
+// (TestSupport/PackageTestNamespace.swift) on a tree whose `Sources/` was `git archive 0.1.0` by the
+// generator `Scripts/cross-version-fixtures/generate-0.1.0.swift.txt`, which no target compiles and
+// whose header says how to run it, in two runs of one test each. The first (2026-10-15) wrote 53 files:
+// its cast is four identities 0.1.0 minted into the in-memory keychain (Alice, Bob, Carol and Dave) and
+// two seal keys Bob's stores minted, and `keychain-rows.json` holds those rows exactly as 0.1.0 wrote
+// them (service, account, accessibility class, sync flag, bytes), so every signature, seal and sealed
+// file below is checked against the keys that made it. The second (2026-10-16) seeded the in-memory
+// keychain with those rows, so its cast is the same four identities, and wrote the verification
+// ceremony's five files through 0.1.0's own `CoachVerificationCeremony`: Alice's QR for Bob, the
+// transcript its signature covers, Bob's challenge, Alice's response, and the transcript the response's
+// signature covers. Every byte is 0.1.0's own output but two signatures: 0.1.0 verifies a schema-1
+// envelope and a legacy-signed admission token but cannot mint either (its identity refuses to sign
+// under the verify-only legacy label), so the generator signed those two with the private key from the
+// rows, over 0.1.0's own `legacyCanonicalBytes`, as a pre-WI-6 peer did. The retired column formats are
+// 0.1.0's sealed session file with its marker replaced (v2) or dropped (unprefixed), the shapes those
+// retired writers left on disk.
 //
-// THE RULE (README "Versioning", CHANGELOG.md): a fixture folder is never regenerated or edited. A
-// digest that stops matching is a fixture someone changed, and the change is reviewed as a change to
-// this file's pin. A later tag adds `Fixtures/<tag>/` and its own cells beside these; every older
-// folder keeps decoding, because a new format is added beside the old one and only retiring a reader
-// is a break (a `y` bump while the version is 0.y). The test bundle carries the folder as a resource
-// (`Package.swift`, `resources: [.copy("Fixtures")]`, which `Scripts/manifest-scan.py` holds), so the
-// cells read it through `Bundle.module` on every test lane, the iOS simulator's included.
+// THE RULE (README "Versioning", CHANGELOG.md): a fixture is never regenerated or edited. A digest that
+// stops matching is a fixture someone changed, and the change is reviewed as a change to this file's
+// pin. A format a folder missed joins it as new files, generated from that tag's code over the same
+// cast and pinned beside the others, as the verification ceremony's joined 0.1.0's. A later tag that
+// moves a format adds `Fixtures/<tag>/` and its own cells beside these, and one that moves none adds no
+// folder; every older folder keeps decoding, because a new format is added beside the old one and only
+// retiring a reader is a break (a `y` bump while the version is 0.y). The test bundle carries the
+// folder as a resource (`Package.swift`, `resources: [.copy("Fixtures")]`, which
+// `Scripts/manifest-scan.py` holds), so the cells read it through `Bundle.module` on every test lane, the
+// iOS simulator's included.
 
 import CryptoKit
 import Foundation
@@ -111,12 +124,17 @@ import Testing
         "0.1.0/sealed-frame-raw.bin": "5b6871ea3931221684994272436e5919ce85de85b9025f0a9f9af483489d55f4",
         "0.1.0/sealed-introduction.json": "4493c4713d7f6d896f76d6af99edc26394e2e71a536e1786382818e89178aa4a",
         "0.1.0/session-store/Session.sealed": "f7ae276c628bbe7cdcfbc9a6af6cf2ce901fcbd06ac7cc05d5d2b8dbfe681c75",
-        "0.1.0/txt-records.json": "c49c626f99ddd93de562da1fc5ec2f3ef296a721087709520c55402108cb92ae"
+        "0.1.0/txt-records.json": "c49c626f99ddd93de562da1fc5ec2f3ef296a721087709520c55402108cb92ae",
+        "0.1.0/verify-challenge.json": "6f43c6c3e8cabfc27180f16fbcd52aa1ca1829ed52df4ab54e48b0b951db2265",
+        "0.1.0/verify-qr-transcript.bin": "7a78a366715c24d8513d0fe7caa04902f1cb073001c7f3a204b5d68cd97b0983",
+        "0.1.0/verify-qr-url.txt": "cd9aca283b680775833321c4bec5077a2b203884e5beebaf0e161d8799a2f171",
+        "0.1.0/verify-response-transcript.bin": "465b6e1b538843c99e4e2287905e09bb37afb6421a16f4140f4328195b8f6b11",
+        "0.1.0/verify-response.json": "780261a1651600d0b7d008f5d036f4a74e7f2f9d18dc464e60372753bf851d9b"
     ]
 
-    /// The fewest fixture files the folder walk may read: the 53 of 0.1.0. A walk that reads fewer is a
+    /// The fewest fixture files the folder walk may read: the 58 of 0.1.0. A walk that reads fewer is a
     /// bundle that lost its resources, not a smaller format list.
-    let fixtureFloor = 53
+    let fixtureFloor = 58
 
     // MARK: - 0.1.0's world
 
@@ -211,15 +229,16 @@ import Testing
     /// legacy pair, the feature salts) and one host feature signature label of each framing has the
     /// prefix bytes 0.1.0 framed it with: raw bytes, an eight-byte big-endian length then the bytes, or
     /// none for a verify-only label. Every signature, hash domain, salt and associated datum below starts
-    /// with one of these.
+    /// with one of these. A label a later release adds is an addition, so today's table may hold more;
+    /// none of 0.1.0's may be framed otherwise or go.
     @Test func theFramedLabelsFrameAsTheyDid() throws {
         let fixture = try decode([String: [String: String]].self, "0.1.0/framed-labels.json")
         let current = Self.framedLabels()
+        let changed = fixture.filter { current[$0.key] != $0.value }.keys.sorted()
         #expect(fixture.count == 43, "0.1.0 framed \(fixture.count) labels")
-        #expect(current == fixture, """
-            labels framed differently from 0.1.0: \
-            \(current.filter { fixture[$0.key] != $0.value }.keys.sorted()) differ, \
-            \(Set(fixture.keys).subtracting(current.keys).sorted()) are gone
+        #expect(changed.isEmpty && current.count >= fixture.count, """
+            labels 0.1.0 framed are framed differently today, or gone: \(changed); today frames \
+            \(current.count) labels, 0.1.0 framed \(fixture.count)
             """)
     }
 
@@ -453,6 +472,75 @@ import Testing
             sentAt: base.addingTimeInterval(130)))
     }
 
+    // MARK: - The verification ceremony
+
+    /// **The verification QR verifies over its transcript.** Alice's QR for Bob, as 0.1.0's ceremony
+    /// displayed it, parses under `.packageTest`'s scheme to her two keys, its instant and a 16-byte
+    /// nonce; today's transcript over those fields is the one 0.1.0 signed, byte for byte, and the gate
+    /// every scanner runs accepts the QR at its instant; and today's encoding of the payload is the JSON
+    /// object the QR carries. The same QR with its instant moved a second is refused, at that instant:
+    /// the signature covers the transcript's fields, not only its label.
+    @Test func theVerificationQRVerifiesOverItsTranscript() throws {
+        let cast = try provisionedCast()
+        let purposes = ProximityNamespace.Purposes.packageTest
+        let url = try verificationQRURL()
+        let qr = try #require(ProximityVerifyQR.parse(url, in: .packageTest), "Alice's QR did not parse: \(url)")
+        let issued = base.addingTimeInterval(1_000)
+        #expect(qr.version == 1 && qr.timestamp == UInt64(issued.timeIntervalSince1970) && qr.nonce.count == 16)
+        #expect(qr.signingPublicKey == cast.alice.localSigningPublicKey
+                && qr.keyAgreementPublicKey == cast.alice.localKeyAgreementPublicKey)
+        #expect(ProximityVerifyQR.canonicalBytes(
+            version: qr.version, signingPublicKey: qr.signingPublicKey, keyAgreementPublicKey: qr.keyAgreementPublicKey,
+            timestamp: qr.timestamp, nonce: qr.nonce, in: purposes) == (try fixture("0.1.0/verify-qr-transcript.bin")),
+                "today's QR transcript is not the one 0.1.0 signed")
+        #expect(ProximityVerifyQR.isValid(qr, at: issued, in: purposes), "the scanner's gate refused Alice's QR")
+        #expect(try sameJSONObject(qr, as: try verificationQRJSON(url)),
+                "today's encoding of the QR's payload is not the JSON object 0.1.0 put in it")
+        let moved = ProximityVerifyQR.Payload(
+            version: qr.version, signingPublicKey: qr.signingPublicKey, keyAgreementPublicKey: qr.keyAgreementPublicKey,
+            timestamp: qr.timestamp + 1, nonce: qr.nonce, signature: qr.signature)
+        #expect(!ProximityVerifyQR.isValid(moved, at: issued.addingTimeInterval(1), in: purposes),
+                "Alice's QR still verified with its instant moved, so its signature does not cover the instant")
+    }
+
+    /// **The challenge and the response verify over their transcript.** Bob's challenge, as the mesh
+    /// sends it inside its seal, quotes the QR's nonce beside a fresh 16-byte one and passes the gate the
+    /// displayer runs on Bob's key-agreement key before it signs; Alice's response names that challenge;
+    /// today's response transcript (Bob's key-agreement key, the challenge nonce, the QR nonce) is the one
+    /// 0.1.0 signed, byte for byte, and her signature verifies over it by her signing key, as a scanner
+    /// checks it; and today's encodings of both payloads are the JSON objects 0.1.0 sent. Her signature
+    /// verifies over no other transcript: not with the two nonces swapped, and not as an answer to Carol.
+    @Test func theVerifyChallengeAndResponseVerifyOverTheirTranscript() throws {
+        let cast = try provisionedCast()
+        let purposes = ProximityNamespace.Purposes.packageTest
+        let qr = try #require(ProximityVerifyQR.parse(try verificationQRURL(), in: .packageTest))
+        let challenge = try decode(VerifyChallengePayload.self, "0.1.0/verify-challenge.json")
+        let response = try decode(VerifyResponsePayload.self, "0.1.0/verify-response.json")
+        #expect(challenge.qrNonce == qr.nonce && challenge.challengeNonce.count == 16
+                && response.challengeNonce == challenge.challengeNonce)
+        #expect(ProximityVerifySignature.isWellFormedChallenge(
+            challenge, scannerKeyAgreementPublicKey: cast.bob.localKeyAgreementPublicKey))
+        let transcript = { (scanner: IdentityService, challengeNonce: Data, qrNonce: Data) in
+            ProximityVerifySignature.message(scannerKeyAgreementPublicKey: scanner.localKeyAgreementPublicKey,
+                                             challengeNonce: challengeNonce, qrNonce: qrNonce, in: purposes)
+        }
+        let signed = transcript(cast.bob, challenge.challengeNonce, challenge.qrNonce)
+        #expect(signed == (try fixture("0.1.0/verify-response-transcript.bin")),
+                "today's response transcript is not the one 0.1.0 signed")
+        let verifies = { (message: Data) in
+            IdentityService.verify(response.signature, of: message, by: cast.alice.localSigningPublicKey,
+                                   purpose: purposes.signature.proximityQRResponseV1)
+        }
+        #expect(verifies(signed), "Alice's response does not verify over Bob's transcript")
+        #expect(!verifies(transcript(cast.bob, challenge.qrNonce, challenge.challengeNonce))
+                && !verifies(transcript(cast.carol, challenge.challengeNonce, challenge.qrNonce)),
+                "Alice's response verified over a transcript she did not sign")
+        #expect(try sameJSONObject(challenge, as: try fixture("0.1.0/verify-challenge.json")),
+                "today's encoding of the challenge is not the JSON object 0.1.0 sent")
+        #expect(try sameJSONObject(response, as: try fixture("0.1.0/verify-response.json")),
+                "today's encoding of the response is not the JSON object 0.1.0 sent")
+    }
+
     // MARK: - Membership
 
     /// **The membership records verify into one ledger.** A verifier that knows only the founder's key
@@ -579,9 +667,11 @@ import Testing
 
     /// **Bob's routed store opens and reassembles its item.** Under the seal key and install binding
     /// 0.1.0 sealed it with, the V3 index loads, at schema 2, to the one item Bob held (its manifest, its one chunk
-    /// file, its custody and delivery instants and both receipts), the inventory today's code derives
-    /// from it is the one Bob signed, and the store reassembles the sealed blob from its chunk file,
-    /// which Bob's content key opens to Alice's note.
+    /// file, its custody and delivery instants, both receipts, and its stored delivery map: the item's id
+    /// and Bob's copy delivered, in the frozen spelling `delivered`, which restores against the signed
+    /// manifest to Bob delivered and Carol pending), the inventory today's code derives from it is the
+    /// one Bob signed, and the store reassembles the sealed blob from its chunk file, which Bob's content
+    /// key opens to Alice's note.
     @Test func theRoutedStoreOpensAndReassemblesItsItem() throws {
         let cast = try provisionedCast()
         let manifest = try routedManifest()
@@ -602,6 +692,12 @@ import Testing
         #expect(record.receipts == [try decode(MeshCustodyReceiptPayload.self, "0.1.0/routed-custody-receipt.json").receipt])
         #expect(record.recipientReceipts
                 == [try decode(MeshRecipientReceiptPayload.self, "0.1.0/routed-recipient-receipt.json").receipt])
+        #expect(record.delivery == MeshRoutedDeliveryRecord(
+            contentID: itemID, progress: [bob: MeshRoutedDeliveryProgress(token: "delivered", custodian: nil)]),
+                "Bob's stored delivery map reads \(String(describing: record.delivery))")
+        #expect(!record.deliveryRestoreRefused && record.deliveryTarget?.state(of: bob) == .delivered
+                && record.deliveryTarget?.state(of: carol) == .pending,
+                "Bob's stored delivery map did not restore against the signed manifest to Bob delivered, Carol pending")
         let signed = try decode(MeshRoutedInventoryPayload.self, "0.1.0/routed-inventory.json")
         #expect(MeshRoutedInventory(meshID: meshID, index: index, selfFingerprint: bob, at: signed.sentAt) == signed.inventory)
         guard case .completed(let reassembled?) = store.assembledBlob(item: MeshRoutedItemKey(manifest), expecting: manifest) else {
@@ -713,6 +809,27 @@ import Testing
         let length = try NetworkMeshWire.payloadLength(from: header, ceiling: MeshChannelIntroductionFormat.maxFrameByteCount)
         #expect(length == frame.count - header.count && NetworkMeshWire.header(for: length) == header, "\(path)'s header")
         return try JSONDecoder().decode(type, from: frame.dropFirst(header.count))
+    }
+
+    /// The verification QR's URL, as 0.1.0's ceremony displayed it.
+    func verificationQRURL() throws -> URL {
+        let text = String(decoding: try fixture("0.1.0/verify-qr-url.txt"), as: UTF8.self)
+        return try #require(URL(string: text), "the QR fixture holds no URL")
+    }
+
+    /// The JSON a verification QR's URL carries: its `d` item, base64url-decoded.
+    func verificationQRJSON(_ url: URL) throws -> Data {
+        let item = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "d" }?.value
+        return try #require(item.flatMap(ProximityVerifyQR.base64URLDecode), "the QR's URL carries no readable `d` item")
+    }
+
+    /// Whether today's encoding of `value` is the JSON object `written` holds, key order aside: the
+    /// write direction, which decoding a tag's bytes does not hold. `JSONEncoder` promises no key order,
+    /// so the bytes themselves are never compared.
+    func sameJSONObject(_ value: some Encodable, as written: Data) throws -> Bool {
+        let tagged = try JSONSerialization.jsonObject(with: written) as? NSDictionary
+        let today = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? NSDictionary
+        return tagged != nil && tagged == today
     }
 
     // MARK: - The keychain and the cast

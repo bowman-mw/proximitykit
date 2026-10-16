@@ -322,7 +322,8 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     /// ``ProximityQUICParameters/listenerNewConnectionLimit``), so it held its place until ``stop()``.
     ///
     /// **Still no timer.** The deadline is applied where a pending place is next needed and where a
-    /// hello is ruled on: each arrival and each ruling first drops every pending connection past it, on
+    /// hello is ruled on: each arrival, and each ruling whether or not its read yielded a hello, first
+    /// drops every pending connection past it but the one being ruled on, which its own ruling ends, on
     /// the instant that event read. A stalled connection nothing needs a place from waits for the next
     /// arrival or ruling, and refuses nobody meanwhile.
     nonisolated static let helloDeadlineSeconds: TimeInterval = 5
@@ -538,8 +539,10 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     ///
     /// Set and cleared inside one synchronous main-actor run
     /// (``adjudicateInbound(_:pendingKey:)``), so one slot is enough for the two connections
-    /// ``maxPendingInbound`` allows: they adjudicate strictly one after the other, and each counts in
-    /// the other's window once its own hello has been read.
+    /// ``maxPendingInbound`` allows: they adjudicate strictly one after the other. A connection is
+    /// hello-bearing only inside its own ruling (``ruleOnHello(_:pendingKey:now:)``), which ends it as
+    /// pending whatever the verdict, so the other's ruling never finds it in the window; the cap rests
+    /// on ``admitInbound(at:)``'s one-tunnel floor and the owner's held connection, not on that count.
     private var adjudicatingInbound: MeshLinkKey?
 
     private(set) var isRunning = false
@@ -771,18 +774,22 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     /// retired radio's pending-connection set. Two populations count: a tunnel whose control
     /// stream has not arrived yet (our own dial, in flight) and an inbound connection that has
     /// delivered a readable dial hello and is being ruled on — every one of those **except** the
-    /// connection currently being adjudicated, which is the one the caller is ruling on. A connection
-    /// that counted itself would refuse every inbound dial there is; a SECOND hello-bearing one that
-    /// went uncounted would let two devices past the cap. See ``adjudicatingInbound``.
+    /// connection currently being adjudicated, which is the one the caller is ruling on; a connection
+    /// that counted itself would refuse every inbound dial there is (see ``adjudicatingInbound``). The
+    /// second population lives only inside a ruling: its own ruling marks a connection hello-bearing
+    /// and ends it as pending in the same synchronous run, so outside the test seam that books one
+    /// (``bookPendingInboundForTesting(_:)``) no other ruling and no caller outside one ever finds one.
     ///
     /// **A pending connection that has delivered no hello does not count.** It has said nothing, not
     /// even that it is a dialer, and it cannot be promoted until it does. Counting it let a silent
     /// twin of a dialer's own connection (on a cold start, Network.framework racing a second attempt
     /// across the service's addresses is the likeliest source) refuse that dialer's hello, and let any
-    /// device on the network that opened a connection and stayed silent refuse every hello until QUIC
-    /// reaped it. The cap does not rest on counting it: a second device is still held off by
-    /// ``admitInbound(at:)``'s one-tunnel floor and by the owner's own held connection, both of which a
-    /// promotion meets synchronously, in the run that read its hello.
+    /// device on the network that opened a connection and stayed silent refuse every hello for as long
+    /// as it held its place: until the radio stopped, for one that never opened a stream (QUIC's idle
+    /// timeout fails such a connection without ending it), or up to that timeout's 90 s, for one that
+    /// opened its stream. The cap rests on neither population of pending connection: a second device is
+    /// held off by ``admitInbound(at:)``'s one-tunnel floor and by the owner's own held connection, both
+    /// of which a promotion meets synchronously, in the run that read its hello.
     func hasConnectingPeers(besides peer: PeerHandle?) -> Bool {
         // R2: bounded by maxPendingInbound.
         for (key, pending) in pendingInbound where key != adjudicatingInbound && pending.stage == .helloDelivered {
@@ -1537,10 +1544,13 @@ private extension NetworkPairSession {
     /// its ``HelloRefusal`` and drops the connection.
     ///
     /// A connection no longer pending (reaped, or the radio stopped, while its hello was being read)
-    /// was ended, and logged, by whatever dropped it, so it is left alone. A hello that was read marks
-    /// its connection ``InboundStage/helloDelivered`` BEFORE the deadline is applied, so a hello that
-    /// arrived is ruled on however long it took, and the deadline then clears every connection still
-    /// silent past it, so a refusal's `pending` count names only connections that could still deliver.
+    /// was ended, and logged, by whatever dropped it, so it is left alone. Every ruling applies the
+    /// deadline before its verdict, to every connection but the one it rules on, so a refusal's
+    /// `pending` count names only connections that could still deliver, and the ruled connection is
+    /// ruled on however long its read took: a hello that was read marks its connection
+    /// ``InboundStage/helloDelivered`` BEFORE the deadline is applied, a stage the deadline never
+    /// touches, and a read that yielded no hello spares its connection, which then gets its own
+    /// ``HelloRefusal/unreadable`` refusal.
     func ruleOnHello(
         _ hello: ProximityPairDialHello?,
         pendingKey: MeshLinkKey,
@@ -1548,6 +1558,7 @@ private extension NetworkPairSession {
     ) -> (key: MeshLinkKey, task: Task<Void, Never>)? {
         guard pendingInbound[pendingKey] != nil else { return nil }
         guard let hello else {
+            expireStalledInbound(now: now, sparing: pendingKey)
             refuseHello(pendingKey, reason: .unreadable)
             return nil
         }
@@ -1748,13 +1759,14 @@ private extension NetworkPairSession {
     }
 
     /// Drops every pending inbound connection that has gone more than ``helloDeadlineSeconds`` since
-    /// it was booked without delivering a readable hello, each as ``PendingEnd/helloDeadline``.
+    /// it was booked without delivering a readable hello, each as ``PendingEnd/helloDeadline``, except
+    /// `ruled`: the connection a ruling on no readable hello is about to refuse, which that refusal ends.
     ///
     /// `now` is the instant the calling event read — an arrival's or a ruling's — so the radio owns no
     /// clock and a test hands in its own. Bounded by ``maxPendingInbound``.
-    func expireStalledInbound(now: Date) {
+    func expireStalledInbound(now: Date, sparing ruled: MeshLinkKey? = nil) {
         let stalled = pendingInbound.filter {
-            $0.value.stage != .helloDelivered
+            $0.key != ruled && $0.value.stage != .helloDelivered
                 && now.timeIntervalSince($0.value.bookedAt) > Self.helloDeadlineSeconds
         }
         // R2: bounded by maxPendingInbound.

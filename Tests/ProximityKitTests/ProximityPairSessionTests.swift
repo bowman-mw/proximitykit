@@ -16,8 +16,10 @@
 //     sighting of it, with no refresh; and an unchanged record is otherwise announced once;
 //   - the inbound hello (0.1.1): a pending connection that has sent no hello refuses nobody, the
 //     owner's gate included; the hello deadline drops a connection silent past it, on a clock the cell
-//     hands in; two connections that have both delivered hellos still refuse, the two-device cap; and
-//     every refusal's line names its reason and how many connections were pending;
+//     hands in; every ruling applies the deadline to the connections beside it first, a read hello's
+//     only after marking it read, so a late hello is still admitted and an unreadable one still refused
+//     by its own reason; two connections that have both delivered hellos still refuse, the two-device
+//     cap; and every refusal's line names its reason and how many connections were pending;
 //   - the diagnostics (0.1.1): the radio's `connected` line names the kind of interface its connection
 //     runs over, and every pairing reports to the inspector its session was built with.
 //
@@ -119,7 +121,8 @@ import Testing
     /// her hello and one that never opens a stream. Both are booked as they arrive. The radio's
     /// connecting window used to count every pending connection but the one being ruled on, so the
     /// owner's gate (the session's own, wired here) refused Blair's hello beside her own silent twin,
-    /// and the dial failed until QUIC reaped the twin. Only a connection that has delivered a readable
+    /// and her every dial failed until the radio stopped, since QUIC's idle timeout fails a connection
+    /// that never opened a stream without ending it. Only a connection that has delivered a readable
     /// hello counts now: the gate admits her, nothing is refused, and the twin is left to its deadline.
     @Test func aStreamlessPendingConnectionDoesNotRefuseTheHelloOfTheDialerBesideIt() throws {
         let host = PackageTestHost()
@@ -193,6 +196,79 @@ import Testing
         #expect(capture.lines(named: "recipe.quic.pendingBooked").map { $0.context["pending"] } == ["1", "2", "2", "2"],
                 "the bookings' lines: \(capture.lines(named: "recipe.quic.pendingBooked"))")
         #expect(capture.lines(named: "recipe.quic.helloRefused").isEmpty, "the deadline is not a refusal")
+        radio.stop()
+    }
+
+    /// **A ruling applies the deadline, and only after it has marked its own hello read.**
+    ///
+    /// Blair's dial, its stream open, and a connection that opened none are booked at one instant, and
+    /// her hello is ruled on six seconds later, when both have run past the deadline. The ruling marks
+    /// her hello read before it applies the deadline, so a hello that arrived is ruled on however long
+    /// it took, and she is admitted; the deadline it then applies reaps the silent connection, whose line
+    /// comes before her admission's. A ruling that skipped the deadline left the silent one pending, and
+    /// one that applied it before marking the hello reaped Blair's own connection and admitted nobody.
+    @Test func aRulingAppliesTheDeadlineAfterMarkingItsOwnHelloRead() throws {
+        let host = PackageTestHost()
+        let (radio, session) = try makeSession(on: host)
+        let blair = browse("b1a1700000f1", named: "Blair", sid: "blair-sid", on: radio)
+        let booked = Date(timeIntervalSinceReferenceDate: 812_000_000)
+        let dial = MeshLinkKey("blair-dial")
+        let silent = MeshLinkKey("silent")
+        #expect(radio.bookPendingInboundForTesting(dial, stage: .readingHello, at: booked)
+                    && radio.bookPendingInboundForTesting(silent, stage: .awaitingStream, at: booked),
+                "the radio did not book the two arrivals")
+
+        let capture = PackageAuditCapture(markedOnly: true)
+        let admitted = capture.marking {
+            radio.ruleOnHelloForTesting(
+                ProximityPairDialHello(sessionID: "blair-sid"), pendingKey: dial, now: booked.addingTimeInterval(6))
+        }
+        #expect(admitted == blair.key, "Blair's hello, ruled on six seconds after her connection arrived, was not admitted")
+        let ended = capture.lines(named: "recipe.quic.pendingEnded").map(\.context)
+        #expect(ended == [
+            ["connection": radio.peerLabel(for: silent), "reason": "helloDeadline", "stage": "awaitingStream", "pending": "1"],
+            ["connection": radio.peerLabel(for: dial), "reason": "admitted", "stage": "helloDelivered", "pending": "0"]
+        ], "the ruling's lines: \(ended)")
+        #expect(capture.lines(named: "recipe.quic.helloRefused").isEmpty,
+                "a hello was refused: \(capture.lines(named: "recipe.quic.helloRefused"))")
+        #expect(radio.pendingInboundCountForTesting == 0, "a connection is still pending after the ruling")
+        session.stop()
+        try host.tearDown()
+    }
+
+    /// **A ruling on no readable hello applies the deadline too, to every connection but the one it
+    /// refuses.**
+    ///
+    /// A connection whose stream opened but whose hello never came off it and a twin that opened no
+    /// stream are booked at one instant, and the read ends with nothing six seconds later, when both have
+    /// run past the deadline. The ruling reaps the twin first, so its refusal counts only connections that
+    /// could still deliver (`pending=1`), and then refuses the connection it rules on for its own reason,
+    /// `unreadable`: that connection's ruling ends it, not the deadline. A ruling that refused first counted
+    /// the stalled twin and left it pending, and one that let the deadline take the ruled connection wrote
+    /// no refusal at all.
+    @Test func aRulingOnNoReadableHelloReapsTheStalledConnectionsBesideItFirst() throws {
+        let radio = try makeRadio().radio
+        let booked = Date(timeIntervalSinceReferenceDate: 812_000_000)
+        let unreadable = MeshLinkKey("unreadable-hello")
+        let twin = MeshLinkKey("silent-twin")
+        #expect(radio.bookPendingInboundForTesting(unreadable, stage: .readingHello, at: booked)
+                    && radio.bookPendingInboundForTesting(twin, stage: .awaitingStream, at: booked),
+                "the radio did not book the two arrivals")
+
+        let capture = PackageAuditCapture(markedOnly: true)
+        let admitted = capture.marking {
+            radio.ruleOnHelloForTesting(nil, pendingKey: unreadable, now: booked.addingTimeInterval(6))
+        }
+        #expect(admitted == nil, "a ruling on no readable hello admitted \(String(describing: admitted))")
+        #expect(capture.lines(named: "recipe.quic.helloRefused").map(\.context) == [[
+            "connection": radio.peerLabel(for: unreadable), "reason": "unreadable", "pending": "1"
+        ]], "the refusal's line: \(capture.lines(named: "recipe.quic.helloRefused"))")
+        let ended = capture.lines(named: "recipe.quic.pendingEnded").map(\.context)
+        #expect(ended == [
+            ["connection": radio.peerLabel(for: twin), "reason": "helloDeadline", "stage": "awaitingStream", "pending": "1"],
+            ["connection": radio.peerLabel(for: unreadable), "reason": "refused", "stage": "readingHello", "pending": "0"]
+        ], "the ruling's lines: \(ended)")
+        #expect(radio.pendingInboundCountForTesting == 0, "a connection is still pending after the ruling")
         radio.stop()
     }
 

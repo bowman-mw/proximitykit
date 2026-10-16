@@ -738,13 +738,18 @@ public final class ProximityPairSession {
     /// was reachable from `didNotStart*` alone, and a QUIC radio that reported a per-operation
     /// refusal through it would stand the whole radio down on an ordinary evening.
     ///
-    /// The guard covers the whole of "something would be lost": a live pairing, and equally the
-    /// **connecting window** — a dial in flight or an inbound connection mid-hello lives in the
-    /// radio's tunnels and pending map, not in `connections`, and `stop()` cancels both. Under MC
-    /// that window was unreachable from here (the door opened at start and nowhere else); a QUIC
-    /// browser failing mid-evening would otherwise abort the user's tap and clear the picker. The
-    /// failure itself, `first` (the radio's own message, or the error a `start()` caught), is
-    /// emitted either way, so nothing about it is silent.
+    /// The guard holds the radio up for a live pairing, and equally for the **connecting window**
+    /// (``ProximityPairRadioSession/hasConnectingPeers(besides:)``): the user's dial in flight lives
+    /// in the radio's tunnels, not in `connections`, and `stop()` would cancel it. Under MC that window
+    /// was unreachable from here (the door opened at start and nowhere else); a QUIC browser failing
+    /// mid-evening would otherwise abort the user's tap and clear the picker. An inbound connection
+    /// counts in the window only once its dial hello has been read, which is inside its own synchronous
+    /// ruling, so one whose hello is still being read holds nothing up: a failure that arrives then
+    /// stands the radio down and `stop()` cancels that peer's dial, which fails on its side. That is
+    /// accepted: when every pending connection counted, a stray connection that never spoke kept a
+    /// failed radio from standing down and retrying for as long as it stayed pending. The failure
+    /// itself, `first` (the radio's own message, or the error a `start()` caught), is emitted either
+    /// way, so nothing about it is silent.
     private func handleTransportError(_ first: Event) {
         emit(first)
         guard connections.isEmpty, !session.hasConnectingPeers(besides: nil), isRunning else { return }
