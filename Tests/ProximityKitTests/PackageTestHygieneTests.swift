@@ -339,6 +339,50 @@ import Testing
             invariant: packageKeychainSuiteInvariant),
         PackageKeychainFile(
             file: "CrossVersionFixtureTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        // Plan step A1's second batch of copied suites: the suites of Fernlet's tests that reach the
+        // keychain and open no store, and the fixtures they build their identities through.
+        PackageKeychainFile(
+            file: "IdentityServiceTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "MemoryLifecycleTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshChunkerTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshDeliveryTargetTests.swift", kind: .fixtureEnum(type: "MeshDeliveryFixtures"),
+            invariant: packageKeychainFixtureEnumInvariant),
+        PackageKeychainFile(
+            file: "MeshDialPolicyTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshIntroductionAuthorityTests.swift", kind: .readsFirst(type: "MeshLedgerChainFixture"),
+            invariant: """
+                the fixture's one initializer reads PackageTestEnvironment.keychain first and every keychain \
+                line of the file sits in one of its instance members (the initializer that provisions its \
+                three identities, the teardown that deletes their rows and the admission it signs), so none \
+                runs before a fixture exists and the in-memory store is ProximityKit's keychain backend; the \
+                file's suite builds its identities only through the fixture
+                """),
+        PackageKeychainFile(
+            file: "MeshKeyAgreementAdvertisementTests.swift", kind: .fixtureEnum(type: "MeshKeyAgreementFixtures"),
+            invariant: packageKeychainFixtureEnumInvariant),
+        PackageKeychainFile(
+            file: "MeshKeyAgreementAdvertisementTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshMembershipEventWireTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshPartitionDetectionTests.swift", kind: .fixtureEnum(type: "MeshPartitionFixtures"),
+            invariant: packageKeychainFixtureEnumInvariant),
+        PackageKeychainFile(
+            file: "MeshRecipientKeyWrapTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshRoutedManifestTests.swift", kind: .suite,
             invariant: packageKeychainSuiteInvariant)
     ]
 
@@ -413,17 +457,20 @@ import Testing
     /// track, when the pair copies brought 24; 122 since its review, when the goodbye walls' home list
     /// brought 1; 124 since plan step A2's groundwork, when the cross-version fixture suite's two store
     /// constructions brought 2; 125 since plan step A1's second batch of copied suites, its support, when
-    /// the identity's call-shape binding brought 1 (``packageTestBindingLines``). The rows spell a needle
-    /// the per-file rule does not cover: the soundness suite's storage cell, which reads
+    /// the identity's call-shape binding brought 1 (``packageTestBindingLines``); 136 since its copies,
+    /// when the bindings they need brought 2 more and the copies 9 (two pure static reads, one bare
+    /// declaration in a file on no keychain list and six throwaway-coordinator lines). The rows spell a
+    /// needle the per-file rule does not cover: the soundness suite's storage cell, which reads
     /// `URL.applicationSupportDirectory` as a value; the package's file locator's one read of its own
     /// source's path; the routed store isolation walls' suite, whose own name spells the store's; the
     /// namespace and platform walls' needles inside literals (``packageNamespaceWallLines``,
     /// ``packagePlatformWallLines``); the package's call-shape bindings' lines that name a keychain-reaching
-    /// type (``packageTestBindingLines``); the copied suites' reads of a keychain-reaching type's statics
-    /// and their source walls' needles inside literals (``packageCopiedStaticLines``,
-    /// ``packageCopiedSourceTextLines``, ``packageCopiedRoutedWallLines``); and the cross-version fixture
-    /// suite's two stores over copies of a tag's fixture folders (``packageCrossVersionStoreLines``); each
-    /// set under one invariant.
+    /// type (``packageTestBindingLines``); the copied suites' reads of a keychain-reaching type's statics,
+    /// their source walls' needles inside literals, their bare declarations in a file on no keychain list
+    /// and their throwaway coordinators (``packageCopiedStaticLines``, ``packageCopiedSourceTextLines``,
+    /// ``packageCopiedRoutedWallLines``, ``packageCopiedDeclarationLines``,
+    /// ``packageCopiedCoordinatorLines``); and the cross-version fixture suite's two stores over copies of
+    /// a tag's fixture folders (``packageCrossVersionStoreLines``); each set under one invariant.
     static let packageHazardAllowlist: [(file: String, line: String, invariant: String)] = [
         (file: "ProximityNamespaceSoundnessTests.swift",
          line: "for base in [URL.applicationSupportDirectory, scratch] {",
@@ -462,6 +509,10 @@ import Testing
         (file: $0.file, line: $0.line, invariant: packageCrossVersionStoreInvariant)
     } + packageTestBindingLines.map {
         (file: "TestSupport/PackageTestBindings.swift", line: $0, invariant: packageTestBindingInvariant)
+    } + packageCopiedDeclarationLines.map {
+        (file: $0.file, line: $0.line, invariant: packageCopiedDeclarationInvariant)
+    } + packageCopiedCoordinatorLines.map {
+        (file: $0.file, line: $0.line, invariant: packageCopiedCoordinatorInvariant)
     }
 
     /// What makes every line of ``packageCrossVersionStoreLines`` safe in the unhosted bundle (rule I9).
@@ -489,8 +540,8 @@ import Testing
         (MeshNetworkManager.maxReGossipFrames, IdentityService.presenceEpochSeconds, and \
         MeshRoutedStoreFormat.maxItems, whose type's name holds the store's) or a nonisolated pure \
         function of its arguments (MeshNetworkManager.shouldInitiateInvite(localSessionID:peerSessionID:), \
-        IdentityService.fingerprint(of:)); nothing on the line builds an instance, so no identity \
-        provisions, no store opens and nothing reaches the keychain
+        IdentityService.fingerprint(of:), IdentityService.verify(_:of:by:purpose:)); nothing on the line \
+        builds an instance, so no identity provisions, no store opens and nothing reaches the keychain
         """
 
     /// The copied suites' lines that read a keychain-reaching type's static, each exact as trimmed (rule
@@ -521,15 +572,20 @@ import Testing
         (file: "PresenceEpochPostureTests.swift",
          line: "#expect(mintInstants.last == Self.anchor.addingTimeInterval(IdentityService.presenceEpochSeconds),"),
         (file: "PresenceEpochPostureTests.swift",
-         line: #"#expect(IdentityService.presenceEpochSeconds == 900, "the one named constant")"#)
+         line: #"#expect(IdentityService.presenceEpochSeconds == 900, "the one named constant")"#),
+        // Plan step A1's second batch of copied suites: a signature checked against a public key.
+        (file: "MeshQuorumPartitionTests.swift", line: "#expect(IdentityService.verify("),
+        (file: "MeshRoutedDrainAnswerTests.swift", line: "#expect(IdentityService.verify(")
     ]
 
     /// What makes every line of ``packageTestBindingLines`` safe in the unhosted bundle (rule I9).
     static let packageTestBindingInvariant = """
         the line declares a call-shape binding over a type that can reach the keychain: an extension of \
-        IdentityService (its participant-less initializer under .packageTest), which names the type and \
-        runs nothing until a suite calls the binding; an identity's initializer reads and writes nothing, so \
-        whatever provisions an identity built through it is a file whose own kind reads \
+        IdentityService (its participant-less initializer under .packageTest and its static agreement's \
+        old spelling) or a parameter of that type (the manifest mint and the typed envelope mint), which \
+        names the type and runs nothing until a suite calls the binding; an identity's initializer reads \
+        and writes nothing, and signing and the static agreement use the keys an identity already holds, \
+        so whatever provisions an identity through a binding is a file whose own kind reads \
         PackageTestEnvironment.keychain first
         """
 
@@ -537,7 +593,47 @@ import Testing
     /// TestSupport/PackageTestBindings.swift (rule I9; ProximityKit plan step A1's second batch of copied
     /// suites, which restored Fernlet's identity and envelope shapes there).
     static let packageTestBindingLines = [
-        "extension IdentityService {"
+        "extension IdentityService {",
+        "identity: IdentityService",
+        "identityService: IdentityService, envelopeID: UUID = UUID(), senderDisplayName: String,"
+    ]
+
+    /// What makes every line of ``packageCopiedDeclarationLines`` safe in the unhosted bundle (rule I9).
+    static let packageCopiedDeclarationInvariant = """
+        the line declares a stored property of a fixture value type with its type and no initializer \
+        (a quorum roster's identities), in a file on no keychain list: it names IdentityService and runs \
+        nothing, and the identities it holds are provisioned by a fixture enum that reads \
+        PackageTestEnvironment.keychain first (MeshPartitionFixtures)
+        """
+
+    /// The copied suites' bare declarations of a keychain-reaching type in a file on no keychain list,
+    /// each exact as trimmed (rule I9; ProximityKit plan step A1's second batch of copied suites). A bare
+    /// declaration in a listed file needs no row (``isBareDeclaration(_:)``).
+    static let packageCopiedDeclarationLines: [(file: String, line: String)] = [
+        (file: "MeshQuorumPartitionTests.swift", line: "let identities: [IdentityService]")
+    ]
+
+    /// What makes every line of ``packageCopiedCoordinatorLines`` safe in the unhosted bundle (rule I9).
+    static let packageCopiedCoordinatorInvariant = """
+        the line builds a never-begun coordinator over a throwaway identity, a slot's stand-in that no \
+        cell begins: an identity's initializer reads and writes nothing, and a coordinator provisions its \
+        identity only when a session begins (its prepareSession), so neither the helper's declaration nor \
+        its body reaches the keychain, whoever calls it and whenever
+        """
+
+    /// The copied suites' throwaway-coordinator helpers' lines, each exact as trimmed (rule I9;
+    /// ProximityKit plan step A1's second batch of copied suites): a file-scoped helper and a suite's
+    /// static, which the suite kind's structure would refuse as a keychain line outside a suite or in a
+    /// static member that is not private.
+    static let packageCopiedCoordinatorLines: [(file: String, line: String)] = [
+        (file: "MemoryLifecycleTests.swift", line: "private func makeThrowawayCoordinator() -> ProximityCoordinator {"),
+        (file: "MemoryLifecycleTests.swift",
+         line: #"let identity = IdentityService(keychainService: "test.memory.lifecycle.\(UUID().uuidString)")"#),
+        (file: "MemoryLifecycleTests.swift", line: "return ProximityCoordinator("),
+        (file: "MeshDialPolicyTests.swift", line: "static func throwawayCoordinator() -> ProximityCoordinator {"),
+        (file: "MeshDialPolicyTests.swift", line: "ProximityCoordinator("),
+        (file: "MeshDialPolicyTests.swift",
+         line: #"identity: IdentityService(keychainService: "test.mesh.dialpolicy.\(UUID().uuidString)"),"#)
     ]
 
     /// What makes every line of ``packageCopiedSourceTextLines`` safe in the unhosted bundle (rule I9).
@@ -1580,10 +1676,12 @@ import Testing
     /// plan step A1.3's final review (2026-10-15): 98 → 99, for the NEW `MeshP9HonestyAcceptanceTests`,
     /// which holds the `.remove` branch's stand-in that Fernlet's P9 honesty cell can no longer read.
     /// RAISED at plan step A2's groundwork (2026-10-15): 99 → 100, for the NEW `CrossVersionFixtureTests`,
-    /// which decodes tag 0.1.0's wire and on-disk fixtures with today's code. A suite added, moved out or
-    /// deleted changes it in the same commit, argued and measured; a deletion lowers it only with the
-    /// retirement argued.
-    static let measuredInventoryRows = 100
+    /// which decodes tag 0.1.0's wire and on-disk fixtures with today's code. RAISED at plan step A1's
+    /// second batch of copied suites (2026-10-16): 100 → 117, for the 17 suites of Fernlet's tests that
+    /// reach the keychain and open no store, sixteen of them and `IdentityServiceTests`, each copied with
+    /// its name and run here. A suite added, moved out or deleted changes it in the same commit, argued and
+    /// measured; a deletion lowers it only with the retirement argued.
+    static let measuredInventoryRows = 117
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -1605,8 +1703,10 @@ import Testing
     /// groundwork (2026-10-15): 619 → 643, for `CrossVersionFixtureTests`' 24. RAISED at plan step A1's
     /// second batch of copied suites, its support (2026-10-16): 643 → 644, for the
     /// `PackageTestSupportTests` cell that holds the switchable install binding to Fernlet's adapter,
-    /// case for case. A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 644
+    /// case for case. RAISED at its copies (2026-10-16): 644 → 801, for the 157 tests of its 17 suites
+    /// (141 in the sixteen that reach the keychain and open no store, and `IdentityServiceTests`' 16). A
+    /// test added or removed changes it in the same commit.
+    static let measuredDeclaredTests = 801
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

@@ -22,7 +22,9 @@
 //
 // A partial copy (ProximityKit plan step A1, the split's first batch of copied suites): of the
 // Fernlet repository's FernletTests file of the same name, this holds only
-// `MeshInventoryDigestTests`, with its name and tests unchanged, and the fixtures the package's
+// `MeshInventoryDigestTests` and, since ProximityKit plan step A1's second batch of copied suites (those
+// that reach the keychain and open no store), `MeshMembershipRecordVerifierTests`, with their names
+// and tests unchanged, and the fixtures the package's
 // copied suites read (`MeshMembershipEventFixtures` and `extension MeshInventoryDigestPayload`);
 // and, since ProximityKit plan step A1.3 (batch D: the cells of that repository's tests that read this
 // module's sources, copied before it deletes its in-tree copy of the module), the half of
@@ -262,6 +264,310 @@ struct MeshInventoryDigestTests {
         #expect(decoded.departureCount == 0)
         #expect(decoded.terminationCount == MeshMembershipBounds.maxTerminationRecords)
         #expect(!decoded.isWellFormed)   // a zero-length hash is malformed, not a cheap collision
+    }
+}
+
+// MARK: - Verify-then-insert
+
+/// The seam item 1 deliberately left open: a record enters a ledger only after its signature
+/// verifies against the signer's ADMITTED key.
+@MainActor
+@Suite(.serialized)
+struct MeshMembershipRecordVerifierTests {
+
+    /// The bundle's in-memory keychain, read as each cell's suite instance is built, so the installer
+    /// has run before a cell's identities reach the keychain.
+    let keychain = PackageTestEnvironment.keychain
+
+    private func makeIdentity() throws -> (IdentityService, String) {
+        let id = "com.fernlet.mesh-membership.test.\(UUID().uuidString)"
+        let service = IdentityService(keychainService: id)
+        try service.ensureProvisioned()
+        return (service, id)
+    }
+
+    /// A verifier holding `founder` plus every identity in `others`, all admitted by the founder.
+    private func seeded(
+        founder: IdentityService,
+        others: [IdentityService],
+        meshID: UUID
+    ) throws -> MeshMembershipRecordVerifier {
+        var verifier = MeshMembershipRecordVerifier(
+            meshID: meshID,
+            founderSigningPublicKey: founder.localSigningPublicKey
+        )
+        #expect(verifier.insert(try admission(of: founder, by: founder, meshID: meshID)) == nil)
+        for member in others {
+            #expect(verifier.insert(try admission(of: member, by: founder, meshID: meshID)) == nil)
+        }
+        return verifier
+    }
+
+    private func admission(
+        of joiner: IdentityService,
+        by admitter: IdentityService,
+        meshID: UUID
+    ) throws -> SignedAdmissionRecord {
+        SignedAdmissionRecord(token: try MeshAdmissionToken.signed(
+            meshID: meshID,
+            joinerFingerprint: joiner.localFingerprint,
+            joinerSigningPublicKey: joiner.localSigningPublicKey,
+            admitterIdentity: admitter,
+            grantedAt: MeshMembershipEventFixtures.base
+        ))
+    }
+
+    @Test func aFoundersOwnAdmissionBootstrapsTheRoster() throws {
+        let (founder, id) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: id) }
+        let meshID = UUID()
+        let verifier = try seeded(founder: founder, others: [], meshID: meshID)
+        #expect(verifier.roster.memberFingerprints == [founder.localFingerprint])
+    }
+
+    /// Without the founder key there is nothing to root the first admission in, so the ledger stays
+    /// empty. Fail closed: an empty roster admits nobody, which is the right answer for a device
+    /// that cannot tell who started the mesh.
+    @Test func anUnrootedAdmissionIsRefused() throws {
+        let (founder, id) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: id) }
+        let meshID = UUID()
+        var verifier = MeshMembershipRecordVerifier(meshID: meshID, founderSigningPublicKey: nil)
+        let rejection = verifier.insert(try admission(of: founder, by: founder, meshID: meshID))
+        #expect(rejection == .unauthorizedAdmitter)
+        #expect(verifier.ledger.admissions.isEmpty)
+    }
+
+    @Test func aSignedDepartureIsAcceptedAndSubtracts() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (leaver, lid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: lid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [leaver], meshID: meshID)
+        #expect(verifier.roster.memberCount == 2)
+
+        let record = try SignedDepartureRecord.signed(
+            meshID: meshID, identity: leaver, occurredAt: MeshMembershipEventFixtures.base)
+        #expect(verifier.insert(record) == nil)
+        #expect(verifier.roster.memberFingerprints == [founder.localFingerprint])
+    }
+
+    /// The whole reason this seam exists: junk must be refused BEFORE it competes for one of the
+    /// sixteen slots. A forged departure with a very low timestamp would otherwise win the
+    /// earliest-wins truncation on every device it reached.
+    @Test func aForgedDepartureNeverReachesTheCappedSet() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (member, mid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: mid) }
+        let (stranger, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [member], meshID: meshID)
+
+        // Signed by a stranger, claiming to be the member.
+        let honest = try SignedDepartureRecord.signed(
+            meshID: meshID, identity: stranger, occurredAt: Date(timeIntervalSince1970: 1))
+        let forged = SignedDepartureRecord(
+            meshID: meshID,
+            memberFingerprint: member.localFingerprint,
+            occurredAt: honest.occurredAt,
+            signature: honest.signature
+        )
+        #expect(verifier.insert(forged) == .signatureInvalid)
+        #expect(verifier.ledger.departures.isEmpty)
+        #expect(verifier.roster.memberCount == 2)
+
+        // And a departure about somebody the mesh never admitted has no key to check at all.
+        let outsider = try SignedDepartureRecord.signed(meshID: meshID, identity: stranger)
+        #expect(verifier.insert(outsider) == .signerNotAdmitted)
+        #expect(verifier.ledger.departures.isEmpty)
+    }
+
+    @Test func aRecordFromAnotherMeshIsRefused() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (member, mid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: mid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [member], meshID: meshID)
+        let record = try SignedDepartureRecord.signed(meshID: UUID(), identity: member)
+        #expect(verifier.insert(record) == .foreignMesh)
+    }
+
+    /// Plan §10.4's arithmetic, re-checked against the RECEIVER's merged roster. Roster 3 needs 2
+    /// votes; one vote is short, and the target's own vote never counts.
+    @Test func aRemovalNeedsQuorumFromTheReceiversRoster() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (second, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let (target, tid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: tid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [second, target], meshID: meshID)
+        #expect(verifier.roster.quorumThreshold == 2)
+
+        let short = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint]
+        )
+        #expect(verifier.insert(short) == .quorumNotMet(required: 2, presented: 1))
+
+        let selfVote = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, target.localFingerprint]
+        )
+        #expect(verifier.insert(selfVote) == .voterNotEligible)
+
+        let complete = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, second.localFingerprint]
+        )
+        #expect(verifier.insert(complete) == nil)
+        #expect(!verifier.roster.contains(fingerprint: target.localFingerprint))
+    }
+
+    /// A cited voter who is not on the receiver's roster is not evidence. The record is refused
+    /// whether the voter is a stranger the mesh never admitted or a member who has since left —
+    /// quorum is arithmetic over the roster the RECEIVER derives, at the moment it derives it.
+    @Test func aRemovalCitingANonMemberVoterIsRefused() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (second, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let (target, tid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: tid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [second, target], meshID: meshID)
+
+        let stranger = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, "fp-never-admitted"]
+        )
+        #expect(verifier.insert(stranger) == .voterNotEligible)
+
+        // The same is true of a voter who WAS a member: the departure subtracted them, so their
+        // vote no longer counts towards a quorum evaluated after it.
+        #expect(verifier.insert(try SignedDepartureRecord.signed(meshID: meshID, identity: second)) == nil)
+        let departedVoter = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, second.localFingerprint]
+        )
+        #expect(verifier.insert(departedVoter) == .voterNotEligible)
+        #expect(verifier.ledger.removals.isEmpty)
+    }
+
+    /// A re-gossiped removal is the NORMAL case (plan §10.5), so replaying one must be free: the
+    /// set dedups by removed member, and the roster it derives does not move a second time. If it
+    /// did, every re-gossip on every later connect would spend a rotation.
+    @Test func aReplayedRemovalIsDedupedRatherThanCountedTwice() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (second, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let (target, tid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: tid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [second, target], meshID: meshID)
+
+        let record = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, second.localFingerprint]
+        )
+        #expect(verifier.insert(record) == nil)
+        let rosterAfterFirst = verifier.roster
+        #expect(verifier.insert(record) == nil, "a re-gossiped record is not an error")
+        #expect(verifier.ledger.removals.count == 1, "and it does not spend a second of sixteen slots")
+        #expect(verifier.roster == rosterAfterFirst, "so the roster does not move twice")
+    }
+
+    /// A termination from somebody who is not a member must not be able to end the mesh.
+    @Test func aTerminationMustComeFromAMember() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (member, mid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: mid) }
+        let (stranger, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [member], meshID: meshID)
+
+        let outsider = try SignedTerminationRecord.signed(
+            meshID: meshID, identity: stranger, rosterAtSigning: [])
+        #expect(verifier.insert(outsider) == .signerNotAdmitted)
+        #expect(verifier.roster.status == .active)
+
+        let real = try SignedTerminationRecord.signed(
+            meshID: meshID,
+            identity: member,
+            rosterAtSigning: [founder.localFingerprint, member.localFingerprint]
+        )
+        #expect(verifier.insert(real) == nil)
+        #expect(verifier.roster.status == .terminated)
+    }
+
+    /// A signed digest verifies, and the same records on both sides compare equal (plan §10.5).
+    @Test func anInventoryDigestVerifiesAndCompares() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (member, mid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: mid) }
+        let meshID = UUID()
+        let verifier = try seeded(founder: founder, others: [member], meshID: meshID)
+
+        let payload = try MeshInventoryDigestPayload.signed(
+            meshID: meshID,
+            ledger: verifier.ledger,
+            identity: member,
+            sentAt: MeshMembershipEventFixtures.base
+        )
+        #expect(verifier.verify(payload) == nil)
+        #expect(verifier.matchesLocalInventory(payload.digest))
+
+        let stale = MeshInventoryDigestPayload.signedForTestingWithTamperedDigest(payload)
+        #expect(verifier.verify(stale) == .signatureInvalid)
+    }
+
+    /// A merge imports records ONE AT A TIME through the same door — a peer that forged one record
+    /// must not be able to import all of them by handing over a whole ledger.
+    @Test func mergingAPeersLedgerVerifiesEveryRecord() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (member, mid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: mid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [member], meshID: meshID)
+
+        var hostile = MeshMembershipLedger.empty
+        hostile.departures = MeshMembershipRecordSet([SignedDepartureRecord(
+            meshID: meshID,
+            memberFingerprint: founder.localFingerprint,
+            occurredAt: Date(timeIntervalSince1970: 1),
+            signature: Data(repeating: 0x11, count: 64)
+        )])
+        let rejections = verifier.merge(hostile)
+        #expect(rejections == [.signatureInvalid])
+        #expect(verifier.roster.memberCount == 2)
     }
 }
 

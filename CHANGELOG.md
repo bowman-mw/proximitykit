@@ -34,6 +34,12 @@ changed, so nothing below needs a tag.
   The test support gains a participant-less `IdentityService(keychainService:)` binding and
   `PackageSwitchableInstallBinding`, an install binding a cell can switch, held to the answers of
   Fernlet's adapter case for case.
+- The package's tests hold the 17 suites of the Fernlet repository's tests that reach the keychain
+  and open no store (plan step A1's batch B, 157 tests), under their Fernlet names: the routed
+  chunker, manifest signing, recipient key wrap, drain answer and heart target, the membership record
+  verifier, key-agreement verification, a joiner's ledger adoption, the dial policy through a live
+  manager, the partition's branch view, the removal quorum's arithmetic, expiry, partition table and
+  signatures, an evicted slot releasing its transport link, and `IdentityServiceTests`.
 
 ## 0.1.0 — 2026-10-15
 

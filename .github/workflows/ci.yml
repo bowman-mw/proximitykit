@@ -189,9 +189,21 @@ jobs:
     # suites passed", its floor passed; the inventory 100 rows declaring 644 tests. The xcodebuild lanes
     # were not run for this note; the batch's copies commit measures the macOS lanes and the builds.
     # swift test's floor refused MIN_TESTS 645. ARITHMETIC CHECK: 643 + 1 = 644.
+    # RAISED 644 -> 801 and 100 -> 117 at plan step A1's second batch of copied suites on a Mac,
+    # 2026-10-16 (the same Xcode and Swift), for the 17 suites of the Fernlet repository's tests that
+    # reach the keychain and open no store, copied with their names and their tests
+    # (MeshRoutedManifestSigningTests 27, MeshChunkerTests 26, IdentityServiceTests 16,
+    # MeshRecipientKeyWrapTests 15, MeshKeyAgreementVerificationTests 11,
+    # MeshMembershipRecordVerifierTests 11, MeshLedgerAdoptionTests 7, MeshDialPolicyManagerTests 6,
+    # MeshRoutedHeartTargetTests 6, four suites of five, two of four, one of three and one of one), over
+    # this repository's tree with them: the Walls step passed, and swift test "Test run with 801 tests
+    # in 117 suites passed", its floor passed; the inventory 117 rows declaring 801 tests. The
+    # xcodebuild lanes were not run for this note; the 0.1.1 fixes' last commit measures them. swift
+    # test's floor refused MIN_TESTS 802, and swift test and the Walls step's declared floor refused
+    # MIN_SUITES 118. ARITHMETIC CHECK: 644 + 157 = 801 and 100 + 17 = 117.
     env:
-      MIN_TESTS: 644
-      MIN_SUITES: 100
+      MIN_TESTS: 801
+      MIN_SUITES: 117
     steps:
       - uses: actions/checkout@v4
 

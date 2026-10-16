@@ -25,8 +25,9 @@
 // A partial copy (ProximityKit plan step A1, the split's first batch of copied suites): of the
 // Fernlet repository's FernletTests file of the same name, this holds only `MeshChunkShapeTests`,
 // with its name and tests unchanged, and the fixtures the package's copied suites read
-// (`MeshChunkFixtures`, `extension MeshChunk` and `MeshChunkShapeFault`); its other suites stay
-// there, so what this header says of them is not held here.
+// (`MeshChunkFixtures`, `extension MeshChunk` and `MeshChunkShapeFault`, and, since ProximityKit plan
+// step A1's second batch of copied suites, `MeshChunkTamper`, which `MeshChunkerTests` reads); its
+// other suites stay there, so what this header says of them is not held here.
 
 import Foundation
 import Testing
@@ -209,6 +210,40 @@ enum MeshChunkShapeFault: String, CaseIterable, Sendable {
         case .countOverCap:
             return base.replacing(chunkCount: UInt32(MeshChunkFormat.maxChunkCount + 1))
         case .indexAtCount: return base.replacing(chunkIndex: base.chunkCount)
+        }
+    }
+}
+
+/// One SIGNED field per case; every case must land on `.signatureInvalid` and nothing else, which
+/// is the point of signing all of them. `meshID` and `payload` are deliberately absent — each has
+/// an earlier, differently named refusal of its own (`foreignMesh`, `chunkHashMismatch`).
+enum MeshChunkTamper: String, CaseIterable, Sendable {
+    case itemID, originFingerprint, contentHash, chunkIndex, chunkCount, chunkHash, expiresAt
+    case signatureByte
+
+    /// A minted chunk with this one field changed, through the memberwise init. The origin
+    /// substitute is another ADMITTED member, so every case reaches the signature check.
+    func applied(to chunk: MeshChunk, otherAdmittedOrigin: String) -> MeshChunk {
+        switch self {
+        case .itemID: return chunk.replacing(itemID: MeshMembershipEventFixtures.proposalID)
+        case .originFingerprint: return chunk.replacing(originFingerprint: otherAdmittedOrigin)
+        case .contentHash:
+            var hash = chunk.contentHash
+            hash[hash.startIndex] ^= 0x01
+            return chunk.replacing(contentHash: hash)
+        case .chunkIndex:
+            let moved = chunk.chunkIndex == 0 ? chunk.chunkIndex + 1 : chunk.chunkIndex - 1
+            return chunk.replacing(chunkIndex: moved)
+        case .chunkCount: return chunk.replacing(chunkCount: chunk.chunkCount + 1)
+        case .chunkHash:
+            var hash = chunk.chunkHash
+            hash[hash.startIndex] ^= 0x01
+            return chunk.replacing(chunkHash: hash)
+        case .expiresAt: return chunk.replacing(expiresAt: chunk.expiresAt.addingTimeInterval(1))
+        case .signatureByte:
+            var signature = chunk.signature
+            signature[signature.startIndex] ^= 0x01
+            return chunk.replacing(signature: signature)
         }
     }
 }

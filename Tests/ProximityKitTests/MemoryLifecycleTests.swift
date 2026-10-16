@@ -24,8 +24,11 @@
 //
 // A partial copy (ProximityKit plan step A1, the split's first batch of copied suites): of the
 // Fernlet repository's FernletTests file of the same name, this holds only
-// `ObservationLoopLifecycleTests`, with its name and tests unchanged; its other suites stay there,
-// so what this header says of them is not held here.
+// `ObservationLoopLifecycleTests` and, since ProximityKit plan step A1's second batch of copied suites
+// (those that reach the keychain and open no store), `MeshEvictionReleasesTransportLinkTests`, with
+// their names and tests unchanged, and the two helpers the second reads (`makePeer` and
+// `makeThrowawayCoordinator`); its other suites stay there, so what this header says of them is not
+// held here.
 
 @testable import ProximityKit
 import Foundation
@@ -67,6 +70,33 @@ private func waitUntil(
         if polls >= minimumPolls, clock.now >= deadline { return }
         try? await Task.sleep(for: .milliseconds(5))
     }
+}
+
+@MainActor
+private func makePeer(name: String = "peer-\(UUID().uuidString.prefix(8))") -> PeerHandle {
+    PeerHandle(
+        id: UUID(),
+        displayHint: name,
+        discoveryInfo: nil,
+        advertisedFingerprint: nil
+    )
+}
+
+/// A never-begun coordinator over mock transports (mirrors MeshNetworkManagerTests). The ranging
+/// mock is created inside — a `@MainActor` type can never be a default-argument value.
+@MainActor
+private func makeThrowawayCoordinator() -> ProximityCoordinator {
+    let identity = IdentityService(keychainService: "test.memory.lifecycle.\(UUID().uuidString)")
+    return ProximityCoordinator(
+        identity: identity,
+        transport: MockMultipeerTransport(),
+        ranging: MockRangingProvider(),
+        inspector: nil,
+        replayCache: ReplayCache(),
+        foregroundAnchor: nil,
+        displayName: "Local",
+        timeoutSeconds: 0
+    )
 }
 
 // MARK: - ObservationLoop
@@ -142,5 +172,32 @@ struct ObservationLoopLifecycleTests {
         #expect(weakOwner == nil, "the loop must hold its owner weakly across the suspension")
         task?.cancel()
         if let task { _ = await task.value }
+    }
+}
+
+// MARK: - MeshNetworkManager: evicted slots free their transport link (the MC link when this was written)
+
+@MainActor
+@Suite(.serialized)
+struct MeshEvictionReleasesTransportLinkTests {
+    let store = PackageTestHost()
+
+    /// `removeSlot` (timeouts, stale sweep, remote goodbye, session close, transport loss) must
+    /// request the per-peer kick — before the fix nothing in the eviction chain touched the shared
+    /// radio, so the link lingered until the whole search stopped.
+    ///
+    /// Asserted on the INJECTED radio rather than through a hook inside the MC session, which is
+    /// what the P2 item-8 seam bought: the claim is now "the eviction chain reached the transport",
+    /// read off the transport, and it holds whichever conformer is behind it.
+    @Test func evictingASlotRequestsTheTransportKick() {
+        let transport = FakeMeshTransportSession()
+        let manager = MeshNetworkManager(store: store, transport: transport)
+        let peer = makePeer()
+        manager.addSlotForTesting(coordinator: makeThrowawayCoordinator(), peer: peer, fingerprint: nil)
+
+        manager.evictSlotForTesting(peerID: peer.id)
+
+        #expect(transport.disconnectedPeers.map(\.id) == [peer.id],
+                "the evicted peer's link must be released, not left as a zombie")
     }
 }

@@ -164,8 +164,17 @@ final class PackageTestHost: ProximityHost {
     /// Fernlet's rows take, and the caps they computed to at plan step A1.1 (9 065, 553 and 10 551 337
     /// bytes) as literals.
     var meshRoutedTypeEntries: [MeshRoutedTypeEntry] {
-        let types = proximityNamespace.family.vocabulary.routedTypes
-        return [
+        Self.routedTypeEntries(proximityNamespace.family.vocabulary.routedTypes)
+    }
+
+    /// The temporary-message, heart and photo rows on `types`: the rows ``meshRoutedTypeEntries`` answers
+    /// for a host's namespace, and the ones the package's test bindings build the registry the copied
+    /// suites call `increment1` over.
+    ///
+    /// - Parameter types: The routed types whose tokens the rows carry.
+    /// - Returns: The three rows, in that order.
+    nonisolated static func routedTypeEntries(_ types: ProximityNamespace.RoutedTypes) -> [MeshRoutedTypeEntry] {
+        [
             MeshRoutedTypeEntry(
                 token: types.tempMessage, maxItemByteCount: 9_065, destinations: .fullRosterAtCreation,
                 relayRetention: .originRetainsUntilDeparture, finalAck: .durableRecipientStorage,
