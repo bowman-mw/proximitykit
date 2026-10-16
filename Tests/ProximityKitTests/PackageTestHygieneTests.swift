@@ -1704,9 +1704,12 @@ import Testing
     /// second batch of copied suites, its support (2026-10-16): 643 → 644, for the
     /// `PackageTestSupportTests` cell that holds the switchable install binding to Fernlet's adapter,
     /// case for case. RAISED at its copies (2026-10-16): 644 → 801, for the 157 tests of its 17 suites
-    /// (141 in the sixteen that reach the keychain and open no store, and `IdentityServiceTests`' 16). A
-    /// test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 801
+    /// (141 in the sixteen that reach the keychain and open no store, and `IdentityServiceTests`' 16).
+    /// RAISED at the 0.1.1 inbound-hello fixes and diagnostics (2026-10-16): 801 → 807, for the six cells
+    /// `ProximityPairSessionTests` gains (the stream-less connection, the hello deadline, the two-hello
+    /// cap, the refusal reasons, the interface key and the inspector). A test added or removed changes it
+    /// in the same commit.
+    static let measuredDeclaredTests = 807
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

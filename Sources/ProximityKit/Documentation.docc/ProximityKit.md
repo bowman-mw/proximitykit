@@ -1008,7 +1008,7 @@ golden, wipe, audit-bridge, transport and localization tests that read this modu
 from that step's final review holding the P9 battery's honesty pin on the `.remove` branch's stand-in
 (`MeshP9HonestyAcceptanceTests`); and, in the package repository, the example app's namespace held
 apart (`ExampleNamespaceTests`, plan step A1.2) and every released tag's bytes decoded by today's code
-(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred seventeen suites, 801 tests. The
+(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred seventeen suites, 807 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1908,6 +1908,21 @@ paired and never re-minted) comes back to the resumed browser under an unchanged
 sighting of each record after a resume is announced whether or not it changed. Announcing on change
 alone left such a peer out of the picker, and refused its dial, until a refresh
 (`ProximityPairSessionTests`).
+
+**An inbound connection is pending until its dial hello is read, and only a read hello counts as
+connecting** (0.1.1). The connecting window used to count every pending connection but the one being
+ruled on, so a dialer's own silent second connection (on a cold start, Network.framework racing a
+second attempt across the service's addresses is the likeliest source) refused that dialer's hello,
+and any device on the network that opened a connection and said nothing refused every hello until
+QUIC's idle timeout reaped it, up to 90 s. A connection that delivers no readable hello within five
+seconds is dropped at the next arrival or ruling, so the radio still owns no timer; and the two-device
+cap still holds, at the radio's one-tunnel floor and at the owner's held connection, which a promotion
+meets in the run that read its hello. Every booking and every end of a pending connection writes a
+line (`recipe.quic.pendingBooked`; `recipe.quic.pendingEnded`, with why and how far it got),
+`recipe.quic.helloRefused` names its reason (`unreadable`, `unresolved`, `ownerRefused`,
+`keptEstablished` or `tunnelHeld`) and how many connections were pending, and `recipe.quic.connected`
+names the kind of interface its connection runs over (`interface`: `wifi`, `wiredEthernet`, `loopback`,
+`cellular`, `other` or `unknown`).
 
 Internal to the module, DEBUG-only, and listed here so they are never mistaken for production
 behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroductionChaosBehaviour`,
@@ -3527,7 +3542,11 @@ does that a person might be shown is a ``ProximityPairSession/Event``, handed in
 renderer whose switches are exhaustive, so a new case is a build error there until it has its sentence.
 The payload the session delivers is its owner's (``ProximityPairSession/Outgoing``: the token, the
 signed summary, the subject the user picked and the bytes, encoded when the pairing has verified), and
-the verified payloads its pairings receive go to its ``ProximityPairSession/payloadHandler``.
+the verified payloads its pairings receive go to its ``ProximityPairSession/payloadHandler``. Its
+pairings' diagnostics (each coordinator's session lifecycle, envelopes with their encoded sizes,
+ranging samples and transport events, the heartbeat's round trip among them) go to the
+``ProximityPairSession/inspector`` its host binds at construction
+(``ProximityPairSession/init(host:profile:inspector:)``, 0.1.1), read-only after it and held weakly.
 
 **Sent is not received.** Every send ends in exactly one ``ProximityPairSession/lastSendOutcome``: a
 ``ProximityPairSendOutcome`` that is either `sent` or `notSent` with a frozen

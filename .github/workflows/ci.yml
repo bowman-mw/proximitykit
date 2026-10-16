@@ -201,8 +201,21 @@ jobs:
     # xcodebuild lanes were not run for this note; the 0.1.1 fixes' last commit measures them. swift
     # test's floor refused MIN_TESTS 802, and swift test and the Walls step's declared floor refused
     # MIN_SUITES 118. ARITHMETIC CHECK: 644 + 157 = 801 and 100 + 17 = 117.
+    # RAISED 801 -> 807, MIN_SUITES unchanged at 117, at the 0.1.1 inbound-hello fixes and diagnostics
+    # on a Mac, 2026-10-16 (the same Xcode and Swift), for the six cells ProximityPairSessionTests
+    # gains (a pending connection that sent no hello refuses nobody, the hello deadline on a clock the
+    # cell hands in, two hello-bearing connections still refuse, every refusal's reason, the
+    # `connected` line's interface key, the pair session's inspector), over this repository's tree
+    # with them, this workflow's steps run as written but the iOS simulator's test leg: swift test
+    # "Test run with 807 tests in 117 suites passed"; the macOS result bundle totalTestCount 807, 0
+    # failed, 0 skipped, the same 117 suites by name, 879 cases with arguments expanded; the Release
+    # build, the iOS simulator build and the example app's macOS and iOS simulator builds passed with
+    # warnings as errors; the inventory 117 rows declaring 807 tests. The iOS simulator's test leg was
+    # not run for this raise. swift test and the macOS bundle passed at these floors and each refused
+    # MIN_TESTS 808; swift test and the Walls step's declared floor refused MIN_SUITES 118. ARITHMETIC
+    # CHECK: 801 + 6 = 807 and 117 + 0 = 117.
     env:
-      MIN_TESTS: 801
+      MIN_TESTS: 807
       MIN_SUITES: 117
     steps:
       - uses: actions/checkout@v4

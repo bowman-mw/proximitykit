@@ -108,7 +108,8 @@ private struct LiveSend {
 /// session retains for the pairing's life, ``ProximityHost/makeProximityTrustPolicy()`` (the
 /// coordinator's trust ref is `weak` — dropping the retention silently disables the revoked/blocked
 /// drops), begun in friend mode as the browser on both ends and committed at the proximity gate
-/// without a user step; its verified payloads go to ``payloadHandler``. The hard 2-device cap is
+/// without a user step; its verified payloads go to ``payloadHandler``, and its diagnostics to the
+/// ``inspector`` the host bound at construction, if any. The hard 2-device cap is
 /// enforced at four layers: the inbound dialer gate, the outbound send guard, the connecting-window
 /// check, and the belt-and-braces channel admission — with the radio PAUSED while paired
 /// (`pauseDiscovery`) and reopened, under a freshly minted posture, only on session-level record
@@ -312,6 +313,18 @@ public final class ProximityPairSession {
     /// Receives the verified payloads the session's pairings deliver: every pairing's coordinator is
     /// built with it. Held weakly; set it once, before ``start()``.
     @ObservationIgnored public weak var payloadHandler: (any ProximityPayloadHandling)?
+    /// The diagnostic recorder every pairing this session builds reports to, or nil to record nothing:
+    /// each pairing's ``ProximityCoordinator`` is built with it and reports its session's lifecycle,
+    /// envelopes (each with its encoded size), ranging samples and transport events (the heartbeat's
+    /// round trip among them) in this module's own value types (``ProximityInspectorRecording``).
+    ///
+    /// **Read-only, bound at construction** (``init(host:profile:inspector:)``): a coordinator keeps the
+    /// recorder it was built with, so a recorder swapped mid-session would split one session's pairings
+    /// across two logs. Held `weak`, as each coordinator holds it, so the host owns the recorder and a
+    /// recorder it releases stops receiving. Main-actor isolated like the session and the recorder
+    /// protocol, so no recorder crosses an isolation boundary through it; unlike ``namespace`` and
+    /// ``profile`` it is not `nonisolated`, because a recorder is a reference, not inert value data.
+    @ObservationIgnored public private(set) weak var inspector: (any ProximityInspectorRecording)?
     /// The radio this session drives. Built once, at construction, because several of this
     /// session's decisions (the inbound gate, the pause flag, a discovery callback) are reachable
     /// before `start()` ever runs — which is also what lets a unit test hand in an in-memory
@@ -378,6 +391,20 @@ public final class ProximityPairSession {
         self.init(host: host, profile: profile, makeRadio: nil)
     }
 
+    /// A session for `host` under `profile` whose pairings report to `inspector`: the same session as
+    /// ``init(host:profile:)``, with every pairing's coordinator built with the recorder.
+    ///
+    /// - Parameters:
+    ///   - host: The host the session runs for.
+    ///   - profile: The kind of connection it is.
+    ///   - inspector: The recorder each pairing reports to, held weakly (``inspector``); nil records
+    ///     nothing.
+    public convenience init(
+        host: any ProximityHost, profile: ProximityPairProfile, inspector: (any ProximityInspectorRecording)?
+    ) {
+        self.init(host: host, profile: profile, makeRadio: nil, inspector: inspector)
+    }
+
     /// The seam a unit test builds this session through: `makeRadio` supplies the radio.
     ///
     /// The production default is the QUIC radio on the profile's row and nothing in shipping code
@@ -395,17 +422,20 @@ public final class ProximityPairSession {
     /// EFFECT was untestable here and only its existence was pinned. An identity of another namespace
     /// than the host's is refused: the session constructs, audits
     /// `<auditArea>.identity.namespaceMismatch` and never starts its radio; so is a profile that is not
-    /// of the host's namespace, under `<auditArea>.profile.namespaceMismatch`.
+    /// of the host's namespace, under `<auditArea>.profile.namespaceMismatch`. `inspector` is the
+    /// recorder every pairing reports to (``inspector``).
     init(
         host store: any ProximityHost,
         profile: ProximityPairProfile,
         makeRadio: (() -> any ProximityPairRadioSession)?,
-        identity injected: IdentityService? = nil
+        identity injected: IdentityService? = nil,
+        inspector: (any ProximityInspectorRecording)? = nil
     ) {
         self.store = store
         let namespace = store.proximityNamespace
         self.namespace = namespace
         self.profile = profile
+        self.inspector = inspector
         self.profileIsOfNamespace = Self.check(profile, isOf: namespace)
         self.session = makeRadio?() ?? NetworkPairSession(namespace: namespace, profile: profile)
         let id = injected ?? store.makeProximityIdentity()
@@ -679,7 +709,9 @@ public final class ProximityPairSession {
             // Hard 2-device cap (inbound): accept only when we hold no connection AND no
             // connecting-window peer — checking `connections` alone leaves a race where a second
             // dialer slips in while the first is still connecting. The SAME peer re-dialing (retry
-            // of a dropped attempt) is always let through.
+            // of a dropped attempt) is always let through. The radio's window is a dial in flight
+            // or an inbound connection whose hello it has read, never one that has sent nothing:
+            // a dialer's own silent second connection used to refuse that dialer's hello here.
             if self.connections.contains(where: { $0.peer.isSameEndpoint(as: peer) }) {
                 return true
             }
@@ -925,6 +957,7 @@ public final class ProximityPairSession {
             identity: identity,
             transport: channel,
             ranging: store.makeProximityRangingProvider(),
+            inspector: inspector,
             payloadHandler: payloadHandler,
             trustPolicy: trustPolicy,
             replayCache: replayCache,
@@ -1503,6 +1536,7 @@ public final class ProximityPairSession {
             identity: identity,
             transport: transport,
             ranging: ranging,
+            inspector: inspector,
             payloadHandler: payloadHandler,
             trustPolicy: trustPolicy,
             replayCache: replayCache,

@@ -10,8 +10,33 @@ in this repository before it is a release.
 
 ## Unreleased
 
-Tests, scripts and documentation only: no public API, wire format, on-disk format or frozen token
-changed, so nothing below needs a tag.
+Planned as 0.1.1, a fix release: no public API, wire format, on-disk format or frozen token is
+changed or removed, and every 0.1.0 API is kept, so z moves.
+
+### Fixed
+
+- The pair radio no longer refuses a dialer's hello because another inbound connection is pending
+  without one. Only a pending connection whose dial hello has been read counts as connecting (the
+  session's inbound gate asks `hasConnectingPeers(besides:)`). Before, a dialer's own silent second
+  connection (likeliest a dual-stack race on a cold start), or any device that opened a connection
+  and stayed silent, refused every hello until QUIC's idle timeout, up to 90 s. The two-device cap
+  holds: two connections whose hellos have both been read still refuse.
+- The pair radio drops a pending inbound connection that delivers no readable hello within 5 s, at
+  the next arrival or ruling. The radio still owns no timer.
+
+### Added
+
+- `ProximityPairSession.inspector` (read-only, weak) and
+  `ProximityPairSession.init(host:profile:inspector:)`: every pairing's coordinator reports to the
+  recorder its host binds.
+- Audit: `recipe.quic.helloRefused` gains `reason` (`unreadable`, `unresolved`, `ownerRefused`,
+  `keptEstablished`, `tunnelHeld`) and `pending`; new `recipe.quic.pendingBooked` (`connection`,
+  `pending`) and `recipe.quic.pendingEnded` (`connection`; `reason`: `admitted`, `refused`,
+  `connectionEnded`, `helloDeadline`, `stopped`; `stage`: `awaitingStream`, `readingHello`,
+  `helloDelivered`; `pending`); `recipe.quic.connected` gains `interface` (`wifi`, `wiredEthernet`,
+  `loopback`, `cellular`, `other`, `unknown`).
+
+### Tests, scripts and documentation
 
 - The package's tests hold every cell of the Fernlet repository's tests that read ProximityKit's
   sources (plan step A1.3's batch D): the routed, mesh, session, continuation, photo-review, pair,
@@ -40,6 +65,12 @@ changed, so nothing below needs a tag.
   verifier, key-agreement verification, a joiner's ledger adoption, the dial policy through a live
   manager, the partition's branch view, the removal quorum's arithmetic, expiry, partition table and
   signatures, an evicted slot releasing its transport link, and `IdentityServiceTests`.
+
+### Consumers
+
+- Fernlet: re-pin to 0.1.1. `RecipeShareOverQUICTests.aSecondDialerArrivingWhileOneIsMidHelloIsRefused`
+  stays green and now means "a second connection whose hello has been read refuses"; re-word it, its
+  sibling's message and the fake radio's window doc. Device-check the pair radio on a second device.
 
 ## 0.1.0 — 2026-10-15
 

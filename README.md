@@ -110,13 +110,14 @@ Its one screen shows:
 
 The numbers have limits. The app times a round trip itself, from the tap to the pong, so the first
 ping also counts discovery, the QUIC handshake and the identity exchange. The byte counts are
-payloads before sealing, not bytes on the wire. Nothing on the screen says which interface a
-connection uses (Wi-Fi, peer-to-peer or loopback), and nothing shows the transport's own round trip
-or wire bytes, because ProximityKit's public API does not expose them yet. Candidates for a later
-release, each an addition to the API: a `ProximityPairSession.inspector` handed to every pairing's
-coordinator, an interface key on the radio's `connected` audit line, and public spelling helpers
-for `ProximityNamespace.MeshMessages`, so that a host that runs only the pair session can declare
-the thirty mesh tokens its family still needs in a few lines.
+payloads before sealing, not bytes on the wire. The log's `recipe.quic.connected` line names the
+kind of interface the connection runs over (`interface=wifi`, `loopback` and so on). The
+heartbeat's own round trip and each envelope's encoded size reach a host that binds a
+`ProximityPairSession.inspector` (`init(host:profile:inspector:)`), which every pairing's coordinator
+reports to; this app binds none yet, so its screen does not show them. A candidate for a later
+release, an addition to the API: public spelling helpers for `ProximityNamespace.MeshMessages`, so
+that a host that runs only the pair session can declare the thirty mesh tokens its family still needs
+in a few lines.
 
 To run it, open `Examples/ProximityPing/ProximityPing.xcodeproj` with Xcode 26 or newer. It uses
 this package from the repository (`../..`), so nothing is downloaded. From the command line:
