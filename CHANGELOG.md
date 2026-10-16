@@ -15,6 +15,18 @@ changed or removed, and every 0.1.0 API is kept, so z moves.
 
 ### Fixed
 
+- Every radio's listener now takes every inbound connection for as long as it lives. Each was
+  built with a finite new-connection limit (the mesh 8, the recipe radio 3, presence 4), which
+  Network.framework spends one per connection created and never refunds, so each went deaf after
+  that many inbound connections since its listener was last built (refused, failed and twin
+  connections included) until a start, resume, republish or epoch boundary: the recipe radio after
+  a few stray dials on a long-open screen, the mesh after eight reconnections in a stable session,
+  presence after a fifth heart inside an epoch. The radios' own pending caps and identification
+  deadlines bound an inbound flood instead (`ProximityRadioListenerTests`).
+- Presence drops a pending inbound connection that delivers no dial hello within 5 s, at the next
+  arrival (no timer). A connection that never opened a stream used to keep its place until the
+  radio stopped, because QUIC's idle timeout fails such a connection without ending it; four of
+  them refused every friend's dial for the rest of the session.
 - The pair radio no longer refuses a dialer's hello because another inbound connection is pending
   without one. Only a pending connection whose dial hello has been read counts as connecting (the
   session's inbound gate asks `hasConnectingPeers(besides:)`). Before, a dialer's own silent second
@@ -70,7 +82,9 @@ changed or removed, and every 0.1.0 API is kept, so z moves.
 
 - Fernlet: re-pin to 0.1.1. `RecipeShareOverQUICTests.aSecondDialerArrivingWhileOneIsMidHelloIsRefused`
   stays green and now means "a second connection whose hello has been read refuses"; re-word it, its
-  sibling's message and the fake radio's window doc. Device-check the pair radio on a second device.
+  sibling's message and the fake radio's window doc. 0.1.1 changes radio behaviour, so device-check
+  it on a second device before it ships: the pair radio, presence hearts past four in one epoch, and
+  a long mesh session.
 
 ## 0.1.0 — 2026-10-15
 

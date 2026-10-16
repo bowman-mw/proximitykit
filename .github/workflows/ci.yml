@@ -214,9 +214,22 @@ jobs:
     # not run for this raise. swift test and the macOS bundle passed at these floors and each refused
     # MIN_TESTS 808; swift test and the Walls step's declared floor refused MIN_SUITES 118. ARITHMETIC
     # CHECK: 801 + 6 = 807 and 117 + 0 = 117.
+    # RAISED 807 -> 810 and 117 -> 118 at the 0.1.1 listener fix on a Mac, 2026-10-16 (the same Xcode
+    # and Swift), for the NEW ProximityRadioListenerTests' three cells (every radio's listener built
+    # unlimited and nothing in the module setting or re-arming a finite limit, each radio's pending
+    # cap and identification deadline at their values and in their places, presence's new hello
+    # deadline freeing a silent connection's place on a clock the cell hands in), over this
+    # repository's tree with them, this workflow's steps run as written but the iOS simulator's test
+    # leg: swift test "Test run with 810 tests in 118 suites passed"; the macOS result bundle
+    # totalTestCount 810, 0 failed, 0 skipped, the same 118 suites by name, 882 cases with arguments
+    # expanded; the Release build, the iOS simulator build and the example app's macOS and iOS
+    # simulator builds passed with warnings as errors; the inventory 118 rows declaring 810 tests. The
+    # iOS simulator's test leg was not run for this raise. swift test and the macOS bundle passed at
+    # these floors and each refused MIN_TESTS 811; swift test and the Walls step's declared floor
+    # refused MIN_SUITES 119. ARITHMETIC CHECK: 807 + 3 = 810 and 117 + 1 = 118.
     env:
-      MIN_TESTS: 807
-      MIN_SUITES: 117
+      MIN_TESTS: 810
+      MIN_SUITES: 118
     steps:
       - uses: actions/checkout@v4
 

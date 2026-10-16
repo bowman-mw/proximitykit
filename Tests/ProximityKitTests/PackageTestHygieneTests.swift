@@ -1679,9 +1679,11 @@ import Testing
     /// which decodes tag 0.1.0's wire and on-disk fixtures with today's code. RAISED at plan step A1's
     /// second batch of copied suites (2026-10-16): 100 → 117, for the 17 suites of Fernlet's tests that
     /// reach the keychain and open no store, sixteen of them and `IdentityServiceTests`, each copied with
-    /// its name and run here. A suite added, moved out or deleted changes it in the same commit, argued and
-    /// measured; a deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 117
+    /// its name and run here. RAISED at the 0.1.1 listener fix (2026-10-16): 117 → 118, for the NEW
+    /// `ProximityRadioListenerTests`, which holds every radio's listener unlimited and each radio's own cap
+    /// and deadline in its place. A suite added, moved out or deleted changes it in the same commit, argued
+    /// and measured; a deletion lowers it only with the retirement argued.
+    static let measuredInventoryRows = 118
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -1707,9 +1709,10 @@ import Testing
     /// (141 in the sixteen that reach the keychain and open no store, and `IdentityServiceTests`' 16).
     /// RAISED at the 0.1.1 inbound-hello fixes and diagnostics (2026-10-16): 801 → 807, for the six cells
     /// `ProximityPairSessionTests` gains (the stream-less connection, the hello deadline, the two-hello
-    /// cap, the refusal reasons, the interface key and the inspector). A test added or removed changes it
-    /// in the same commit.
-    static let measuredDeclaredTests = 807
+    /// cap, the refusal reasons, the interface key and the inspector). RAISED at the 0.1.1 listener fix
+    /// (2026-10-16): 807 → 810, for `ProximityRadioListenerTests`' 3 (the unlimited listeners, the caps and
+    /// deadlines, presence's hello deadline). A test added or removed changes it in the same commit.
+    static let measuredDeclaredTests = 810
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

@@ -184,14 +184,38 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     /// wrong, or not wired at all, must not accumulate tunnels.
     nonisolated static let maxTunnels = 4
 
-    /// Inbound connections that may be mid-hello at once.
-    ///
-    /// A silent dialer is reaped by QUIC's own idle timeout — the same
-    /// ``MeshHeartbeatSchedule/idleTimeoutMilliseconds`` the mesh declares, which ends the
-    /// connection and throws its owning task out of `inboundStreams`. That is deliberately the only
-    /// reaper: a sweep would need a clock, and presence owns exactly one timer, which belongs to the
-    /// epoch rotation.
+    /// Inbound connections that may be mid-hello at once: booked at their arrival, before any hello
+    /// can be read, and held until their hello is ruled on, they end, or ``helloDeadlineSeconds``
+    /// reaps them. One past it is refused before its owning task starts, so the framework closes it:
+    /// with the listener's limit lifted (``ProximityQUICParameters/listenerNewConnectionLimit``) this
+    /// is the cap on what an inbound flood can make this radio hold.
     nonisolated static let maxPendingInbound = 4
+
+    /// Seconds a pending inbound connection may go without delivering its dial hello before the
+    /// radio drops it, at the next arrival.
+    ///
+    /// **Why there is one.** QUIC's own idle timeout (``MeshHeartbeatSchedule/idleTimeoutMilliseconds``)
+    /// was meant to be the reaper, ending a silent dialer's connection and throwing its owning task
+    /// out of `inboundStreams`; it does not. A connection that never opens a stream fails at the
+    /// idle timeout, and fails at once when its dialer closes it, but its `inboundStreams` neither
+    /// returns nor throws (measured on macOS 26.6.2 over loopback, for over 20 s past the failure), so
+    /// before this deadline such a connection kept its place until ``stop()``, across every epoch,
+    /// and four of them, a stranger's or a dialer's own abandoned second attempt, refused every
+    /// friend's dial for the rest of the session.
+    ///
+    /// **Why five.** A dialer writes its hello in the first flight on its control stream, straight
+    /// after the QUIC handshake (`runInitiator`: open the stream, send one frame of at most
+    /// ``PresenceDialHello/maxEncodedBytes``), so over a link-local radio a live dialer's hello lands
+    /// milliseconds after its connection. Five seconds is the recipe radio's
+    /// ``NetworkPairSession/helloDeadlineSeconds``, set by the same reasoning, and half the mesh's
+    /// ``NetworkMeshSession/introductionDeadlineSeconds``, which allows two signed round trips where
+    /// this is one frame.
+    ///
+    /// **Still no timer.** The deadline is applied where a pending place is next needed: each
+    /// arrival first drops every pending connection booked more than this long before it, on the
+    /// instant that arrival read. A stalled connection nothing needs a place from waits, and refuses
+    /// nobody meanwhile; presence's one timer stays the epoch rotation's.
+    nonisolated static let helloDeadlineSeconds: TimeInterval = 5
 
     /// Frames one tunnel may deliver before its receive loop retires (Power of 10 rule 2). Two
     /// orders of magnitude above a heart exchange, which is a handful of frames.
@@ -262,8 +286,19 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
         var task: Task<Void, Never>?
     }
 
+    /// One inbound connection booked and not yet admitted, refused, reaped or stopped.
+    private struct PendingInbound {
+
+        /// When it was booked: the instant ``helloDeadlineSeconds`` runs from.
+        let bookedAt: Date
+
+        /// Owns the connection: cancelling it closes the connection, and an admission hands it to
+        /// the tunnel.
+        let task: Task<Void, Never>
+    }
+
     private var tunnels: [MeshLinkKey: Tunnel] = [:]
-    private var pendingInbound: [MeshLinkKey: Task<Void, Never>] = [:]
+    private var pendingInbound: [MeshLinkKey: PendingInbound] = [:]
     private var identities = MeshSessionIdentityMap()
     private var browsedEndpoints: [MeshLinkKey: Bonjour.Endpoint] = [:]
     private var browsedRecords: [MeshLinkKey: MeshEndpointRecord] = [:]
@@ -314,7 +349,7 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
         listenerTask?.cancel()
         browserTask?.cancel()
         for tunnel in tunnels.values { tunnel.task?.cancel() }
-        for task in pendingInbound.values { task.cancel() }
+        for pending in pendingInbound.values { pending.task.cancel() }
     }
 
     // MARK: - Lifecycle
@@ -373,7 +408,7 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     func stop() {
         let stopped = isRunning
         for tunnel in tunnels.values { tunnel.task?.cancel() }
-        for task in pendingInbound.values { task.cancel() }
+        for pending in pendingInbound.values { pending.task.cancel() }
         cancelListener()
         cancelBrowser()
         tunnels.removeAll()
@@ -591,6 +626,21 @@ final class NetworkPresenceSession: PresenceRadioSession, NetworkChannelHost {
     /// How many inbound connections are mid-hello.
     var pendingInboundCountForTesting: Int { pendingInbound.count }
 
+    /// Books an arrival at `now` exactly as ``acceptInbound(_:)`` books one (the hello deadline at
+    /// `now` first, then the ``maxPendingInbound`` cap), behind a stub task in place of the framework
+    /// connection a unit test cannot build, so a cell drives the deadline on instants it hands in.
+    ///
+    /// - Returns: Whether it was booked.
+    @discardableResult
+    func bookPendingInboundForTesting(_ pendingKey: MeshLinkKey, at now: Date) -> Bool {
+        bookPendingInbound(pendingKey, at: now) { Task {} }
+    }
+
+    /// Whether a connection is pending under `pendingKey`.
+    func isPendingInboundForTesting(_ pendingKey: MeshLinkKey) -> Bool {
+        pendingInbound[pendingKey] != nil
+    }
+
     /// The channel this radio would hand the owner for `peer`, built exactly as the live path
     /// builds one. ``PresenceRadioSession`` requirement.
     func channel(for peer: PeerHandle) -> NetworkPeerChannel {
@@ -615,7 +665,7 @@ private extension NetworkPresenceSession {
                 alpn: alpn,
                 identity: posture.tlsIdentity.identity
             )
-        ).newConnectionLimit(Self.maxTunnels)
+        ).newConnectionLimit(ProximityQUICParameters.listenerNewConnectionLimit)
         self.listener = listener
         listener.onStateUpdate { [weak self] _, state in
             Task { @MainActor in self?.listenerStateChanged(state) }
@@ -908,12 +958,42 @@ private extension NetworkPresenceSession {
     func acceptInbound(_ connection: NetworkConnection<QUIC>) {
         guard isRunning else { return }
         let pendingKey = MeshLinkKey(connection.id)
+        bookPendingInbound(pendingKey, at: Date()) {
+            Task { @MainActor [weak self] in
+                await self?.runResponder(connection, pendingKey: pendingKey)
+            }
+        }
+    }
+
+    /// Books one arrival as pending at `now`, starting the task that owns its connection only once a
+    /// place is free: ``helloDeadlineSeconds`` is applied at `now` first, so a place a silent
+    /// connection held is free again for this one, then the ``maxPendingInbound`` cap.
+    ///
+    /// A connection refused here was never pending: its owning task is never started, so the
+    /// framework closes it, and only the debug log names it.
+    ///
+    /// - Returns: Whether it was booked.
+    @discardableResult
+    func bookPendingInbound(_ pendingKey: MeshLinkKey, at now: Date, start: () -> Task<Void, Never>) -> Bool {
+        expireStalledInbound(now: now)
         guard pendingInbound[pendingKey] == nil, pendingInbound.count < Self.maxPendingInbound else {
             logger.debug("presence connection refused pre-hello for \(self.peerLabel(for: pendingKey), privacy: .public)")
-            return
+            return false
         }
-        pendingInbound[pendingKey] = Task { @MainActor [weak self] in
-            await self?.runResponder(connection, pendingKey: pendingKey)
+        pendingInbound[pendingKey] = PendingInbound(bookedAt: now, task: start())
+        return true
+    }
+
+    /// Drops every pending connection booked more than ``helloDeadlineSeconds`` before `now`,
+    /// cancelling the task that owns it, which closes it. Bounded by ``maxPendingInbound``.
+    func expireStalledInbound(now: Date) {
+        let stalled = pendingInbound
+            .filter { now.timeIntervalSince($0.value.bookedAt) > Self.helloDeadlineSeconds }
+            .keys
+        // R2: bounded by maxPendingInbound.
+        for key in stalled {
+            logger.debug("presence connection dropped at its hello deadline for \(self.peerLabel(for: key), privacy: .public)")
+            dropPendingInbound(key)
         }
     }
 
@@ -956,7 +1036,7 @@ private extension NetworkPresenceSession {
             return
         }
         let channel = prepareChannel(for: key)
-        tunnels[key] = Tunnel(peer: channel.peer, channel: channel, role: .responder, task: owning)
+        tunnels[key] = Tunnel(peer: channel.peer, channel: channel, role: .responder, task: owning.task)
         activate(key, stream: stream)
         do {
             try await receiveFrames(for: key, from: stream)
@@ -1039,7 +1119,7 @@ private extension NetworkPresenceSession {
     /// Drops a pending inbound connection, cancelling the task that owns it. Idempotent, and safe
     /// to call from inside that task — cancelling itself is how the connection is closed.
     func dropPendingInbound(_ key: MeshLinkKey) {
-        pendingInbound.removeValue(forKey: key)?.cancel()
+        pendingInbound.removeValue(forKey: key)?.task.cancel()
     }
 
     /// Records the control stream and hands the channel to the owner.

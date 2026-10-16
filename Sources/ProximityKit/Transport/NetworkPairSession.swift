@@ -298,7 +298,10 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     ///
     /// A pending connection holds one of these and, until it has delivered a readable dial hello, no
     /// place in the connecting window (``hasConnectingPeers(besides:)``): a connection that has said
-    /// nothing cannot refuse anyone.
+    /// nothing cannot refuse anyone. One past it is refused before its owning task starts, so the
+    /// framework closes it: with the listener's limit lifted
+    /// (``ProximityQUICParameters/listenerNewConnectionLimit``) this is the cap on what an inbound flood
+    /// can make this radio hold.
     nonisolated static let maxPendingInbound = 2
 
     /// Seconds a pending inbound connection may go without delivering a readable dial hello, whether it
@@ -313,13 +316,15 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     /// introduction where this is one frame and no round trip, so a phone that just woke is not cut off
     /// mid-hello; and it is well inside the dialing owner's 12 s pre-connect timeout, so a place a silent
     /// connection held is free again with seven seconds of a real dial's window left. Before it, QUIC's
-    /// idle timeout (``MeshHeartbeatSchedule/idleTimeoutMilliseconds``) was the only reaper, and a
-    /// connection that never opened a stream held its place for up to 90 s.
+    /// idle timeout (``MeshHeartbeatSchedule/idleTimeoutMilliseconds``) was meant to be the reaper, and
+    /// is none: it fails a connection that never opened a stream, but that connection's
+    /// `inboundStreams` neither returns nor throws (measured; see
+    /// ``ProximityQUICParameters/listenerNewConnectionLimit``), so it held its place until ``stop()``.
     ///
     /// **Still no timer.** The deadline is applied where a pending place is next needed and where a
     /// hello is ruled on: each arrival and each ruling first drops every pending connection past it, on
     /// the instant that event read. A stalled connection nothing needs a place from waits for the next
-    /// arrival, or for QUIC's idle timeout, and refuses nobody meanwhile.
+    /// arrival or ruling, and refuses nobody meanwhile.
     nonisolated static let helloDeadlineSeconds: TimeInterval = 5
 
     /// Frames one tunnel may deliver before its receive loop retires (Power of 10 rule 2). Three
@@ -1078,7 +1083,7 @@ private extension NetworkPairSession {
                 alpn: alpn,
                 identity: posture.tlsIdentity.identity
             )
-        ).newConnectionLimit(Self.maxTunnels + Self.maxPendingInbound)
+        ).newConnectionLimit(ProximityQUICParameters.listenerNewConnectionLimit)
         self.listener = listener
         listener.onStateUpdate { [weak self] _, state in
             Task { @MainActor in self?.listenerStateChanged(state) }

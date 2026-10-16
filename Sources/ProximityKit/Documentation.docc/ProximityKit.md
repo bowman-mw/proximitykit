@@ -996,7 +996,8 @@ crypto-goldens line) and, on the `proximitykit` line, the membership records (`M
 audit sink (`PackageTestHostTests`), the namespace wall (`ProximityNamespaceBoundaryTests`), the
 platform wall (`ProximityPlatformNeutralityTests`), the keychain door's wall
 (`ProximityKeychainDoorTests`), the presence engine (`ProximityPresenceSessionTests`), the pair
-session over its own radio (`ProximityPairSessionTests`), the tests' own
+session over its own radio (`ProximityPairSessionTests`), the radios' listeners and what bounds the
+connections they hand over (`ProximityRadioListenerTests`), the tests' own
 hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`), the source walls
 over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
 (`ProximityMemoryLifecycleTests`); thirty-three suites copied from Fernlet's tests, described
@@ -1008,7 +1009,7 @@ golden, wipe, audit-bridge, transport and localization tests that read this modu
 from that step's final review holding the P9 battery's honesty pin on the `.remove` branch's stand-in
 (`MeshP9HonestyAcceptanceTests`); and, in the package repository, the example app's namespace held
 apart (`ExampleNamespaceTests`, plan step A1.2) and every released tag's bytes decoded by today's code
-(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred seventeen suites, 807 tests. The
+(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred eighteen suites, 810 tests. The
 target is unhosted: Fernlet's scheme runs it as a second test bundle through `Fernlet.xcworkspace`, in
 the simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator a `SecItem`
 call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on macOS") and no
@@ -1068,7 +1069,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all one hundred seventeen passing `swift test` with this module and its tests laid out as in the package
+Mac too, all one hundred eighteen passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
@@ -1913,8 +1914,9 @@ alone left such a peer out of the picker, and refused its dial, until a refresh
 connecting** (0.1.1). The connecting window used to count every pending connection but the one being
 ruled on, so a dialer's own silent second connection (on a cold start, Network.framework racing a
 second attempt across the service's addresses is the likeliest source) refused that dialer's hello,
-and any device on the network that opened a connection and said nothing refused every hello until
-QUIC's idle timeout reaped it, up to 90 s. A connection that delivers no readable hello within five
+and any device on the network that opened a connection and said nothing refused every hello for as
+long as it stayed pending, which was until the radio stopped: QUIC's idle timeout fails such a
+connection but does not end it (see the next paragraph). A connection that delivers no readable hello within five
 seconds is dropped at the next arrival or ruling, so the radio still owns no timer; and the two-device
 cap still holds, at the radio's one-tunnel floor and at the owner's held connection, which a promotion
 meets in the run that read its hello. Every booking and every end of a pending connection writes a
@@ -1923,6 +1925,29 @@ line (`recipe.quic.pendingBooked`; `recipe.quic.pendingEnded`, with why and how 
 `keptEstablished` or `tunnelHeld`) and how many connections were pending, and `recipe.quic.connected`
 names the kind of interface its connection runs over (`interface`: `wifi`, `wiredEthernet`, `loopback`,
 `cellular`, `other` or `unknown`).
+
+**Every radio's listener hands it every connection, and the radio's own cap and deadline bound what it
+holds** (0.1.1). Each radio used to build its listener with a finite new-connection limit (the mesh 8,
+the recipe radio 3, presence 4), read as a cap on connections at once. Network.framework spends it
+instead: the limit counts down by one for every connection the listener creates and never back up when
+one ends, and at zero the listener stops handing connections over, so each radio went deaf after that
+many inbound connections since its listener was last built (refused, failed and closed ones included)
+until a start, resume, republish or epoch boundary built it again, and a peer's dial into it neither
+connected nor failed. Measured on macOS 26.6.2 over loopback under the radios' own QUIC and TLS
+parameters, twice: limited to 2, the third and fourth dials were never handed over though the first two
+had closed and ended; with no limit all four were. The listeners are now unlimited
+(`ProximityQUICParameters.listenerNewConnectionLimit`, the framework's infinite marker), and what bounds
+an inbound flood is what bounded it before: each radio books a connection as pending only under its cap
+(the recipe radio 2, the mesh 8, presence 4) and refuses one past it before its task starts, so the
+framework closes it; and each drops a pending connection that has not identified itself within its
+deadline (the recipe radio's 5 s hello deadline, the mesh's 10 s introduction deadline, and presence's 5 s
+hello deadline, new here, applied at each arrival with no timer). Presence needed the deadline: QUIC's
+idle timeout fails a connection that never opens a stream, and its dialer's close fails it at once, but
+that connection's `inboundStreams` neither returns nor throws (measured as above, for over 20 s past the
+failure), so presence, whose only reaper was meant to be the idle timeout, kept such a connection's
+place until it stopped, across every epoch. Re-arming a finite limit from the live count instead was
+measured and not taken: it needs every end seen, and a stream-less connection's is not, and a limit set
+again while a dial waits hands over a connection that has already failed (`ProximityRadioListenerTests`).
 
 Internal to the module, DEBUG-only, and listed here so they are never mistaken for production
 behaviour: `MeshTransportConsoleLog`, `MeshIntroductionChaos`, `MeshIntroductionChaosBehaviour`,
