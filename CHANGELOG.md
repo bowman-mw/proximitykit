@@ -92,6 +92,13 @@ folder: `Fixtures/0.1.0/` holds the bytes it reads and writes.
   verifier, key-agreement verification, a joiner's ledger adoption, the dial policy through a live
   manager, the partition's branch view, the removal quorum's arithmetic, expiry, partition table and
   signatures, an evicted slot releasing its transport link, and `IdentityServiceTests`.
+- The hygiene rule I9 holds the store suites of the Fernlet repository's tests as they are written: in
+  a file it lists, a line that names a mesh store is held as a keychain line, and the file's rows
+  state where its stores' scopes come from; `.production(` stays refused in every file. Only `private`
+  hides a member from the rule, an argument collection may not name a static member its file
+  declares unless it is a literal constant, and the readers follow a declaration past a line ending
+  in `=`. `PackageSwitchableInstallBinding` gains the scripted override, an answer a cell changes
+  partway through the work it wraps, and `PackageTestHost` can be built over it.
 
 ### Consumers
 

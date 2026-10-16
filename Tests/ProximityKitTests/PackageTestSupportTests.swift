@@ -18,7 +18,7 @@ import Security
 import Testing
 
 /// The package tests' namespace is sound, their file locator finds this package, and their switchable
-/// install binding answers as Fernlet's adapter answers.
+/// install binding answers as Fernlet's adapter answers, a scripted answer changed mid-operation included.
 @Suite struct PackageTestSupportTests {
 
     /// `.packageTest` passes every soundness rule, at every level a binding hands ProximityKit:
@@ -86,5 +86,40 @@ import Testing
         #expect(failing.open == .failure(ProximityInstallBindingReadError(status: errSecIO)),
                 "an open whose read fails defers, with the status Fernlet's binding throws")
         #expect(try binding.read(for: .seal) == own, "the override held outside the work it wrapped")
+    }
+
+    /// A scripted override answers, at each read, what its binding holds at that moment, read as the
+    /// three fixed cases are, as `DeviceBindingID`'s scripted case answers through Fernlet's adapter: a
+    /// change made inside the wrapped work is what the next read sees, for another install's bytes, an
+    /// absent binding (nothing to a seal or an open) and a failed read (nothing to a seal, the retryable
+    /// error with `errSecIO` to an open). The flip Fernlet's `MeshSessionLifecycleManagerTests` makes
+    /// between a joiner's two saves rides exactly this; the override holds only inside the work it wraps.
+    @Test func theSwitchableInstallBindingAnswersAScriptedOverrideAtEachRead() throws {
+        typealias Reads = (seal: Data?, open: Data?)
+        let binding = PackageSwitchableInstallBinding()
+        let first = Data(repeating: 0x1C, count: 16)
+        let second = Data(repeating: 0x2D, count: 16)
+        let scripted = PackageSwitchableInstallBinding.ScriptedBinding(.identifier(first))
+        let open = { () throws(ProximityInstallBindingReadError) -> Data? in try binding.read(for: .open) }
+        let reads = try PackageSwitchableInstallBinding.testOverride.withValue(.scripted(scripted)) {
+            () throws -> (before: Reads, after: Reads, absent: Reads, failing: (seal: Data?, open: Result<Data?, ProximityInstallBindingReadError>)) in
+            let before: Reads = (seal: try binding.read(for: .seal), open: try binding.read(for: .open))
+            scripted.set(.identifier(second))
+            let after: Reads = (seal: try binding.read(for: .seal), open: try binding.read(for: .open))
+            scripted.set(.unavailable)
+            let absent: Reads = (seal: try binding.read(for: .seal), open: try binding.read(for: .open))
+            scripted.set(.readError)
+            return (before: before, after: after, absent: absent,
+                    failing: (seal: try binding.read(for: .seal), open: Result(catching: open)))
+        }
+        #expect(reads.before.seal == first && reads.before.open == first, "the scripted answer was not read: \(reads.before)")
+        #expect(reads.after.seal == second && reads.after.open == second,
+                "a change made inside the wrapped work was not what the next read saw: \(reads.after)")
+        #expect(reads.absent.seal == nil && reads.absent.open == nil, "a scripted absent binding answered \(reads.absent)")
+        #expect(reads.failing.seal == nil, "a seal whose scripted read fails refuses, as an absent binding does")
+        #expect(reads.failing.open == .failure(ProximityInstallBindingReadError(status: errSecIO)),
+                "an open whose scripted read fails defers, with the status Fernlet's binding throws")
+        #expect(try binding.read(for: .open) == PackageSwitchableInstallBinding.installBytes,
+                "the scripted override held outside the work it wrapped")
     }
 }

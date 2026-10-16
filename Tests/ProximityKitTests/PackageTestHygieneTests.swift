@@ -12,8 +12,9 @@
 // four rules, the readers of each fixtured both ways:
 //
 //   I9   no file reaches what the bundle cannot serve: a needle stands only on an allowlist row, a
-//        keychain needle only in a listed keychain file that keeps its kinds' structure, and a wall file
-//        (this one first) is read as code, so the needles it holds as data are not refused;
+//        keychain needle or a store's name only in a listed keychain file that keeps its kinds'
+//        structure, and a wall file (this one first) is read as code, so the needles it holds as data
+//        are not refused;
 //   I11  every module a file imports travels with the package;
 //   the target's own inventory, ProximityKitTests.tsv beside the target's folder under the package
 //        root's `Tests`, is the tree: each suite's file and its declared tests (I1, I2, I4, I7), the
@@ -52,13 +53,14 @@ import Testing
     /// I9's readers read their samples: the needle reader holds a keychain type however it is constructed
     /// or reached, a seal key's wipe, a raw `SecItem` call but not a status that spells it inside its name,
     /// every platform directory but the temporary ones, and each location call by itself; the structure
-    /// reader passes a keychain file that keeps its kinds' structure and names each way one breaks it; and
-    /// a wall file's literal is data while the same needle in its code is read, and a literal of it that
-    /// starts with a repository folder is refused.
+    /// reader passes a keychain file that keeps its kinds' structure, its store lines among its keychain
+    /// lines, and names each way one breaks it; and a wall file's literal is data while the same needle in
+    /// its code is read, and a literal of it that starts with a repository folder is refused.
     @Test func theHazardReadersReadTheirSamples() {
         Self.expectTheNeedleReaderFixtured()
         Self.expectTheSuiteKeychainFileReaderFixtured()
         Self.expectTheFixtureEnumReaderFixtured()
+        Self.expectTheStoreLineReaderFixtured()
         Self.expectTheInstallerAndSupportTypeReadersFixtured()
         Self.expectTheWallFileReaderFixtured()
     }
@@ -166,7 +168,12 @@ import Testing
     /// stands only in a file on ``packageKeychainFiles`` (or on a ``packageHazardAllowlist`` row), each
     /// listed file held to the structure its kinds name, which keeps its every keychain line behind a read
     /// of the installer (``packageKeychainFileProblems(_:source:)``); and a raw `SecItem` call stands in no
-    /// file, listed or not, since it bypasses the funnel the store answers. It is a needle list, not a
+    /// file, listed or not, since it bypasses the funnel the store answers. The store needles are the two
+    /// mesh stores' names, whose every store seals under a seal key it reads from the keychain, and the
+    /// shorthand of a production scope (``packageStoreNeedles``): since ProximityKit plan step A1's third
+    /// batch of copied suites, a store's name stands in a listed file too, held there as a keychain line
+    /// under ``packageKeychainFileStoreInvariant`` (``packageListedStoreNeedles``), while a production
+    /// scope's shorthand stands in no file but on an allowlist row. It is a needle list, not a
     /// call-graph closure: a path it misses fails with -34018 on the simulator only where the failure
     /// surfaces, and a delete through `ProximityKeychainItem.deleteAll` only audits its failure, which no
     /// cell sees unless it captures that line, so it passes silently. There is no audit needle: the bundle
@@ -187,10 +194,13 @@ import Testing
             stands nowhere
             """
         let stores = """
-            a store seals its files under a seal key it reads from the keychain, so it needs an allowlist \
-            row whose invariant says what reads PackageTestEnvironment.keychain first, and writes them \
+            a store seals its files under a seal key it reads from the keychain, so its name stands only in \
+            a file on packageKeychainFiles, whose kind keeps it behind a read of \
+            PackageTestEnvironment.keychain and one of whose rows states packageKeychainFileStoreInvariant, \
+            or on an allowlist row whose invariant says what reads the installer first; it writes them \
             under its scope's directory, which this target's PackageTestTreeWallTests holds to a scope of \
-            the test's own, never the production one
+            the test's own, never the production one, and a production scope's shorthand stands only on an \
+            allowlist row
             """
         let location = "a production or process-shared location; on an unsandboxed Mac, the developer's own"
         let repo = """
@@ -200,14 +210,13 @@ import Testing
             own location breaks when a layout moves, and a relative path read from the unhosted agent \
             has no defined base
             """
-        let storeNeedles = ["MeshRoutedStore", "MeshSessionStore", ".production("]
         let scratch: Set<String> = ["temporaryDirectory", "NSTemporaryDirectory"]
         let locationNeedles = ProximityPlatformNeutralityTests.directoryNeedles.map(\.token)
             .filter { !scratch.contains($0) } + ["UserDefaults", "Bundle.main"]
         let repoNeedles = ["RepoRoot", "#filePath", "\"App/", "\"Docs/", "\"Tests/", "\".github/",
                            "\"FernletKit/", "\"Scripts/"]
         return packageKeychainNeedles.map { (needle: $0, reason: keychain) }
-            + storeNeedles.map { (needle: $0, reason: stores) }
+            + packageStoreNeedles.map { (needle: $0, reason: stores) }
             + locationNeedles.map { (needle: $0, reason: location) }
             + repoNeedles.map { (needle: $0, reason: repo) }
     }()
@@ -226,9 +235,24 @@ import Testing
     /// ProximityKit's keychain funnel, so the bundle's in-memory store never answers it.
     static let packageIdentifierStartNeedles: Set<String> = ["SecItem"]
 
+    /// The store needles of ``packageHazards`` (rule I9): the two mesh stores' names, each matched as a
+    /// substring so a construction, a static and a name that holds one (`MeshRoutedStoreFormat`) are all
+    /// held, and the shorthand of a production scope.
+    static let packageStoreNeedles = ["MeshRoutedStore", "MeshSessionStore", ".production("]
+
+    /// The store needles a file on ``packageKeychainFiles`` may hold (rule I9; ProximityKit plan step A1's
+    /// third batch of copied suites, whose store suites hold too many such lines for per-line rows): the
+    /// two stores' names, each line held as a keychain line by the file's kinds, since a store reads its seal
+    /// key from the keychain as it seals or opens, and the file's rows stating
+    /// ``packageKeychainFileStoreInvariant``. A production scope's shorthand is not among them: it stands
+    /// in no file, listed or not, but on an allowlist row.
+    static let packageListedStoreNeedles: Set<String> = ["MeshRoutedStore", "MeshSessionStore"]
+
     /// How a file on ``packageKeychainFiles`` keeps every one of its keychain lines behind a read of
     /// `PackageTestEnvironment.keychain` (rule I9): each kind is a structure
-    /// ``packageKeychainFileProblems(_:source:)`` checks, so a file that loses it fails. A file may be
+    /// ``packageKeychainFileProblems(_:source:)`` checks, so a file that loses it fails. A line that names
+    /// a store (``packageListedStoreNeedles``) is a keychain line here, since the store reads its seal key
+    /// from the keychain as it seals or opens, so each kind holds it as it holds an identity. A file may be
     /// listed under more than one kind, one row each (a suite file that also holds a fixture enum): each
     /// kind then holds the keychain lines inside the types it names (``keychainDomain(of:in:)``), and a
     /// keychain line inside none of them fails.
@@ -238,11 +262,14 @@ import Testing
         /// the suite instance for each cell, before the cell runs; and the file runs nothing that
         /// reaches the keychain without an instance: no static or free test; no trait or argument on a
         /// test or a suite but `.serialized`, a display name, and argument collections that are a
-        /// literal array or a type's `.allCases` with no call and no keychain needle
-        /// (``attributeArgumentProblems(in:)``), which Swift Testing evaluates before any instance
-        /// exists; no static stored property whose initializer reaches the keychain (spells a keychain
-        /// needle or names a static member of the file that holds a keychain line); no global stored
-        /// property; and no keychain line in a static member or a nested type that is not `private`.
+        /// literal array or a type's `.allCases` with no call, no keychain needle and no name of a
+        /// static member of the file but a literal constant (``attributeArgumentProblems(in:)``), which
+        /// Swift Testing evaluates before any instance exists; no static stored property whose
+        /// initializer reaches the keychain (spells a keychain needle or names a static member of the
+        /// file that holds a keychain line, an initializer that starts on the line below its `=`
+        /// included); no global stored property; and no keychain line in a static member or a nested
+        /// type that is not `private` (`fileprivate` reaches a second suite of the file, which may hold
+        /// no marker).
         /// A `@Suite` type that holds no keychain line needs no marker: it reaches the keychain only
         /// through another type, which that type's own kind holds.
         case suite
@@ -251,7 +278,8 @@ import Testing
         case installer
         /// A support type's file: every keychain line sits in an instance member of the named type,
         /// never in a static member or a stored property's initializer, and every initializer of the
-        /// type reads `PackageTestEnvironment.keychain` in its first statement.
+        /// type reads `PackageTestEnvironment.keychain` in its first statement. The type's own head
+        /// line, which declares nothing else, runs nothing (``isBareTypeHead(_:of:in:)``).
         case readsFirst(type: String)
         /// A fixture enum (ProximityKit plan step A1's second batch of copied suites, whose keychain
         /// fixtures are enums of static functions): every keychain line of its domain sits in a member
@@ -259,7 +287,8 @@ import Testing
         /// property, never in a stored property's initializer (which runs on first touch, before any
         /// read), and every member that holds one, whatever its access, reads
         /// `PackageTestEnvironment.keychain` in its first statement. So the read precedes the line
-        /// whoever calls the member, from a suite instance, another fixture or another file.
+        /// whoever calls the member, from a suite instance, another fixture or another file. The enum's
+        /// own head line, which declares nothing else, runs nothing (``isBareTypeHead(_:of:in:)``).
         case fixtureEnum(type: String)
     }
 
@@ -285,10 +314,11 @@ import Testing
         Swift Testing evaluates that property as it builds the suite instance for each cell, before the cell \
         runs; and nothing in the file that reaches the keychain runs without an instance (no static or free \
         test; no trait or argument but .serialized, a display name and a literal or .allCases collection \
-        with no call and no keychain needle; no static stored property whose initializer reaches the \
-        keychain; no global stored property; no keychain line in a static member or a nested type another \
-        file could reach): the installer has put the in-memory store behind ProximityKit's keychain funnel \
-        before the line runs, so a call on it reaches the store, never the system keychain
+        with no call, no keychain needle and no static member of the file but a literal constant; no \
+        static stored property whose initializer reaches the keychain; no global stored property; no \
+        keychain line in a static member or a nested type another type could reach, fileprivate ones \
+        included): the installer has put the in-memory store behind ProximityKit's keychain funnel before \
+        the line runs, so a call on it reaches the store, never the system keychain
         """
 
     /// The invariant every ``PackageKeychainFileKind/fixtureEnum(type:)`` row keeps (rule I9).
@@ -299,6 +329,37 @@ import Testing
         the installer has put the in-memory store behind ProximityKit's keychain funnel before the line runs, \
         so a call on it reaches the store, never the system keychain
         """
+
+    /// What makes a file's store lines safe in the unhosted bundle (rule I9; ProximityKit plan step A1's
+    /// third batch of copied suites): a listed file whose keychain lines name a store
+    /// (``packageListedStoreNeedles``) states it in one of its rows, and a file whose lines name none states
+    /// it in none (``storeClauseProblems(_:source:keychain:)``), so the clause stands exactly where a store
+    /// does.
+    static let packageKeychainFileStoreInvariant = """
+        every line of the file that names a store (MeshRoutedStore, MeshSessionStore) is held as a keychain \
+        line, since a store reads its seal key from the keychain as it seals or opens, so the installer has \
+        put the in-memory store behind ProximityKit's keychain funnel before the line runs; and every store \
+        it builds is on a scope of the cell's own: one its fixture hand-builds per call on a fresh folder \
+        under the temporary directory named for a fresh UUID, with a keychain service ending in .test. and a \
+        fresh UUID, or one of a PackageTestHost's two scopes, on that host's own fresh root and services; \
+        PackageTestTreeWallTests holds every store construction to an explicit scope:, no production scope \
+        by any spelling and no hand-built scope on a production directory or service, and this rule refuses \
+        a production scope's shorthand in every file, listed or not, so no production directory or row is \
+        reachable; and no scope or store outlives the cell or the suite instance that built it in a static \
+        stored property (the suite, support-type and fixture kinds each refuse a store line in a static \
+        stored property's initializer, and a fixture builds its scope inside the member that reads the \
+        installer first), so a cell reaches no scope another cell built
+        """
+
+    /// ``packageKeychainSuiteInvariant`` and ``packageKeychainFileStoreInvariant``: the invariant of a
+    /// ``PackageKeychainFileKind/suite`` row in a file that holds a store line (rule I9).
+    static let packageKeychainStoreSuiteInvariant = packageKeychainSuiteInvariant + "; and "
+        + packageKeychainFileStoreInvariant
+
+    /// ``packageKeychainFixtureEnumInvariant`` and ``packageKeychainFileStoreInvariant``: the invariant of a
+    /// ``PackageKeychainFileKind/fixtureEnum(type:)`` row in a file that holds a store line (rule I9).
+    static let packageKeychainStoreFixtureEnumInvariant = packageKeychainFixtureEnumInvariant + "; and "
+        + packageKeychainFileStoreInvariant
 
     /// The files a keychain needle may stand in (rule I9, ProximityKit plan step A1.1.10): one row per
     /// file and kind (since plan step A1's second batch of copied suites, a file may hold a suite and a
@@ -449,28 +510,30 @@ import Testing
     /// trimmed text, and the invariant that makes it safe. A row is added only with an invariant a reviewer
     /// can check against the line it names, and a row whose line is gone or changed is a failure, so no row
     /// outlives the line it excuses. 23 rows since ProximityKit plan step A1.1.10, when the per-file rule
-    /// (``packageKeychainFiles``) replaced the per-line rows of the files that reach the keychain; moved here
-    /// at A1.1.13; 43 since plan step A1, when the suites copied from Fernlet's tests brought 20; 76 since
-    /// plan step A1.3's batch D (the routed track), when the routed source walls copied from Fernlet's tests
-    /// brought 33; 89 since its mesh track, when the cells of Fernlet's mesh tests that read this module's
-    /// sources brought 13; 97 since its session track, when the session copies brought 8; 121 since its pair
-    /// track, when the pair copies brought 24; 122 since its review, when the goodbye walls' home list
-    /// brought 1; 124 since plan step A2's groundwork, when the cross-version fixture suite's two store
-    /// constructions brought 2; 125 since plan step A1's second batch of copied suites, its support, when
-    /// the identity's call-shape binding brought 1 (``packageTestBindingLines``); 136 since its copies,
-    /// when the bindings they need brought 2 more and the copies 9 (two pure static reads, one bare
-    /// declaration in a file on no keychain list and six throwaway-coordinator lines). The rows spell a
-    /// needle the per-file rule does not cover: the soundness suite's storage cell, which reads
-    /// `URL.applicationSupportDirectory` as a value; the package's file locator's one read of its own
-    /// source's path; the routed store isolation walls' suite, whose own name spells the store's; the
-    /// namespace and platform walls' needles inside literals (``packageNamespaceWallLines``,
-    /// ``packagePlatformWallLines``); the package's call-shape bindings' lines that name a keychain-reaching
-    /// type (``packageTestBindingLines``); the copied suites' reads of a keychain-reaching type's statics,
-    /// their source walls' needles inside literals, their bare declarations in a file on no keychain list
-    /// and their throwaway coordinators (``packageCopiedStaticLines``, ``packageCopiedSourceTextLines``,
-    /// ``packageCopiedRoutedWallLines``, ``packageCopiedDeclarationLines``,
-    /// ``packageCopiedCoordinatorLines``); and the cross-version fixture suite's two stores over copies of
-    /// a tag's fixture folders (``packageCrossVersionStoreLines``); each set under one invariant.
+    /// (``packageKeychainFiles``) replaced the per-line rows of the files that reach the keychain; moved
+    /// here at A1.1.13; 43 since plan step A1, when the suites copied from Fernlet's tests brought 20; 76
+    /// since plan step A1.3's batch D (the routed track), when the routed source walls copied from
+    /// Fernlet's tests brought 33; 89 since its mesh track, when the cells of Fernlet's mesh tests that
+    /// read this module's sources brought 13; 97 since its session track, when the session copies brought
+    /// 8; 121 since its pair track, when the pair copies brought 24; 122 since its review, when the goodbye
+    /// walls' home list brought 1; 124 since plan step A2's groundwork, when the cross-version fixture
+    /// suite's two store constructions brought 2; 125 since plan step A1's second batch of copied suites,
+    /// its support, when the identity's call-shape binding brought 1 (``packageTestBindingLines``); 136
+    /// since its copies, when the bindings they need brought 2 more and the copies 9 (two pure static
+    /// reads, one bare declaration in a file on no keychain list and six throwaway-coordinator lines); 140
+    /// since plan step A1's third batch of copied suites, its support, when the two seal keys' open-read
+    /// bindings brought 4. The rows spell a needle the per-file rule does not cover: the soundness suite's
+    /// storage cell, which reads `URL.applicationSupportDirectory` as a value; the package's file locator's
+    /// one read of its own source's path; the routed store isolation walls' suite, whose own name spells
+    /// the store's; the namespace and platform walls' needles inside literals
+    /// (``packageNamespaceWallLines``, ``packagePlatformWallLines``); the package's call-shape bindings'
+    /// lines that name a keychain-reaching type (``packageTestBindingLines``); the copied suites' reads of
+    /// a keychain-reaching type's statics, their source walls' needles inside literals, their bare
+    /// declarations in a file on no keychain list and their throwaway coordinators
+    /// (``packageCopiedStaticLines``, ``packageCopiedSourceTextLines``, ``packageCopiedRoutedWallLines``,
+    /// ``packageCopiedDeclarationLines``, ``packageCopiedCoordinatorLines``); and the cross-version fixture
+    /// suite's two stores over copies of a tag's fixture folders (``packageCrossVersionStoreLines``); each
+    /// set under one invariant.
     static let packageHazardAllowlist: [(file: String, line: String, invariant: String)] = [
         (file: "ProximityNamespaceSoundnessTests.swift",
          line: "for base in [URL.applicationSupportDirectory, scratch] {",
@@ -582,20 +645,27 @@ import Testing
     static let packageTestBindingInvariant = """
         the line declares a call-shape binding over a type that can reach the keychain: an extension of \
         IdentityService (its participant-less initializer under .packageTest and its static agreement's \
-        old spelling) or a parameter of that type (the manifest mint and the typed envelope mint), which \
-        names the type and runs nothing until a suite calls the binding; an identity's initializer reads \
-        and writes nothing, and signing and the static agreement use the keys an identity already holds, \
-        so whatever provisions an identity through a binding is a file whose own kind reads \
-        PackageTestEnvironment.keychain first
+        old spelling) or a parameter of that type (the manifest mint and the typed envelope mint), or an \
+        extension of a mesh store's seal key and the signature of its open read under .packageTest's \
+        account, which names the type and runs nothing until a suite calls the binding; an identity's \
+        initializer reads and writes nothing, and signing and the static agreement use the keys an \
+        identity already holds, so whatever provisions an identity through a binding is a file whose own \
+        kind reads PackageTestEnvironment.keychain first, and a seal key's open read reaches the keychain \
+        only as a cell of such a file calls it
         """
 
     /// The package's call-shape bindings' lines that spell a keychain needle, each exact as trimmed, in
     /// TestSupport/PackageTestBindings.swift (rule I9; ProximityKit plan step A1's second batch of copied
-    /// suites, which restored Fernlet's identity and envelope shapes there).
+    /// suites, which restored Fernlet's identity and envelope shapes there, and its third, which restored
+    /// the two seal keys' open reads).
     static let packageTestBindingLines = [
         "extension IdentityService {",
         "identity: IdentityService",
-        "identityService: IdentityService, envelopeID: UUID = UUID(), senderDisplayName: String,"
+        "identityService: IdentityService, envelopeID: UUID = UUID(), senderDisplayName: String,",
+        "extension MeshSessionSealKey {",
+        "static func forOpen(service: String) -> MeshSessionSealKeyOutcome {",
+        "extension MeshRoutedSealKey {",
+        "static func forOpen(service: String) -> MeshRoutedSealKeyOutcome {"
     ]
 
     /// What makes every line of ``packageCopiedDeclarationLines`` safe in the unhosted bundle (rule I9).
@@ -939,8 +1009,9 @@ import Testing
     }
 
     /// One file's I9 problems when it is on no wall list: every code line's needles but an allowlist row's
-    /// line and, in a file on ``packageKeychainFiles``, its keychain needles, which its kinds' structure
-    /// holds instead; and the indices of the allowlist rows its lines matched.
+    /// line and, in a file on ``packageKeychainFiles``, its keychain needles and its stores' names
+    /// (``isListedFileNeedle(_:)``), which its kinds' structure holds instead; and the indices of the
+    /// allowlist rows its lines matched.
     static func ordinaryFileProblems(_ file: PackageSwiftFiles.File) -> (problems: [String], allowed: Set<Int>) {
         var problems: [String] = []
         var allowed: Set<Int> = []
@@ -954,7 +1025,7 @@ import Testing
                 continue
             }
             for hazard in packageHazardNeedles(onLine: trimmed)
-            where rows.isEmpty || !isListedKeychainNeedle(hazard.needle) {
+            where rows.isEmpty || !isListedFileNeedle(hazard.needle) {
                 problems.append("I9: \(file.path): `\(trimmed)` holds `\(hazard.needle)`: \(hazard.reason)")
             }
         }
@@ -1027,14 +1098,17 @@ import Testing
     }
 
     /// Whether `needle` may stand in a file on ``packageKeychainFiles`` (rule I9): a keychain needle that
-    /// is not read only where an identifier starts, so a raw `SecItem` call stands in no file.
-    static func isListedKeychainNeedle(_ needle: String) -> Bool {
-        packageKeychainNeedles.contains(needle) && !packageIdentifierStartNeedles.contains(needle)
+    /// is not read only where an identifier starts, so a raw `SecItem` call stands in no file, or a
+    /// store's name (``packageListedStoreNeedles``), so a production scope's shorthand stands in none.
+    static func isListedFileNeedle(_ needle: String) -> Bool {
+        (packageKeychainNeedles.contains(needle) && !packageIdentifierStartNeedles.contains(needle))
+            || packageListedStoreNeedles.contains(needle)
     }
 
-    /// The 1-based code lines of `source` (trimmed text not starting `//`) that hold a keychain needle a
-    /// file on ``packageKeychainFiles`` may hold, an allowlist row of `file` and a bare declaration
-    /// (``isBareDeclaration(_:)``) aside (rule I9).
+    /// The 1-based code lines of `source` (trimmed text not starting `//`) that hold a needle a file on
+    /// ``packageKeychainFiles`` may hold (``isListedFileNeedle(_:)``: a keychain needle or a store's
+    /// name), an allowlist row of `file` and a bare declaration (``isBareDeclaration(_:)``) aside (rule
+    /// I9).
     static func packageKeychainLines(in source: String, file: String) -> [Int] {
         var lines: [Int] = []
         // R2: bounded by the source's line count.
@@ -1042,7 +1116,7 @@ import Testing
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.hasPrefix("//"), !isBareDeclaration(trimmed),
                   !packageHazardAllowlist.contains(where: { $0.file == file && $0.line == trimmed }) else { continue }
-            if packageHazardNeedles(onLine: trimmed).contains(where: { isListedKeychainNeedle($0.needle) }) {
+            if packageHazardNeedles(onLine: trimmed).contains(where: { isListedFileNeedle($0.needle) }) {
                 lines.append(offset + 1)
             }
         }
@@ -1088,9 +1162,11 @@ import Testing
                                                in: heading).isEmpty == false
         }
 
-        /// Whether it is `private` or `fileprivate` (`private(set)` is a setter's access, not its own).
+        /// Whether it is `private`: reachable from its own type and that type's extensions in the file,
+        /// and from no other type. `fileprivate` is not: another type of the file, a second suite among
+        /// them, reaches it; and `private(set)` is a setter's access, not its own.
         var isPrivate: Bool {
-            PackageTestHygieneTests.matchLines(#"(?<![A-Za-z0-9_])(?:private|fileprivate)(?![A-Za-z0-9_(])"#,
+            PackageTestHygieneTests.matchLines(#"(?<![A-Za-z0-9_])private(?![A-Za-z0-9_(])"#,
                                                in: heading).isEmpty == false
         }
 
@@ -1139,8 +1215,9 @@ import Testing
 
     /// The last line of the declaration whose keyword stands on `head`: its heading runs on while the
     /// parentheses and brackets opened from `head` stay open (a signature or an initializer written over
-    /// several lines); then, when the heading opens a brace, the declaration ends where that brace
-    /// closes, and otherwise with its heading.
+    /// several lines) or a line ends with an assignment's `=` (an initializer that starts on the next
+    /// line); then, when the heading opens a brace, the declaration ends where that brace closes, and
+    /// otherwise with its heading.
     static func declarationEnd(from head: Int, in code: [String]) -> Int {
         var heading = head
         var open = 0
@@ -1148,7 +1225,7 @@ import Testing
         for index in head..<code.count {
             open += code[index].filter { "([".contains($0) }.count - code[index].filter { ")]".contains($0) }.count
             heading = index
-            if open <= 0 { break }
+            if open <= 0 && !endsWithAssignment(code[index]) { break }
         }
         guard code[head...heading].contains(where: { $0.contains("{") }) else { return heading }
         var depth = 0
@@ -1228,7 +1305,9 @@ import Testing
     /// its kinds says, and it holds at least one, since a listed file with none would outlive its need.
     /// A file listed under one kind hands that kind every keychain line; a file listed under several
     /// hands each kind the lines inside the types it names (``keychainDomain(of:in:)``), and a line inside
-    /// none of them is a problem of its own.
+    /// none of them is a problem of its own. A file whose keychain lines name a store
+    /// (``packageListedStoreNeedles``) states ``packageKeychainFileStoreInvariant`` in one of its rows, and
+    /// a file whose lines name none states it in none (``storeClauseProblems(_:source:keychain:)``).
     ///
     /// - Parameters:
     ///   - rows: The file's rows on ``packageKeychainFiles``, one per kind.
@@ -1254,7 +1333,27 @@ import Testing
         for (index, row) in rows.enumerated() {
             problems += keychainKindProblems(row.kind, code: code, source: source, keychain: owned[index], all: keychain)
         }
+        problems += storeClauseProblems(rows, source: source, keychain: keychain)
         return problems.map { "I9: \(file) \($0)" }
+    }
+
+    /// Whether a listed file's rows state ``packageKeychainFileStoreInvariant`` exactly when one of its
+    /// keychain lines (`keychain`, 0-based) names a store (rule I9): a store line under no row that states
+    /// the clause, or a row stating it over a file that holds none, is a problem.
+    static func storeClauseProblems(_ rows: [PackageKeychainFile], source: String, keychain: [Int]) -> [String] {
+        let lines = source.components(separatedBy: "\n")
+        let stores = keychain.filter { line in
+            packageHazardNeedles(onLine: lines[line].trimmingCharacters(in: .whitespaces))
+                .contains { packageListedStoreNeedles.contains($0.needle) }
+        }
+        let states = rows.contains { $0.invariant.contains(packageKeychainFileStoreInvariant) }
+        if let first = stores.first, !states {
+            return ["line \(first + 1) names a store, but none of its rows on packageKeychainFiles states packageKeychainFileStoreInvariant"]
+        }
+        if stores.isEmpty && states {
+            return ["states packageKeychainFileStoreInvariant but names no store on a keychain line; drop the store clause from its rows"]
+        }
+        return []
     }
 
     /// One kind's problems over the keychain lines it holds, `keychain`, of the file's, `all` (rule I9),
@@ -1414,25 +1513,36 @@ import Testing
     }
 
     /// The last 0-based line of the expression that starts on `head`: where its parentheses, brackets
-    /// and braces, counted from the line's start, close.
+    /// and braces, counted from the line's start, close, past every line that ends with an assignment's
+    /// `=` (an initializer that starts on the next line).
     static func expressionEnd(from head: Int, in code: [String]) -> Int {
         var depth = 0
         // R2: bounded by the lines from `head` on.
         for index in head..<code.count {
             depth += code[index].filter { "([{".contains($0) }.count - code[index].filter { ")]}".contains($0) }.count
-            if depth <= 0 { return index }
+            if depth <= 0 && !endsWithAssignment(code[index]) { return index }
         }
         return code.count - 1
+    }
+
+    /// Whether a lexed line ends with an assignment's `=` (not `==`), so the expression it opens goes on
+    /// on the next line.
+    static func endsWithAssignment(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.hasSuffix("=") && !trimmed.hasSuffix("==")
     }
 
     /// Every item of a `@Test(…)` or `@Suite(…)` attribute in lexed code that runs code before a suite
     /// instance exists (rule I9), with the 1-based line of its attribute: anything but `.serialized`, a
     /// display name (a literal with no interpolation, `""` once lexed), and, after `arguments:`, a
-    /// collection that is a literal array holding no call (no `(`) and no keychain needle, or a type's
-    /// `.allCases`. Swift Testing evaluates an attribute's items as it plans the run, before it builds any
-    /// suite instance, so they may reach nothing the installer must precede.
+    /// collection that is a literal array holding no call (no `(`), no keychain needle and no name of a
+    /// static member the file declares but a literal constant (``argumentStaticNames(in:)``), or a type's
+    /// `.allCases` the file does not declare itself. Swift Testing evaluates an attribute's items as it
+    /// plans the run, before it builds any suite instance, so they may reach nothing the installer must
+    /// precede, and a static member the file declares may reach the keychain however it is spelled.
     static func attributeArgumentProblems(in lexed: String) -> [(line: Int, item: String)] {
         guard let regex = try? NSRegularExpression(pattern: #"@(?:Test|Suite)(?![A-Za-z0-9_])\s*\("#) else { return [(-1, "")] }
+        let statics = argumentStaticNames(in: lexed.components(separatedBy: "\n"))
         let text = Array(lexed)
         let ns = lexed as NSString
         var found: [(line: Int, item: String)] = []
@@ -1446,8 +1556,8 @@ import Testing
                 if item == "\"\"" || item == ".serialized" { continue }
                 if item.hasPrefix("arguments:") {
                     collections = true
-                    if isPlainCollection(String(item.dropFirst("arguments:".count))) { continue }
-                } else if collections && isPlainCollection(item) {
+                    if isPlainCollection(String(item.dropFirst("arguments:".count)), statics: statics) { continue }
+                } else if collections && isPlainCollection(item, statics: statics) {
                     continue
                 }
                 found.append((line, item))
@@ -1481,12 +1591,46 @@ import Testing
     }
 
     /// Whether an argument collection evaluates nothing the installer must precede (rule I9): a type's
-    /// `.allCases`, or a literal array that holds no call and no keychain needle.
-    private static func isPlainCollection(_ text: String) -> Bool {
+    /// `.allCases`, or a literal array that holds no call, no keychain needle and no store's name; and
+    /// either way, no name among `statics`, the static members the file declares but its literal
+    /// constants (an `allCases` the file declares itself among them).
+    private static func isPlainCollection(_ text: String, statics: Set<String>) -> Bool {
         let collection = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let names = matchedNames(#"[A-Za-z_][A-Za-z0-9_]*"#, in: collection)
+        guard names.isDisjoint(with: statics) else { return false }
         if matchLines(#"^[A-Za-z_][A-Za-z0-9_.]*\.allCases$"#, in: collection) == [1] { return true }
         guard collection.hasPrefix("["), collection.hasSuffix("]"), !collection.contains("(") else { return false }
-        return !packageHazardNeedles(onLine: collection).contains { isListedKeychainNeedle($0.needle) }
+        return !packageHazardNeedles(onLine: collection).contains { isListedFileNeedle($0.needle) }
+    }
+
+    /// The names of the static members lexed `code` declares, at any depth, that an argument collection
+    /// may not name (rule I9): every static or class function, subscript and property, but a static `let`
+    /// whose initializer, whole on its line, is a literal constant (a number, a string with no
+    /// interpolation, `true` or `false`), which evaluates nothing.
+    static func argumentStaticNames(in code: [String]) -> Set<String> {
+        let pattern = #"^(?:@[A-Za-z_][A-Za-z0-9_.]*(?:\([^)]*\))?\s+)*(?:[a-z]+(?:\([a-z]+\))?\s+)*"#
+            + #"(?:static|class)\s+(?:[a-z]+(?:\([a-z]+\))?\s+)*(let|var|func|subscript)\s*([A-Za-z_][A-Za-z0-9_]*)?(.*)$"#
+        let constant = #"^\s*(?::[^=]*)?=\s*(?:-?[0-9][0-9_]*(?:\.[0-9_]+)?|""|true|false)\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        var names: Set<String> = []
+        // R2: bounded by the code's lines.
+        for line in code {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let text = trimmed as NSString
+            guard let match = regex.firstMatch(in: trimmed, range: NSRange(location: 0, length: text.length)),
+                  match.range(at: 2).location != NSNotFound else { continue }
+            let keyword = text.substring(with: match.range(at: 1))
+            if keyword == "let" && matchLines(constant, in: text.substring(with: match.range(at: 3))) == [1] { continue }
+            names.insert(text.substring(with: match.range(at: 2)))
+        }
+        return names
+    }
+
+    /// The distinct texts `pattern` matches in `text`.
+    private static func matchedNames(_ pattern: String, in text: String) -> Set<String> {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let ns = text as NSString
+        return Set(regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range) })
     }
 
     /// The installer's structure (rule I9, ``PackageKeychainFileKind/installer``), its keychain lines
@@ -1517,7 +1661,7 @@ import Testing
             problems.append("`\(name)`'s initializer on line \(initializer.head + 1) does not read PackageTestEnvironment.keychain in its first statement")
         }
         // R2: bounded by the file's keychain lines.
-        for line in keychain {
+        for line in keychain where !isBareTypeHead(line, of: type.declaration, in: code) {
             guard type.declaration.first <= line && line <= type.declaration.last,
                   let owner = owningMember(of: line, in: members) else {
                 problems.append("line \(line + 1) reaches the keychain outside every member of `\(name)`")
@@ -1543,7 +1687,7 @@ import Testing
         let members = structureMembers(of: type.declaration, in: code)
         var unread: Set<Int> = []
         // R2: bounded by the file's keychain lines.
-        for line in keychain {
+        for line in keychain where !isBareTypeHead(line, of: type.declaration, in: code) {
             guard type.declaration.first <= line && line <= type.declaration.last,
                   let owner = owningMember(of: line, in: members) else {
                 problems.append("line \(line + 1) reaches the keychain outside every member of the fixture enum `\(name)`")
@@ -1560,6 +1704,16 @@ import Testing
             problems.append("`\(name)`'s member on line \(head + 1) reaches the keychain but does not read PackageTestEnvironment.keychain in its first statement")
         }
         return problems
+    }
+
+    /// Whether 0-based `line` is the head of `type`'s own declaration and declares nothing else (rule I9):
+    /// the line its keyword stands on, its lexed code ending at the one brace that opens the type's body.
+    /// A type's name runs nothing, so a fixture or support type whose own name holds a needle (the store
+    /// fixtures' `MeshRoutedStoreFixtures`, ProximityKit plan step A1's third batch of copied suites) does
+    /// not reach the keychain on that line; a member written on the same line is still read.
+    static func isBareTypeHead(_ line: Int, of type: StructureDeclaration, in code: [String]) -> Bool {
+        let trimmed = code[line].trimmingCharacters(in: .whitespaces)
+        return line == type.head && trimmed.hasSuffix("{") && trimmed.filter { $0 == "{" }.count == 1
     }
 
     /// The first statement of the body `declaration` opens, trimmed: the code after its first brace on
@@ -1715,9 +1869,12 @@ import Testing
     /// and tag 0.1.0's verification ceremony fixtures (2026-10-16): 810 → 814, for the two cells
     /// `ProximityPairSessionTests` gains (a ruling's deadline after its own hello is marked read, and
     /// before an unreadable hello's refusal) and the two `CrossVersionFixtureTests` gains (the
-    /// verification QR, and the challenge and response). A test added or removed changes it in the same
-    /// commit.
-    static let measuredDeclaredTests = 814
+    /// verification QR, and the challenge and response). RAISED at plan step A1's third batch of copied
+    /// suites, its support (2026-10-16): 814 → 815, for the `PackageTestSupportTests` cell that holds the
+    /// switchable install binding's scripted override, an answer a cell changes partway through the work
+    /// it wraps, to the answers of Fernlet's adapter under `DeviceBindingID`'s. A test added or removed
+    /// changes it in the same commit.
+    static let measuredDeclaredTests = 815
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three
@@ -2163,13 +2320,17 @@ import Testing
     /// reads the installer, with its keychain lines in its instance tests and a private static helper,
     /// passes, and so do the traits, arguments and statics that run nothing the installer must precede
     /// (`.serialized`, a display name, a literal array with no call and no needle, a type's `.allCases`, a
-    /// static stored property that reaches no keychain), a bare declaration of a keychain type in a
-    /// public nested type, and a second suite that holds no keychain line and so needs no marker; and each
-    /// way a suite file reaches the keychain without an instance is named: no marker, or a marker second;
-    /// a helper or a nested type that is not private; a static or a free test; an argument that calls,
-    /// that names a keychain type, or that is no collection, and any other trait; a static stored
-    /// property that builds a keychain type or names a static member that does; a global stored property;
-    /// a keychain line outside every suite; and a listed file with no keychain line.
+    /// static stored property that reaches no keychain, a literal constant of the suite's named in an
+    /// argument), a bare declaration of a keychain type in a public nested type, and a second suite that
+    /// holds no keychain line and so needs no marker; and each way a suite file reaches the keychain
+    /// without an instance is named: no marker, or a marker second; a helper, a `fileprivate` one
+    /// included, or a nested type that is not private; a keychain call inside a static helper's
+    /// multi-line call; a static or a free test; an argument that calls, that names a keychain type or a
+    /// static member of the file that is no literal constant, or that is no collection, a second
+    /// collection that calls, and any other trait; a static stored property that builds a keychain type,
+    /// on its own line, inside a multi-line call or on the line below its `=`, or names a static member
+    /// that does, one whose initializer starts below its `=` included; a global stored property; a keychain line outside every suite; and a listed file with
+    /// no keychain line.
     private static func expectTheSuiteKeychainFileReaderFixtured() {
         let read = fixtureKeychainProblems as (PackageKeychainFileKind, String) -> [String]
         let suite = """
@@ -2191,7 +2352,9 @@ import Testing
             suite.replacingOccurrences(of: "@Test func a()", with: "@Test(arguments: Fault.Kind.allCases) func a(v: Fault.Kind)"),
             suite.replacingOccurrences(of: marker, with: marker + "\n    private static let size = MeshChunkFormat.maxChunkPayloadBytes + 1"),
             suite.replacingOccurrences(of: marker, with: marker + "\n    struct Pair {\n        let origin: IdentityService\n    }"),
-            suite + "\n@Suite(.serialized) struct T {\n    @Test func c() {}\n}"
+            suite + "\n@Suite(.serialized) struct T {\n    @Test func c() {}\n}",
+            suite.replacingOccurrences(of: marker, with: marker + "\n    private static let size = 3")
+                .replacingOccurrences(of: "@Test func a()", with: "@Test(arguments: [Self.size, 4]) func a(v: Int)")
         ]
         // R2: bounded by the fixed list.
         for source in admitted {
@@ -2220,7 +2383,30 @@ import Testing
             (suite + "\nlet shared = 1", "global stored property"),
             (suite + "\n@Test func free() {}", "declares a free test"),
             (suite + "\nfunc helper() { _ = ProximityKeychainItem.backend }", "outside every @Suite type"),
-            ("@Suite struct S {\n" + marker + "\n    @Test func a() {}\n}", "holds no keychain needle")
+            ("@Suite struct S {\n" + marker + "\n    @Test func a() {}\n}", "holds no keychain needle"),
+            (suite.replacingOccurrences(of: "@MainActor private static", with: "@MainActor fileprivate static"),
+             "static member that is not private"),
+            (suite.replacingOccurrences(of: marker, with: marker + "\n    private static var seeded: String { identity().localFingerprint }")
+                .replacingOccurrences(of: "@Test func a()", with: "@Test(arguments: [Self.seeded]) func a(v: String)"),
+             "arguments or traits"),
+            (suite.replacingOccurrences(of: "@Test func a()", with: "@Test(arguments: [Self.make()]) func a(v: Int)"),
+             "arguments or traits"),
+            (suite.replacingOccurrences(of: "@Test func a()", with: "@Test(arguments: [1], Self.cases()) func a(v: Int, w: Int)"),
+             "arguments or traits"),
+            (suite.replacingOccurrences(of: marker, with: marker
+                + "\n    static func wrapped() -> Wrapper {\n        Wrapper(\n            identity: IdentityService(keychainService: \"x\")\n        )\n    }"),
+             "static member that is not private"),
+            (suite.replacingOccurrences(of: marker, with: marker
+                + "\n    private static let cache = Wrapper(\n        IdentityService(namespace: .packageTest)\n    )"),
+             "static stored property whose initializer reaches the keychain"),
+            (suite.replacingOccurrences(of: marker, with: marker
+                + "\n    private static let cache =\n        IdentityService(namespace: .packageTest)"),
+             "static stored property whose initializer reaches the keychain"),
+            (suite.replacingOccurrences(of: marker, with: marker
+                + "\n    private static let made =\n        IdentityService(namespace: .packageTest)\n    private static let alias = made"),
+             "line 5 declares a static stored property whose initializer reaches the keychain"),
+            (suite.replacingOccurrences(of: marker, with: marker + "\n    private static let alias =\n        identity()"),
+             "line 3 declares a static stored property whose initializer reaches the keychain")
         ]
         // R2: bounded by the fixed list.
         for (source, names) in suites {
@@ -2295,6 +2481,90 @@ import Testing
         let unmarked = together.replacingOccurrences(of: "    let keychain = PackageTestEnvironment.keychain\n", with: "")
         #expect(fixtureKeychainProblems(both, unmarked).contains { $0.contains("first stored property reads none") },
                 "a suite with a keychain line and no marker beside a fixture enum was read as \(fixtureKeychainProblems(both, unmarked))")
+    }
+
+    /// The structure reader over store lines (rule I9; ProximityKit plan step A1's third batch of copied
+    /// suites), both ways. A listed file may hold a store's name, and neither a production scope's
+    /// shorthand nor a raw `SecItem` call, and an unlisted file's store line is refused. A suite whose cell
+    /// builds a store behind its marker passes under a row that states the store clause, and so does a
+    /// fixture enum whose member reads the installer before it builds one, its own name holding a store's
+    /// or not; and each way a store line escapes the installer is named: no marker; a static helper that
+    /// is not private, a static stored property or a free function that builds one; a store's name in an
+    /// argument collection; a fixture member that builds one before its read, or a stored property that
+    /// does, or one written on the enum's head line. And the store clause stands
+    /// exactly where a store does: a store line under rows that state none is refused, and so is a row
+    /// stating it over a file that names no store.
+    private static func expectTheStoreLineReaderFixtured() {
+        #expect(isListedFileNeedle("MeshRoutedStore") && isListedFileNeedle("MeshSessionStore"),
+                "a listed file may not hold a store's name")
+        #expect(!isListedFileNeedle(".production(") && !isListedFileNeedle("SecItem"),
+                "a listed file may hold a production scope's shorthand or a raw SecItem call")
+        let loose = PackageSwiftFiles.File(path: "Unlisted.swift", text: "let s = MeshSessionStore(scope: scope)\n")
+        #expect(ordinaryFileProblems(loose).problems.contains { $0.contains("holds `MeshSessionStore`") },
+                "an unlisted file's store line was not refused")
+        let read = { (kind: PackageKeychainFileKind, invariant: String, source: String) in
+            packageKeychainFileProblems([PackageKeychainFile(file: "F.swift", kind: kind, invariant: invariant)],
+                                        source: source)
+        }
+        let stores = packageKeychainStoreSuiteInvariant
+        let suite = """
+            @Suite struct S {
+                let keychain = PackageTestEnvironment.keychain
+                @Test func a() { _ = MeshRoutedStore(scope: Self.scope()).load() }
+                private static func scope() -> MeshRoutedStorageScope { Fixtures.scope() }
+                private static func wipe(_ scope: MeshRoutedStorageScope) { MeshRoutedStore.wipeForDeleteAll(scope: scope) }
+            }
+            """
+        #expect(read(.suite, stores, suite).isEmpty, "a suite whose store lines sit behind its marker was refused: \(read(.suite, stores, suite))")
+        let cell = "    @Test func a() { _ = MeshRoutedStore(scope: Self.scope()).load() }"
+        let refused: [(source: String, invariant: String, names: String)] = [
+            (suite.replacingOccurrences(of: "    let keychain = PackageTestEnvironment.keychain\n", with: ""), stores,
+             "first stored property reads none"),
+            (suite.replacingOccurrences(of: "    private static func wipe", with: "    static func wipe"), stores,
+             "static member that is not private"),
+            (suite.replacingOccurrences(of: cell, with: cell + "\n    private static let shared = MeshSessionStore(scope: .init())"),
+             stores, "static stored property whose initializer reaches the keychain"),
+            (suite + "\nfunc loose() { _ = MeshRoutedStore(scope: s) }", stores, "outside every @Suite type"),
+            (suite.replacingOccurrences(of: "@Test func a()", with: "@Test(arguments: [MeshRoutedStoreFormat.maxItems]) func a(v: Int)"),
+             stores, "arguments or traits"),
+            (suite, packageKeychainSuiteInvariant, "names a store, but none of its rows"),
+            ("@Suite struct S {\n    let keychain = PackageTestEnvironment.keychain\n    @Test func a() { _ = ProximityKeychainItem.backend }\n}",
+             stores, "names no store on a keychain line")
+        ]
+        // R2: bounded by the fixed list.
+        for (source, invariant, names) in refused {
+            let problems = read(.suite, invariant, source)
+            #expect(problems.contains { $0.contains(names) }, "a suite file whose store line \(names) was read as \(problems)")
+        }
+        let fixture = """
+            enum Fixtures {
+                static func store(_ scope: MeshSessionStorageScope) -> MeshSessionStore {
+                    _ = PackageTestEnvironment.keychain
+                    return MeshSessionStore(scope: scope)
+                }
+            }
+            """
+        let kind = PackageKeychainFileKind.fixtureEnum(type: "Fixtures")
+        let enums = packageKeychainStoreFixtureEnumInvariant
+        #expect(read(kind, enums, fixture).isEmpty, "a fixture enum that reads before its store was refused: \(read(kind, enums, fixture))")
+        let named = fixture.replacingOccurrences(of: "enum Fixtures {", with: "enum MeshSessionStoreFixtures {")
+        let storeNamed = PackageKeychainFileKind.fixtureEnum(type: "MeshSessionStoreFixtures")
+        #expect(read(storeNamed, enums, named).isEmpty,
+                "a fixture enum whose own name holds a store's was refused on its head line: \(read(storeNamed, enums, named))")
+        let broken: [(source: String, names: String)] = [
+            (named.replacingOccurrences(of: "enum MeshSessionStoreFixtures {\n",
+                                        with: "enum MeshSessionStoreFixtures { static func s() { _ = MeshSessionStore.self }\n"),
+             "outside every member of the fixture enum"),
+            (fixture.replacingOccurrences(of: "        _ = PackageTestEnvironment.keychain\n", with: ""),
+             "does not read PackageTestEnvironment.keychain"),
+            (fixture.replacingOccurrences(of: "enum Fixtures {\n", with: "enum Fixtures {\n    static let shared = MeshSessionStore(scope: .init())\n"),
+             "stored property's initializer")
+        ]
+        // R2: bounded by the fixed list.
+        for (source, names) in broken {
+            let problems = read(source.contains("MeshSessionStoreFixtures") ? storeNamed : kind, enums, source)
+            #expect(problems.contains { $0.contains(names) }, "a fixture enum whose store line \(names) was read as \(problems)")
+        }
     }
 
     /// The structure reader over the installer and a support type (rule I9), both ways. An installer passes

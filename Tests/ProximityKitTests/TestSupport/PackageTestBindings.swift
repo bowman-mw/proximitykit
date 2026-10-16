@@ -23,9 +23,9 @@
 // From another of Fernlet's files (ProximityKit plan step A1's second batch of copied suites), each over
 // the package's own stand-in for the Fernlet value it bound: the identity's `init(keychainService:)`,
 // which Fernlet's FernletAppTestBindings.swift restores with Fernlet's sealed-backup escrow and this file
-// with no provisioning participant; the routed registry the suites call `increment1`, which Fernlet's
-// FernletSocialTestBindings.swift builds over FernletSocial's host rows and this file over
-// `PackageTestHost`'s; and the typed envelope mint, which Fernlet's tests reach through FernletConnections'
+// with no provisioning participant; the routed registry the suites call `increment1`, and its ack-stage
+// projection, which Fernlet's FernletSocialTestBindings.swift builds over FernletSocial's host rows and
+// this file over `PackageTestHost`'s; and the typed envelope mint, which Fernlet's tests reach through FernletConnections'
 // typed view of the payload token and this file restores over ProximityKit's own `MeshPayloadRole`.
 
 import CryptoKit
@@ -133,9 +133,20 @@ func canonicalBytes(for payload: MeshRoutedDrainAnswerPayload) -> Data {
     canonicalBytes(for: payload, in: .packageTest)
 }
 
+/// `canonicalBytes(for: receipt, in: .packageTest)`: a custody receipt under the package tests' labels.
+func canonicalBytes(for receipt: MeshCustodyReceipt) -> Data {
+    canonicalBytes(for: receipt, in: .packageTest)
+}
+
 /// `canonicalBytes(for: receipt, in: .packageTest)`: a recipient receipt under the package tests' labels.
 func canonicalBytes(for receipt: MeshRecipientReceipt) -> Data {
     canonicalBytes(for: receipt, in: .packageTest)
+}
+
+/// `canonicalBytes(for: payload, in: .packageTest)`: a routed inventory digest under the package tests'
+/// labels.
+func canonicalBytes(for payload: MeshRoutedInventoryPayload) -> Data {
+    canonicalBytes(for: payload, in: .packageTest)
 }
 
 // MARK: - Signed transcripts II: the verifiers and the exchange
@@ -164,6 +175,28 @@ extension MeshRoutedManifestVerifier {
 /// The chunk door's initializer the suites were written against, keeping the package tests' labels as
 /// its copy.
 extension MeshChunkVerifier {
+
+    /// `init(meshID:hardDeadline:ledger:manifest:purposes: .packageTest)`.
+    init(meshID: UUID, hardDeadline: Date, ledger: MeshMembershipLedger, manifest: MeshRoutedManifest?) {
+        self.init(meshID: meshID, hardDeadline: hardDeadline, ledger: ledger, manifest: manifest,
+                  purposes: .packageTest)
+    }
+}
+
+/// The custody-receipt door's initializer the suites were written against, keeping the package tests'
+/// labels as its copy.
+extension MeshCustodyReceiptVerifier {
+
+    /// `init(meshID:hardDeadline:ledger:manifest:purposes: .packageTest)`.
+    init(meshID: UUID, hardDeadline: Date, ledger: MeshMembershipLedger, manifest: MeshRoutedManifest?) {
+        self.init(meshID: meshID, hardDeadline: hardDeadline, ledger: ledger, manifest: manifest,
+                  purposes: .packageTest)
+    }
+}
+
+/// The recipient-receipt door's initializer the suites were written against, keeping the package tests'
+/// labels as its copy.
+extension MeshRecipientReceiptVerifier {
 
     /// `init(meshID:hardDeadline:ledger:manifest:purposes: .packageTest)`.
     init(meshID: UUID, hardDeadline: Date, ledger: MeshMembershipLedger, manifest: MeshRoutedManifest?) {
@@ -219,6 +252,32 @@ extension MeshChunk {
 
     /// `chunkID(in: .packageTest)`.
     var chunkID: UUID { chunkID(in: .packageTest) }
+}
+
+/// A custody receipt's dedup id as the property the suites were written against, over the package tests'
+/// labels.
+extension MeshCustodyReceipt {
+
+    /// `receiptID(in: .packageTest)`.
+    var receiptID: UUID { receiptID(in: .packageTest) }
+}
+
+/// A recipient receipt's dedup id as the property the suites were written against, over the package
+/// tests' labels.
+extension MeshRecipientReceipt {
+
+    /// `receiptID(in: .packageTest)`.
+    var receiptID: UUID { receiptID(in: .packageTest) }
+}
+
+/// The streaming content hasher's initializer the suites were written against, over the package tests'
+/// labels.
+extension MeshRoutedContentHasher {
+
+    /// `MeshRoutedContentHasher(purposes: .packageTest)`.
+    init() {
+        self.init(purposes: .packageTest)
+    }
 }
 
 /// The in-memory reassembler's two verbs in the shapes the suites were written against, over the
@@ -338,6 +397,17 @@ extension MeshRoutedTypeRegistry {
     }
 }
 
+/// The ack-stage table in the shape the suites were written against: the `finalAck` column of the
+/// package host's registry (``MeshRoutedTypeRegistry/increment1``), keyed by `.packageTest`'s tokens, as
+/// Fernlet's tests restore it over FernletSocial's rows (`FernletSocialTestBindings.swift`).
+extension MeshRoutedAckStageTable {
+
+    /// The table the retired `increment1` value held: ``MeshRoutedTypeRegistry/increment1``'s ack stages.
+    static var increment1: MeshRoutedAckStageTable {
+        MeshRoutedTypeRegistry.increment1.ackStages
+    }
+}
+
 /// The manifest mint in the shape the suites were written against, with the registry its retired
 /// `types:` default named. It inherits the mint's main-actor isolation.
 extension MeshRoutedManifest {
@@ -379,6 +449,32 @@ extension ProximityIdentityEnvelope {
             payloadTypeToken: payloadType.token(in: ProximityNamespace.packageTest.family.vocabulary.mesh),
             payloadEncryption: payloadEncryption, payloadSummary: payloadSummary, payload: payload,
             createdAt: createdAt, expiresAt: expiresAt)
+    }
+}
+
+// MARK: - The installation's rows
+//
+// The mesh stores' seal-key accounts are the namespace's installation rows; each seal key's open read
+// comes back in the shape the suites were written against with `.packageTest`'s account, read off the
+// value, never respelled here.
+
+/// The mesh-session seal key's open read in the shape the suites were written against, with
+/// `.packageTest`'s mesh-session seal-key account.
+extension MeshSessionSealKey {
+
+    /// `forOpen(service:account:)` with `.packageTest`'s `installation.keychain.meshSessionSealKey.account`.
+    static func forOpen(service: String) -> MeshSessionSealKeyOutcome {
+        forOpen(service: service, account: ProximityNamespace.packageTest.installation.keychain.meshSessionSealKey.account)
+    }
+}
+
+/// The routed seal key's open read in the shape the suites were written against, with `.packageTest`'s
+/// routed seal-key account.
+extension MeshRoutedSealKey {
+
+    /// `forOpen(service:account:)` with `.packageTest`'s `installation.keychain.meshRoutedSealKey.account`.
+    static func forOpen(service: String) -> MeshRoutedSealKeyOutcome {
+        forOpen(service: service, account: ProximityNamespace.packageTest.installation.keychain.meshRoutedSealKey.account)
     }
 }
 
