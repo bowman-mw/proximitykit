@@ -1001,15 +1001,16 @@ connections they hand over (`ProximityRadioListenerTests`), the tests' own
 hygiene (`PackageTestHygieneTests`), their tree walls (`PackageTestTreeWallTests`), the source walls
 over this module's own code (`ProximitySourceWallTests`) and the memory-lifecycle wall over it
 (`ProximityMemoryLifecycleTests`); thirty-three suites copied from Fernlet's tests, described
-below, and seventeen more that reach the keychain and open no store, described after them, and, copied
-at plan step A1.3 and described after them, the source walls of nine of its routed
+below, seventeen more that reach the keychain and open no store, described after them, and twenty that
+also open a store, described after those, and, copied at plan step A1.3 and described after them, the
+source walls of nine of its routed
 suites, thirteen suites holding the cells of its mesh tests, six holding those of its session,
 continuation and photo-review suites and ten holding those of its pair-session, presence, identity,
 golden, wipe, audit-bridge, transport and localization tests that read this module's sources, and one
 from that step's final review holding the P9 battery's honesty pin on the `.remove` branch's stand-in
 (`MeshP9HonestyAcceptanceTests`); and, in the package repository, the example app's namespace held
 apart (`ExampleNamespaceTests`, plan step A1.2) and every released tag's bytes decoded by today's code
-(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred eighteen suites, 815 tests. The
+(`CrossVersionFixtureTests`, plan step A2; see "Versioning"): one hundred thirty-eight suites, 999 tests. The
 target is unhosted: the package repository's CI runs it under `swift test` and `xcodebuild test` on
 macOS and in an iOS simulator's `xctest` agent, so no keychain entitlement reaches it (on the simulator
 a `SecItem` call returns `errSecMissingEntitlement`; for a Mac see the Keychain row of "Hosting on
@@ -1069,7 +1070,7 @@ while an absent one mints; scopes on two services never see each other's rows; a
 device-only variants of one account stay apart. At plan step A1.1.6 the bundle, 150 tests then, also
 built and ran natively on a Mac (`swift build --product FernletKitPackageTests`, then
 `swift test --skip-build`), against its in-memory store; the suites added since have run natively on a
-Mac too, all one hundred eighteen passing `swift test` with this module and its tests laid out as in the package
+Mac too, all one hundred thirty-eight passing `swift test` with this module and its tests laid out as in the package
 repository (`Sources/`, `Tests/` and a root manifest).
 
 The bundle's audit sink is `PackageAuditSink` (`PackageAuditCapture.swift`), which
@@ -1263,6 +1264,32 @@ token; the sealed-type control those frames are checked against is the verify ch
 they have in Fernlet's tests (`MeshDeliveryTargetTests.swift` holds only `MeshDeliveryRig` and
 `MeshDeliveryFixtures`), and the two mocks they need, `FakeMeshTransportSession` and
 `MockMultipeerTransport`, join `Mocks/`.
+
+The suites copied at plan step A1's third batch are the twenty-two that reach the keychain and open a
+store: the routed store's five-state load, its durability and its error vocabulary, the inventory
+builder, every cap at every door it guards, the parked-set drop rule and the sweeps, custody's parity
+with the in-memory reassembler, the persisted delivery map and the evidence behind every custodied
+rung, the custody and recipient receipts' signing and doors, the routed inventory's signing and door,
+the hand-off's two batch doors, the session store's round trip and durability, the session's restore
+mapping, the removal frame on a live manager, and rotation through a live manager. Two of them,
+`MeshRoutedCapacityTests` and `MeshRoutedCustodyEvidenceTests`, already held the cells of theirs that
+read this module's sources (plan step A1.3's batch D, below), and the rest of their cells join them in
+their original order, so twenty suites are new. They seal and open the two mesh stores on scopes of
+their own: a fixture builds each on a fresh folder under the temporary directory and a `.test.` service,
+under `.packageTest` and `PackageSwitchableInstallBinding`, whose override a cell binds where its
+original binds Fernlet's `DeviceBindingID` override; the two suites that build a manager build it over a
+`PackageTestHost` handed that binding. Rule I9 holds a line that names a store as it holds a keychain
+line, so each such suite reads `PackageTestEnvironment.keychain` in its first stored property and each
+fixture member that names a store reads it in its first statement, and each such file's rows state
+where its stores' scopes come from. Beyond the earlier batches' edits, a copy reads the routed chunk
+folder by `.packageTest`'s name, opens a seal key by `.packageTest`'s account, and mints, measures and
+checks receipts and inventories through bindings over `.packageTest`'s labels (the two receipt doors,
+their ids, the canonical bytes of a custody receipt and of an inventory digest, the streaming content
+hasher and the ack-stage table); two suites Fernlet's tests declare implicitly carry the bare `@Suite`
+attribute, which changes nothing Swift Testing runs. Their fixtures keep the file names they have in
+Fernlet's tests (`MeshRoutedStoreTests.swift` holds the store's and the custody rig's,
+`MeshSessionStoreTests.swift` the session store's, and `MeshCustodyReceiptTests.swift` the custody
+receipt's).
 
 Before Fernlet deleted its in-tree copy of this module (plan step A1.3), every cell of its tests that
 read this module's sources was copied here too, so no check was lost when those files left its tree

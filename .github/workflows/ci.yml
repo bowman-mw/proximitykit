@@ -251,9 +251,26 @@ jobs:
     # example app's macOS and iOS simulator builds passed with warnings as errors; the inventory 118 rows
     # declaring 815 tests. The iOS simulator's test leg was not run for this raise. swift test and the
     # macOS bundle passed at this floor and each refused MIN_TESTS 816. ARITHMETIC CHECK: 814 + 1 = 815.
+    # RAISED 815 -> 999 and 118 -> 138 at plan step A1's third batch of copied suites on a Mac,
+    # 2026-10-16 (the same Xcode and Swift), for the 22 suites of the Fernlet repository's tests that
+    # reach the keychain and open a store, copied with their names and their 184 tests
+    # (MeshRoutedCapacityTests 20, joining the two cells the package held, MeshRoutedInventoryBuilderTests
+    # 18, MeshRoutedCustodyEvidenceTests 16, joining its one, MeshRoutedStoreLoadTests 14,
+    # MeshRoutedStoreDurabilityTests 13, MeshRecipientReceiptSigningTests 11,
+    # MeshRoutedCustodyHandoffDoorTests 8, four suites of seven, five of six, two of five and four of
+    # four), twenty of them new suites, over this repository's tree with them, this workflow's steps run
+    # as written but the iOS simulator's test leg: swift test "Test run with 999 tests in 138 suites
+    # passed"; the macOS result bundle totalTestCount 999, 0 failed, 0 skipped, the same 138 suites by
+    # name, 1087 cases with arguments expanded (200 more than the 887 before them, each copied
+    # suite's cases equal to its original's); the Release build, the iOS simulator build and the
+    # example app's macOS and iOS simulator builds passed with warnings as errors; the inventory 138
+    # rows declaring 999 tests. The iOS simulator's test leg was not run for this raise. swift test and
+    # the macOS bundle passed at these floors and each refused MIN_TESTS 1000; swift test and the Walls
+    # step's declared floor refused MIN_SUITES 139. ARITHMETIC CHECK: 815 + 184 = 999 and
+    # 118 + 20 = 138.
     env:
-      MIN_TESTS: 815
-      MIN_SUITES: 118
+      MIN_TESTS: 999
+      MIN_SUITES: 138
     steps:
       - uses: actions/checkout@v4
 

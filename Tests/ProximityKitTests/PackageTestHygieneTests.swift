@@ -241,8 +241,8 @@ import Testing
     static let packageStoreNeedles = ["MeshRoutedStore", "MeshSessionStore", ".production("]
 
     /// The store needles a file on ``packageKeychainFiles`` may hold (rule I9; ProximityKit plan step A1's
-    /// third batch of copied suites, whose store suites hold too many such lines for per-line rows): the
-    /// two stores' names, each line held as a keychain line by the file's kinds, since a store reads its seal
+    /// third batch of copied suites, whose twelve files hold 182 such lines, too many for per-line rows):
+    /// the two stores' names, each line held as a keychain line by the file's kinds, since a store reads its seal
     /// key from the keychain as it seals or opens, and the file's rows stating
     /// ``packageKeychainFileStoreInvariant``. A production scope's shorthand is not among them: it stands
     /// in no file, listed or not, but on an allowlist row.
@@ -435,7 +435,7 @@ import Testing
             invariant: packageKeychainSuiteInvariant),
         PackageKeychainFile(
             file: "MeshMembershipEventWireTests.swift", kind: .suite,
-            invariant: packageKeychainSuiteInvariant),
+            invariant: packageKeychainStoreSuiteInvariant),
         PackageKeychainFile(
             file: "MeshPartitionDetectionTests.swift", kind: .fixtureEnum(type: "MeshPartitionFixtures"),
             invariant: packageKeychainFixtureEnumInvariant),
@@ -444,7 +444,56 @@ import Testing
             invariant: packageKeychainSuiteInvariant),
         PackageKeychainFile(
             file: "MeshRoutedManifestTests.swift", kind: .suite,
-            invariant: packageKeychainSuiteInvariant)
+            invariant: packageKeychainSuiteInvariant),
+        // Plan step A1's third batch of copied suites: the suites of Fernlet's tests that reach the
+        // keychain and open a store, and the fixtures they build their stores and items through, each
+        // file whose lines name a store under the invariants that state where its stores' scopes come
+        // from.
+        PackageKeychainFile(
+            file: "MeshCustodyReceiptTests.swift", kind: .suite,
+            invariant: packageKeychainStoreSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshRecipientReceiptTests.swift", kind: .suite,
+            invariant: packageKeychainStoreSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshRotationTriggerTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshRoutedCapacityTests.swift", kind: .fixtureEnum(type: "MeshRoutedCapacityFixtures"),
+            invariant: packageKeychainStoreFixtureEnumInvariant),
+        PackageKeychainFile(
+            file: "MeshRoutedCapacityTests.swift", kind: .suite,
+            invariant: packageKeychainStoreSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshRoutedCustodyHandoffTests.swift", kind: .suite,
+            invariant: packageKeychainStoreSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshRoutedCustodyTests.swift", kind: .suite,
+            invariant: packageKeychainStoreSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshRoutedInventoryBuilderTests.swift", kind: .suite,
+            invariant: packageKeychainStoreSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshRoutedInventoryTests.swift", kind: .suite,
+            invariant: packageKeychainStoreSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshRoutedStoreTests.swift", kind: .fixtureEnum(type: "MeshRoutedCustodyFixtures"),
+            invariant: packageKeychainStoreFixtureEnumInvariant),
+        PackageKeychainFile(
+            file: "MeshRoutedStoreTests.swift", kind: .fixtureEnum(type: "MeshRoutedStoreFixtures"),
+            invariant: packageKeychainStoreFixtureEnumInvariant),
+        PackageKeychainFile(
+            file: "MeshRoutedStoreTests.swift", kind: .suite,
+            invariant: packageKeychainStoreSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshSessionStateMachineTests.swift", kind: .suite,
+            invariant: packageKeychainStoreSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshSessionStoreTests.swift", kind: .fixtureEnum(type: "MeshSessionStoreFixtures"),
+            invariant: packageKeychainStoreFixtureEnumInvariant),
+        PackageKeychainFile(
+            file: "MeshSessionStoreTests.swift", kind: .suite,
+            invariant: packageKeychainStoreSuiteInvariant)
     ]
 
     /// The namespace wall (rule I9), whose lines that spell a keychain needle as data
@@ -522,7 +571,9 @@ import Testing
     /// since its copies, when the bindings they need brought 2 more and the copies 9 (two pure static
     /// reads, one bare declaration in a file on no keychain list and six throwaway-coordinator lines); 140
     /// since plan step A1's third batch of copied suites, its support, when the two seal keys' open-read
-    /// bindings brought 4. The rows spell a needle the per-file rule does not cover: the soundness suite's
+    /// bindings brought 4, and still 140 since its copies, whose 182 lines that name a store the per-file
+    /// rule holds (``packageListedStoreNeedles``). The rows spell a needle the per-file rule does not
+    /// cover: the soundness suite's
     /// storage cell, which reads `URL.applicationSupportDirectory` as a value; the package's file locator's
     /// one read of its own source's path; the routed store isolation walls' suite, whose own name spells
     /// the store's; the namespace and platform walls' needles inside literals
@@ -1835,9 +1886,13 @@ import Testing
     /// reach the keychain and open no store, sixteen of them and `IdentityServiceTests`, each copied with
     /// its name and run here. RAISED at the 0.1.1 listener fix (2026-10-16): 117 → 118, for the NEW
     /// `ProximityRadioListenerTests`, which holds every radio's listener unlimited and each radio's own cap
-    /// and deadline in its place. A suite added, moved out or deleted changes it in the same commit, argued
-    /// and measured; a deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 118
+    /// and deadline in its place. RAISED at plan step A1's third batch of copied suites (2026-10-16):
+    /// 118 → 138, for the 20 new suites of the 22 of Fernlet's tests that reach the keychain and open a
+    /// store, each copied with its name and run here; the other two, `MeshRoutedCapacityTests` and
+    /// `MeshRoutedCustodyEvidenceTests`, already had rows, for their cells that read this module's
+    /// sources. A suite added, moved out or deleted changes it in the same commit, argued and measured; a
+    /// deletion lowers it only with the retirement argued.
+    static let measuredInventoryRows = 138
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -1872,9 +1927,11 @@ import Testing
     /// verification QR, and the challenge and response). RAISED at plan step A1's third batch of copied
     /// suites, its support (2026-10-16): 814 → 815, for the `PackageTestSupportTests` cell that holds the
     /// switchable install binding's scripted override, an answer a cell changes partway through the work
-    /// it wraps, to the answers of Fernlet's adapter under `DeviceBindingID`'s. A test added or removed
-    /// changes it in the same commit.
-    static let measuredDeclaredTests = 815
+    /// it wraps, to the answers of Fernlet's adapter under `DeviceBindingID`'s. RAISED at its copies
+    /// (2026-10-16): 815 → 999, for the 184 tests of the 22 suites that reach the keychain and open a store
+    /// (148 in the 20 new suites, and 20 and 16 joining `MeshRoutedCapacityTests` and
+    /// `MeshRoutedCustodyEvidenceTests`). A test added or removed changes it in the same commit.
+    static let measuredDeclaredTests = 999
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

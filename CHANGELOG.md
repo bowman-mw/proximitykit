@@ -99,6 +99,14 @@ folder: `Fixtures/0.1.0/` holds the bytes it reads and writes.
   declares unless it is a literal constant, and the readers follow a declaration past a line ending
   in `=`. `PackageSwitchableInstallBinding` gains the scripted override, an answer a cell changes
   partway through the work it wraps, and `PackageTestHost` can be built over it.
+- The package's tests hold the 22 suites of the Fernlet repository's tests that reach the keychain
+  and open a store (plan step A1's batch C, 184 tests), under their Fernlet names: the routed store's
+  load, durability and error vocabulary, the inventory builder, every cap at every door it guards, the
+  parked-set drop rule and the sweeps, custody's parity with the reassembler, the persisted delivery
+  map and the evidence behind each custodied rung, the custody and recipient receipts' signing and
+  doors, the routed inventory's signing and door, the hand-off's batch doors, the session store's
+  round trip and durability, the session's restore mapping, and the removal frame and rotation
+  through a live manager.
 
 ### Consumers
 

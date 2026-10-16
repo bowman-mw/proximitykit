@@ -21,11 +21,12 @@
 // the debounce window bypassed, because a two-second wall-clock sleep in a test is a flake waiting
 // for a loaded runner.
 //
-// A partial copy (ProximityKit plan step A1, the split's first batch of copied suites): of the
-// Fernlet repository's FernletTests file of the same name, this holds only
-// `MeshRotationTriggerQueueTests`, `MeshRotationPolicyTests`, `MeshKeyRotationCauseWireTests` and
-// `MeshEpochGraceTests`, with their names and tests unchanged; its other suites stay there, so what
-// this header says of them is not held here.
+// A copy (ProximityKit plan step A1, the split's first and third batches of copied suites): of the
+// Fernlet repository's FernletTests file of the same name, this holds every suite, with its name and
+// tests unchanged: `MeshRotationTriggerQueueTests`, `MeshRotationPolicyTests`,
+// `MeshKeyRotationCauseWireTests` and `MeshEpochGraceTests`, and, since the third batch (the suites
+// that reach the keychain and open a store), `MeshRotationManagerTests`, over a package host whose
+// install binding its cells switch.
 
 import Foundation
 import Testing
@@ -394,5 +395,208 @@ struct MeshEpochGraceTests {
         #expect(!keyring.canOpen(old, at: rotatedAt.addingTimeInterval(grace + 1)),
                 "past the grace the old key must be rejected")
         #expect(keyring.openableEpochs(at: rotatedAt.addingTimeInterval(grace + 1)) == [new])
+    }
+}
+
+// MARK: - MeshRotationManagerTests
+
+/// The manager side: the triggers that fire, the departure that ships, the save that blocks, and
+/// the cap that ends the session.
+@MainActor
+@Suite(.serialized)
+struct MeshRotationManagerTests {
+
+    let store = PackageTestHost(installBinding: PackageSwitchableInstallBinding())
+
+    /// A fixed install identity, so the sealed save is deterministic rather than whatever the
+    /// simulator's real device-binding row happens to be.
+    private static let install = Data(repeating: 0x5C, count: 16)
+
+    private func makeMesh(_ manager: MeshNetworkManager) -> MeshDescriptor {
+        let now = Date()
+        let local = MeshMember(
+            fingerprint: manager.identityForTesting.localFingerprint,
+            displayName: "Local",
+            signingPublicKey: manager.identityForTesting.localSigningPublicKey,
+            keyAgreementPublicKey: manager.identityForTesting.localKeyAgreementPublicKey,
+            joinedAt: now
+        )
+        return MeshDescriptor(
+            meshID: UUID(),
+            name: "Rotation Meadow",
+            mode: .open,
+            members: [local],
+            nameSetAt: now,
+            nameSetBy: local.fingerprint,
+            modeSetAt: now,
+            modeSetBy: local.fingerprint,
+            createdAt: now
+        )
+    }
+
+    /// A group key bound to `counter`, and the epoch ref that names it for this manager's mesh.
+    private func seedEpoch(_ manager: MeshNetworkManager, counter: UInt32) -> MeshEpochRef? {
+        guard let coordinator = MeshEpochRef.minted(
+            counter: counter,
+            coordinatorFingerprint: manager.identityForTesting.localFingerprint,
+            meshID: manager.currentMesh?.meshID ?? UUID()
+        ) else {
+            Issue.record("could not mint the seed epoch — is the local fingerprint canonical?")
+            return nil
+        }
+        manager.seedEpochKeyringForTesting(
+            head: coordinator,
+            key: MeshGroupKey(
+                epoch: Int(counter),
+                keyBytes: Data(repeating: 0x11, count: 32),
+                activeSince: Date()
+            )
+        )
+        return coordinator
+    }
+
+    /// The 15-minute timer's trigger still arms a rotation, and it arms it as `timer`.
+    @Test func theTimerTriggerStillArmsARotation() {
+        let manager = MeshNetworkManager(store: store)
+        manager.currentMesh = makeMesh(manager)
+
+        manager.requestRotation(cause: .timer)
+
+        #expect(manager.rotationTriggers.pendingCause == .timer)
+        #expect(manager.rotationTriggers.firesAt != nil, "the timer trigger must arm a window")
+        manager.leaveMesh()
+    }
+
+    /// A completed removal vote rotates immediately (plan §8.3) and bars the member locally, so the
+    /// next distribution cannot include them.
+    @Test func aCompletedRemovalTriggersAMembershipRotation() {
+        let manager = MeshNetworkManager(store: store)
+        manager.currentMesh = makeMesh(manager)
+        let proposal = MeshRemovalProposalPayload(
+            id: UUID(),
+            targetFingerprint: "fp-target",
+            targetDisplayName: "Target",
+            proposerFingerprint: "fp-proposer",
+            proposerDisplayName: "Proposer",
+            createdAt: Date(),
+            expiresAt: Date().addingTimeInterval(60)
+        )
+
+        manager.secondRemoval(proposal)
+
+        #expect(manager.rotationTriggers.pendingCause == .membership,
+                "a voted-out member must trigger a rotation, not wait for the 15-minute tick")
+        #expect(manager.removedMemberFingerprints.contains("fp-target"))
+        manager.leaveMesh()
+    }
+
+    /// A merge that MOVES the derived roster rotates; one that changes nothing does not.
+    @Test func onlyAMergeThatChangesTheRosterRotates() throws {
+        let manager = MeshNetworkManager(store: store)
+        let mesh = makeMesh(manager)
+        manager.currentMesh = mesh
+        let identity = manager.identityForTesting
+        manager.prepareMembershipLedger(
+            meshID: mesh.meshID, founderSigningPublicKey: identity.localSigningPublicKey
+        )
+
+        var donor = MeshMembershipLedger.empty
+        donor.admissions = donor.admissions.inserting(
+            SignedAdmissionRecord(token: try MeshAdmissionToken.signed(
+                meshID: mesh.meshID,
+                joinerFingerprint: identity.localFingerprint,
+                joinerSigningPublicKey: identity.localSigningPublicKey,
+                admitterIdentity: identity
+            ))
+        )
+        #expect(manager.mergeMembershipLedger(donor).isEmpty, "the founder's own admission verifies")
+        #expect(manager.rotationTriggers.pendingCause == .merge,
+                "a merge that admits a member is a roster change")
+
+        manager.leaveMesh()
+        manager.currentMesh = mesh
+        manager.prepareMembershipLedger(
+            meshID: mesh.meshID, founderSigningPublicKey: identity.localSigningPublicKey
+        )
+        var forged = MeshMembershipLedger.empty
+        forged.departures = forged.departures.inserting(MeshMembershipFixtures.departure(9))
+        #expect(!manager.mergeMembershipLedger(forged).isEmpty, "a record from a stranger is refused")
+        #expect(manager.rotationTriggers.pendingCause == nil,
+                "a refused record must not spend a rotation")
+        manager.leaveMesh()
+    }
+
+    /// Item 3's interim regression, closed: leaving now emits a SIGNED departure before the
+    /// transport goes away.
+    @Test func leavingEmitsASignedDeparture() async {
+        let manager = MeshNetworkManager(store: store)
+        manager.currentMesh = makeMesh(manager)
+        var emitted: [MeshPayloadRole] = []
+        manager.onMembershipEventSentForTesting = { emitted.append($0) }
+
+        await manager.leaveSessionAfterNotifyingPeers()
+
+        #expect(emitted == [.meshMemberDeparture],
+                "leaveSessionAfterNotifyingPeers must notify peers — item 3 left it sending nothing")
+        #expect(manager.currentMesh == nil, "and it must still end the session")
+    }
+
+    /// Durable before acknowledged (plan §3.6): a refused seal abandons the rotation, keeps the old
+    /// epoch, and names the reason instead of swallowing it.
+    @Test func aRefusedSaveBlocksTheRotation() async {
+        let manager = MeshNetworkManager(store: store)
+        manager.currentMesh = makeMesh(manager)
+        guard let seeded = seedEpoch(manager, counter: 3) else { return }
+
+        await PackageSwitchableInstallBinding.testOverride.withValue(.unavailable) {
+            await manager.rotateNowForTesting(cause: .membership)
+        }
+
+        #expect(manager.epochKeyring?.head == seeded, "a rotation that cannot be sealed must not happen")
+        #expect(manager.currentGroupKey?.epoch == 3)
+        #expect(manager.lastRotationBlockReason != nil, "a blocked rotation is never silent")
+        manager.leaveMesh()
+    }
+
+    /// The same rotation succeeds once the seal can be written, and it records its cause.
+    @Test func aSealableRotationAdvancesTheHeldKeyring() async {
+        let manager = MeshNetworkManager(store: store)
+        manager.currentMesh = makeMesh(manager)
+        guard let seeded = seedEpoch(manager, counter: 3) else { return }
+
+        await PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Self.install)) {
+            await manager.rotateNowForTesting(cause: .membership)
+        }
+
+        #expect(manager.epochKeyring?.head.counter == 4)
+        #expect(manager.currentGroupKey?.epoch == 4)
+        #expect(manager.lastRotationCause == .membership)
+        #expect(manager.lastRotationBlockReason == nil)
+        #expect(manager.epochRef == manager.epochKeyring?.head.canonicalString,
+                "the introduction's epochRef is read off the held keyring, not re-derived")
+        #expect(manager.epochKeyring?.canOpen(seeded, at: Date()) == true,
+                "the closing epoch stays openable for its grace window")
+        manager.leaveMesh()
+    }
+
+    /// Plan §8.4's counter cap: the session ends with a signed termination rather than trapping or
+    /// serving a key it can never retire.
+    @Test func theCounterCapEndsTheSession() async {
+        let manager = MeshNetworkManager(store: store)
+        manager.currentMesh = makeMesh(manager)
+        guard seedEpoch(manager, counter: MeshEpochBounds.counterCap) != nil else { return }
+        var emitted: [MeshPayloadRole] = []
+        manager.onMembershipEventSentForTesting = { emitted.append($0) }
+
+        await PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Self.install)) {
+            await manager.rotateNowForTesting(cause: .membership)
+        }
+
+        #expect(emitted == [.meshTerminated])
+        #expect(manager.currentMesh == nil, "a mesh that cannot rotate must end")
+        // Ending the session drops the keyring — and with it the block reason, which is
+        // per-session diagnostic state rather than a durable one.
+        #expect(manager.epochKeyring == nil)
+        #expect(manager.currentGroupKey == nil)
     }
 }
