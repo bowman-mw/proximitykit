@@ -16,9 +16,14 @@ not held.
 
 ## Unreleased
 
-Planned as 0.1.1, a fix release: no public API, wire format, on-disk format or frozen token is
-changed or removed, and every 0.1.0 API is kept, so z moves. It writes no format, and no version of
-one, that `Fixtures/0.1.0/` does not hold, so it adds no fixture folder.
+Nothing yet.
+
+## 0.1.1 — 2026-10-17
+
+Tag `0.1.1`, commit `e09affe4` (the merge of proximitykit#6). A fix release: no public API, wire
+format, on-disk format or frozen token is changed or removed, and every 0.1.0 API is kept, so z moves.
+It writes no format, and no version of one, that `Fixtures/0.1.0/` does not hold, so it adds no
+fixture folder.
 
 ### Fixed
 
