@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Manifest wall for ProximityKit: Package.swift carries no unsafe flags and no warnings setting.
+"""Manifest wall for ProximityKit: Package.swift carries no unsafe flags, no warnings setting, and no
+resource but the tests' fixture folder.
 
 Power of 10 rule 10 (warnings are errors) is held on the build commands in
 .github/workflows/ci.yml, never in the manifest, the way the Fernlet repository holds it for its
@@ -24,21 +25,41 @@ Checks:
     MF-MISSING       Once Sources/ProximityKit exists, Package.swift exists too. Without it CI's
                      build and test steps would skip with a notice, and the job would pass on the
                      walls alone.
+    MF-RESOURCES     The manifest's one resource rule is the test target's `.copy("Fixtures")`
+                     (ALLOWED_RESOURCE), under the one `resources:` label, both after the
+                     `.testTarget(` line, and the folder it names exists. The folder holds the bytes
+                     each released tag wrote, which CrossVersionFixtureTests reads through
+                     Bundle.module: copied whole, because `.process` flattens a folder and two tags'
+                     files of one name would collide, and only in the tests, because a resource in
+                     the library would ship inside every host's app. Any other resource rule
+                     (`.copy(`, `.process(` or `.embedInCode(`, whatever qualifies it, as in
+                     `Resource.process(`, and however it is spaced before its `(`) or `resources:`
+                     label is refused, and so is a fixture folder on disk that the manifest does not
+                     declare (SwiftPM would warn about its unhandled files and the suite would have no
+                     Bundle.module).
 
 Comment-only lines are skipped, so prose that explains the ban passes; a trailing comment does
 not hide a setting. The names are matched at identifier boundaries, so a longer identifier that
-contains one is not the setting.
+contains one is not the setting; a resource rule's name is bounded by the `.` before it and the `(`
+after it.
 
 Before the import: the code came with its git history from the Fernlet repository. A tree with
 neither Package.swift nor Sources/ProximityKit, as this repository's was until then, passes.
 """
 import os
+import re
 import sys
 
 MANIFEST = "Package.swift"
 IMPORT_ROOT = os.path.join("Sources", "ProximityKit")   # MF-MISSING starts once this exists
 
 UNSAFE_SETTINGS = ("unsafeFlags",)
+# MF-RESOURCES: the one resource rule, the tests' fixture folder, and where it sits.
+RESOURCE_RULES = ("copy", "process", "embedInCode")
+RESOURCE_CALL = re.compile(r"\.(" + "|".join(RESOURCE_RULES) + r")\s*\(")
+ALLOWED_RESOURCE = '.copy("Fixtures")'
+TEST_TARGET_CALL = ".testTarget("
+FIXTURE_FOLDER = os.path.join("Tests", "ProximityKitTests", "Fixtures")
 # PackageDescription's warning-control settings (new in PackageDescription 6.2): Swift settings
 # take the first two, C and C++ settings all four.
 WARNING_SETTINGS = ("treatAllWarnings", "treatWarning", "enableWarning", "disableWarning")
@@ -88,6 +109,45 @@ def scan_manifest(lines):
     return findings
 
 
+def resource_calls(text):
+    """The resource rules `text` calls: each RESOURCE_RULES name right after a `.`, whatever qualifies
+    it (`.process(`, `Resource.process(`), with its `(` next after any blanks (`.process (`)."""
+    return [match.group(1) for match in RESOURCE_CALL.finditer(text)]
+
+
+def scan_resources(lines, fixture_folder_exists):
+    """Return (check, line number, detail, text) for MF-RESOURCES over `lines`."""
+    findings = []
+    test_target = next((number for number, line in enumerate(lines, start=1)
+                        if not is_comment_only(line) and TEST_TARGET_CALL in line), None)
+    allowed, labels = [], []
+    for number, line in enumerate(lines, start=1):
+        if is_comment_only(line):
+            continue
+        if names_symbol(line, "resources"):
+            labels.append(number)
+        calls = resource_calls(line)
+        if line.strip().rstrip(",") == ALLOWED_RESOURCE:
+            allowed.append(number)
+        elif calls:
+            findings.append(("MF-RESOURCES", number, f"declares the resource rule `.{calls[0]}(`; the one "
+                             f"resource is the tests' `{ALLOWED_RESOURCE}`", line))
+    if fixture_folder_exists and len(allowed) != 1:
+        findings.append(("MF-RESOURCES", 0, f"{FIXTURE_FOLDER} exists but the manifest declares "
+                         f"`{ALLOWED_RESOURCE}` {len(allowed)} times, not once", ""))
+    if allowed and not fixture_folder_exists:
+        findings.append(("MF-RESOURCES", allowed[0], f"declares `{ALLOWED_RESOURCE}` but {FIXTURE_FOLDER} "
+                         f"does not exist", lines[allowed[0] - 1]))
+    if len(labels) > 1 or (labels and not allowed):
+        findings.append(("MF-RESOURCES", labels[-1], f"{len(labels)} `resources:` labels; the one is the "
+                         f"test target's, holding `{ALLOWED_RESOURCE}`", lines[labels[-1] - 1]))
+    for number in labels + allowed:
+        if test_target is None or number < test_target:
+            findings.append(("MF-RESOURCES", number, f"a resource declaration before the `{TEST_TARGET_CALL}` "
+                             f"line: the library declares none", lines[number - 1]))
+    return findings
+
+
 def main():
     repo = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     imported = os.path.isdir(os.path.join(repo, IMPORT_ROOT))
@@ -98,6 +158,7 @@ def main():
         with open(manifest, encoding="utf-8", errors="replace") as f:
             lines = f.read().split("\n")
         findings = scan_manifest(lines)
+        findings += scan_resources(lines, os.path.isdir(os.path.join(repo, FIXTURE_FOLDER)))
     elif imported:
         findings.append(("MF-MISSING", 0, f"{IMPORT_ROOT} exists but {MANIFEST} does not, so CI would "
                          f"skip every build and test step", ""))

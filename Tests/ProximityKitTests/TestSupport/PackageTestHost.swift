@@ -26,7 +26,9 @@ import ProximityKit
 ///   here creates it (a store a cell opens does), and ``tearDown()`` removes it;
 /// - both storage scopes on that root, under its namespace and its install binding, on the `.test.`
 ///   services `org.example.pktest.mesh-session.test.<UUID>` and `org.example.pktest.mesh-routed.test.<UUID>`;
-/// - a ``PinnedInstallBinding`` of sixteen fixed bytes, read with no keychain;
+/// - the install binding it is handed, a ``PinnedInstallBinding`` of sixteen fixed bytes, read with no
+///   keychain, unless a cell hands it another (a cell that switches its binding hands it a
+///   `PackageSwitchableInstallBinding`), under which both its scopes seal and open;
 /// - a fresh ``PackageTrustPolicy`` per ``makeProximityTrustPolicy()`` call and a fresh
 ///   `NoopRangingProvider` per ``makeProximityRangingProvider()`` call;
 /// - a fresh identity under its namespace per ``makeProximityIdentity()`` call, every one on the host's
@@ -75,7 +77,7 @@ final class PackageTestHost: ProximityHost {
     /// of its own.
     let meshRoutedStorage: MeshRoutedStorageScope
 
-    /// Sixteen fixed bytes, read with no keychain.
+    /// The install binding this host was handed: sixteen fixed bytes, read with no keychain, by default.
     let proximityInstallBinding: any ProximityInstallBinding
 
     /// The keychain service every identity this host builds keeps its rows under:
@@ -95,19 +97,24 @@ final class PackageTestHost: ProximityHost {
     var trustedSigningKeys: Set<Data> = []
 
     /// A host of `namespace`, whose user goes by `displayName`, on a fresh scratch root and fresh `.test.`
-    /// services. Reads the bundle's keychain store and audit sink first, so both are installed; creates
-    /// nothing on disk and writes no keychain row.
+    /// services, its scopes sealing and opening under `installBinding`. Reads the bundle's keychain store
+    /// and audit sink first, so both are installed; creates nothing on disk and writes no keychain row.
     ///
     /// - Parameters:
     ///   - namespace: The host's namespace; `.packageTest` by default.
     ///   - displayName: The name this device goes by; `"Tester"` by default.
-    init(namespace: ProximityNamespace = .packageTest, displayName: String = "Tester") {
+    ///   - installBinding: The binding its scopes seal and open under; a ``PinnedInstallBinding`` of
+    ///     sixteen fixed bytes by default.
+    init(
+        namespace: ProximityNamespace = .packageTest, displayName: String = "Tester",
+        installBinding: any ProximityInstallBinding = PinnedInstallBinding(bytes: Data(repeating: 0xA5, count: 16))
+    ) {
         keychain = PackageTestEnvironment.keychain
         _ = PackageTestEnvironment.audit
         let id = UUID().uuidString
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("PackageTestHost-\(id)", isDirectory: true)
-        let binding = PinnedInstallBinding(bytes: Data(repeating: 0xA5, count: 16))
+        let binding = installBinding
         proximityNamespace = namespace
         proximityDisplayName = displayName
         proximitySupportDirectory = root
@@ -164,8 +171,17 @@ final class PackageTestHost: ProximityHost {
     /// Fernlet's rows take, and the caps they computed to at plan step A1.1 (9 065, 553 and 10 551 337
     /// bytes) as literals.
     var meshRoutedTypeEntries: [MeshRoutedTypeEntry] {
-        let types = proximityNamespace.family.vocabulary.routedTypes
-        return [
+        Self.routedTypeEntries(proximityNamespace.family.vocabulary.routedTypes)
+    }
+
+    /// The temporary-message, heart and photo rows on `types`: the rows ``meshRoutedTypeEntries`` answers
+    /// for a host's namespace, and the ones the package's test bindings build the registry the copied
+    /// suites call `increment1` over.
+    ///
+    /// - Parameter types: The routed types whose tokens the rows carry.
+    /// - Returns: The three rows, in that order.
+    nonisolated static func routedTypeEntries(_ types: ProximityNamespace.RoutedTypes) -> [MeshRoutedTypeEntry] {
+        [
             MeshRoutedTypeEntry(
                 token: types.tempMessage, maxItemByteCount: 9_065, destinations: .fullRosterAtCreation,
                 relayRetention: .originRetainsUntilDeparture, finalAck: .durableRecipientStorage,

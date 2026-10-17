@@ -395,6 +395,9 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// proved who it is must never occupy a **roster** seat, because the seat would then be taken by
     /// whoever dialed first rather than by a member. An unauthenticated connection holds one of
     /// these instead, and takes a real slot only once ``MeshChannelIntroductionExchange`` accepts it.
+    /// One past it is refused before its owning task starts, so the framework closes it: with the
+    /// listener's limit lifted (``ProximityQUICParameters/listenerNewConnectionLimit``) this is the cap
+    /// on what an inbound flood can make this radio hold.
     nonisolated static let maxPendingInboundTunnels = MeshLinkTable.maxConcurrentLinks
 
     /// Seconds an inbound connection may take to finish its signed channel introduction.
@@ -1147,7 +1150,7 @@ private extension NetworkMeshSession {
                 txtRecord: NWTXTRecord(advertisedFields)
             ),
             using: listenerParameters(identity: tlsIdentity.identity)
-        ).newConnectionLimit(MeshLinkTable.maxConcurrentLinks)
+        ).newConnectionLimit(ProximityQUICParameters.listenerNewConnectionLimit)
         self.listener = listener
         listener.onStateUpdate { [weak self] _, state in
             Task { @MainActor in self?.listenerStateChanged(state) }
@@ -1300,7 +1303,49 @@ private extension NetworkMeshSession {
 /// The **ALPN is the parameter that must differ**: a presence connection and a mesh connection
 /// speak different protocols over the same transport, and a shared ALPN would let one radio's dial
 /// complete a TLS handshake with the other's listener.
+///
+/// The listener's new-connection limit is the factory's too (``listenerNewConnectionLimit``), for the
+/// same reason: it is a claim about every radio's availability, and three copies of it were three
+/// places to get it wrong, which all three did.
 nonisolated enum ProximityQUICParameters {
+
+    /// The new-connection limit every radio's listener is built with: none
+    /// (`NWListener.InfiniteConnectionLimit`), so the listener hands the radio every connection it
+    /// creates for as long as it lives.
+    ///
+    /// **A finite limit is a lifetime budget, not a cap on connections at once.** Network.framework
+    /// counts it down by one for every connection the listener creates and never back up when one
+    /// ends; at zero the listener stops handing connections over until the limit is set again
+    /// (`nw_listener_set_new_connection_limit` in the framework's C header says so, and the Swift
+    /// `NetworkListener.newConnectionLimit(_:)` behaves the same). Measured on macOS 26.6.2 over
+    /// loopback, under this factory's QUIC and TLS parameters: a listener limited to 2 read its limit
+    /// back as 1, then 0, after its first two connections, each closed and ended before the next dial;
+    /// the third and fourth were never handed over, and the third's dialer, watched for 30 s, never
+    /// became ready and never failed. With no limit every dial was handed over. Until 0.1.1 each
+    /// radio set a finite one here (the mesh `MeshLinkTable.maxConcurrentLinks`, 8; the recipe radio
+    /// its one tunnel plus its two pending places, 3; presence its four tunnels), so each went deaf
+    /// after that many inbound connections since its listener was last built (refused, failed and
+    /// ended ones included) until a start, resume, republish or epoch boundary built it again.
+    ///
+    /// **What bounds an inbound flood is each radio's own admission, never the listener.** A radio
+    /// books a connection the listener hands it as pending only under its cap
+    /// (``NetworkPairSession/maxPendingInbound``, ``NetworkMeshSession/maxPendingInboundTunnels``,
+    /// ``NetworkPresenceSession/maxPendingInbound``) and refuses one past it in the same main-actor
+    /// run, its owning task never started, so the framework closes it; and each drops a pending
+    /// connection that has not identified itself within its deadline
+    /// (``NetworkPairSession/helloDeadlineSeconds``, ``NetworkMeshSession/introductionDeadlineSeconds``,
+    /// ``NetworkPresenceSession/helloDeadlineSeconds``). The deadlines are the reapers: QUIC's idle
+    /// timeout fails a connection that never opened a stream, but its `inboundStreams` neither returns
+    /// nor throws (measured as above, for over 20 s past the failure), so only cancelling its owning
+    /// task ends it.
+    ///
+    /// **Not a re-armed limit.** Setting the limit back from a radio's live count whenever a
+    /// connection ends restores acceptance (measured: four dials of four), but it needs every end
+    /// seen, and a stream-less connection's end is not; and a limit set again while a dial waits hands
+    /// over a connection that has already failed (measured: `Connection refused`), which would sit
+    /// pending in a place only a deadline frees. The radios' own caps do what the limit was meant to,
+    /// with no second count kept by the framework off the main actor.
+    static let listenerNewConnectionLimit = NWListener.InfiniteConnectionLimit
 
     /// Parameters for an outbound connection. No local identity: only the listener side presents a
     /// certificate, and neither side validates one — see ``EphemeralMeshTLSIdentity``.

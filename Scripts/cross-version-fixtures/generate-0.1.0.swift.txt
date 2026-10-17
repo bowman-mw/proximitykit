@@ -1,0 +1,599 @@
+// generate-0.1.0.swift.txt: the generator of Tests/ProximityKitTests/Fixtures/0.1.0/. No target
+// compiles it; it runs as a test file in a throwaway tree whose Sources/ is `git archive 0.1.0`.
+//
+// A fixture folder is generated once and never regenerated: CrossVersionFixtureTests pins every file's
+// SHA-256. So this file is the record of how 0.1.0's bytes were made, and the template for a later
+// tag's folder (copy it as generate-<tag>.swift.txt). Each of its two tests ran once, under
+// `.packageTest`:
+//   - generate() minted the cast (Alice, Bob, Carol and Dave) and Bob's two seal keys into the test
+//     support's in-memory keychain and wrote the folder's first 53 files, keychain-rows.json among
+//     them. Running it again mints another cast, whose bytes match no pin.
+//   - generateVerification() seeds the in-memory keychain with keychain-rows.json, so the cast is the
+//     same four identities, and writes the verification ceremony's five files through 0.1.0's own
+//     CoachVerificationCeremony.
+// Every byte is written by 0.1.0's own code: its encoders, its signing factories, its seals and its
+// stores; the two exceptions are the schema-1 envelope's and the legacy admission token's signatures,
+// which 0.1.0 verifies but never mints (its identity refuses to sign under the verify-only legacy
+// label), so they are made here with CryptoKit over 0.1.0's own `legacyCanonicalBytes`, as a pre-WI-6
+// peer made them.
+//
+// What ran is this file but for this header: generateVerification() ran as it stands, and generate()
+// as it stands but for its paths, which that run held as literals where this file reads them from the
+// environment and requires them.
+//
+// How to run one test, from this repository's root, with <scratch> a folder outside it. Set up the tree:
+//   mkdir -p <scratch>/tree && git archive 0.1.0 Package.swift Sources Tests/ProximityKitTests/TestSupport \
+//     Tests/ProximityKitTests/ProximityNamespaceMeshMessagesSpelling.swift | tar -x -C <scratch>/tree
+//   cp Scripts/cross-version-fixtures/generate-0.1.0.swift.txt <scratch>/tree/Tests/ProximityKitTests/FixtureGenerator.swift
+// Then run the one test, anchored, since `--filter` is a regular expression and an unanchored
+// 'FixtureGenerator/generate()' also selects generateVerification(). generate():
+//   cd <scratch>/tree && FIXTURE_OUT=<scratch>/out/0.1.0 FIXTURE_WORK=<scratch>/work \
+//     swift test --filter 'FixtureGenerator/generate\(\)$'
+// generateVerification():
+//   cd <scratch>/tree && FIXTURE_OUT=<scratch>/out/0.1.0 \
+//     FIXTURE_ROWS=<this repository>/Tests/ProximityKitTests/Fixtures/0.1.0/keychain-rows.json \
+//     swift test --filter 'FixtureGenerator/generateVerification\(\)$'
+// Then copy only the files the run added into the folder, and pin each one's SHA-256 in
+// CrossVersionFixtureTests' `digests` beside the others, raising its `fixtureFloor`.
+
+import CryptoKit
+import Foundation
+@testable import ProximityKit
+import Security
+import Testing
+
+@MainActor
+@Suite struct FixtureGenerator {
+
+    let keychain = PackageTestEnvironment.keychain
+
+    /// Where a run writes its files, its stores' scratch, and the rows generateVerification() seeds.
+    static let outRoot = ProcessInfo.processInfo.environment["FIXTURE_OUT"] ?? ""
+    static let workRoot = ProcessInfo.processInfo.environment["FIXTURE_WORK"] ?? ""
+    static let rowsPath = ProcessInfo.processInfo.environment["FIXTURE_ROWS"] ?? ""
+
+    // MARK: World
+
+    static let base = Date(timeIntervalSince1970: 1_792_065_600)
+    static let farFuture = Date(timeIntervalSince1970: 4_102_444_800)
+    static func id(_ n: Int) -> UUID { UUID(uuidString: String(format: "C0FFEE00-0000-4000-8000-%012X", n))! }
+    static let meshID = id(1)
+    static let itemID = id(2)
+    static let binding = PinnedInstallBinding(bytes: Data(repeating: 0xA5, count: 16))
+    static let channelBinding = Data(repeating: 0x5C, count: 32)
+    static let groupKey = Data(repeating: 0x6B, count: 32)
+    static let rotationKey = Data(repeating: 0x7C, count: 32)
+    static let sessionSealService = "org.example.pktest.mesh-session.fixture.bob"
+    static let routedSealService = "org.example.pktest.mesh-routed.fixture.bob"
+    static let tempMessage = "pktest.routed.note.v1"
+    static func identityService(_ name: String) -> String { "org.example.pktest.identity.fixture.\(name)" }
+    static let wirePlaintext = Data(String(repeating: "A wire2 note sealed to Bob, framed and deflated by 0.1.0. ", count: 4).utf8)
+    static let legacyPlaintext = Data("A note sealed to Bob with no wire2 framing.".utf8)
+    static let routedPlaintext = Data(String(repeating: "A routed note from Alice to Bob and Carol. ", count: 5).utf8)
+
+    struct Cast {
+        let alice: IdentityService
+        let bob: IdentityService
+        let carol: IdentityService
+        let dave: IdentityService
+    }
+
+    func identity(_ name: String) throws -> IdentityService {
+        let identity = IdentityService(namespace: .packageTest, keychainService: Self.identityService(name))
+        try identity.ensureProvisioned()
+        return identity
+    }
+
+    func write(_ data: Data, _ name: String) throws {
+        let url = URL(fileURLWithPath: Self.outRoot).appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url)
+    }
+
+    func json(_ value: some Encodable) throws -> Data { try JSONEncoder().encode(value) }
+
+    func pretty(_ value: some Encodable) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(value) + Data("\n".utf8)
+    }
+
+    func framed(_ value: some Encodable) throws -> Data {
+        let payload = try JSONEncoder().encode(value)
+        return NetworkMeshWire.header(for: payload.count) + payload
+    }
+
+    func signingKey(_ name: String) throws -> Curve25519.Signing.PrivateKey {
+        let rows = keychain.rows(service: Self.identityService(name))
+        let row = try #require(rows.first { $0.account == ProximityNamespace.packageTest.installation.keychain.identity.signingPrivateKey })
+        return try Curve25519.Signing.PrivateKey(rawRepresentation: row.data)
+    }
+
+    // MARK: The first generation: the cast minted, 53 files
+
+    @Test func generate() throws {
+        try #require(!Self.outRoot.isEmpty && !Self.workRoot.isEmpty, "set FIXTURE_OUT and FIXTURE_WORK")
+        try? FileManager.default.removeItem(atPath: Self.outRoot)
+        try? FileManager.default.removeItem(atPath: Self.workRoot)
+        let cast = try Cast(alice: identity("alice"), bob: identity("bob"), carol: identity("carol"),
+                            dave: identity("dave"))
+        try envelopes(cast)
+        try radios(cast)
+        try meshPayloads(cast)
+        let ledger = try membership(cast)
+        try routed(cast, ledger: ledger)
+        try session(cast, ledger: ledger)
+        try sidecar()
+        try framedLabels()
+        try keychainRows()
+    }
+
+    // MARK: The second generation: the verification ceremony, over the same cast
+
+    /// The fingerprints the first generation's cast derived, which the seeded cast must adopt.
+    static let castFingerprints = ["bed3ec5f2fbe494b", "d9c3377b65a9c11b", "56d314f3caa1a152", "831da20f0430755b"]
+
+    /// The QR ceremony as a host runs it, through 0.1.0's own `CoachVerificationCeremony` on both sides at
+    /// one instant: Alice displays her signed QR for Bob, Bob scans it and challenges her, Alice answers,
+    /// and Bob's side proves the answer. Writes the QR's URL, the transcript its signature covers, the
+    /// challenge and the response as the mesh sends them (plain `JSONEncoder`, before the seal), and the
+    /// transcript the response's signature covers.
+    @Test func generateVerification() throws {
+        try #require(!Self.outRoot.isEmpty && !Self.rowsPath.isEmpty, "set FIXTURE_OUT and FIXTURE_ROWS")
+        let cast = try seededCast()
+        let purposes = ProximityNamespace.Purposes.packageTest
+        let issued = Self.base.addingTimeInterval(1_000)
+        let displayer = CoachVerificationCeremony(identity: cast.alice, now: { issued })
+        let scanner = CoachVerificationCeremony(identity: cast.bob, now: { issued })
+        let url = try #require(displayer.makeDisplayURL(forPeerSigningKey: cast.bob.localSigningPublicKey))
+        let qr = try #require(ProximityVerifyQR.parse(url, in: .packageTest))
+        let challenge = try #require(scanner.beginVerification(
+            scannedURL: url, expectedPeerSigningKey: cast.alice.localSigningPublicKey))
+        let verdict = displayer.handleChallenge(
+            challenge, senderSigningPublicKey: cast.bob.localSigningPublicKey,
+            senderKeyAgreementPublicKey: cast.bob.localKeyAgreementPublicKey)
+        guard case .respond(let response) = verdict else {
+            Issue.record("Alice did not answer Bob's challenge: \(verdict)"); return
+        }
+        #expect(scanner.handleResponse(response, senderSigningPublicKey: cast.alice.localSigningPublicKey))
+        try write(Data(url.absoluteString.utf8), "verify-qr-url.txt")
+        try write(ProximityVerifyQR.canonicalBytes(
+            version: qr.version, signingPublicKey: qr.signingPublicKey, keyAgreementPublicKey: qr.keyAgreementPublicKey,
+            timestamp: qr.timestamp, nonce: qr.nonce, in: purposes), "verify-qr-transcript.bin")
+        try write(try json(challenge), "verify-challenge.json")
+        try write(try json(response), "verify-response.json")
+        try write(ProximityVerifySignature.message(
+            scannerKeyAgreementPublicKey: cast.bob.localKeyAgreementPublicKey, challengeNonce: challenge.challengeNonce,
+            qrNonce: challenge.qrNonce, in: purposes), "verify-response-transcript.bin")
+    }
+
+    /// The first generation's cast: every row of its keychain-rows.json stored as written, then each
+    /// identity provisioned by adopting its rows, to the fingerprints that generation derived.
+    func seededCast() throws -> Cast {
+        let rows = try JSONDecoder().decode([RowFile].self, from: Data(contentsOf: URL(fileURLWithPath: Self.rowsPath)))
+        #expect(rows.count == 4 * 4 + 2)
+        for row in rows {
+            let status = ProximityKeychainItem.store(
+                row.data, account: row.account, service: row.service,
+                accessibility: row.accessibility as CFString, synchronizable: row.synchronizable)
+            #expect(status == errSecSuccess, "seeding \(row.service)/\(row.account) answered \(status)")
+        }
+        let cast = try Cast(alice: identity("alice"), bob: identity("bob"), carol: identity("carol"),
+                            dave: identity("dave"))
+        try #require([cast.alice, cast.bob, cast.carol, cast.dave].map(\.localFingerprint) == Self.castFingerprints)
+        return cast
+    }
+
+    // MARK: Envelopes, seals and frames
+
+    func envelopes(_ c: Cast) throws {
+        let v2 = try ProximityIdentityEnvelope.signed(
+            identityService: c.alice, envelopeID: Self.id(3), senderDisplayName: "Alice",
+            recipientFingerprint: c.bob.localFingerprint, payloadTypeToken: "pktest.wave.v1",
+            payloadEncryption: .none,
+            payloadSummary: PayloadSummary(title: "Fixture wave", subtitle: "schema 2", itemCount: 1,
+                                           dateRange: DateRange(start: Self.base, end: Self.base.addingTimeInterval(60)),
+                                           extraDetails: ["kind": "wave"]),
+            payload: Data("A schema-2 envelope's plaintext payload.".utf8),
+            createdAt: Self.base, expiresAt: Self.farFuture)
+        let v2JSON = try json(v2)
+        try write(v2JSON, "identity-envelope-v2.json")
+        try write(NetworkMeshWire.header(for: v2JSON.count) + v2JSON, "mesh-wire-frame.bin")
+
+        var v1 = ProximityIdentityEnvelope(
+            schemaVersion: 1, envelopeID: Self.id(4), senderSigningPublicKey: c.alice.localSigningPublicKey,
+            senderKeyAgreementPublicKey: c.alice.localKeyAgreementPublicKey, senderDisplayName: "Alice",
+            recipientFingerprint: nil, payloadTypeToken: "pktest.wave.v1", payloadEncryption: .none,
+            payloadSummary: PayloadSummary(title: "Fixture wave", subtitle: "schema 1"),
+            payload: Data("A schema-1 envelope's plaintext payload.".utf8),
+            createdAt: Self.base.addingTimeInterval(1), expiresAt: nil, signature: Data())
+        v1.signature = try signingKey("alice").signature(for: legacyCanonicalBytes(for: v1))
+        try write(try json(v1), "identity-envelope-v1.json")
+
+        let wire2 = try c.alice.seal(Self.wirePlaintext, to: c.bob.localKeyAgreementPublicKey, format: .wire2)
+        try write(try json(try sealedEnvelope(c, id: 5, payload: wire2, subtitle: "wire2")),
+                  "identity-envelope-sealed-wire2.json")
+        let legacy = try c.alice.seal(Self.legacyPlaintext, to: c.bob.localKeyAgreementPublicKey, format: .legacy)
+        try write(try json(try sealedEnvelope(c, id: 6, payload: legacy, subtitle: "legacy framing")),
+                  "identity-envelope-sealed-legacy.json")
+
+        let inner = try ProximityIdentityEnvelope.signed(
+            identityService: c.alice, envelopeID: Self.id(7), senderDisplayName: "",
+            recipientFingerprint: c.bob.localFingerprint, payloadTypeToken: "pktest.session.hello.v1",
+            payloadSummary: PayloadSummary(title: "Test hello"),
+            payload: Data("An introduction sealed to the friend it was meant for.".utf8),
+            createdAt: Self.base.addingTimeInterval(2), expiresAt: Self.farFuture)
+        let sealedInner = try c.alice.seal(try json(inner), to: c.bob.localKeyAgreementPublicKey)
+        try write(try json(SealedIntroductionEnvelope(sealedIntroduction: sealedInner)), "sealed-introduction.json")
+
+        let raw = SealedPayloadFraming.frame(Self.legacyPlaintext)
+        let deflated = SealedPayloadFraming.frame(Self.wirePlaintext)
+        #expect(raw.first == 0x02 && deflated.first == 0x01)
+        try write(raw, "sealed-frame-raw.bin")
+        try write(deflated, "sealed-frame-deflate.bin")
+
+        let bundle = ProximityPrekeyBundle(
+            bundleID: Self.id(8), created: Self.base, expires: Self.base.addingTimeInterval(7 * 86_400),
+            keys: [
+                ProximityPrekeyBundle.PrekeyEntry(id: Self.id(9), publicKey: try Self.prekey(0x41)),
+                ProximityPrekeyBundle.PrekeyEntry(id: Self.id(10), publicKey: try Self.prekey(0x42))
+            ],
+            signedPrekey: ProximityPrekeyBundle.SignedPrekey(
+                id: Self.id(11), publicKey: try Self.prekey(0x43), created: Self.base,
+                expires: Self.base.addingTimeInterval(30 * 86_400)))
+        try write(try json(bundle), "prekey-bundle.json")
+    }
+
+    static func prekey(_ fill: UInt8) throws -> Data {
+        try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: fill, count: 32)).publicKey.rawRepresentation
+    }
+
+    func sealedEnvelope(_ c: Cast, id: Int, payload: Data, subtitle: String) throws -> ProximityIdentityEnvelope {
+        try ProximityIdentityEnvelope.signed(
+            identityService: c.alice, envelopeID: Self.id(id), senderDisplayName: "Alice",
+            recipientFingerprint: c.bob.localFingerprint, payloadTypeToken: "pktest.note.v1",
+            payloadEncryption: .sealedTo(recipientKeyAgreementPublicKey: c.bob.localKeyAgreementPublicKey),
+            payloadSummary: PayloadSummary(title: "Fixture note", subtitle: subtitle),
+            payload: payload, createdAt: Self.base.addingTimeInterval(Double(id)), expiresAt: nil)
+    }
+
+    // MARK: Radios: the channel introduction, dial hellos and TXT records
+
+    func epoch(_ c: Cast) throws -> MeshEpochRef {
+        try #require(MeshEpochRef.minted(counter: 1, coordinatorFingerprint: c.alice.localFingerprint,
+                                         meshID: Self.meshID, in: .packageTest))
+    }
+
+    func radios(_ c: Cast) throws {
+        let epochRef = try epoch(c).canonicalString
+        let aliceHello = MeshChannelHello(
+            protocolVersion: MeshChannelIntroductionFormat.protocolVersion, meshID: Self.meshID, epochRef: epochRef,
+            signingPublicKey: c.alice.localSigningPublicKey, nonce: Data(repeating: 0x11, count: 16), sessionID: "alice-sid")
+        let bobHello = MeshChannelHello(
+            protocolVersion: MeshChannelIntroductionFormat.protocolVersion, meshID: Self.meshID, epochRef: epochRef,
+            signingPublicKey: c.bob.localSigningPublicKey, nonce: Data(repeating: 0x22, count: 16), sessionID: "bob-sid")
+        var exchange = MeshChannelIntroductionExchange(role: .initiator, localHello: aliceHello, purposes: .packageTest)
+        var nonces = MeshIntroductionNonceCache()
+        let refusal = exchange.receive(bobHello, roster: MeshIntroductionRoster(members: [c.bob.localSigningPublicKey]),
+                                       nonces: &nonces)
+        #expect(refusal == nil)
+        let bound = exchange.bind(channelBindingHash: Self.channelBinding)
+        let transcript = try #require(bound)
+        let signature = try c.alice.sign(transcript, purpose: ProximityNamespace.Purposes.packageTest.signature.meshChannelIntroductionV1)
+        try write(try framed(aliceHello), "channel-hello-initiator.bin")
+        try write(try framed(bobHello), "channel-hello-responder.bin")
+        try write(try framed(MeshChannelIntroduction(channelBindingHash: Self.channelBinding, signature: signature)),
+                  "channel-introduction.bin")
+
+        try write(try ProximityPairDialHello.encoded(sessionID: "alice-sid"), "pair-dial-hello.json")
+        try write(try PresenceDialHello.encoded(tag: "pkfixturetag01"), "presence-dial-hello.json")
+
+        let pair = ProximityPairAdvertisement.publishedFields(
+            from: [ProximityPairAdvertisement.versionKey: ProximityPairAdvertisement.version,
+                   ProximityPairAdvertisement.modeKey: "pair", ProximityPairAdvertisement.nameKey: "Alice"],
+            sessionID: "alice-sid")
+        let presence = PresenceAdvertisement.publishedFields(tags: ["tag0003", "tag0001", "tag0002"])
+        let meshLink = MeshLinkAdvertisement.publishedFields(
+            from: ["sid": "alice-sid", "fp": "withheld-fingerprint", "name": "Alice", "mode": "mesh"])
+        try write(try pretty(["pair": pair, "presence": presence, "meshLink": meshLink]), "txt-records.json")
+    }
+
+    // MARK: The mesh payloads
+
+    func meshPayloads(_ c: Cast) throws {
+        let token = try MeshAdmissionToken.signed(
+            meshID: Self.meshID, joinerFingerprint: c.bob.localFingerprint,
+            joinerSigningPublicKey: c.bob.localSigningPublicKey, admitterIdentity: c.alice,
+            grantedAt: Self.base.addingTimeInterval(11))
+        let grant = MeshAdmissionGrantPayload(
+            meshID: Self.meshID, requesterFingerprint: c.bob.localFingerprint, token: token,
+            encryptedCurrentKey: try c.alice.encryptGroupKey(Self.groupKey, for: c.bob.localKeyAgreementPublicKey),
+            currentKeyEpoch: 3)
+        try write(try json(grant), "mesh-admission-grant.json")
+
+        var legacy = MeshAdmissionToken(
+            meshID: Self.meshID, joinerFingerprint: c.carol.localFingerprint,
+            joinerSigningPublicKey: c.carol.localSigningPublicKey, admitterFingerprint: c.alice.localFingerprint,
+            grantedAt: Self.base.addingTimeInterval(12), expiresAt: Self.base.addingTimeInterval(12 + 7_200),
+            admitterSigningPublicKey: c.alice.localSigningPublicKey, admitterSignature: Data())
+        legacy.admitterSignature = try signingKey("alice").signature(for: legacyCanonicalBytes(for: legacy))
+        try write(try json(legacy), "mesh-admission-token-v1.json")
+
+        let rotation = MeshKeyRotationPayload(
+            newEpoch: 4,
+            perMember: [
+                c.bob.localFingerprint: try c.alice.encryptGroupKey(Self.rotationKey, for: c.bob.localKeyAgreementPublicKey),
+                c.carol.localFingerprint: try c.alice.encryptGroupKey(Self.rotationKey, for: c.carol.localKeyAgreementPublicKey)
+            ],
+            rotationInitiatedAt: Self.base.addingTimeInterval(120), coordinatorFingerprint: c.alice.localFingerprint,
+            cause: .membership)
+        try write(try json(rotation), "mesh-key-rotation.json")
+        try plainPayloads(c)
+    }
+
+    func member(_ identity: IdentityService, _ name: String, joined: Double) -> MeshMember {
+        MeshMember(fingerprint: identity.localFingerprint, displayName: name,
+                   signingPublicKey: identity.localSigningPublicKey,
+                   keyAgreementPublicKey: identity.localKeyAgreementPublicKey,
+                   joinedAt: Self.base.addingTimeInterval(joined))
+    }
+
+    func plainPayloads(_ c: Cast) throws {
+        let descriptor = MeshDescriptor(
+            meshID: Self.meshID, name: "Fixture mesh", mode: .closed,
+            members: [member(c.alice, "Alice", joined: 10), member(c.bob, "Bob", joined: 11)],
+            nameSetAt: Self.base.addingTimeInterval(20), nameSetBy: c.alice.localFingerprint,
+            modeSetAt: Self.base.addingTimeInterval(21), modeSetBy: c.alice.localFingerprint,
+            createdAt: Self.base.addingTimeInterval(10))
+        try write(try json(MeshStateChangePayload(descriptor: descriptor)), "mesh-state-change.json")
+        try write(try json(MeshAdmissionRequestPayload(
+            meshID: Self.meshID, requesterFingerprint: c.carol.localFingerprint, requesterDisplayName: "Carol",
+            requesterSigningPublicKey: c.carol.localSigningPublicKey,
+            requesterKeyAgreementPublicKey: c.carol.localKeyAgreementPublicKey)), "mesh-admission-request.json")
+        let proposal = MeshRemovalProposalPayload(
+            id: Self.id(13), targetFingerprint: c.dave.localFingerprint, targetDisplayName: "Dave",
+            proposerFingerprint: c.alice.localFingerprint, proposerDisplayName: "Alice",
+            createdAt: Self.base.addingTimeInterval(200), expiresAt: Self.base.addingTimeInterval(500))
+        try write(try json(proposal), "mesh-removal-proposal.json")
+        try write(try json(MeshRemovalSecondPayload(proposal: proposal, seconderFingerprint: c.bob.localFingerprint)),
+                  "mesh-removal-second.json")
+        try write(try json(MeshFriendVouchListPayload(
+            voucherFingerprint: c.alice.localFingerprint, voucherDisplayName: "Alice",
+            trustedFingerprints: [c.bob.localFingerprint, c.carol.localFingerprint],
+            expiresAt: Self.base.addingTimeInterval(3_600))), "mesh-vouch-list.json")
+        try write(try json(MeshKeyAckPayload(epoch: 4, memberFingerprint: c.bob.localFingerprint)), "mesh-key-ack.json")
+        try write(try json(MeshRotationSyncPayload(closingEpoch: 3)), "mesh-rotation-sync.json")
+        try write(try json(MeshCoordinatorBeaconPayload(
+            coordinatorFingerprint: c.alice.localFingerprint, currentEpoch: 4,
+            nextRotationAt: Self.base.addingTimeInterval(1_800), sentAt: Self.base.addingTimeInterval(130))),
+                  "mesh-coordinator-beacon.json")
+    }
+
+    // MARK: Membership
+
+    func admission(_ joiner: IdentityService, by founder: IdentityService, at seconds: Double) throws -> SignedAdmissionRecord {
+        SignedAdmissionRecord(token: try MeshAdmissionToken.signed(
+            meshID: Self.meshID, joinerFingerprint: joiner.localFingerprint,
+            joinerSigningPublicKey: joiner.localSigningPublicKey, admitterIdentity: founder,
+            grantedAt: Self.base.addingTimeInterval(seconds)))
+    }
+
+    /// The full ledger, and its routed snapshot (admissions and the removal).
+    func membership(_ c: Cast) throws -> (full: MeshMembershipLedger, routed: MeshMembershipLedger) {
+        var ledger = MeshMembershipLedger.empty
+        for (name, joiner, at) in [("alice", c.alice, 10.0), ("bob", c.bob, 11.0), ("carol", c.carol, 13.0), ("dave", c.dave, 14.0)] {
+            let record = try admission(joiner, by: c.alice, at: at)
+            ledger.admissions = ledger.admissions.inserting(record)
+            try write(try json(MeshMemberAdmissionPayload(record: record)), "membership-admission-\(name).json")
+        }
+        let proposal = try SignedRemovalProposal.signed(
+            meshID: Self.meshID, identity: c.alice, targetFingerprint: c.dave.localFingerprint,
+            proposalID: Self.id(12), issuedAt: Self.base.addingTimeInterval(300))
+        try write(try json(proposal), "membership-removal-proposal.json")
+        try write(try json(try SignedRemovalVote.signed(on: proposal, identity: c.bob, castAt: Self.base.addingTimeInterval(310))),
+                  "membership-removal-vote-bob.json")
+        try write(try json(try SignedRemovalVote.signed(on: proposal, identity: c.carol, castAt: Self.base.addingTimeInterval(320))),
+                  "membership-removal-vote-carol.json")
+        let removal = try SignedRemovalRecord.signed(
+            meshID: Self.meshID, identity: c.alice, memberFingerprint: c.dave.localFingerprint, proposalID: Self.id(12),
+            voterFingerprints: [c.alice.localFingerprint, c.bob.localFingerprint, c.carol.localFingerprint],
+            occurredAt: Self.base.addingTimeInterval(330))
+        ledger.removals = ledger.removals.inserting(removal)
+        try write(try json(MeshMemberRemovalPayload(record: removal)), "membership-removal.json")
+        let routed = ledger
+
+        let departure = try SignedDepartureRecord.signed(
+            meshID: Self.meshID, identity: c.carol, occurredAt: Self.base.addingTimeInterval(400),
+            custodyHandoff: MeshCustodyHandoffSummary(custodianFingerprints: [c.bob.localFingerprint], handedOffItemCount: 1))
+        ledger.departures = ledger.departures.inserting(departure)
+        try write(try json(MeshMemberDeparturePayload(record: departure)), "membership-departure.json")
+        let termination = try SignedTerminationRecord.signed(
+            meshID: Self.meshID, identity: c.alice,
+            rosterAtSigning: [c.alice.localFingerprint, c.bob.localFingerprint].sorted(),
+            occurredAt: Self.base.addingTimeInterval(500))
+        ledger.terminations = ledger.terminations.inserting(termination)
+        try write(try json(MeshTerminationPayload(record: termination)), "membership-termination.json")
+
+        try write(try json(try MeshInventoryDigestPayload.signed(
+            meshID: Self.meshID, ledger: ledger, identity: c.alice, sentAt: Self.base.addingTimeInterval(510))),
+                  "membership-inventory-digest.json")
+        try write(try json(try MeshEpochHeadsPayload.signed(
+            meshID: Self.meshID, heads: [try epoch(c)], identity: c.alice, sentAt: Self.base.addingTimeInterval(520))),
+                  "membership-epoch-heads.json")
+        try write(try json(MeshKeyAgreementPayload(
+            meshID: Self.meshID, advertisements: try advertisements(c), senderFingerprint: c.alice.localFingerprint)),
+                  "membership-key-agreement.json")
+        return (ledger, routed)
+    }
+
+    func advertisements(_ c: Cast) throws -> [SignedKeyAgreementAdvertisement] {
+        try [c.alice, c.bob, c.carol].map {
+            try SignedKeyAgreementAdvertisement.signed(meshID: Self.meshID, identity: $0, advertisedAt: Self.base.addingTimeInterval(30))
+        }
+    }
+
+    // MARK: Routed
+
+    func routedScope() -> MeshRoutedStorageScope {
+        MeshRoutedStorageScope(
+            namespace: .packageTest, directory: URL(fileURLWithPath: Self.workRoot).appendingPathComponent("routed-store"),
+            keychainService: Self.routedSealService, installBinding: Self.binding)
+    }
+
+    func routed(_ c: Cast, ledger: (full: MeshMembershipLedger, routed: MeshMembershipLedger)) throws {
+        let entry = MeshRoutedTypeEntry(
+            token: Self.tempMessage, maxItemByteCount: 9_065, destinations: .fullRosterAtCreation,
+            relayRetention: .originRetainsUntilDeparture, finalAck: .durableRecipientStorage,
+            expiry: .meshHardDeadlinePlusGrace, contentScope: .session)
+        let registry = MeshRoutedTypeRegistry(entries: [entry])
+        let contentKey = MeshRoutedContentKeyWrapper.makeContentKey()
+        let binding = MeshRoutedWrapBinding(meshID: Self.meshID, itemID: Self.itemID, originFingerprint: c.alice.localFingerprint)
+        let blob = try MeshRoutedItemSealer.seal(
+            Self.routedPlaintext, contentKey: contentKey, binding: binding, typeToken: Self.tempMessage,
+            maxBlobByteCount: 9_065, in: .packageTest)
+        let target = MeshDeliveryTarget(contentID: Self.itemID, roster: ledger.routed.derivedRoster,
+                                        selfFingerprint: c.alice.localFingerprint)
+        let manifest = try MeshRoutedManifest.signed(
+            meshID: Self.meshID, target: target, typeToken: Self.tempMessage,
+            contentHash: MeshRoutedContentDigest.contentHash(of: blob, in: .packageTest), size: UInt64(blob.count),
+            createdAt: Self.base.addingTimeInterval(600), hardDeadline: Self.base.addingTimeInterval(21_600),
+            contentKey: contentKey,
+            recipientKeys: [c.bob.localFingerprint: c.bob.localKeyAgreementPublicKey,
+                            c.carol.localFingerprint: c.carol.localKeyAgreementPublicKey],
+            identity: c.alice, types: registry)
+        let chunks = try MeshChunker.chunks(of: blob, for: manifest, identity: c.alice)
+        #expect(chunks.count == 1)
+        try write(try json(MeshRoutedManifestPayload(manifest: manifest)), "routed-manifest.json")
+        try write(try json(MeshChunkPayload(chunk: chunks[0])), "routed-chunk.json")
+        try storeRouted(c, manifest: manifest, chunk: chunks[0])
+    }
+
+    func storeRouted(_ c: Cast, manifest: MeshRoutedManifest, chunk: MeshChunk) throws {
+        let store = MeshRoutedStore(scope: routedScope())
+        let key = MeshRoutedItemKey(manifest)
+        let now = Self.base.addingTimeInterval(900)
+        #expect(store.admittingManifest(manifest, now: now).value != nil)
+        #expect(store.stagingChunk(chunk, now: now).value != nil)
+        let committed = store.committingCustody(item: key, custodian: c.bob.localFingerprint, now: now.addingTimeInterval(10))
+        guard case .completed(.committed(let witness)) = committed else {
+            Issue.record("custody: \(committed)"); return
+        }
+        let custody = try MeshCustodyReceipt.signed(witness: witness, manifest: manifest, identity: c.bob)
+        try write(try json(MeshCustodyReceiptPayload(receipt: custody)), "routed-custody-receipt.json")
+        let evidence = store.recordingCustodyEvidence(item: key, receipt: custody, now: now.addingTimeInterval(11))
+        #expect(evidence.value != nil, "custody evidence: \(evidence)")
+        let stages = MeshRoutedAckStageTable(rows: [MeshRoutedAckStageRow(typeToken: Self.tempMessage, finalAck: .durableRecipientStorage)])
+        let delivered = store.committingDelivery(item: key, recipient: c.bob.localFingerprint, stages: stages,
+                                                 evidence: .none, now: now.addingTimeInterval(20))
+        guard case .completed(.acknowledged(let delivery)) = delivered else {
+            Issue.record("delivery: \(delivered)"); return
+        }
+        let receipt = try MeshRecipientReceipt.signed(witness: delivery, manifest: manifest, identity: c.bob)
+        try write(try json(MeshRecipientReceiptPayload(receipt: receipt)), "routed-recipient-receipt.json")
+        let recorded = store.recordingRecipientReceipt(item: key, receipt: receipt, now: now.addingTimeInterval(21))
+        #expect(recorded.value != nil, "recipient receipt: \(recorded)")
+        guard case .loaded(let index, _) = store.load() else { Issue.record("index did not load"); return }
+        let inventory = try MeshRoutedInventoryPayload.signed(
+            meshID: Self.meshID, index: index, sentAt: now.addingTimeInterval(30), identity: c.bob)
+        try write(try json(inventory), "routed-inventory.json")
+        try write(try json(try MeshRoutedDrainAnswerPayload.signed(
+            meshID: Self.meshID, advertiser: c.bob.localFingerprint, advertisedAt: inventory.sentAt,
+            quiescent: false, sentAt: now.addingTimeInterval(40), identity: c.carol)), "routed-drain-answer.json")
+        try copyTree(store.scope.directory, as: "routed-store")
+    }
+
+    func copyTree(_ directory: URL, as name: String) throws {
+        let walker = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey])
+        for case let url as URL in walker?.allObjects ?? [] {
+            guard (try url.resourceValues(forKeys: [.isRegularFileKey])).isRegularFile == true else { continue }
+            let relative = String(url.standardizedFileURL.path.dropFirst(directory.standardizedFileURL.path.count + 1))
+            try write(try Data(contentsOf: url), name + "/" + relative)
+        }
+    }
+
+    // MARK: Session context, column markers
+
+    func session(_ c: Cast, ledger: (full: MeshMembershipLedger, routed: MeshMembershipLedger)) throws {
+        let scope = MeshSessionStorageScope(
+            namespace: .packageTest, directory: URL(fileURLWithPath: Self.workRoot).appendingPathComponent("session-store"),
+            keychainService: Self.sessionSealService, installBinding: Self.binding)
+        let store = MeshSessionStore(scope: scope)
+        let context = MeshSessionContext(
+            meshID: Self.meshID, protocolVersion: MeshChannelIntroductionFormat.protocolVersion, createdAt: Self.base,
+            hardDeadline: Self.base.addingTimeInterval(21_600), ledger: ledger.full, epochHeads: [try epoch(c)],
+            lastExternalHeartbeat: Self.base.addingTimeInterval(700), developedLocally: false,
+            keyAdvertisements: MeshKeyAgreementAdvertisementSet(advertisements: try advertisements(c)),
+            localTermination: MeshSessionLocalTermination(reason: .verifiedTerminationRecord, at: Self.base.addingTimeInterval(500)),
+            endingPresented: true)
+        guard case .absent(let token) = store.load() else { Issue.record("session store not absent"); return }
+        try store.save(context, token: token)
+        guard case .loaded(let loaded, _) = store.load() else { Issue.record("session did not reload"); return }
+        #expect(loaded == context)
+        try copyTree(scope.directory, as: "session-store")
+        let sealed = try Data(contentsOf: store.fileURL)
+        #expect(sealed.first == 0x03)
+        let unprefixed = Data(sealed.dropFirst())
+        #expect(ProximityColumnCrypto.StoredFormat.classify(unprefixed) == .unprefixed, "rerun: the nonce's first byte reads as a marker")
+        try write(Data([0x02]) + unprefixed, "column-v2-marked.sealed")
+        try write(unprefixed, "column-unprefixed.sealed")
+    }
+
+    // MARK: Sidecar, labels and keychain rows
+
+    func sidecar() throws {
+        let url = URL(fileURLWithPath: Self.workRoot).appendingPathComponent("sidecar/protected-sidecar.json")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // The bytes 0.1.0's sidecar hands its writer; the writer is injected only because the default
+        // one's `.completeFileProtection` has no data-protection volume to write to on a Mac.
+        let sidecar = ProtectedSidecar<[String: Int]>(fileURL: url, empty: [:], auditPrefix: "pktest.fixture.sidecar",
+                                                      writeData: { data, target in try data.write(to: target, options: .atomic) },
+                                                      observeProtectedData: false)
+        #expect(sidecar.mutate { $0 = ["alpha": 1, "beta": 2, "gamma": 3] } == .persisted)
+        try write(try Data(contentsOf: url), "protected-sidecar.json")
+    }
+
+    func framedLabels() throws {
+        let purposes = ProximityNamespace.Purposes.packageTest
+        var table: [String: [String: String]] = [:]
+        let groups: [(String, Any)] = [("signature", purposes.signature), ("keyDerivation", purposes.keyDerivation),
+                                       ("aead", purposes.aead), ("hash", purposes.hash),
+                                       ("signature.legacyV1", purposes.signature.legacyV1)]
+        for (group, value) in groups {
+            for child in Mirror(reflecting: value).children {
+                guard let label = child.label else { continue }
+                let purpose = (child.value as? ProximityCryptographicPurpose)
+                    ?? ((child.value as? ProximityCryptographicPurpose?) ?? nil)
+                guard let purpose else { continue }
+                table[group + "." + label] = ["label": purpose.rawValue, "prefix": Self.hex(purpose.prefixBytes)]
+            }
+        }
+        for entry in purposes.feature.entries {
+            table["feature." + entry.name] = ["label": entry.purpose.rawValue, "prefix": Self.hex(entry.purpose.prefixBytes)]
+        }
+        let raw = ProximityCryptographicPurpose.featureSignature("pktest.fixture.raw-signature.v1", framing: .rawPrefix)
+        let prefixed = ProximityCryptographicPurpose.featureSignature("pktest.fixture.prefixed-signature.v1", framing: .lengthPrefixed)
+        table["featureSignature.rawPrefix"] = ["label": raw.rawValue, "prefix": Self.hex(raw.prefixBytes)]
+        table["featureSignature.lengthPrefixed"] = ["label": prefixed.rawValue, "prefix": Self.hex(prefixed.prefixBytes)]
+        try write(try pretty(table), "framed-labels.json")
+    }
+
+    static func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+
+    struct RowFile: Codable {
+        let service: String
+        let account: String
+        let accessibility: String
+        let synchronizable: Bool
+        let data: Data
+    }
+
+    func keychainRows() throws {
+        let services = ["alice", "bob", "carol", "dave"].map(Self.identityService) + [Self.sessionSealService, Self.routedSealService]
+        let rows = services.flatMap { keychain.rows(service: $0) }.map {
+            RowFile(service: $0.service, account: $0.account, accessibility: $0.accessibility,
+                    synchronizable: $0.synchronizable, data: $0.data)
+        }
+        #expect(rows.count == 4 * 4 + 2, "rows: \(rows.map { $0.service + "/" + $0.account })")
+        try write(try pretty(rows), "keychain-rows.json")
+    }
+}

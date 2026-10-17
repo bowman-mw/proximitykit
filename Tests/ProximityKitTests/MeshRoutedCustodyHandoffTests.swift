@@ -21,8 +21,11 @@
 //
 // A partial copy (ProximityKit plan step A1, the split's first batch of copied suites): of the
 // Fernlet repository's FernletTests file of the same name, this holds only
-// `MeshRoutedCustodyHandoffWallTests`, with its name and tests unchanged; its other suites stay
-// there, so what this header says of them is not held here.
+// `MeshRoutedCustodyHandoffWallTests` and, since ProximityKit plan step A1's third batch of copied
+// suites (those that reach the keychain and open a store), `MeshRoutedCustodyHandoffDoorTests`, the
+// store's two batch doors with no manager at all, with their names and tests unchanged; its other
+// suite and the fixtures only that suite reads stay there, so what this header says of them is not
+// held here.
 
 import Foundation
 import Testing
@@ -277,5 +280,268 @@ struct MeshRoutedCustodyHandoffWallTests {
             index = source.index(after: index)
         }
         return nil
+    }
+}
+
+// MARK: - The store doors, with no manager at all
+
+/// The two batch doors' own rules: one load, N updates, one save, and three lists that never
+/// collapse into each other.
+@MainActor
+@Suite(.serialized)
+struct MeshRoutedCustodyHandoffDoorTests {
+
+    /// The bundle's in-memory keychain, read as each cell's suite instance is built, so the installer
+    /// has run before a cell's identities or stores reach the keychain.
+    let keychain = PackageTestEnvironment.keychain
+
+    private typealias Fixture = MeshRoutedStoreFixtures
+
+    /// One call advances every item's rung, and every one survives the single save.
+    @Test func aBatchTransferWritesEveryRungInOneSave() throws {
+        let scope = Fixture.scope()
+        defer { Fixture.tearDown(scope) }
+        let first = try MeshRoutedCustodyFixtures.rig(scope: scope)
+        let second = try MeshRoutedCustodyFixtures.rig(scope: scope)
+        let transfers = [
+            MeshRoutedCustodyHandoff(
+                item: first.key, destinations: first.otherDestinations,
+                receipt: try MeshRoutedCustodyFixtures.receipt(first)
+            ),
+            MeshRoutedCustodyHandoff(
+                item: second.key, destinations: second.otherDestinations,
+                receipt: try MeshRoutedCustodyFixtures.receipt(second)
+            )
+        ]
+        let outcome = PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Fixture.installA)) {
+            first.store.recordingCustodyHandoff(transfers, now: Fixture.now)
+        }
+
+        #expect(outcome.value?.advanced.count == 2, "\(outcome)")
+        let index = try #require(MeshRoutedCustodyFixtures.loadedIndex(first.store))
+        for transfer in transfers {
+            let target = try #require(index.record(for: transfer.item)?.deliveryTarget)
+            let custodian = transfer.receipt.custodianFingerprint
+            let moved = transfer.destinations.allSatisfy {
+                target.state(of: $0) == .custodied(by: custodian)
+            }
+            #expect(moved, "one save carried every rung the batch planned")
+        }
+    }
+
+    /// A per-item refusal skips **that** item: nothing about one item's receipt says anything about
+    /// another's, so the batch continues and the refusal is named.
+    @Test func aRefusedItemDoesNotAbortTheBatch() throws {
+        let scope = Fixture.scope()
+        defer { Fixture.tearDown(scope) }
+        let rig = try MeshRoutedCustodyFixtures.rig(scope: scope)
+        let receipt = try MeshRoutedCustodyFixtures.receipt(rig)
+        let stranger = MeshRoutedItemKey(originFingerprint: "fpNobody", itemID: UUID())
+        let outcome = PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Fixture.installA)) {
+            rig.store.recordingCustodyHandoff(
+                [
+                    MeshRoutedCustodyHandoff(
+                        item: stranger, destinations: rig.otherDestinations, receipt: receipt
+                    ),
+                    MeshRoutedCustodyHandoff(
+                        item: rig.key, destinations: rig.otherDestinations, receipt: receipt
+                    )
+                ],
+                now: Fixture.now
+            )
+        }
+
+        #expect(outcome.value?.advanced == [rig.key])
+        #expect(outcome.value?.refused.map(\.refusal) == [.store(.unknownItem)])
+        #expect(outcome.value?.refused.map(\.item) == [stranger])
+    }
+
+    /// **A delivery-level refusal keeps its own name.** `advancingAll` refuses the whole item at the
+    /// first ladder refusal and applies nothing, so reporting it as `unchanged` would make a caller
+    /// bug indistinguishable from "every leg was already where the door would have put it" — and it
+    /// would reach no report and no audit line at all.
+    @Test func aDeliveryLevelRefusalIsNamedRatherThanCalledUnchanged() throws {
+        let scope = Fixture.scope()
+        defer { Fixture.tearDown(scope) }
+        let rig = try MeshRoutedCustodyFixtures.rig(
+            scope: scope, typeToken: MeshRoutedTypeToken.photo
+        )
+        MeshRoutedCustodyFixtures.stageAll(rig)
+        _ = MeshRoutedCustodyFixtures.commit(rig)
+        let commit = MeshRoutedCustodyFixtures.commitDelivery(rig)
+        let witness = try #require(MeshRoutedCustodyFixtures.deliveryWitness(commit), "\(commit)")
+        let receipt = try MeshRecipientReceipt.signed(
+            witness: witness, manifest: rig.manifest, identity: rig.custodian
+        )
+        let closed = rig.custodian.localFingerprint
+        let filed = PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Fixture.installA)) {
+            rig.store.recordingRecipientReceipt(item: rig.key, receipt: receipt, now: Fixture.now)
+        }
+        #expect(filed.value?.target != nil, "the leg must actually reach `delivered`: \(filed)")
+        #expect(MeshRoutedCustodyFixtures.loadedIndex(rig.store)?
+            .record(for: rig.key)?.deliveryTarget?.state(of: closed) == .delivered)
+        // A caller bug by construction: naming another member the courier for a leg that is already
+        // terminal. The ladder refuses it, and the batch must say which refusal that was.
+        let courier = try #require(rig.otherDestinations.first)
+        let outcome = PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Fixture.installA)) {
+            rig.store.claimingHandedOffLegs(
+                [MeshRoutedHandoffClaim(
+                    item: rig.key, destinations: [closed], custodian: courier
+                )],
+                now: Fixture.now
+            )
+        }
+
+        #expect(outcome.value?.refused.map(\.refusal) == [.delivery(.alreadyDelivered)], "\(outcome)")
+        #expect(outcome.value?.advanced.isEmpty == true, "and nothing was written")
+        #expect(outcome.value?.incomplete.isEmpty == true, "a refusal is not a 'not yet'")
+    }
+
+    /// A store that cannot be read writes nothing at all — not even the items it could have taken.
+    @Test func anUnavailableStoreWritesNothing() throws {
+        let scope = Fixture.scope()
+        defer { Fixture.tearDown(scope) }
+        let rig = try MeshRoutedCustodyFixtures.rig(scope: scope)
+        let receipt = try MeshRoutedCustodyFixtures.receipt(rig)
+        try Fixture.writeRaw(Data("not a sealed index".utf8), into: rig.store)
+        let before = Fixture.snapshot(scope)
+        let outcome = PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Fixture.installA)) {
+            rig.store.recordingCustodyHandoff(
+                [MeshRoutedCustodyHandoff(
+                    item: rig.key, destinations: rig.otherDestinations, receipt: receipt
+                )],
+                now: Fixture.now
+            )
+        }
+
+        #expect(outcome.unavailability != nil, "\(outcome)")
+        #expect(Fixture.snapshot(scope) == before, "an unreadable store was written to anyway")
+    }
+
+    /// "Not yet" is not a refusal: an incomplete item has no ``MeshRoutedStoreRefusal`` spelling, so
+    /// it rides its own list and is retried when the item completes.
+    @Test func aClaimNamesAnIncompleteItemInItsOwnList() throws {
+        let scope = Fixture.scope()
+        defer { Fixture.tearDown(scope) }
+        let rig = try MeshRoutedCustodyFixtures.rig(scope: scope)
+        PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Fixture.installA)) {
+            #expect(rig.store.admittingManifest(rig.manifest, now: Fixture.now).value != nil)
+        }
+        let outcome = PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Fixture.installA)) {
+            rig.store.claimingHandedOffLegs(
+                [MeshRoutedHandoffClaim(
+                    item: rig.key, destinations: rig.otherDestinations,
+                    custodian: rig.custodian.localFingerprint
+                )],
+                now: Fixture.now
+            )
+        }
+
+        #expect(outcome.value?.incomplete == [rig.key])
+        #expect(outcome.value?.refused.isEmpty == true, "not yet is not a refusal")
+        #expect(outcome.value?.advanced.isEmpty == true)
+    }
+
+    /// The claim is receipt-free: a record's evidence set holds OTHER members' receipts, and this
+    /// device's own custody is `custodiedAt` plus a re-mint on demand.
+    @Test func aClaimStoresNoReceiptOfItsOwn() throws {
+        let scope = Fixture.scope()
+        defer { Fixture.tearDown(scope) }
+        let rig = try MeshRoutedCustodyFixtures.rig(scope: scope)
+        MeshRoutedCustodyFixtures.stageAll(rig)
+        let outcome = PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Fixture.installA)) {
+            rig.store.claimingHandedOffLegs(
+                [MeshRoutedHandoffClaim(
+                    item: rig.key, destinations: rig.otherDestinations,
+                    custodian: rig.custodian.localFingerprint
+                )],
+                now: Fixture.now
+            )
+        }
+
+        #expect(outcome.value?.advanced == [rig.key], "\(outcome)")
+        let record = try #require(MeshRoutedCustodyFixtures.loadedIndex(rig.store)?.record(for: rig.key))
+        #expect(record.receipts.isEmpty, "the claim burned no evidence slot on a self-receipt")
+        #expect(record.custodiedAt == nil, "and it committed nothing: the rung is not the commit")
+    }
+
+    /// A parked item — chunks with no manifest — answers `manifestMismatch` by name, the same answer
+    /// the single-item transfer door gives.
+    @Test func aParkedItemAnswersManifestMismatch() throws {
+        let scope = Fixture.scope()
+        defer { Fixture.tearDown(scope) }
+        let rig = try MeshRoutedCustodyFixtures.rig(scope: scope)
+        let receipt = try MeshRoutedCustodyFixtures.receipt(rig)
+        let parkedScope = Fixture.scope()
+        defer { Fixture.tearDown(parkedScope) }
+        let parked = MeshRoutedStore(scope: parkedScope)
+        PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Fixture.installA)) {
+            for chunk in rig.chunks {
+                #expect(parked.stagingChunk(chunk, now: Fixture.now).value != nil)
+            }
+        }
+        let outcome = PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Fixture.installA)) {
+            parked.recordingCustodyHandoff(
+                [MeshRoutedCustodyHandoff(
+                    item: rig.key, destinations: rig.otherDestinations, receipt: receipt
+                )],
+                now: Fixture.now
+            )
+        }
+
+        #expect(outcome.value?.refused.map(\.refusal) == [.store(.manifestMismatch)], "\(outcome)")
+        #expect(outcome.value?.advanced.isEmpty == true)
+    }
+
+    /// **The cell that would have caught the memberwise-initializer bypass.** The push batch goes
+    /// through the drain's narrowing initializer, so a maximal local index still fits inside the
+    /// per-answer bounds instead of charging a thousand frames to send sixty-four.
+    @Test func aPushBatchNeverExceedsTheDrainFrameBound() throws {
+        let index = Self.bulkyIndex(items: 40, chunks: 100)
+        let meshID = MeshRoutedManifestFixtures.meshID
+        let local = try #require(MeshRoutedInventory(
+            meshID: meshID, index: index, selfFingerprint: "fpSelf", at: Fixture.now
+        ))
+        let bounds = MeshRoutedDrainBounds.increment1
+        let batch = try #require(MeshCustodyHandoffPlan.pushBatch(
+            local: local,
+            remote: MeshRoutedInventory(meshID: meshID, members: [], entries: []),
+            offerable: Set(index.items.map(\.key)),
+            refused: [],
+            frameAllowance: bounds.maxFrames
+        ))
+
+        #expect(batch.frameCount <= bounds.maxFrames, "\(batch.frameCount) frames planned")
+        #expect(batch.manifests.count <= bounds.maxItems)
+        #expect(batch.chunks.reduce(0) { $0 + $1.indices.count } <= bounds.maxChunksPerAnswer)
+        #expect(batch.truncated, "the remainder is owed, not lost")
+    }
+
+    /// A synthetic index of `items` complete, manifest-bound records with `chunks` slots each —
+    /// bigger than any single answer may carry, which is the whole point.
+    private static func bulkyIndex(items: Int, chunks: Int) -> MeshRoutedIndex {
+        var records: [MeshRoutedItemRecord] = []
+        // R2: bounded by the caller's own item count.
+        for _ in 0..<items {
+            let manifest = MeshRoutedManifestFixtures.manifest().replacing(itemID: UUID())
+            let descriptors = (0..<chunks).map {
+                Fixture.descriptor(index: UInt32($0), count: UInt32(chunks), bytes: 16)
+            }
+            records.append(MeshRoutedItemRecord(
+                key: MeshRoutedItemKey(manifest),
+                contentHash: manifest.contentHash,
+                chunkCount: UInt32(chunks),
+                expiresAt: manifest.expiresAt,
+                manifest: manifest,
+                firstSeenAt: MeshRoutedManifestFixtures.base,
+                custodiedAt: nil,
+                deliveredAt: nil,
+                chunks: descriptors,
+                delivery: nil,
+                receipts: [],
+                recipientReceipts: []
+            ))
+        }
+        return MeshRoutedIndex(items: records)
     }
 }

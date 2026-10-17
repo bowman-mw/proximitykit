@@ -59,6 +59,11 @@
 # The inventory of the package's tests: the hygiene suite holds it to the test tree, and it is the
 # test-count floor's declared pin, held against the floor literals in .github/workflows/ci.yml.
 /Tests/ProximityKitTests.tsv                                           @bowman-mw
+# The bytes each released tag wrote, and the suite that pins their digests and decodes them with
+# today's code (plan step A2): a fixture regenerated or edited, or a digest re-pinned, is a wire or
+# on-disk compatibility decision, never a drive-by.
+/Tests/ProximityKitTests/Fixtures/                                     @bowman-mw
+/Tests/ProximityKitTests/CrossVersionFixtureTests.swift                @bowman-mw
 
 # What every wall reads through (a blind lexer, locator or walker passes every wall vacuously), and
 # the source-scan helper the source walls copied from Fernlet's tests read ProximityKit's code

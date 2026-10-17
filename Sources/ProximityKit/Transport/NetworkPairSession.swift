@@ -56,7 +56,8 @@ protocol ProximityPairRadioSession: AnyObject {
     /// Ends a peer's tunnel at the owner's request.
     func endTunnel(_ peer: PeerHandle)
     /// Whether any peer other than `peer` is mid-connect — the connecting-window half of the hard
-    /// 2-device cap.
+    /// 2-device cap: a dial in flight, or an inbound connection whose dial hello has been read and is
+    /// being ruled on.
     func hasConnectingPeers(besides peer: PeerHandle?) -> Bool
     /// Stands the listener and the browser down, keeping every live tunnel.
     func pauseDiscovery()
@@ -125,6 +126,50 @@ nonisolated struct ProximityPairPosture {
     }
 }
 
+// MARK: - PairTunnelInterface
+
+/// The kind of network interface a pair tunnel's connection runs over, as the `interface` key of
+/// `recipe.quic.connected` names it: a frozen diagnostic token, never localized and never on the wire.
+///
+/// Read once, at activation, off the connection's current path: its first available interface, the
+/// one the path prefers, in Network.framework's own classification. It names the interface's kind
+/// only, never its name or an address, so the line says whether a pairing ran over Wi-Fi or the
+/// loopback without saying where. `cellular` is here so the mapping is total, though every pair
+/// connection prohibits it; `unknown` is a connection that reported no path.
+nonisolated enum PairTunnelInterface: String, CaseIterable, Sendable {
+
+    /// A Wi-Fi interface.
+    case wifi
+    /// A wired Ethernet interface.
+    case wiredEthernet
+    /// The loopback interface: both ends on one machine, as two simulators on one Mac are.
+    case loopback
+    /// A cellular interface, which the pair radio's connections prohibit.
+    case cellular
+    /// Any other kind, or a kind this module does not know yet.
+    case other
+    /// The connection reported no path, or its path no interface.
+    case unknown
+
+    /// The token for an interface kind, `unknown` for none.
+    ///
+    /// - Parameter type: The kind of the path's first available interface, or nil.
+    init(_ type: NWInterface.InterfaceType?) {
+        guard let type else {
+            self = .unknown
+            return
+        }
+        switch type {
+        case .wifi: self = .wifi
+        case .wiredEthernet: self = .wiredEthernet
+        case .loopback: self = .loopback
+        case .cellular: self = .cellular
+        case .other: self = .other
+        @unknown default: self = .other
+        }
+    }
+}
+
 // MARK: - NetworkPairSession
 
 /// The pair session's radio (Fernlet's recipe-share radio), its Network.framework/QUIC surface: one
@@ -166,6 +211,15 @@ nonisolated struct ProximityPairPosture {
 /// through ``resolveDialer``, then rules on it through ``shouldAcceptDialer``. A hello that names
 /// no such peer, or names this device itself, is refused before any channel or handle exists. See
 /// ``ProximityPairDialHello`` for why that frame discloses nothing the air did not.
+///
+/// Until its hello is read, an inbound connection is only *pending*: booked at its arrival
+/// (`recipe.quic.pendingBooked`), it holds one of ``maxPendingInbound`` places and no place in the
+/// connecting window, which counts it only once it has delivered a readable hello
+/// (``hasConnectingPeers(besides:)``). It stops being pending when its hello is admitted or refused,
+/// when its connection ends, when it goes ``helloDeadlineSeconds`` without a readable hello, or when
+/// the radio stops, and each of those writes one `recipe.quic.pendingEnded` line naming which. A
+/// refusal writes `recipe.quic.helloRefused` first, with its ``HelloRefusal`` and how many
+/// connections were pending.
 ///
 /// ## Glare
 ///
@@ -238,13 +292,41 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     /// must not seat a second device.
     nonisolated static let maxTunnels = 1
 
-    /// Inbound connections that may be mid-hello at once.
+    /// Inbound connections that may be pending at once: booked at their arrival, before any hello can
+    /// be read, and held until their hello is ruled on, they end, or ``helloDeadlineSeconds`` reaps
+    /// them.
     ///
-    /// A silent dialer is reaped by QUIC's own idle timeout — the same
-    /// ``MeshHeartbeatSchedule/idleTimeoutMilliseconds`` the mesh declares — which ends the
-    /// connection and throws its owning task out of `inboundStreams`. That is deliberately the
-    /// only reaper: a sweep would need a clock, and this radio owns no timer.
+    /// A pending connection holds one of these and, until it has delivered a readable dial hello, no
+    /// place in the connecting window (``hasConnectingPeers(besides:)``): a connection that has said
+    /// nothing cannot refuse anyone. One past it is refused before its owning task starts, so the
+    /// framework closes it: with the listener's limit lifted
+    /// (``ProximityQUICParameters/listenerNewConnectionLimit``) this is the cap on what an inbound flood
+    /// can make this radio hold.
     nonisolated static let maxPendingInbound = 2
+
+    /// Seconds a pending inbound connection may go without delivering a readable dial hello, whether it
+    /// never opened its control stream or opened it and never finished the hello, before the radio drops
+    /// it.
+    ///
+    /// **Why five.** A dialer writes its hello in the first flight on its control stream, straight after
+    /// the QUIC handshake (`runInitiator`: open the stream, send one frame of at most
+    /// ``ProximityPairDialHello/maxEncodedBytes``), so over a link-local radio a live dialer's hello
+    /// lands milliseconds after its connection does. Five seconds is half the mesh's
+    /// ``NetworkMeshSession/introductionDeadlineSeconds``, which allows a two-round-trip signed
+    /// introduction where this is one frame and no round trip, so a phone that just woke is not cut off
+    /// mid-hello; and it is well inside the dialing owner's 12 s pre-connect timeout, so a place a silent
+    /// connection held is free again with seven seconds of a real dial's window left. Before it, QUIC's
+    /// idle timeout (``MeshHeartbeatSchedule/idleTimeoutMilliseconds``) was meant to be the reaper, and
+    /// is none: it fails a connection that never opened a stream, but that connection's
+    /// `inboundStreams` neither returns nor throws (measured; see
+    /// ``ProximityQUICParameters/listenerNewConnectionLimit``), so it held its place until ``stop()``.
+    ///
+    /// **Still no timer.** The deadline is applied where a pending place is next needed and where a
+    /// hello is ruled on: each arrival, and each ruling whether or not its read yielded a hello, first
+    /// drops every pending connection past it but the one being ruled on, which its own ruling ends, on
+    /// the instant that event read. A stalled connection nothing needs a place from waits for the next
+    /// arrival or ruling, and refuses nobody meanwhile.
+    nonisolated static let helloDeadlineSeconds: TimeInterval = 5
 
     /// Frames one tunnel may deliver before its receive loop retires (Power of 10 rule 2). Three
     /// orders of magnitude above a recipe exchange, which is a signed introduction and one share.
@@ -338,8 +420,68 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
         }
     }
 
+    /// How far a pending inbound connection has got toward the dial hello that resolves it: the
+    /// `stage` of `recipe.quic.pendingEnded`, a frozen diagnostic token, never on the wire.
+    nonisolated enum InboundStage: String, Sendable {
+        /// Booked at its arrival; the dialer has opened no stream yet.
+        case awaitingStream
+        /// Its control stream has arrived and the hello is being read off it.
+        case readingHello
+        /// A readable hello has been read off it and the connection is being ruled on: the only stage
+        /// the connecting window counts.
+        case helloDelivered
+    }
+
+    /// Why an inbound hello was refused: the `reason` of `recipe.quic.helloRefused`, a frozen
+    /// diagnostic token, never on the wire and never localized.
+    nonisolated enum HelloRefusal: String, CaseIterable, Error, Sendable {
+        /// No readable dial hello came off the control stream: a first frame that was not one, or a
+        /// stream that ended first.
+        case unreadable
+        /// The hello resolves to no browsed peer: its session id is this device's own, the owner's
+        /// resolver names nobody for it, or the peer it names has aged out of the identity map.
+        case unresolved
+        /// The owner's admission gate refused the peer: the two-device cap's inbound layer, or a peer
+        /// the owner would not take.
+        case ownerRefused
+        /// A tunnel to the same peer is held and the glare rule keeps it, or cannot rank the pair,
+        /// which keeps it too.
+        case keptEstablished
+        /// A tunnel to another device is held: the radio's own one-tunnel floor.
+        case tunnelHeld
+    }
+
+    /// Why a pending inbound connection stopped being pending: the `reason` of
+    /// `recipe.quic.pendingEnded`, a frozen diagnostic token.
+    nonisolated enum PendingEnd: String, Sendable {
+        /// Its hello was admitted, and the connection is the peer's tunnel now.
+        case admitted
+        /// Its hello was refused; `recipe.quic.helloRefused` names why.
+        case refused
+        /// Its connection ended before a hello was ruled on.
+        case connectionEnded
+        /// It went ``helloDeadlineSeconds`` without delivering a readable hello.
+        case helloDeadline
+        /// The radio stopped.
+        case stopped
+    }
+
+    /// One inbound connection booked and not yet admitted, refused, ended, reaped or stopped.
+    private struct PendingInbound {
+
+        /// When it was booked: the instant ``helloDeadlineSeconds`` runs from.
+        let bookedAt: Date
+
+        /// How far it has got toward its hello.
+        var stage: InboundStage
+
+        /// Owns the connection: cancelling it closes the connection, and an admission hands it to the
+        /// tunnel.
+        let task: Task<Void, Never>
+    }
+
     private var tunnels: [MeshLinkKey: Tunnel] = [:]
-    private var pendingInbound: [MeshLinkKey: Task<Void, Never>] = [:]
+    private var pendingInbound: [MeshLinkKey: PendingInbound] = [:]
     private var identities = MeshSessionIdentityMap()
     private var browsedEndpoints: [MeshLinkKey: Bonjour.Endpoint] = [:]
     private var browsedRecords: [MeshLinkKey: MeshEndpointRecord] = [:]
@@ -397,8 +539,10 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     ///
     /// Set and cleared inside one synchronous main-actor run
     /// (``adjudicateInbound(_:pendingKey:)``), so one slot is enough for the two connections
-    /// ``maxPendingInbound`` allows: they adjudicate strictly one after the other, and each counts
-    /// the other.
+    /// ``maxPendingInbound`` allows: they adjudicate strictly one after the other. A connection is
+    /// hello-bearing only inside its own ruling (``ruleOnHello(_:pendingKey:now:)``), which ends it as
+    /// pending whatever the verdict, so the other's ruling never finds it in the window; the cap rests
+    /// on ``admitInbound(at:)``'s one-tunnel floor and the owner's held connection, not on that count.
     private var adjudicatingInbound: MeshLinkKey?
 
     private(set) var isRunning = false
@@ -465,7 +609,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
         listenerTask?.cancel()
         browserTask?.cancel()
         for tunnel in tunnels.values { tunnel.cancelTasks() }
-        for task in pendingInbound.values { task.cancel() }
+        for pending in pendingInbound.values { pending.task.cancel() }
     }
 
     // MARK: - Lifecycle
@@ -500,15 +644,14 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
 
     /// Tears the radio down and drops everything it was holding — including the posture and the
     /// pause flag, so a stood-down radio keeps no name, no identity and no hold to come back up
-    /// under.
+    /// under. Each pending inbound connection it drops writes its `recipe.quic.pendingEnded` line.
     func stop() {
         let stopped = isRunning
         for tunnel in tunnels.values { tunnel.cancelTasks() }
-        for task in pendingInbound.values { task.cancel() }
+        endEveryPendingInbound(.stopped)
         cancelListener()
         cancelBrowser()
         tunnels.removeAll()
-        pendingInbound.removeAll()
         browsedEndpoints.removeAll()
         browsedRecords.removeAll()
         owedSightings.removeAll()
@@ -629,13 +772,29 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     ///
     /// The connecting-window half of the hard 2-device cap, and the QUIC counterpart of the
     /// retired radio's pending-connection set. Two populations count: a tunnel whose control
-    /// stream has not arrived yet (our own dial, in flight) and an inbound connection that is
-    /// mid-hello — every one of those **except** the connection currently being adjudicated, which
-    /// is the one the caller is ruling on. A connection that counted itself would refuse every
-    /// inbound dial there is; a SECOND one that went uncounted would let two devices past the cap.
-    /// See ``adjudicatingInbound``.
+    /// stream has not arrived yet (our own dial, in flight) and an inbound connection that has
+    /// delivered a readable dial hello and is being ruled on — every one of those **except** the
+    /// connection currently being adjudicated, which is the one the caller is ruling on; a connection
+    /// that counted itself would refuse every inbound dial there is (see ``adjudicatingInbound``). The
+    /// second population lives only inside a ruling: its own ruling marks a connection hello-bearing
+    /// and ends it as pending in the same synchronous run, so outside the test seam that books one
+    /// (``bookPendingInboundForTesting(_:)``) no other ruling and no caller outside one ever finds one.
+    ///
+    /// **A pending connection that has delivered no hello does not count.** It has said nothing, not
+    /// even that it is a dialer, and it cannot be promoted until it does. Counting it let a silent
+    /// twin of a dialer's own connection (on a cold start, Network.framework racing a second attempt
+    /// across the service's addresses is the likeliest source) refuse that dialer's hello, and let any
+    /// device on the network that opened a connection and stayed silent refuse every hello for as long
+    /// as it held its place: until the radio stopped, for one that never opened a stream (QUIC's idle
+    /// timeout fails such a connection without ending it), or up to that timeout's 90 s, for one that
+    /// opened its stream. The cap rests on neither population of pending connection: a second device is
+    /// held off by ``admitInbound(at:)``'s one-tunnel floor and by the owner's own held connection, both
+    /// of which a promotion meets synchronously, in the run that read its hello.
     func hasConnectingPeers(besides peer: PeerHandle?) -> Bool {
-        guard pendingInbound.keys.allSatisfy({ $0 == adjudicatingInbound }) else { return true }
+        // R2: bounded by maxPendingInbound.
+        for (key, pending) in pendingInbound where key != adjudicatingInbound && pending.stage == .helloDelivered {
+            return true
+        }
         let excluded = peer.flatMap { identities.key(for: $0) }
         for (key, tunnel) in tunnels where key != excluded && tunnel.controlStream == nil {
             return true
@@ -800,20 +959,65 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
         resolveInbound(hello)
     }
 
-    /// Books a pending inbound connection exactly as ``acceptInbound(_:)`` books one — BEFORE any
-    /// hello can be read — minus the framework connection a unit test cannot build.
+    /// Books a pending inbound connection whose dial hello has been READ — the stage
+    /// ``ruleOnHello(_:pendingKey:now:)`` marks a connection at before it rules on it, and the only one
+    /// the connecting window counts — through the booking an arrival takes, now, behind a stub task.
+    ///
+    /// Until the hello deadline (0.1.1) this booked a connection as an arrival is booked, before any
+    /// hello, and the window counted every pending connection. A connection at that stage
+    /// (``InboundStage/awaitingStream``) no longer counts, so this books the one a second dialer's
+    /// ruling must still count; ``bookPendingInboundForTesting(_:stage:at:)`` books any stage at a
+    /// chosen instant. A cell that drives the deadline books through that one alone: this one reads the
+    /// clock, and its booking applies the deadline at that instant.
     func bookPendingInboundForTesting(_ pendingKey: MeshLinkKey) {
-        pendingInbound[pendingKey] = Task { @MainActor in }
+        bookPendingInbound(pendingKey, stage: .helloDelivered, at: Date()) { Task { @MainActor in } }
     }
 
-    /// Runs the whole adjudication ``serveInbound(stream:pendingKey:connection:)`` runs on a
-    /// decoded hello — the owner's gate asked with this connection excluded from the connecting
-    /// window — and answers the key it admitted, or nil for a refusal.
+    /// Books a pending inbound connection at `stage`, booked at `now`, exactly as ``acceptInbound(_:)``
+    /// books an arrival — the hello deadline applied at `now` first, then the cap, then the
+    /// `recipe.quic.pendingBooked` line — minus the framework connection a unit test cannot build: a
+    /// stub task stands in for the connection's, and a drop cancels it as it would a real one.
+    ///
+    /// - Returns: Whether it was booked: false when the key is already pending or the pending places
+    ///   are full.
+    @discardableResult
+    func bookPendingInboundForTesting(_ pendingKey: MeshLinkKey, stage: InboundStage, at now: Date) -> Bool {
+        bookPendingInbound(pendingKey, stage: stage, at: now) { Task { @MainActor in } }
+    }
+
+    /// How far a pending inbound connection has got toward its hello, or nil when it is not pending.
+    func pendingInboundStageForTesting(_ pendingKey: MeshLinkKey) -> InboundStage? {
+        pendingInbound[pendingKey]?.stage
+    }
+
+    /// Applies the hello deadline at a caller-chosen `now`, exactly as an arrival and a ruling apply it.
+    func expireStalledInboundForTesting(now: Date) {
+        expireStalledInbound(now: now)
+    }
+
+    /// Runs the whole synchronous ruling ``serveInbound(stream:pendingKey:connection:)`` runs on what
+    /// it read off a control stream — `hello`, or nil for no readable one — at `now`: the stage mark,
+    /// the hello deadline, the adjudication, and then the refusal's `recipe.quic.helloRefused` line and
+    /// drop, or the admission out of the pending map. Answers the key it admitted, or nil. The tunnel an
+    /// admission then builds is the live path's, which needs a framework stream.
+    func ruleOnHelloForTesting(
+        _ hello: ProximityPairDialHello?,
+        pendingKey: MeshLinkKey,
+        now: Date
+    ) -> MeshLinkKey? {
+        ruleOnHello(hello, pendingKey: pendingKey, now: now)?.key
+    }
+
+    /// Runs the adjudication ``serveInbound(stream:pendingKey:connection:)`` runs on a decoded
+    /// hello — the owner's gate asked with this connection excluded from the connecting window —
+    /// and answers the key it admitted, or nil for a refusal. Unlike the live path it neither logs
+    /// a refusal nor drops the refused connection: ``ruleOnHelloForTesting(_:pendingKey:now:)`` does.
     func adjudicateInboundForTesting(
         _ hello: ProximityPairDialHello,
         pendingKey: MeshLinkKey
     ) -> MeshLinkKey? {
-        adjudicateInbound(hello, pendingKey: pendingKey)?.key
+        guard case .admitted(let key, _) = adjudicateInbound(hello, pendingKey: pendingKey) else { return nil }
+        return key
     }
 
     /// Runs the browser-failure classifier ``browserStateChanged(_:)`` routes a `.failed` through,
@@ -886,7 +1090,7 @@ private extension NetworkPairSession {
                 alpn: alpn,
                 identity: posture.tlsIdentity.identity
             )
-        ).newConnectionLimit(Self.maxTunnels + Self.maxPendingInbound)
+        ).newConnectionLimit(ProximityQUICParameters.listenerNewConnectionLimit)
         self.listener = listener
         listener.onStateUpdate { [weak self] _, state in
             Task { @MainActor in self?.listenerStateChanged(state) }
@@ -1244,22 +1448,51 @@ private extension NetworkPairSession {
     func acceptInbound(_ connection: NetworkConnection<QUIC>) {
         guard isRunning, !isDiscoveryPaused else { return }
         let pendingKey = MeshLinkKey(connection.id)
+        bookPendingInbound(pendingKey, stage: .awaitingStream, at: Date()) {
+            Task { @MainActor [weak self] in
+                await self?.runResponder(connection, pendingKey: pendingKey)
+            }
+        }
+    }
+
+    /// Books one arrival as pending at `stage`, at `now`, starting the task that owns its connection
+    /// only once a place is free: the hello deadline is applied at `now` first, so a place a stalled
+    /// connection held is free again for this one, then the ``maxPendingInbound`` cap, then the
+    /// `recipe.quic.pendingBooked` line, which names the connection and how many are pending with it.
+    ///
+    /// A connection refused here was never pending: its owning task is never started, so the framework
+    /// closes it, and only the debug log names it.
+    ///
+    /// - Returns: Whether it was booked.
+    @discardableResult
+    func bookPendingInbound(
+        _ pendingKey: MeshLinkKey,
+        stage: InboundStage,
+        at now: Date,
+        start: () -> Task<Void, Never>
+    ) -> Bool {
+        expireStalledInbound(now: now)
         guard pendingInbound[pendingKey] == nil, pendingInbound.count < Self.maxPendingInbound else {
             logger.debug(
                 "recipe connection refused pre-hello for \(self.peerLabel(for: pendingKey), privacy: .public)"
             )
-            return
+            return false
         }
-        pendingInbound[pendingKey] = Task { @MainActor [weak self] in
-            await self?.runResponder(connection, pendingKey: pendingKey)
-        }
+        pendingInbound[pendingKey] = PendingInbound(bookedAt: now, stage: stage, task: start())
+        ProximityAudit.log(
+            "recipe.quic.pendingBooked",
+            context: ["connection": peerLabel(for: pendingKey), "pending": String(pendingInbound.count)]
+        )
+        return true
     }
 
     /// Listening side: serve the peer's control stream, and every later stream as a transfer.
     ///
     /// The control stream is the peer's stream 0 and only ever that — the dialer opens exactly one
     /// before anything else — so the id alone names it, and any other stream is a per-transfer
-    /// stream carrying a picture recipe.
+    /// stream carrying a picture recipe. Its arrival moves the pending connection to
+    /// ``InboundStage/readingHello``; a connection that ends before a hello is ruled on writes its
+    /// `recipe.quic.pendingEnded` line here.
     func runResponder(_ connection: NetworkConnection<QUIC>, pendingKey: MeshLinkKey) async {
         do {
             try await connection.inboundStreams { stream in
@@ -1268,34 +1501,31 @@ private extension NetworkPairSession {
                     return
                 }
                 guard self.pendingInbound[pendingKey] != nil else { return }
+                self.pendingInbound[pendingKey]?.stage = .readingHello
                 await self.serveInbound(stream: stream, pendingKey: pendingKey, connection: connection)
             }
         } catch {
             guard !Task.isCancelled else { return }
-            dropPendingInbound(pendingKey)
+            endPendingInbound(pendingKey, .connectionEnded)
         }
     }
 
     /// Reads the dial hello and, only if it resolves to a browsed peer the owner accepts and
     /// ``admitInbound(at:)`` gives it the slot, promotes the pending connection to a real tunnel.
     ///
-    /// Every early return drops the pending connection whole: no channel is built and no handle is
+    /// Every other outcome drops the pending connection whole: no channel is built and no handle is
     /// minted for an owner. That is the "no leakage" property, and it holds by construction —
     /// everything downstream needs a resolved ``PeerHandle`` this path does not have.
     ///
-    /// The guard chain itself is ``adjudicateInbound(_:pendingKey:)``, which runs it with this
-    /// connection excluded from the connecting window.
+    /// The ruling is ``ruleOnHello(_:pendingKey:now:)``, synchronous from the moment the hello has
+    /// been read, so nothing can change between the hello's arrival and its verdict.
     func serveInbound(
         stream: Network.QUIC.Stream<QUICStream>,
         pendingKey: MeshLinkKey,
         connection: NetworkConnection<QUIC>
     ) async {
-        guard let hello = await readDialHello(from: stream),
-              let admitted = adjudicateInbound(hello, pendingKey: pendingKey) else {
-            auditHelloRefused(pendingKey)
-            dropPendingInbound(pendingKey)
-            return
-        }
+        let hello = await readDialHello(from: stream)
+        guard let admitted = ruleOnHello(hello, pendingKey: pendingKey, now: Date()) else { return }
         let key = admitted.key
         let channel = prepareChannel(for: key)
         tunnels[key] = Tunnel(peer: channel.peer, channel: channel, role: .responder, task: admitted.task)
@@ -1308,62 +1538,123 @@ private extension NetworkPairSession {
         }
     }
 
+    /// The ruling on what a pending connection's control stream yielded — `hello`, or nil when no
+    /// readable hello came off it — at `now`, writing its outcome: the admission hands back the key
+    /// and the task owning the connection; a refusal writes one `recipe.quic.helloRefused` line naming
+    /// its ``HelloRefusal`` and drops the connection.
+    ///
+    /// A connection no longer pending (reaped, or the radio stopped, while its hello was being read)
+    /// was ended, and logged, by whatever dropped it, so it is left alone. Every ruling applies the
+    /// deadline before its verdict, to every connection but the one it rules on, so a refusal's
+    /// `pending` count names only connections that could still deliver, and the ruled connection is
+    /// ruled on however long its read took: a hello that was read marks its connection
+    /// ``InboundStage/helloDelivered`` BEFORE the deadline is applied, a stage the deadline never
+    /// touches, and a read that yielded no hello spares its connection, which then gets its own
+    /// ``HelloRefusal/unreadable`` refusal.
+    func ruleOnHello(
+        _ hello: ProximityPairDialHello?,
+        pendingKey: MeshLinkKey,
+        now: Date
+    ) -> (key: MeshLinkKey, task: Task<Void, Never>)? {
+        guard pendingInbound[pendingKey] != nil else { return nil }
+        guard let hello else {
+            expireStalledInbound(now: now, sparing: pendingKey)
+            refuseHello(pendingKey, reason: .unreadable)
+            return nil
+        }
+        pendingInbound[pendingKey]?.stage = .helloDelivered
+        expireStalledInbound(now: now)
+        switch adjudicateInbound(hello, pendingKey: pendingKey) {
+        case .admitted(let key, let task):
+            return (key, task)
+        case .refused(let reason):
+            refuseHello(pendingKey, reason: reason)
+            return nil
+        case .notPending:
+            return nil
+        }
+    }
+
     /// The whole SYNCHRONOUS half of inbound adjudication, run with `pendingKey` excluded from
-    /// the connecting window: resolve the hello to a browsed peer the owner accepts, check the
-    /// pending entry, take that peer's tunnel slot, and hand back the task owning the connection.
+    /// the connecting window: check the pending entry, resolve the hello to a browsed peer the owner
+    /// accepts, take that peer's tunnel slot, and hand back the task owning the connection — or the
+    /// one ``HelloRefusal`` the chain stopped at.
     ///
     /// The pending entry is checked BEFORE ``admitInbound(at:)`` and removed after, so the one
     /// guard in the chain with an effect (it may close a tunnel) can never run for a connection
     /// that has already been dropped — which is also what refuses a SECOND hello on one connection.
+    /// It neither logs a refusal nor drops the refused connection; ``ruleOnHello(_:pendingKey:now:)``
+    /// does both.
     ///
     /// There is deliberately no suspension point between the set and the `defer`: see
     /// ``adjudicatingInbound`` for why one slot is then enough.
-    func adjudicateInbound(
-        _ hello: ProximityPairDialHello,
-        pendingKey: MeshLinkKey
-    ) -> (key: MeshLinkKey, task: Task<Void, Never>)? {
+    func adjudicateInbound(_ hello: ProximityPairDialHello, pendingKey: MeshLinkKey) -> PairInboundVerdict {
         adjudicatingInbound = pendingKey
         defer { adjudicatingInbound = nil }
-        guard let peer = resolveInbound(hello),
-              let key = identities.key(for: peer),
-              pendingInbound[pendingKey] != nil,
-              admitInbound(at: key),
-              let owning = pendingInbound.removeValue(forKey: pendingKey) else { return nil }
-        return (key, owning)
+        guard pendingInbound[pendingKey] != nil else { return .notPending }
+        let peer: PeerHandle
+        switch resolution(of: hello) {
+        case .success(let resolved): peer = resolved
+        case .failure(let refusal): return .refused(refusal)
+        }
+        guard let key = identities.key(for: peer) else { return .refused(.unresolved) }
+        if let refusal = inboundAdmission(at: key) { return .refused(refusal) }
+        guard let owning = releasePendingInbound(pendingKey, .admitted) else { return .notPending }
+        return .admitted(key: key, task: owning)
     }
 
-    /// The owner-facing half of inbound resolution: refuse our OWN session id, then ask the
-    /// owner's resolver for the browsed peer that id names, then ask the owner's admission gate.
+    /// The owner-facing half of inbound resolution: the browsed peer the hello names, if the owner
+    /// accepts it, or nil. See ``resolution(of:)``.
+    func resolveInbound(_ hello: ProximityPairDialHello) -> PeerHandle? {
+        guard case .success(let peer) = resolution(of: hello) else { return nil }
+        return peer
+    }
+
+    /// The owner-facing half of inbound resolution, with the refusal it ends in: refuse our OWN
+    /// session id, then ask the owner's resolver for the browsed peer that id names
+    /// (``HelloRefusal/unresolved``), then ask the owner's admission gate
+    /// (``HelloRefusal/ownerRefused``).
     ///
     /// Both hooks fail closed, and the self-dial refusal is this radio's own: a session id we are
     /// advertising can only reach us from an echo of our own registration or from a replay, and
     /// neither is a peer.
-    func resolveInbound(_ hello: ProximityPairDialHello) -> PeerHandle? {
-        guard hello.sessionID != posture?.sessionID else { return nil }
-        guard let peer = resolveDialer?(hello.sessionID) else { return nil }
-        guard shouldAcceptDialer?(peer) == true else { return nil }
-        return peer
+    func resolution(of hello: ProximityPairDialHello) -> Result<PeerHandle, HelloRefusal> {
+        guard hello.sessionID != posture?.sessionID,
+              let peer = resolveDialer?(hello.sessionID) else { return .failure(.unresolved) }
+        guard shouldAcceptDialer?(peer) == true else { return .failure(.ownerRefused) }
+        return .success(peer)
     }
 
     /// Whether an inbound connection that resolved to `key` may take that key's one tunnel slot,
-    /// closing whatever it displaces — the glare resolution the type's ## Glare section describes.
-    ///
-    /// The verdict is the mesh's ``MeshTunnelConvergence``, computed over the two advertised
-    /// **instance names** in place of the mesh's two session ids. They are the same shape of value
-    /// — a random token each side publishes and the other browses — and they are the only pair of
-    /// facts both devices hold and agree on here, because this radio runs no signed channel
-    /// introduction and so has no verified identity to rank at this point.
-    ///
-    /// `.keepEstablished` drops the arriving connection and disturbs nothing; `.keepIncoming` (and
-    /// the unrepresentable `.keepBoth`) ends the held tunnel with the owner TOLD, which is
-    /// load-bearing rather than incidental: the owner's channel-ready gate answers "already
-    /// connected" for a device it still holds a record for, so a yield that stayed quiet would hand
-    /// the fresh channel to an owner that dropped it and leave a coordinator waiting on a dead
-    /// connection. Answers `false` when either name is missing, which is the fail-closed direction.
+    /// closing whatever it displaces. See ``inboundAdmission(at:)``.
     func admitInbound(at key: MeshLinkKey) -> Bool {
-        guard let established = tunnels[key] else { return tunnels.count < Self.maxTunnels }
+        inboundAdmission(at: key) == nil
+    }
+
+    /// Whether an inbound connection that resolved to `key` may take that key's one tunnel slot,
+    /// closing whatever it displaces — nil to admit it, or the refusal — the glare resolution the
+    /// type's ## Glare section describes.
+    ///
+    /// With no tunnel under `key`, the one-tunnel floor decides: a tunnel to another device refuses it
+    /// (``HelloRefusal/tunnelHeld``). With one, the verdict is the mesh's ``MeshTunnelConvergence``,
+    /// computed over the two advertised **instance names** in place of the mesh's two session ids.
+    /// They are the same shape of value — a random token each side publishes and the other browses —
+    /// and they are the only pair of facts both devices hold and agree on here, because this radio
+    /// runs no signed channel introduction and so has no verified identity to rank at this point.
+    ///
+    /// `.keepEstablished` drops the arriving connection and disturbs nothing
+    /// (``HelloRefusal/keptEstablished``); `.keepIncoming` (and the unrepresentable `.keepBoth`) ends
+    /// the held tunnel with the owner TOLD, which is load-bearing rather than incidental: the owner's
+    /// channel-ready gate answers "already connected" for a device it still holds a record for, so a
+    /// yield that stayed quiet would hand the fresh channel to an owner that dropped it and leave a
+    /// coordinator waiting on a dead connection. Refuses when either name is missing, keeping the
+    /// established tunnel, which is the fail-closed direction.
+    func inboundAdmission(at key: MeshLinkKey) -> HelloRefusal? {
+        guard let established = tunnels[key] else {
+            return tunnels.count < Self.maxTunnels ? nil : .tunnelHeld
+        }
         guard let localName = posture?.instanceName,
-              let peerName = browsedRecords[key]?.instanceName else { return false }
+              let peerName = browsedRecords[key]?.instanceName else { return .keptEstablished }
         let verdict = MeshTunnelConvergence.resolve(
             incomingRole: .responder,
             establishedRole: established.role,
@@ -1372,11 +1663,11 @@ private extension NetworkPairSession {
         )
         guard verdict != .keepEstablished else {
             auditRedundantTunnelClosed(key, kept: "established")
-            return false
+            return .keptEstablished
         }
         endTunnel(key, reason: Self.redundantTunnelCloseReason)
         auditRedundantTunnelClosed(key, kept: "incoming")
-        return true
+        return nil
     }
 
     /// The one audit line for a collapsed duplicate, naming the peer by ``peerLabel(for:)`` and
@@ -1388,13 +1679,29 @@ private extension NetworkPairSession {
         )
     }
 
+    /// Refuses a pending connection's hello: its `recipe.quic.helloRefused` line, then the drop. A
+    /// connection no longer pending was already ended, and logged, by whatever dropped it.
+    func refuseHello(_ pendingKey: MeshLinkKey, reason: HelloRefusal) {
+        guard pendingInbound[pendingKey] != nil else { return }
+        auditHelloRefused(pendingKey, reason: reason)
+        endPendingInbound(pendingKey, .refused)
+    }
+
     /// The one audit line for an inbound connection refused at the hello. Named by the PENDING
     /// key — a connection id, not a browsed endpoint — because a refused dialer is by definition
     /// one this radio never resolved to a peer.
-    func auditHelloRefused(_ pendingKey: MeshLinkKey) {
+    ///
+    /// `reason` is the ``HelloRefusal`` the ruling stopped at, and `pending` how many inbound
+    /// connections were pending as it was refused, this one included: a refusal beside a second
+    /// pending connection reads `pending=2`, and that connection's own lines say what it was.
+    func auditHelloRefused(_ pendingKey: MeshLinkKey, reason: HelloRefusal) {
         ProximityAudit.log(
             "recipe.quic.helloRefused",
-            context: ["connection": peerLabel(for: pendingKey)]
+            context: [
+                "connection": peerLabel(for: pendingKey),
+                "reason": reason.rawValue,
+                "pending": String(pendingInbound.count)
+            ]
         )
     }
 
@@ -1417,10 +1724,55 @@ private extension NetworkPairSession {
         }
     }
 
-    /// Drops a pending inbound connection, cancelling the task that owns it. Idempotent, and safe
-    /// to call from inside that task — cancelling itself is how the connection is closed.
-    func dropPendingInbound(_ key: MeshLinkKey) {
-        pendingInbound.removeValue(forKey: key)?.cancel()
+    /// Takes a connection out of the pending map with its one `recipe.quic.pendingEnded` line — the
+    /// connection, why (``PendingEnd``), the stage it had reached (``InboundStage``) and how many stay
+    /// pending — and hands back the task that owns it, or nil when it was not pending, writing nothing.
+    @discardableResult
+    func releasePendingInbound(_ key: MeshLinkKey, _ end: PendingEnd) -> Task<Void, Never>? {
+        guard let pending = pendingInbound.removeValue(forKey: key) else { return nil }
+        ProximityAudit.log(
+            "recipe.quic.pendingEnded",
+            context: [
+                "connection": peerLabel(for: key),
+                "reason": end.rawValue,
+                "stage": pending.stage.rawValue,
+                "pending": String(pendingInbound.count)
+            ]
+        )
+        return pending.task
+    }
+
+    /// Drops a pending inbound connection with its `recipe.quic.pendingEnded` line, cancelling the
+    /// task that owns it. Idempotent and silent for a connection no longer pending, and safe to call
+    /// from inside that task — cancelling itself is how the connection is closed.
+    func endPendingInbound(_ key: MeshLinkKey, _ end: PendingEnd) {
+        releasePendingInbound(key, end)?.cancel()
+    }
+
+    /// Drops every pending inbound connection, in key order, each with its line. Bounded by
+    /// ``maxPendingInbound``.
+    func endEveryPendingInbound(_ end: PendingEnd) {
+        // R2: bounded by maxPendingInbound.
+        for key in pendingInbound.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            endPendingInbound(key, end)
+        }
+    }
+
+    /// Drops every pending inbound connection that has gone more than ``helloDeadlineSeconds`` since
+    /// it was booked without delivering a readable hello, each as ``PendingEnd/helloDeadline``, except
+    /// `ruled`: the connection a ruling on no readable hello is about to refuse, which that refusal ends.
+    ///
+    /// `now` is the instant the calling event read — an arrival's or a ruling's — so the radio owns no
+    /// clock and a test hands in its own. Bounded by ``maxPendingInbound``.
+    func expireStalledInbound(now: Date, sparing ruled: MeshLinkKey? = nil) {
+        let stalled = pendingInbound.filter {
+            $0.key != ruled && $0.value.stage != .helloDelivered
+                && now.timeIntervalSince($0.value.bookedAt) > Self.helloDeadlineSeconds
+        }
+        // R2: bounded by maxPendingInbound.
+        for key in stalled.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            endPendingInbound(key, .helloDeadline)
+        }
     }
 
     /// Records the control stream and the connection, then hands the channel to the owner.
@@ -1429,6 +1781,9 @@ private extension NetworkPairSession {
     /// can never carry a frame from a connection this radio has not admitted" structural: a stream
     /// arriving on an unadmitted connection resolves to no tunnel in
     /// ``serveTransferStream(_:on:)`` and is refused before a byte is read.
+    ///
+    /// Its `recipe.quic.connected` line names how many tunnels are live and the kind of interface the
+    /// connection runs over (``PairTunnelInterface``), read off the connection's current path.
     func activate(
         _ key: MeshLinkKey,
         stream: Network.QUIC.Stream<QUICStream>,
@@ -1438,7 +1793,11 @@ private extension NetworkPairSession {
         tunnel.controlStream = stream
         tunnel.connection = connection
         tunnels[key] = tunnel
-        ProximityAudit.log("recipe.quic.connected", context: ["tunnels": String(tunnels.count)])
+        let interface = PairTunnelInterface(connection.currentPath?.availableInterfaces.first?.type)
+        ProximityAudit.log(
+            "recipe.quic.connected",
+            context: ["tunnels": String(tunnels.count), "interface": interface.rawValue]
+        )
         onPeerChannelReady?(tunnel.channel)
     }
 
@@ -1465,6 +1824,21 @@ private extension NetworkPairSession {
         guard notifyOwner else { return }
         onPeerDisconnected?(tunnel.peer, reason)
     }
+}
+
+// MARK: - Inbound verdicts
+
+/// What one adjudication decided about a pending inbound connection's dial hello.
+private enum PairInboundVerdict {
+
+    /// Admitted under `key`; `task` owns the connection and is the tunnel's now.
+    case admitted(key: MeshLinkKey, task: Task<Void, Never>)
+
+    /// Refused, for the reason given.
+    case refused(NetworkPairSession.HelloRefusal)
+
+    /// The connection is no longer pending: whatever dropped it ended it and wrote its line.
+    case notPending
 }
 
 // MARK: - Per-transfer streams

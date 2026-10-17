@@ -42,8 +42,56 @@ in-memory keychain, exists only under `#if DEBUG`, so `swift test -c release` do
 
 The test target is unhosted: no app and no keychain entitlement. Its support folder,
 `Tests/ProximityKitTests/TestSupport`, installs an in-memory keychain store and an audit sink, and gives
-the tests a namespace of their own, `.packageTest`, and a host built from the public API alone.
+the tests a namespace of their own, `.packageTest`, a host built from the public API alone, and an
+install binding a test can switch for the work it wraps.
 `Tests/ProximityKitTests.tsv` lists every suite with its file and its number of tests.
+
+## Versioning
+
+ProximityKit uses semantic versioning, and while its version is 0.y it reads the rule this way:
+
+- **y** moves for a break. After 1.0 that is the major version.
+- **z** moves for everything else: additions and fixes. After 1.0 those are the minor and patch
+  versions.
+
+A break is any change a host or another device running a released version would notice:
+
+- the public API: a type, member or parameter removed or renamed, a signature, a default or a
+  documented behavior changed, or a new requirement a host must state;
+- a wire format: any byte a released version writes, or any byte it accepted and now would not, for
+  an envelope, a frame, a payload, a TXT record, a seal, a signature's canonical bytes or a label's
+  framing;
+- an on-disk format: a sealed store's schema, marker or seal, a sidecar's encoding, or a keychain
+  row's service, account, accessibility class or encoding;
+- a frozen token: a payload type, record kind, routed type, capability, audit or TXT key, which a host
+  supplies or matches by its exact spelling.
+
+A new format goes in beside the old one, and the old one keeps decoding, so a release never strands a
+device still running the last one. That makes breaks rare: a new optional JSON key that an older
+decoder ignores, or a new schema a newer reader accepts beside the old, is an addition. Retiring the
+old reader is the break.
+
+A consumer pins an exact version, `.package(url: "https://github.com/bowman-mw/proximitykit", exact:
+"0.1.0")`, as the Fernlet repository does, and moves to a new one deliberately, reading its entry in
+[CHANGELOG.md](CHANGELOG.md). SwiftPM's `from: "0.1.0"` means anything below 1.0.0, so it would take
+0.2.0, a break, on the next resolve without a word.
+
+Every tag that writes a format, or a version of one, that no earlier folder holds commits those bytes
+under `Tests/ProximityKitTests/Fixtures/<tag>/`, generated once from that tag's code and never
+regenerated, each file's SHA-256 pinned in `CrossVersionFixtureTests`; a tag that writes none adds no
+folder. Its generator is committed as a file no target compiles,
+`Scripts/cross-version-fixtures/generate-<tag>.swift.txt` (0.1.0's is `generate-0.1.0.swift.txt`),
+whose header says how to run it in a tree holding that tag's sources. The suite's cells decode every
+tag's fixtures with the current code: they check the fields, the signatures and seals under the keys
+the tag stored, the deterministic encodings re-encoded byte for byte, and the retired formats still
+refused, and they drive today's verification ceremony against the tag's: today's QR writer writes the
+QR a tag's scanner reads, today's scanner and displayer interoperate with the tag's transcript, and
+each of the ceremony's JSON payloads holds every key and value the tag wrote (a fresh nonce or
+signature aside, and a key added since is an addition); other JSON is held in the read direction only,
+today's decoders on the tag's bytes. So a break fails in this repository's
+CI before a tag exists, rather than first in a host's update to the tag (tags never move). A later
+tag's folder sits beside the older ones, and the older ones keep decoding. The CHANGELOG's table for
+each tag names its formats, and marks those with no fixture.
 
 ## Example app
 
@@ -71,13 +119,14 @@ Its one screen shows:
 
 The numbers have limits. The app times a round trip itself, from the tap to the pong, so the first
 ping also counts discovery, the QUIC handshake and the identity exchange. The byte counts are
-payloads before sealing, not bytes on the wire. Nothing on the screen says which interface a
-connection uses (Wi-Fi, peer-to-peer or loopback), and nothing shows the transport's own round trip
-or wire bytes, because ProximityKit's public API does not expose them yet. Candidates for a later
-release, each an addition to the API: a `ProximityPairSession.inspector` handed to every pairing's
-coordinator, an interface key on the radio's `connected` audit line, and public spelling helpers
-for `ProximityNamespace.MeshMessages`, so that a host that runs only the pair session can declare
-the thirty mesh tokens its family still needs in a few lines.
+payloads before sealing, not bytes on the wire. The log's `recipe.quic.connected` line names the
+kind of interface the connection runs over (`interface=wifi`, `loopback` and so on). The
+heartbeat's own round trip and each envelope's encoded size reach a host that binds a
+`ProximityPairSession.inspector` (`init(host:profile:inspector:)`), which every pairing's coordinator
+reports to; this app binds none yet, so its screen does not show them. A candidate for a later
+release, an addition to the API: public spelling helpers for `ProximityNamespace.MeshMessages`, so
+that a host that runs only the pair session can declare the thirty mesh tokens its family still needs
+in a few lines.
 
 To run it, open `Examples/ProximityPing/ProximityPing.xcodeproj` with Xcode 26 or newer. It uses
 this package from the repository (`../..`), so nothing is downloaded. From the command line:
@@ -125,12 +174,18 @@ script in `Scripts/` that uses only the standard library. You can run one locall
 - `no-tracking-scan.py` checks that no file imports a tracking, analytics, advertising or
   attribution SDK. It also checks that nothing in `Sources/` or the example app uses `URLSession`
   or any other HTTP client, that the package has no dependencies, and that the example's project
-  depends on nothing but this package.
+  depends on nothing but this package. And it holds the package's own code in `Sources/` to four
+  rules that the Fernlet repository's whole-tree privacy scans held it to while it lived there:
+  no URL scheme (`scheme://`) written on a line of code, no pasteboard, no web view or in-app
+  browser, and no `UserDefaults`, `@AppStorage` or iCloud key-value store, because the host app
+  owns persistence. Comments may name any of them. None has an exception: one would be a permit
+  row in the script, with the reason it is safe, argued in review.
 - `local-link-scan.py` checks that the local network API appears only in the three radio files in
   `Sources/ProximityKit/Transport/`, and never in the example app, which reaches the radios only
   through the package.
-- `manifest-scan.py` checks that `Package.swift` has no unsafe flags and no warnings setting, and
-  that it exists beside the sources.
+- `manifest-scan.py` checks that `Package.swift` has no unsafe flags and no warnings setting, that
+  its one resource is the test target's fixture folder, copied whole (`.copy("Fixtures")`), and that
+  it exists beside the sources.
 - `codeowners-scan.py` checks that every rule in `.github/CODEOWNERS` names a path that exists,
   because GitHub never reports a rule that matches nothing, and that the walls, the manifest, the
   label registry and the inventory of the tests keep their rules.
@@ -143,7 +198,9 @@ script in `Scripts/` that uses only the standard library. You can run one locall
   declares, but only a check outside the run can see that they ran.
 
 The walls are ports of the checks that guard this code in the Fernlet repository, or counterparts
-of them. Then CI builds and tests the package, and every warning fails the build. The warnings
+of them. The no-tracking scan's four `Sources/` rules carry checks that guarded this code there
+until the Fernlet repository came to depend on this package's tag, when its scans stopped reading
+this code. Then CI builds and tests the package, and every warning fails the build. The warnings
 setting lives on the build commands, never in `Package.swift`, as in the Fernlet repository. CI:
 
 - builds the package with `swift build`, and the library alone in Release with
@@ -161,13 +218,15 @@ Other walls are suites in the package's own tests, so they run on every test lan
 wall, the platform wall (which also keeps CloudKit out), the keychain door's wall, the tests' own
 hygiene and their tree walls, the source walls over ProximityKit's code (launch hooks read only in
 Debug builds, keychain rows that never sync, a purpose named beside every raw cryptographic call, and
-the one escape hatch counted), the memory-lifecycle wall, and the example app's namespace held apart.
+the one escape hatch counted), the memory-lifecycle wall, the example app's namespace held apart, and
+the cross-version fixtures (see "Versioning").
 The source walls copied from the Fernlet repository's tests, which read ProximityKit's code there
 before it moved, run on every test lane too.
 `.github/CODEOWNERS` puts the package's own walls, the files they read through, the label registry,
 the example's namespace and its copy, the keychain funnel and the byte formats under the owner's
-review, and of the source walls copied from the Fernlet repository's tests the five whose originals
-that repository's CODEOWNERS owns; the other copies are not under it.
+review, as are the fixtures each tag wrote and the suite that pins and decodes them, and of the
+source walls copied from the Fernlet repository's tests the five whose originals that repository's
+CODEOWNERS owns; the other copies are not under it.
 
 ## History
 

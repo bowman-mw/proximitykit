@@ -11,11 +11,14 @@
 #     carries a /// comment;
 #   * no-tracking-scan.py: no tracking SDK in Sources/, Tests/ or Examples/, no HTTP client in
 #     Sources/ or Examples/, no package dependency in Package.swift or Package.resolved, and none in
-#     the example's project but this package;
+#     the example's project but this package; and on a line of code in Sources/, no URL scheme
+#     (`scheme://`), no web view or in-app browser, no pasteboard and no UserDefaults, @AppStorage
+#     or iCloud key-value store, each permit set empty (what the Fernlet repository's whole-tree
+#     scans held this code to until that repository consumed this package's tag);
 #   * local-link-scan.py: Network.framework's local-link API only in the three radio files, never in
 #     the example app;
-#   * manifest-scan.py: Package.swift carries no unsafe flags and no warnings setting, and exists
-#     once the sources do;
+#   * manifest-scan.py: Package.swift carries no unsafe flags and no warnings setting, declares no
+#     resource but the test target's fixture folder, copied whole, and exists once the sources do;
 #   * codeowners-scan.py: every rule in .github/CODEOWNERS resolves to a path, and the
 #     wall-critical paths stay owned;
 #   * ci-scan.py: this file keeps its legs, their warnings-as-errors flags and the floor checks;
@@ -151,9 +154,135 @@ jobs:
     # swift test and the macOS bundle passed at these floors and each refused MIN_TESTS 619; swift
     # test and the Walls step's declared floor refused MIN_SUITES 99. ARITHMETIC CHECK: 583 + 35 = 618
     # and 88 + 10 = 98.
+    # RAISED 618 -> 619 and 98 -> 99 at plan step A1.3's final review on a Mac, 2026-10-15 (the same
+    # Xcode and Swift), for MeshP9HonestyAcceptanceTests, whose one cell holds in existence the source
+    # stand-in for the recipe radio's `.remove` branch (RecipeShareOverQUICTests'
+    # theRegistrationRemoveBranchIsNotABareAssignment), which the Fernlet repository's P9 honesty cell
+    # required while the stand-in was that repository's cell and can no longer read, over this
+    # repository's tree with it, this workflow's steps run as written but the iOS simulator's test leg:
+    # swift test "Test run with 619 tests in 99 suites passed"; the macOS result bundle totalTestCount
+    # 619, 0 failed, 0 skipped, the same 99 suites by name, 658 cases with arguments expanded; the
+    # Release build, the iOS simulator build and the example app's macOS and iOS simulator builds
+    # passed with warnings as errors; the inventory 99 rows declaring 619 tests. The iOS simulator's
+    # test leg was not run for this raise. swift test and the macOS bundle passed at these floors and
+    # each refused MIN_TESTS 620; swift test and the Walls step's declared floor refused MIN_SUITES
+    # 100. ARITHMETIC CHECK: 618 + 1 = 619 and 98 + 1 = 99.
+    # RAISED 619 -> 643 and 99 -> 100 at plan step A2's groundwork on a Mac, 2026-10-15 (the same Xcode
+    # and Swift), for CrossVersionFixtureTests, whose 24 cells decode tag 0.1.0's wire and on-disk
+    # bytes (Tests/ProximityKitTests/Fixtures/0.1.0/, the test target's one resource, each file's
+    # SHA-256 pinned) with today's code, over this repository's tree with it, this workflow's steps run
+    # as written but the iOS simulator's test leg: swift test "Test run with 643 tests in 100 suites
+    # passed"; the macOS result bundle totalTestCount 643, 0 failed, 0 skipped, the same 100 suites by
+    # name, 682 cases with arguments expanded; the Release build, the iOS simulator build and the
+    # example app's macOS and iOS simulator builds passed with warnings as errors; the inventory 100
+    # rows declaring 643 tests. The iOS simulator's test leg was not run for this raise; an iOS
+    # Simulator build-for-testing, with no simulator booted, carried the 53 fixtures byte-identical in
+    # the test bundle's resource bundle, where the suite reads them through Bundle.module. swift test
+    # and the macOS bundle passed at these floors and each refused MIN_TESTS 644; swift test
+    # and the Walls step's declared floor refused MIN_SUITES 101. ARITHMETIC CHECK: 619 + 24 = 643 and
+    # 99 + 1 = 100.
+    # RAISED 643 -> 644 at plan step A1's second batch of copied suites, its support, on a Mac,
+    # 2026-10-16 (the same Xcode and Swift), for PackageTestSupportTests' cell that holds the install
+    # binding a cell can switch to the answers of Fernlet's adapter over DeviceBindingID, case for case;
+    # MIN_SUITES stays 100, since the cell joins a suite the inventory already lists. Over this
+    # repository's tree with it: the Walls step passed, and swift test "Test run with 644 tests in 100
+    # suites passed", its floor passed; the inventory 100 rows declaring 644 tests. The xcodebuild lanes
+    # were not run for this note; the batch's copies commit measures the macOS lanes and the builds.
+    # swift test's floor refused MIN_TESTS 645. ARITHMETIC CHECK: 643 + 1 = 644.
+    # RAISED 644 -> 801 and 100 -> 117 at plan step A1's second batch of copied suites on a Mac,
+    # 2026-10-16 (the same Xcode and Swift), for the 17 suites of the Fernlet repository's tests that
+    # reach the keychain and open no store, copied with their names and their tests
+    # (MeshRoutedManifestSigningTests 27, MeshChunkerTests 26, IdentityServiceTests 16,
+    # MeshRecipientKeyWrapTests 15, MeshKeyAgreementVerificationTests 11,
+    # MeshMembershipRecordVerifierTests 11, MeshLedgerAdoptionTests 7, MeshDialPolicyManagerTests 6,
+    # MeshRoutedHeartTargetTests 6, four suites of five, two of four, one of three and one of one), over
+    # this repository's tree with them: the Walls step passed, and swift test "Test run with 801 tests
+    # in 117 suites passed", its floor passed; the inventory 117 rows declaring 801 tests. The
+    # xcodebuild lanes were not run for this note; the 0.1.1 fixes' last commit measures them. swift
+    # test's floor refused MIN_TESTS 802, and swift test and the Walls step's declared floor refused
+    # MIN_SUITES 118. ARITHMETIC CHECK: 644 + 157 = 801 and 100 + 17 = 117.
+    # RAISED 801 -> 807, MIN_SUITES unchanged at 117, at the 0.1.1 inbound-hello fixes and diagnostics
+    # on a Mac, 2026-10-16 (the same Xcode and Swift), for the six cells ProximityPairSessionTests
+    # gains (a pending connection that sent no hello refuses nobody, the hello deadline on a clock the
+    # cell hands in, two hello-bearing connections still refuse, every refusal's reason, the
+    # `connected` line's interface key, the pair session's inspector), over this repository's tree
+    # with them, this workflow's steps run as written but the iOS simulator's test leg: swift test
+    # "Test run with 807 tests in 117 suites passed"; the macOS result bundle totalTestCount 807, 0
+    # failed, 0 skipped, the same 117 suites by name, 879 cases with arguments expanded; the Release
+    # build, the iOS simulator build and the example app's macOS and iOS simulator builds passed with
+    # warnings as errors; the inventory 117 rows declaring 807 tests. The iOS simulator's test leg was
+    # not run for this raise. swift test and the macOS bundle passed at these floors and each refused
+    # MIN_TESTS 808; swift test and the Walls step's declared floor refused MIN_SUITES 118. ARITHMETIC
+    # CHECK: 801 + 6 = 807 and 117 + 0 = 117.
+    # RAISED 807 -> 810 and 117 -> 118 at the 0.1.1 listener fix on a Mac, 2026-10-16 (the same Xcode
+    # and Swift), for the NEW ProximityRadioListenerTests' three cells (every radio's listener built
+    # unlimited and nothing in the module setting or re-arming a finite limit, each radio's pending
+    # cap and identification deadline at their values and in their places, presence's new hello
+    # deadline freeing a silent connection's place on a clock the cell hands in), over this
+    # repository's tree with them, this workflow's steps run as written but the iOS simulator's test
+    # leg: swift test "Test run with 810 tests in 118 suites passed"; the macOS result bundle
+    # totalTestCount 810, 0 failed, 0 skipped, the same 118 suites by name, 882 cases with arguments
+    # expanded; the Release build, the iOS simulator build and the example app's macOS and iOS
+    # simulator builds passed with warnings as errors; the inventory 118 rows declaring 810 tests. The
+    # iOS simulator's test leg was not run for this raise. swift test and the macOS bundle passed at
+    # these floors and each refused MIN_TESTS 811; swift test and the Walls step's declared floor
+    # refused MIN_SUITES 119. ARITHMETIC CHECK: 807 + 3 = 810 and 117 + 1 = 118.
+    # RAISED 810 -> 814, MIN_SUITES unchanged at 118, at the 0.1.1 hello deadline applied at every
+    # ruling and tag 0.1.0's verification ceremony fixtures on a Mac, 2026-10-16 (the same Xcode and
+    # Swift), for the two cells ProximityPairSessionTests gains (a ruling's deadline after its own hello
+    # is marked read, and before an unreadable hello's refusal) and the two CrossVersionFixtureTests
+    # gains (the verification QR; the challenge and response), over this repository's tree with them,
+    # this workflow's steps run as written but the iOS simulator's test leg: swift test "Test run with
+    # 814 tests in 118 suites passed"; the macOS result bundle totalTestCount 814, 0 failed, 0 skipped,
+    # the same 118 suites by name, 886 cases with arguments expanded; the Release build, the iOS
+    # simulator build and the example app's macOS and iOS simulator builds passed with warnings as
+    # errors; the inventory 118 rows declaring 814 tests. The iOS simulator's test leg was not run for
+    # this raise. swift test and the macOS bundle passed at these floors and each refused MIN_TESTS
+    # 815; swift test and the Walls step's declared floor refused MIN_SUITES 119. ARITHMETIC CHECK:
+    # 810 + 4 = 814 and 118 + 0 = 118.
+    # RAISED 814 -> 815 at plan step A1's third batch of copied suites, its support, on a Mac,
+    # 2026-10-16 (the same Xcode and Swift), for PackageTestSupportTests' cell that holds the install
+    # binding's scripted override, an answer a cell changes partway through the work it wraps, to the
+    # answers of Fernlet's adapter under DeviceBindingID's; MIN_SUITES stays 118, since the cell joins a
+    # suite the inventory already lists. Over this repository's tree with it, this workflow's steps run
+    # as written but the iOS simulator's test leg: swift test "Test run with 815 tests in 118 suites
+    # passed"; the macOS result bundle totalTestCount 815, 0 failed, 0 skipped, the same 118 suites by
+    # name, 887 cases with arguments expanded; the Release build, the iOS simulator build and the
+    # example app's macOS and iOS simulator builds passed with warnings as errors; the inventory 118 rows
+    # declaring 815 tests. The iOS simulator's test leg was not run for this raise. swift test and the
+    # macOS bundle passed at this floor and each refused MIN_TESTS 816. ARITHMETIC CHECK: 814 + 1 = 815.
+    # RAISED 815 -> 999 and 118 -> 138 at plan step A1's third batch of copied suites on a Mac,
+    # 2026-10-16 (the same Xcode and Swift), for the 22 suites of the Fernlet repository's tests that
+    # reach the keychain and open a store, copied with their names and their 184 tests
+    # (MeshRoutedCapacityTests 20, joining the two cells the package held, MeshRoutedInventoryBuilderTests
+    # 18, MeshRoutedCustodyEvidenceTests 16, joining its one, MeshRoutedStoreLoadTests 14,
+    # MeshRoutedStoreDurabilityTests 13, MeshRecipientReceiptSigningTests 11,
+    # MeshRoutedCustodyHandoffDoorTests 8, four suites of seven, five of six, two of five and four of
+    # four), twenty of them new suites, over this repository's tree with them, this workflow's steps run
+    # as written but the iOS simulator's test leg: swift test "Test run with 999 tests in 138 suites
+    # passed"; the macOS result bundle totalTestCount 999, 0 failed, 0 skipped, the same 138 suites by
+    # name, 1087 cases with arguments expanded (200 more than the 887 before them, each copied
+    # suite's cases equal to its original's); the Release build, the iOS simulator build and the
+    # example app's macOS and iOS simulator builds passed with warnings as errors; the inventory 138
+    # rows declaring 999 tests. The iOS simulator's test leg was not run for this raise. swift test and
+    # the macOS bundle passed at these floors and each refused MIN_TESTS 1000; swift test and the Walls
+    # step's declared floor refused MIN_SUITES 139. ARITHMETIC CHECK: 815 + 184 = 999 and
+    # 118 + 20 = 138.
+    # RAISED 999 -> 1003 and 138 -> 139 at the verification ceremony's cross-version cells and the
+    # custody commit's partial-item cell on a Mac, 2026-10-16 (the same Xcode and Swift), for the
+    # three cells CrossVersionFixtureTests gains (today's QR writer, today's scanner and today's
+    # displayer against tag 0.1.0's ceremony) and the package's NEW MeshRoutedCustodyCommitGuardTests
+    # and its one cell, over this repository's tree with them, this workflow's steps run as written but
+    # the iOS simulator's test leg: swift test "Test run with 1003 tests in 139 suites passed"; the
+    # macOS result bundle totalTestCount 1003, 0 failed, 0 skipped, the same 139 suites by name, 1091
+    # cases with arguments expanded; the Release build, the iOS simulator build and the example app's
+    # macOS and iOS simulator builds passed with warnings as errors; the inventory 139 rows declaring
+    # 1003 tests. The iOS simulator's test leg was not run for this raise. swift test and the macOS
+    # bundle passed at these floors and each refused MIN_TESTS 1004; swift test and the Walls step's
+    # declared floor refused MIN_SUITES 140. ARITHMETIC CHECK: 999 + 4 = 1003 and 138 + 1 = 139.
     env:
-      MIN_TESTS: 618
-      MIN_SUITES: 98
+      MIN_TESTS: 1003
+      MIN_SUITES: 139
     steps:
       - uses: actions/checkout@v4
 

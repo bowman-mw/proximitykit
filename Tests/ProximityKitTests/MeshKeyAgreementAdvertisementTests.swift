@@ -35,12 +35,322 @@
 // (`MeshKeyAgreementSchemaTests.theRetiredRoutingInventoryDigestIsGone`, its walk's half over this
 // module), with the readers they need. The originals walk every shipping root of Fernlet's, this
 // module's folder included; each walk here reads every Swift file of the module through
-// `PackageSwiftFiles`, at the walk's floor and with its expected home. The rest of the file, and each
-// walk's other half (Fernlet's own roots), stay there, so what this header says of the rest is not held
-// here.
+// `PackageSwiftFiles`, at the walk's floor and with its expected home. Since ProximityKit plan step A1's
+// second batch of copied suites (those that reach the keychain and open no store), it also holds claim
+// 1's suite, `MeshKeyAgreementVerificationTests`, whole, with its name and tests unchanged, and what it
+// reads: `MeshKeyAgreementFixtures`, whose members that reach the keychain each gain one first statement
+// that reads `PackageTestEnvironment.keychain` (the package's hygiene rule I9), and the test-only
+// `with(...)` of `extension SignedKeyAgreementAdvertisement`, whose `signedForTesting(...)`, read by
+// none of the copies, stays there. The rest of the file, and each walk's other half (Fernlet's own
+// roots), stay there, so what this header says of the rest is not held here.
 
 import Foundation
 import Testing
+@testable import ProximityKit
+
+// MARK: - Fixtures
+
+/// Everything the key-advertisement suites need that is not already a membership fixture.
+///
+/// The pure value helpers are `nonisolated` so the at-rest suite can use them; only the three that
+/// touch `IdentityService` are `@MainActor`, because signing reads the device's long-term key.
+enum MeshKeyAgreementFixtures {
+
+    /// A distinct 32-byte key for member `index`, so "a second, DIFFERENT key" is expressible.
+    static func key(_ index: Int) -> Data {
+        Data(
+            (0..<MeshMembershipEventFormat.keyAgreementByteCount)
+                .map { UInt8((index &* 13 &+ $0) % 251) }
+        )
+    }
+
+    /// A fresh, provisioned identity and the keychain service to tear down with it.
+    @MainActor
+    static func identity() throws -> (IdentityService, String) {
+        _ = PackageTestEnvironment.keychain
+        let service = "com.fernlet.mesh-key-agreement.test.\(UUID().uuidString)"
+        let identity = IdentityService(keychainService: service)
+        try identity.ensureProvisioned()
+        return (identity, service)
+    }
+
+    /// An admission of `joiner` signed by `admitter`.
+    @MainActor
+    static func admission(
+        of joiner: IdentityService,
+        by admitter: IdentityService,
+        meshID: UUID
+    ) throws -> SignedAdmissionRecord {
+        SignedAdmissionRecord(token: try MeshAdmissionToken.signed(
+            meshID: meshID,
+            joinerFingerprint: joiner.localFingerprint,
+            joinerSigningPublicKey: joiner.localSigningPublicKey,
+            admitterIdentity: admitter,
+            grantedAt: MeshMembershipEventFixtures.base
+        ))
+    }
+
+    /// A verifier holding `founder` plus every identity in `others`, all admitted by the founder.
+    @MainActor
+    static func verifier(
+        founder: IdentityService,
+        others: [IdentityService] = [],
+        meshID: UUID
+    ) throws -> MeshMembershipRecordVerifier {
+        _ = PackageTestEnvironment.keychain
+        var verifier = MeshMembershipRecordVerifier(
+            meshID: meshID,
+            founderSigningPublicKey: founder.localSigningPublicKey
+        )
+        #expect(verifier.insert(try admission(of: founder, by: founder, meshID: meshID)) == nil)
+        for member in others {
+            #expect(verifier.insert(try admission(of: member, by: founder, meshID: meshID)) == nil)
+        }
+        return verifier
+    }
+
+    /// `identity`'s own signed advertisement, `secondsIn` seconds after the shared base instant.
+    @MainActor
+    static func advertisement(
+        of identity: IdentityService,
+        meshID: UUID,
+        secondsIn: Int = 480
+    ) throws -> SignedKeyAgreementAdvertisement {
+        try SignedKeyAgreementAdvertisement.signed(
+            meshID: meshID,
+            identity: identity,
+            advertisedAt: MeshMembershipEventFixtures.base.addingTimeInterval(TimeInterval(secondsIn))
+        )
+    }
+
+    /// A placeholder-signed row for `index` — the at-rest door's input, never the fold's.
+    ///
+    /// - Parameters:
+    ///   - index: The member index, which becomes `fp%03d` and, by default, the instant.
+    ///   - meshID: The mesh the row claims.
+    ///   - keyIndex: A different key than `index`'s, so "a second, DIFFERENT key" is expressible.
+    ///   - secondsIn: The instant, when a cell needs the alphabetical order and the instant order
+    ///     to DISAGREE — the shape that separates a mark derived from the surviving rows from one
+    ///     truncated alphabetically.
+    static func unverifiedRow(
+        _ index: Int,
+        meshID: UUID,
+        keyIndex: Int? = nil,
+        secondsIn: Int? = nil
+    ) -> SignedKeyAgreementAdvertisement {
+        SignedKeyAgreementAdvertisement(
+            meshID: meshID,
+            memberFingerprint: String(format: "fp%03d", index),
+            keyAgreementPublicKey: key(keyIndex ?? index),
+            advertisedAt: MeshMembershipEventFixtures.base
+                .addingTimeInterval(TimeInterval(secondsIn ?? index)),
+            signature: Data(repeating: 0xAB, count: MeshMembershipEventFormat.signatureByteCount)
+        )
+    }
+}
+
+// MARK: - The verifier's accept/refuse table
+
+/// Every way an advertisement can be refused, each by its own frozen name.
+///
+/// The trust root is the ledger's own admission set, so every cell here mints real Ed25519
+/// identities and real admissions — a placeholder-signed fixture would be refused for the wrong
+/// reason and the table would prove nothing.
+@MainActor
+@Suite(.serialized)
+struct MeshKeyAgreementVerificationTests {
+
+    /// The bundle's in-memory keychain, read as each cell's suite instance is built, so the installer
+    /// has run before a cell's identities reach the keychain.
+    let keychain = PackageTestEnvironment.keychain
+
+    @Test func aSelfSignedAdvertisementFromAnAdmittedMemberVerifies() throws {
+        let (founder, service) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: service) }
+        let meshID = UUID()
+        let verifier = try MeshKeyAgreementFixtures.verifier(founder: founder, meshID: meshID)
+        let advertisement = try MeshKeyAgreementFixtures.advertisement(of: founder, meshID: meshID)
+
+        #expect(advertisement.memberFingerprint == founder.localFingerprint)
+        #expect(advertisement.authorFingerprint == advertisement.memberFingerprint)
+        #expect(advertisement.keyAgreementPublicKey == founder.localKeyAgreementPublicKey)
+        #expect(verifier.verify(advertisement).rejection == nil)
+    }
+
+    @Test func anAdvertisementForAnotherMeshIsRefused() throws {
+        let (founder, service) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: service) }
+        let meshID = UUID()
+        let verifier = try MeshKeyAgreementFixtures.verifier(founder: founder, meshID: meshID)
+        let foreign = try MeshKeyAgreementFixtures.advertisement(of: founder, meshID: UUID())
+
+        #expect(verifier.verify(foreign).rejection == .foreignMesh)
+    }
+
+    /// Every width the format fixes, refused before any signature work. A signature check on a
+    /// malformed value is a signature check on attacker-chosen widths.
+    @Test func aMalformedAdvertisementIsRefusedBeforeAnySignatureCheck() throws {
+        let (founder, service) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: service) }
+        let meshID = UUID()
+        let verifier = try MeshKeyAgreementFixtures.verifier(founder: founder, meshID: meshID)
+        let honest = try MeshKeyAgreementFixtures.advertisement(of: founder, meshID: meshID)
+        let shapes: [(String, SignedKeyAgreementAdvertisement)] = [
+            ("a short key", honest.with(key: Data(repeating: 1, count: 31))),
+            ("a long key", honest.with(key: Data(repeating: 1, count: 33))),
+            ("a short signature", honest.with(signature: Data(repeating: 2, count: 63))),
+            ("an empty fingerprint", honest.with(fingerprint: "")),
+            ("an over-long fingerprint", honest.with(
+                fingerprint: String(repeating: "f", count: MeshMembershipEventFormat.maxFingerprintLength + 1)
+            ))
+        ]
+        #expect(shapes.count == 5, "one shape per width the format fixes")
+        for (name, malformed) in shapes {
+            #expect(!malformed.isWellFormed, "\(name) must not be well formed")
+            #expect(verifier.verify(malformed).rejection == .malformedRecord, "\(name)")
+        }
+    }
+
+    @Test func anAdvertisementFromANonAdmittedSignerIsRefused() throws {
+        let (founder, founderService) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: founderService) }
+        let (stranger, strangerService) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: strangerService) }
+        let meshID = UUID()
+        let verifier = try MeshKeyAgreementFixtures.verifier(founder: founder, meshID: meshID)
+        let advertisement = try MeshKeyAgreementFixtures.advertisement(of: stranger, meshID: meshID)
+
+        #expect(verifier.verify(advertisement).rejection == .signerNotAdmitted)
+    }
+
+    /// A departed member is refused: a mint's destinations come from the derived roster, which
+    /// subtracts departures, so no path ever needs its key — and a 16-row durable set must not
+    /// spend a slot on a row nothing can use. The departure is a REAL signed record, so the roster
+    /// actually loses the member rather than the cell passing for a different reason.
+    @Test func aDepartedMembersAdvertisementIsRefused() throws {
+        let (founder, founderService) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: founderService) }
+        let (leaver, leaverService) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: leaverService) }
+        let meshID = UUID()
+        var verifier = try MeshKeyAgreementFixtures.verifier(
+            founder: founder, others: [leaver], meshID: meshID
+        )
+        let advertisement = try MeshKeyAgreementFixtures.advertisement(of: leaver, meshID: meshID)
+        #expect(verifier.verify(advertisement).rejection == nil, "the precondition: it verified while a member")
+
+        let departure = try SignedDepartureRecord.signed(
+            meshID: meshID,
+            identity: leaver,
+            occurredAt: MeshMembershipEventFixtures.base.addingTimeInterval(600)
+        )
+        #expect(verifier.insert(departure) == nil)
+        #expect(!verifier.roster.contains(fingerprint: leaver.localFingerprint))
+        #expect(verifier.verify(advertisement).rejection == .signerNotAMember)
+    }
+
+    /// The mirror of the departure cell, on a three-member roster so the quorum arithmetic is real.
+    @Test func aRemovedMembersAdvertisementIsRefused() throws {
+        let (founder, founderService) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: founderService) }
+        let (second, secondService) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: secondService) }
+        let (target, targetService) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: targetService) }
+        let meshID = UUID()
+        var verifier = try MeshKeyAgreementFixtures.verifier(
+            founder: founder, others: [second, target], meshID: meshID
+        )
+        let advertisement = try MeshKeyAgreementFixtures.advertisement(of: target, meshID: meshID)
+        #expect(verifier.verify(advertisement).rejection == nil, "the precondition: it verified while a member")
+
+        let removal = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, second.localFingerprint],
+            occurredAt: MeshMembershipEventFixtures.base.addingTimeInterval(660)
+        )
+        #expect(verifier.insert(removal) == nil)
+        #expect(!verifier.roster.contains(fingerprint: target.localFingerprint))
+        #expect(verifier.verify(advertisement).rejection == .signerNotAMember)
+    }
+
+    /// The key is BOUND. Swapping it for another member's would otherwise be the whole attack:
+    /// a content key wrapped to a device the attacker controls, under an authentic fingerprint.
+    @Test func anAdvertisementWhoseKeyWasEditedIsRefused() throws {
+        let (founder, service) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: service) }
+        let meshID = UUID()
+        let verifier = try MeshKeyAgreementFixtures.verifier(founder: founder, meshID: meshID)
+        let honest = try MeshKeyAgreementFixtures.advertisement(of: founder, meshID: meshID)
+        let edited = honest.with(key: MeshKeyAgreementFixtures.key(9))
+
+        #expect(edited.isWellFormed, "the edit keeps every width — only the signature can catch it")
+        #expect(verifier.verify(edited).rejection == .signatureInvalid)
+    }
+
+    /// `advertisedAt` is bound, so a replay cannot be re-dated into a row that would win the set's
+    /// earliest-wins order.
+    @Test func anAdvertisementWhoseInstantWasEditedIsRefused() throws {
+        let (founder, service) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: service) }
+        let meshID = UUID()
+        let verifier = try MeshKeyAgreementFixtures.verifier(founder: founder, meshID: meshID)
+        let honest = try MeshKeyAgreementFixtures.advertisement(of: founder, meshID: meshID)
+        let backdated = honest.with(advertisedAt: MeshMembershipEventFixtures.base)
+
+        #expect(verifier.verify(backdated).rejection == .signatureInvalid)
+    }
+
+    /// `meshID` is bound into the signed bytes, which is what `foreignMesh` alone cannot prove: an
+    /// advertisement minted for mesh A and re-stamped with mesh B's id reaches B's verifier past
+    /// check 1 and dies at the signature.
+    @Test func anAdvertisementReStampedForAnotherMeshIsRefusedAtTheSignature() throws {
+        let (founder, service) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: service) }
+        let otherMesh = UUID()
+        let thisMesh = UUID()
+        let verifier = try MeshKeyAgreementFixtures.verifier(founder: founder, meshID: thisMesh)
+        let elsewhere = try MeshKeyAgreementFixtures.advertisement(of: founder, meshID: otherMesh)
+        let reStamped = elsewhere.with(meshID: thisMesh)
+
+        #expect(verifier.verify(elsewhere).rejection == .foreignMesh)
+        #expect(verifier.verify(reStamped).rejection == .signatureInvalid)
+    }
+
+    /// The cross-domain negative in code as well as in the framing wall: a departure's signature,
+    /// carried on an advertisement of the same subject at the same instant, does not verify. Only
+    /// the signing domain keeps the two apart, and "here is my key" must never be replayable as the
+    /// permanent, grow-only "I have left".
+    @Test func anAdvertisementCarryingADepartureSignatureIsRefused() throws {
+        let (founder, service) = try MeshKeyAgreementFixtures.identity()
+        defer { ProximityKeychainItem.deleteAll(service: service) }
+        let meshID = UUID()
+        let verifier = try MeshKeyAgreementFixtures.verifier(founder: founder, meshID: meshID)
+        let at = MeshMembershipEventFixtures.base.addingTimeInterval(480)
+        let departure = try SignedDepartureRecord.signed(
+            meshID: meshID, identity: founder, occurredAt: at
+        )
+        let borrowed = try MeshKeyAgreementFixtures.advertisement(of: founder, meshID: meshID)
+            .with(signature: departure.signature)
+
+        #expect(borrowed.isWellFormed)
+        #expect(verifier.verify(borrowed).rejection == .signatureInvalid)
+    }
+
+    /// Every refusal this family can produce, spelled out, so a reader can see the vocabulary is
+    /// the ledger's own and no new case was minted for addressing.
+    @Test func theRefusalVocabularyIsTheLedgersOwn() {
+        let used: [MeshMembershipRecordRejection] = [
+            .foreignMesh, .malformedRecord, .signerNotAdmitted, .signerNotAMember, .signatureInvalid
+        ]
+        for rejection in used {
+            #expect(!rejection.diagnosticDescription.isEmpty)
+        }
+    }
+}
 
 // MARK: - The fold
 
@@ -354,4 +664,26 @@ struct MeshKeyAgreementSchemaTests {
     /// The file whose schema history records the field's retirement in prose, by its path under the
     /// module's source folder: the wall's expected home, read with the walk.
     static let removalRecordFile = "Mesh/MeshSessionContext.swift"
+}
+
+// MARK: - Test-only helpers
+
+extension SignedKeyAgreementAdvertisement {
+
+    /// A copy with one field replaced, so a tamper cell states exactly what it moved.
+    func with(
+        meshID: UUID? = nil,
+        fingerprint: String? = nil,
+        key: Data? = nil,
+        advertisedAt: Date? = nil,
+        signature: Data? = nil
+    ) -> SignedKeyAgreementAdvertisement {
+        SignedKeyAgreementAdvertisement(
+            meshID: meshID ?? self.meshID,
+            memberFingerprint: fingerprint ?? memberFingerprint,
+            keyAgreementPublicKey: key ?? keyAgreementPublicKey,
+            advertisedAt: advertisedAt ?? self.advertisedAt,
+            signature: signature ?? self.signature
+        )
+    }
 }

@@ -22,13 +22,18 @@
 //
 // A partial copy (ProximityKit plan step A1, the split's first batch of copied suites): of the
 // Fernlet repository's FernletTests file of the same name, this holds only
-// `MeshInventoryDigestTests`, with its name and tests unchanged, and the fixtures the package's
+// `MeshInventoryDigestTests` and, since ProximityKit plan step A1's second batch of copied suites (those
+// that reach the keychain and open no store), `MeshMembershipRecordVerifierTests`, with their names
+// and tests unchanged, and the fixtures the package's
 // copied suites read (`MeshMembershipEventFixtures` and `extension MeshInventoryDigestPayload`);
 // and, since ProximityKit plan step A1.3 (batch D: the cells of that repository's tests that read this
 // module's sources, copied before it deletes its in-tree copy of the module), the half of
 // `MeshLegacyGoodbyeInteropTests.noShippingSourceEmitsAGoodbye` that reads ProximityKit's code, under
-// its suite's and its test's names; its other suites, and that cell's other half (Fernlet's own roots),
-// stay there, so what this header says of them is not held here.
+// its suite's and its test's names; and, since ProximityKit plan step A1's third batch of copied suites
+// (those that reach the keychain and open a store), `MeshMemberRemovalFrameTests`, with its name and
+// tests unchanged, over a package host whose install binding its cells switch; its other suites, and
+// that cell's other half (Fernlet's own roots), stay there, so what this header says of them is not
+// held here.
 
 import Foundation
 import Testing
@@ -265,6 +270,310 @@ struct MeshInventoryDigestTests {
     }
 }
 
+// MARK: - Verify-then-insert
+
+/// The seam item 1 deliberately left open: a record enters a ledger only after its signature
+/// verifies against the signer's ADMITTED key.
+@MainActor
+@Suite(.serialized)
+struct MeshMembershipRecordVerifierTests {
+
+    /// The bundle's in-memory keychain, read as each cell's suite instance is built, so the installer
+    /// has run before a cell's identities reach the keychain.
+    let keychain = PackageTestEnvironment.keychain
+
+    private func makeIdentity() throws -> (IdentityService, String) {
+        let id = "com.fernlet.mesh-membership.test.\(UUID().uuidString)"
+        let service = IdentityService(keychainService: id)
+        try service.ensureProvisioned()
+        return (service, id)
+    }
+
+    /// A verifier holding `founder` plus every identity in `others`, all admitted by the founder.
+    private func seeded(
+        founder: IdentityService,
+        others: [IdentityService],
+        meshID: UUID
+    ) throws -> MeshMembershipRecordVerifier {
+        var verifier = MeshMembershipRecordVerifier(
+            meshID: meshID,
+            founderSigningPublicKey: founder.localSigningPublicKey
+        )
+        #expect(verifier.insert(try admission(of: founder, by: founder, meshID: meshID)) == nil)
+        for member in others {
+            #expect(verifier.insert(try admission(of: member, by: founder, meshID: meshID)) == nil)
+        }
+        return verifier
+    }
+
+    private func admission(
+        of joiner: IdentityService,
+        by admitter: IdentityService,
+        meshID: UUID
+    ) throws -> SignedAdmissionRecord {
+        SignedAdmissionRecord(token: try MeshAdmissionToken.signed(
+            meshID: meshID,
+            joinerFingerprint: joiner.localFingerprint,
+            joinerSigningPublicKey: joiner.localSigningPublicKey,
+            admitterIdentity: admitter,
+            grantedAt: MeshMembershipEventFixtures.base
+        ))
+    }
+
+    @Test func aFoundersOwnAdmissionBootstrapsTheRoster() throws {
+        let (founder, id) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: id) }
+        let meshID = UUID()
+        let verifier = try seeded(founder: founder, others: [], meshID: meshID)
+        #expect(verifier.roster.memberFingerprints == [founder.localFingerprint])
+    }
+
+    /// Without the founder key there is nothing to root the first admission in, so the ledger stays
+    /// empty. Fail closed: an empty roster admits nobody, which is the right answer for a device
+    /// that cannot tell who started the mesh.
+    @Test func anUnrootedAdmissionIsRefused() throws {
+        let (founder, id) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: id) }
+        let meshID = UUID()
+        var verifier = MeshMembershipRecordVerifier(meshID: meshID, founderSigningPublicKey: nil)
+        let rejection = verifier.insert(try admission(of: founder, by: founder, meshID: meshID))
+        #expect(rejection == .unauthorizedAdmitter)
+        #expect(verifier.ledger.admissions.isEmpty)
+    }
+
+    @Test func aSignedDepartureIsAcceptedAndSubtracts() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (leaver, lid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: lid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [leaver], meshID: meshID)
+        #expect(verifier.roster.memberCount == 2)
+
+        let record = try SignedDepartureRecord.signed(
+            meshID: meshID, identity: leaver, occurredAt: MeshMembershipEventFixtures.base)
+        #expect(verifier.insert(record) == nil)
+        #expect(verifier.roster.memberFingerprints == [founder.localFingerprint])
+    }
+
+    /// The whole reason this seam exists: junk must be refused BEFORE it competes for one of the
+    /// sixteen slots. A forged departure with a very low timestamp would otherwise win the
+    /// earliest-wins truncation on every device it reached.
+    @Test func aForgedDepartureNeverReachesTheCappedSet() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (member, mid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: mid) }
+        let (stranger, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [member], meshID: meshID)
+
+        // Signed by a stranger, claiming to be the member.
+        let honest = try SignedDepartureRecord.signed(
+            meshID: meshID, identity: stranger, occurredAt: Date(timeIntervalSince1970: 1))
+        let forged = SignedDepartureRecord(
+            meshID: meshID,
+            memberFingerprint: member.localFingerprint,
+            occurredAt: honest.occurredAt,
+            signature: honest.signature
+        )
+        #expect(verifier.insert(forged) == .signatureInvalid)
+        #expect(verifier.ledger.departures.isEmpty)
+        #expect(verifier.roster.memberCount == 2)
+
+        // And a departure about somebody the mesh never admitted has no key to check at all.
+        let outsider = try SignedDepartureRecord.signed(meshID: meshID, identity: stranger)
+        #expect(verifier.insert(outsider) == .signerNotAdmitted)
+        #expect(verifier.ledger.departures.isEmpty)
+    }
+
+    @Test func aRecordFromAnotherMeshIsRefused() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (member, mid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: mid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [member], meshID: meshID)
+        let record = try SignedDepartureRecord.signed(meshID: UUID(), identity: member)
+        #expect(verifier.insert(record) == .foreignMesh)
+    }
+
+    /// Plan §10.4's arithmetic, re-checked against the RECEIVER's merged roster. Roster 3 needs 2
+    /// votes; one vote is short, and the target's own vote never counts.
+    @Test func aRemovalNeedsQuorumFromTheReceiversRoster() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (second, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let (target, tid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: tid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [second, target], meshID: meshID)
+        #expect(verifier.roster.quorumThreshold == 2)
+
+        let short = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint]
+        )
+        #expect(verifier.insert(short) == .quorumNotMet(required: 2, presented: 1))
+
+        let selfVote = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, target.localFingerprint]
+        )
+        #expect(verifier.insert(selfVote) == .voterNotEligible)
+
+        let complete = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, second.localFingerprint]
+        )
+        #expect(verifier.insert(complete) == nil)
+        #expect(!verifier.roster.contains(fingerprint: target.localFingerprint))
+    }
+
+    /// A cited voter who is not on the receiver's roster is not evidence. The record is refused
+    /// whether the voter is a stranger the mesh never admitted or a member who has since left —
+    /// quorum is arithmetic over the roster the RECEIVER derives, at the moment it derives it.
+    @Test func aRemovalCitingANonMemberVoterIsRefused() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (second, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let (target, tid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: tid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [second, target], meshID: meshID)
+
+        let stranger = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, "fp-never-admitted"]
+        )
+        #expect(verifier.insert(stranger) == .voterNotEligible)
+
+        // The same is true of a voter who WAS a member: the departure subtracted them, so their
+        // vote no longer counts towards a quorum evaluated after it.
+        #expect(verifier.insert(try SignedDepartureRecord.signed(meshID: meshID, identity: second)) == nil)
+        let departedVoter = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, second.localFingerprint]
+        )
+        #expect(verifier.insert(departedVoter) == .voterNotEligible)
+        #expect(verifier.ledger.removals.isEmpty)
+    }
+
+    /// A re-gossiped removal is the NORMAL case (plan §10.5), so replaying one must be free: the
+    /// set dedups by removed member, and the roster it derives does not move a second time. If it
+    /// did, every re-gossip on every later connect would spend a rotation.
+    @Test func aReplayedRemovalIsDedupedRatherThanCountedTwice() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (second, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let (target, tid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: tid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [second, target], meshID: meshID)
+
+        let record = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, second.localFingerprint]
+        )
+        #expect(verifier.insert(record) == nil)
+        let rosterAfterFirst = verifier.roster
+        #expect(verifier.insert(record) == nil, "a re-gossiped record is not an error")
+        #expect(verifier.ledger.removals.count == 1, "and it does not spend a second of sixteen slots")
+        #expect(verifier.roster == rosterAfterFirst, "so the roster does not move twice")
+    }
+
+    /// A termination from somebody who is not a member must not be able to end the mesh.
+    @Test func aTerminationMustComeFromAMember() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (member, mid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: mid) }
+        let (stranger, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [member], meshID: meshID)
+
+        let outsider = try SignedTerminationRecord.signed(
+            meshID: meshID, identity: stranger, rosterAtSigning: [])
+        #expect(verifier.insert(outsider) == .signerNotAdmitted)
+        #expect(verifier.roster.status == .active)
+
+        let real = try SignedTerminationRecord.signed(
+            meshID: meshID,
+            identity: member,
+            rosterAtSigning: [founder.localFingerprint, member.localFingerprint]
+        )
+        #expect(verifier.insert(real) == nil)
+        #expect(verifier.roster.status == .terminated)
+    }
+
+    /// A signed digest verifies, and the same records on both sides compare equal (plan §10.5).
+    @Test func anInventoryDigestVerifiesAndCompares() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (member, mid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: mid) }
+        let meshID = UUID()
+        let verifier = try seeded(founder: founder, others: [member], meshID: meshID)
+
+        let payload = try MeshInventoryDigestPayload.signed(
+            meshID: meshID,
+            ledger: verifier.ledger,
+            identity: member,
+            sentAt: MeshMembershipEventFixtures.base
+        )
+        #expect(verifier.verify(payload) == nil)
+        #expect(verifier.matchesLocalInventory(payload.digest))
+
+        let stale = MeshInventoryDigestPayload.signedForTestingWithTamperedDigest(payload)
+        #expect(verifier.verify(stale) == .signatureInvalid)
+    }
+
+    /// A merge imports records ONE AT A TIME through the same door — a peer that forged one record
+    /// must not be able to import all of them by handing over a whole ledger.
+    @Test func mergingAPeersLedgerVerifiesEveryRecord() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (member, mid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: mid) }
+        let meshID = UUID()
+        var verifier = try seeded(founder: founder, others: [member], meshID: meshID)
+
+        var hostile = MeshMembershipLedger.empty
+        hostile.departures = MeshMembershipRecordSet([SignedDepartureRecord(
+            meshID: meshID,
+            memberFingerprint: founder.localFingerprint,
+            occurredAt: Date(timeIntervalSince1970: 1),
+            signature: Data(repeating: 0x11, count: 64)
+        )])
+        let rejections = verifier.merge(hostile)
+        #expect(rejections == [.signatureInvalid])
+        #expect(verifier.roster.memberCount == 2)
+    }
+}
+
 // MARK: - Test-only helper
 
 extension MeshInventoryDigestPayload {
@@ -400,5 +709,395 @@ struct MeshLegacyGoodbyeInteropTests {
                 """)
         }
         return problems
+    }
+}
+
+// MARK: - The removal frame on the manager
+
+/// P3 item 3b (plan §8.3, §10.4): `fernlet.mesh.member-removal.v1` end to end.
+///
+/// Item 5 mints a removal record where the vote completes and files it locally; item 3 framed the
+/// other three record kinds. This suite walls the fourth frame's two directions and the one edge
+/// item 6 could not wire:
+///
+/// 1. **The removed member is not sent the record.** Exclusion is computed by item 5's own
+///    key-distribution rule, so "who gets the new key" and "who is told why" cannot drift apart.
+/// 2. **A received record is verified, made durable, and only then counted** — and if it names this
+///    device, it ends this device's session (plan §8.2's `removed` edge).
+/// 3. **The legacy `.meshRemovalSecond` path still agrees.** It is the interim exclusion authority
+///    until item 7, so the two must never disagree about who is out.
+@MainActor
+@Suite(.serialized)
+struct MeshMemberRemovalFrameTests {
+
+    let store = PackageTestHost(installBinding: PackageSwitchableInstallBinding())
+
+    /// A pinned install identity, so every seal in this suite is deterministic.
+    private static let install = Data(repeating: 0x3B, count: 16)
+
+    // MARK: Fixtures
+
+    private func makeIdentity() throws -> (IdentityService, String) {
+        let id = "com.fernlet.mesh-removal-frame.test.\(UUID().uuidString)"
+        let service = IdentityService(keychainService: id)
+        try service.ensureProvisioned()
+        return (service, id)
+    }
+
+    private func makeMesh(_ manager: MeshNetworkManager) -> MeshDescriptor {
+        let now = Date()
+        let local = MeshMember(
+            fingerprint: manager.identityForTesting.localFingerprint,
+            displayName: "Local",
+            signingPublicKey: manager.identityForTesting.localSigningPublicKey,
+            keyAgreementPublicKey: manager.identityForTesting.localKeyAgreementPublicKey,
+            joinedAt: now
+        )
+        return MeshDescriptor(
+            meshID: UUID(),
+            name: "Removal Meadow",
+            mode: .open,
+            members: [local],
+            nameSetAt: now,
+            nameSetBy: local.fingerprint,
+            modeSetAt: now,
+            modeSetBy: local.fingerprint,
+            createdAt: now
+        )
+    }
+
+    /// A ledger admitting `founder` (by itself) and every identity in `others` (by the founder) —
+    /// the roster a removal's quorum is re-derived against.
+    private func ledger(
+        founder: IdentityService,
+        others: [IdentityService],
+        meshID: UUID
+    ) throws -> MeshMembershipLedger {
+        var built = MeshMembershipLedger.empty
+        for member in [founder] + others {
+            built.admissions = built.admissions.inserting(
+                SignedAdmissionRecord(token: try MeshAdmissionToken.signed(
+                    meshID: meshID,
+                    joinerFingerprint: member.localFingerprint,
+                    joinerSigningPublicKey: member.localSigningPublicKey,
+                    admitterIdentity: founder
+                ))
+            )
+        }
+        return built
+    }
+
+    /// A coordinator with no live dependencies, for slots this suite only needs to exist.
+    private static func throwawayCoordinator() -> ProximityCoordinator {
+        ProximityCoordinator(
+            identity: IdentityService(keychainService: "test.mesh.removal-frame.\(UUID().uuidString)"),
+            transport: MockMultipeerTransport(),
+            ranging: MockRangingProvider(),
+            inspector: nil,
+            replayCache: ReplayCache(),
+            foregroundAnchor: nil,
+            displayName: "Local",
+            timeoutSeconds: 0
+        )
+    }
+
+    /// Attaches a COMMITTED slot for `fingerprint` and returns the coordinator that owns it, which
+    /// is how the real dispatch entry point finds the slot a frame arrived on.
+    @discardableResult
+    private func attachSlot(to manager: MeshNetworkManager, fingerprint: String) -> ProximityCoordinator {
+        let coordinator = Self.throwawayCoordinator()
+        manager.addSlotForTesting(
+            coordinator: coordinator,
+            peer: PeerHandle(
+                id: UUID(),
+                displayHint: "iPhone",
+                discoveryInfo: ["v": "1"],
+                advertisedFingerprint: fingerprint,
+                endpoint: PeerEndpointKey()
+            ),
+            fingerprint: fingerprint
+        )
+        return coordinator
+    }
+
+    /// Delivers a removal frame through the REAL receive entry point, under a pinned install so the
+    /// seal the receive path owes can actually be written.
+    ///
+    /// - Parameter binding: The device-binding behaviour to deliver under; nil is the pinned,
+    ///   sealable install. (A default argument cannot name ``install`` — a `@MainActor` type's
+    ///   static member is not available as a default-argument value.)
+    private func deliver(
+        _ record: SignedRemovalRecord,
+        to manager: MeshNetworkManager,
+        from sender: IdentityService,
+        over coordinator: ProximityCoordinator,
+        binding: PackageSwitchableInstallBinding.TestOverride? = nil
+    ) throws {
+        let plaintext = try JSONEncoder().encode(MeshMemberRemovalPayload(record: record))
+        let envelope = try ProximityIdentityEnvelope.signed(
+            identityService: sender,
+            senderDisplayName: "Peer",
+            payloadType: .meshMemberRemoval,
+            payloadSummary: PayloadSummary(title: "Removal"),
+            payload: plaintext
+        )
+        PackageSwitchableInstallBinding.testOverride.withValue(binding ?? .identifier(Self.install)) {
+            manager.proximityCoordinator(
+                coordinator, didReceive: envelope, plaintext: plaintext, from: nil
+            )
+        }
+    }
+
+    /// Reads the sealed context back, under the same pinned install everything here writes with.
+    private func loadContext() -> MeshSessionContext? {
+        let sessionStore = MeshSessionStore(scope: store.meshSessionStorage)
+        let load = PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Self.install)) {
+            sessionStore.load()
+        }
+        guard case .loaded(let context, _) = load else { return nil }
+        return context
+    }
+
+    // MARK: Bounds (plan §9)
+
+    /// A frame carrying more voters than the mesh can hold is CLAMPED on decode, not trimmed after
+    /// it is trusted and never a trap — and because the clamp changes the bytes the tallier signed,
+    /// the padded record is then refused outright rather than crediting an inflated quorum.
+    @Test func aPaddedVoterListIsClampedOnDecodeAndThenRefused() throws {
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (second, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        let (target, tid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: tid) }
+        let meshID = UUID()
+
+        let honest = try SignedRemovalRecord.signed(
+            meshID: meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, second.localFingerprint]
+        )
+        let padded = SignedRemovalRecord(
+            meshID: meshID,
+            memberFingerprint: honest.memberFingerprint,
+            proposalID: honest.proposalID,
+            voterFingerprints: (0..<99).map { "fp-pad-\($0)" },
+            occurredAt: honest.occurredAt,
+            authorFingerprint: honest.authorFingerprint,
+            signature: honest.signature
+        )
+        // The initializer already clamped; the DECODE of a hostile frame must clamp too, which a
+        // synthesized `Codable` would not have done.
+        let wire = try JSONEncoder().encode(MeshMemberRemovalPayload(record: padded))
+        let decoded = try JSONDecoder().decode(MeshMemberRemovalPayload.self, from: wire)
+        #expect(decoded.record.voterFingerprints.count == MeshMembershipBounds.maxVoters)
+
+        var verifier = MeshMembershipRecordVerifier(
+            meshID: meshID, founderSigningPublicKey: founder.localSigningPublicKey,
+            ledger: try ledger(founder: founder, others: [second, target], meshID: meshID)
+        )
+        #expect(verifier.insert(decoded.record) == .voterNotEligible)
+        #expect(verifier.ledger.removals.isEmpty)
+    }
+
+    // MARK: Emission
+
+    /// The removed member is not sent the record that removes them (plan §8.3): they learn of it as
+    /// a key that no longer opens anything. Every other committed member is.
+    @Test func theRemovalFrameExcludesTheRemovedMember() {
+        let manager = MeshNetworkManager(store: store)
+        manager.currentMesh = makeMesh(manager)
+        attachSlot(to: manager, fingerprint: "fp-target")
+        attachSlot(to: manager, fingerprint: "fp-witness")
+
+        let recipients = manager.membershipEventRecipients(excluding: "fp-target")
+
+        #expect(!recipients.contains("fp-target"), "the removed member must not receive the record")
+        #expect(recipients.contains("fp-witness"), "every other member must")
+        #expect(recipients.contains(manager.identityForTesting.localFingerprint),
+                "and this device is always in the set the key distribution uses")
+        manager.leaveMesh()
+    }
+
+    /// The vote completing puts the signed record on the wire — the gap item 5 named and left open,
+    /// where peers learned of a removal only from the legacy broadcast and the descriptor.
+    @Test func aCompletedVoteBroadcastsTheSignedRecord() async {
+        let manager = MeshNetworkManager(store: store)
+        manager.currentMesh = makeMesh(manager)
+        attachSlot(to: manager, fingerprint: "fp-witness")
+        var emitted: [MeshPayloadRole] = []
+        manager.onMembershipEventSentForTesting = { emitted.append($0) }
+
+        PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Self.install)) {
+            manager.secondRemoval(MeshRemovalProposalPayload(
+                id: UUID(),
+                targetFingerprint: "fp-target",
+                targetDisplayName: "Target",
+                proposerFingerprint: "fp-proposer",
+                proposerDisplayName: "Proposer",
+                createdAt: Date(),
+                expiresAt: Date().addingTimeInterval(60)
+            ))
+        }
+        // The emit is fire-and-forget on a task, so let the main actor drain it. Bounded, and it
+        // completes in a hop or two — the yields are a settle, never a timeout.
+        var yields = 0
+        while emitted.isEmpty, yields < 100 {
+            await Task.yield()
+            yields += 1
+        }
+
+        #expect(emitted == [.meshMemberRemoval],
+                "a completed removal now ships its record, not only the legacy second")
+        manager.leaveMesh()
+    }
+
+    /// Both removal paths agree on who is out. The legacy `.meshRemovalSecond` vote is the interim
+    /// exclusion authority until item 7 and the signed record is the durable one; a mesh in which
+    /// they disagreed would exclude a member from the key and keep them on the roster, or worse.
+    @Test func theLegacyPathAndTheRecordAgreeOnExclusion() {
+        let manager = MeshNetworkManager(store: store)
+        manager.currentMesh = makeMesh(manager)
+        attachSlot(to: manager, fingerprint: "fp-target")
+
+        PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Self.install)) {
+            manager.secondRemoval(MeshRemovalProposalPayload(
+                id: UUID(),
+                targetFingerprint: "fp-target",
+                targetDisplayName: "Target",
+                proposerFingerprint: "fp-proposer",
+                proposerDisplayName: "Proposer",
+                createdAt: Date(),
+                expiresAt: Date().addingTimeInterval(60)
+            ))
+        }
+
+        #expect(manager.removedMemberFingerprints.contains("fp-target"),
+                "the legacy path still records the exclusion")
+        #expect(!manager.membershipEventRecipients(excluding: "fp-other").contains("fp-target"),
+                "and the record path excludes exactly the same member")
+        #expect(manager.rotationTriggers.pendingCause == .membership,
+                "a completed removal still rotates the key at once")
+        manager.leaveMesh()
+    }
+
+    // MARK: Reception
+
+    /// A verified removal from a peer inserts, reaches the disk, moves the roster and rotates —
+    /// the whole receive contract for a member who is not the one being removed.
+    @Test func aReceivedRemovalInsertsPersistsAndRotates() throws {
+        let manager = MeshNetworkManager(store: store)
+        let mesh = makeMesh(manager)
+        manager.currentMesh = mesh
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (target, tid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: tid) }
+        manager.seedMembershipLedgerForTesting(
+            meshID: mesh.meshID,
+            founderSigningPublicKey: founder.localSigningPublicKey,
+            ledger: try ledger(
+                founder: founder, others: [manager.identityForTesting, target], meshID: mesh.meshID
+            )
+        )
+        #expect(manager.membershipVerifier?.roster.memberCount == 3)
+        let coordinator = attachSlot(to: manager, fingerprint: founder.localFingerprint)
+
+        let record = try SignedRemovalRecord.signed(
+            meshID: mesh.meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, manager.identityForTesting.localFingerprint]
+        )
+        try deliver(record, to: manager, from: founder, over: coordinator)
+
+        #expect(manager.membershipVerifier?.ledger.removals.count == 1)
+        #expect(manager.membershipVerifier?.roster.contains(fingerprint: target.localFingerprint) == false)
+        #expect(loadContext()?.ledger.removals.count == 1, "the record is on the disk, not only in RAM")
+        #expect(manager.rotationTriggers.pendingCause == .membership,
+                "a roster move rotates as `membership` (plan §8.3)")
+        #expect(manager.sessionState != .departed, "somebody else's removal is not this device's")
+        manager.leaveMesh()
+    }
+
+    /// Durable before acknowledged (plan §3.6): a seal the store refuses rolls the record back out
+    /// of the ledger, and the rotation it would have caused never fires.
+    @Test func aRemovalTheStoreCannotSealIsNotAcknowledged() throws {
+        let manager = MeshNetworkManager(store: store)
+        let mesh = makeMesh(manager)
+        manager.currentMesh = mesh
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (target, tid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: tid) }
+        manager.seedMembershipLedgerForTesting(
+            meshID: mesh.meshID,
+            founderSigningPublicKey: founder.localSigningPublicKey,
+            ledger: try ledger(
+                founder: founder, others: [manager.identityForTesting, target], meshID: mesh.meshID
+            )
+        )
+        let coordinator = attachSlot(to: manager, fingerprint: founder.localFingerprint)
+
+        let record = try SignedRemovalRecord.signed(
+            meshID: mesh.meshID,
+            identity: founder,
+            memberFingerprint: target.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, manager.identityForTesting.localFingerprint]
+        )
+        try deliver(record, to: manager, from: founder, over: coordinator, binding: .unavailable)
+
+        #expect(manager.membershipVerifier?.ledger.removals.isEmpty == true,
+                "a record that could not be written down is not inserted for roster purposes")
+        #expect(manager.membershipVerifier?.roster.contains(fingerprint: target.localFingerprint) == true)
+        #expect(manager.rotationTriggers.pendingCause == nil,
+                "and the rotation it would have caused must not fire")
+        manager.leaveMesh()
+    }
+
+    /// The edge item 6 built and could not wire: a verified record naming THIS device ends its
+    /// membership. State `departed`, the durable mark written, the rejoin bar up, participation
+    /// stopped — and the mesh carries on without it, which is why it is not `terminated`.
+    @Test func aReceivedRemovalNamingThisDeviceEndsItsSession() throws {
+        let manager = MeshNetworkManager(store: store)
+        let mesh = makeMesh(manager)
+        manager.currentMesh = mesh
+        let (founder, fid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: fid) }
+        let (second, sid) = try makeIdentity()
+        defer { ProximityKeychainItem.deleteAll(service: sid) }
+        manager.seedMembershipLedgerForTesting(
+            meshID: mesh.meshID,
+            founderSigningPublicKey: founder.localSigningPublicKey,
+            ledger: try ledger(
+                founder: founder, others: [second, manager.identityForTesting], meshID: mesh.meshID
+            )
+        )
+        let coordinator = attachSlot(to: manager, fingerprint: founder.localFingerprint)
+        PackageSwitchableInstallBinding.testOverride.withValue(.identifier(Self.install)) {
+            manager.applySessionEvent(.founded)
+            manager.applySessionEvent(.peerCommitted)
+        }
+
+        let record = try SignedRemovalRecord.signed(
+            meshID: mesh.meshID,
+            identity: founder,
+            memberFingerprint: manager.identityForTesting.localFingerprint,
+            proposalID: MeshMembershipEventFixtures.proposalID,
+            voterFingerprints: [founder.localFingerprint, second.localFingerprint]
+        )
+        try deliver(record, to: manager, from: founder, over: coordinator)
+
+        #expect(manager.sessionState == .departed,
+                "a verified removal of this device is terminal for this device only")
+        #expect(manager.rejoinBar?.reason == .removedFromRoster, "and the rejoin bar names why")
+        #expect(loadContext()?.localTermination?.reason == .removedFromRoster,
+                "the ending mark is on the disk before the teardown")
+        #expect(manager.currentMesh == nil, "participation is torn down, as the legacy path does")
+        #expect(manager.slots.isEmpty, "and the links with it")
     }
 }

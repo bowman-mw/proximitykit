@@ -33,7 +33,9 @@ struct RecipeShareOverQUICTests {
     /// And the source needle that the `.remove` branch is not a bare assignment — the shape the
     /// whole finding is: a state flag cleared and nothing else done about it. (The behaviour half,
     /// a withdrawn registration republishing under a fresh posture, stays in the Fernlet
-    /// repository's original suite.)
+    /// repository's original suite.) No execution reaches the branch, so this cell is its
+    /// stand-in, and `MeshP9HonestyAcceptanceTests` (MeshP9AcceptanceTests.swift) holds it in
+    /// existence: a test of this name with no trait, its body reading the branch and the republish.
     @Test func theRegistrationRemoveBranchIsNotABareAssignment() throws {
         let code = MeshRoutedSourceScan.codeOnly(try Self.sessionSource())
         let body = try #require(
