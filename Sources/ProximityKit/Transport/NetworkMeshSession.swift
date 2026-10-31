@@ -2379,7 +2379,7 @@ private extension NetworkMeshSession {
             purposes: purposes
         )
         do {
-            let peerHello = try await exchangeHellos(role: role, local: exchange.localHello, over: stream)
+            let peerHello = try await openHellos(role: role, local: exchange.localHello, over: stream)
             if let rejection = exchange.receive(
                 peerHello, roster: authority.roster, nonces: &introductionNonces,
                 mayReconcileDivergentEpochs: authority.mayReconcileDivergentEpochs
@@ -2388,6 +2388,7 @@ private extension NetworkMeshSession {
                 report("A QUIC tunnel was refused: \(rejection.diagnosticDescription)")
                 return nil
             }
+            if role == .responder { try await sendIntroductionFrame(exchange.localHello, over: stream) }
             guard let transcript = exchange.bind(channelBindingHash: binding) else {
                 report("The QUIC transport could not derive a channel-introduction transcript.")
                 return nil
@@ -2438,16 +2439,22 @@ private extension NetworkMeshSession {
             + "rosterMembers=\(roster.memberCount) rosterBarred=\(roster.barredCount)"
     }
 
-    /// Exchanges hellos in the order the role fixes: the dialer speaks first.
-    func exchangeHellos(
+    /// Opens the hello exchange in the order the role fixes: the dialer speaks first.
+    ///
+    /// **The responder answers only a hello it accepts** (World Friends P1, 2026-10-31). This half
+    /// reads the dialer's hello and returns; ``introduce(role:over:stream:)`` sends the responder's own
+    /// hello — the one frame that carries its long-term signing key — only after
+    /// ``MeshChannelIntroductionExchange/receive(_:roster:nonces:mayReconcileDivergentEpochs:)``
+    /// accepted the dialer. A stranger the doors do not admit, or a probe that dials to collect keys,
+    /// is refused having been sent nothing. The transcript is unchanged: it covers both hellos
+    /// whichever order they were written in.
+    func openHellos(
         role: MeshChannelRole,
         local: MeshChannelHello,
         over stream: Network.QUIC.Stream<QUICStream>
     ) async throws -> MeshChannelHello {
         guard role == .initiator else {
-            let peer = try await receiveIntroductionFrame(MeshChannelHello.self, from: stream)
-            try await sendIntroductionFrame(local, over: stream)
-            return peer
+            return try await receiveIntroductionFrame(MeshChannelHello.self, from: stream)
         }
         try await sendIntroductionFrame(local, over: stream)
         return try await receiveIntroductionFrame(MeshChannelHello.self, from: stream)

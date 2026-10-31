@@ -289,12 +289,14 @@ nonisolated struct MeshDerivedRoster: Equatable, Sendable {
     ///     that has no door to consult.
     func introductionRoster(
         additionalBarred: [Data] = [],
-        admitsStrangersProvisionally: Bool = false
+        admitsStrangersProvisionally: Bool = false,
+        admissibleStrangers: Set<Data>? = nil
     ) -> MeshIntroductionRoster {
         MeshIntroductionRoster(
             members: members.map(\.signingPublicKey),
             barred: barred.map(\.signingPublicKey) + additionalBarred,
-            admitsStrangersProvisionally: admitsStrangersProvisionally
+            admitsStrangersProvisionally: admitsStrangersProvisionally,
+            admissibleStrangers: admissibleStrangers
         )
     }
 

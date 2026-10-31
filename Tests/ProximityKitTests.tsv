@@ -116,6 +116,7 @@ MeshSessionRestoreMappingTests	MeshSessionStateMachineTests.swift	6
 MeshSessionStateMachineTests	MeshSessionStateMachineTests.swift	14
 MeshSessionStoreDurabilityTests	MeshSessionStoreTests.swift	4
 MeshSessionStoreRoundTripTests	MeshSessionStoreTests.swift	6
+MeshStrangerDoorTests	TapRendezvousTests.swift	2
 MeshTransferStreamTableTests	NetworkMeshTransportTests.swift	19
 MeshTunnelConvergenceTests	NetworkMeshTransportTests.swift	11
 MeshTunnelEndReasonTests	NetworkMeshTransportTests.swift	3
@@ -148,4 +149,6 @@ RecipeShareTransferTests	RecipeShareTransferTests.swift	2
 ReplayCacheTests	ReplayCacheTests.swift	1
 RoutedShareRefusalCopyTests	RoutedShareRefusalCopyTests.swift	1
 SessionMessageTests	SessionMessageTests.swift	1
+TapRendezvousLinkTests	TapRendezvousTests.swift	6
+TapRendezvousRotationTests	TapRendezvousTests.swift	3
 TransportNeutralityBoundaryTests	TransportNeutralityBoundaryTests.swift	3

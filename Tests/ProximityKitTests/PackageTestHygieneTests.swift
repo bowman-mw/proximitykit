@@ -2070,9 +2070,12 @@ import Testing
     /// `MeshRoutedCustodyEvidenceTests`, already had rows, for their cells that read this module's
     /// sources. RAISED at the custody commit's partial-item cell (2026-10-16): 138 → 139, for the package's NEW
     /// `MeshRoutedCustodyCommitGuardTests`, which holds the custody commit's answer to a partly staged
-    /// item. A suite added, moved out or deleted changes it in the same commit, argued and measured; a
-    /// deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 139
+    /// item. RAISED at the tap rendezvous (2026-10-31): 139 → 142, for the NEW `TapRendezvousLinkTests`,
+    /// `TapRendezvousRotationTests` and `MeshStrangerDoorTests`, which hold the rendezvous's two privacy
+    /// requirements (nothing identifying before both say yes; a pre-tap signal that rotates) and the
+    /// mesh's narrowed stranger door. A suite added, moved out or deleted changes it in the same commit,
+    /// argued and measured; a deletion lowers it only with the retirement argued.
+    static let measuredInventoryRows = 142
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -2113,9 +2116,10 @@ import Testing
     /// `MeshRoutedCustodyEvidenceTests`). RAISED at the verification ceremony's cross-version cells and
     /// the custody commit's partial-item cell (2026-10-16): 999 → 1003, for the three cells
     /// `CrossVersionFixtureTests` gains (today's QR writer, today's scanner and today's displayer against
-    /// 0.1.0's ceremony) and `MeshRoutedCustodyCommitGuardTests`' 1.
+    /// 0.1.0's ceremony) and `MeshRoutedCustodyCommitGuardTests`' 1. RAISED at the tap rendezvous
+    /// (2026-10-31): 1003 → 1014, for its three new suites' 6 + 3 + 2 cells.
     /// A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 1003
+    static let measuredDeclaredTests = 1014
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

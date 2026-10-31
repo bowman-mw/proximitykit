@@ -16,7 +16,32 @@ not held.
 
 ## Unreleased
 
-Nothing yet.
+Additions and a privacy fix, so z moves (0.1.2 when tagged). No public API, wire format, on-disk format
+or frozen token is changed or removed; the new wire format below is new, so it writes no format a
+fixture folder holds.
+
+### Added
+
+- `ProximityTapRendezvous`, meeting someone new by tapping phones with nothing that identifies either
+  person sent before both say yes. It runs on the pair radio's row under the host's own TXT mode,
+  advertising only `v`, `mode` and the radio's per-posture `sid`, and rotates its whole posture (Bonjour
+  name, TLS identity, `sid`, an in-memory X25519 key and nonce, and a fresh Nearby Interaction session
+  per link) at every start and at least every 900 s. After two ephemeral hellos every message is
+  ChaChaPoly-sealed under the key they agree: the ranging token, then, once this phone measured the
+  15 cm dwell, the name and companion look, then the answer, and only once both people said yes the
+  long-term keys, signed over the rendezvous transcript (`ProximityTapRendezvousMatch`). Rings show
+  within 3 m (`closeness`). The host supplies the profile and both labels
+  (`ProximityTapRendezvousProfile`).
+- `MeshNetworkManager.admissibleStrangerSigningKeys`: a host may narrow the open join doors to the keys
+  it names (its friends and the people a rendezvous matched); every other stranger is refused at the
+  channel introduction. `nil`, the default, keeps D-4.3 Option 1's doors.
+
+### Fixed
+
+- The mesh's QUIC responder now sends its channel hello, the one frame carrying its long-term signing
+  key, only after accepting the dialer's hello. A stranger the doors refuse, or a probe dialing to
+  collect keys, is refused having been sent nothing. Accepted peers see the same frames in the same
+  order as before.
 
 ## 0.1.1 — 2026-10-17
 

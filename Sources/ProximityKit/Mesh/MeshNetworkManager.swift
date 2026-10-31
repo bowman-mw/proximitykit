@@ -95,6 +95,17 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// leaves the flag in its default state for the next session on this manager.
     @ObservationIgnored private var isAdmittingNewPeers = true
 
+    /// Which strangers the open join doors admit: `nil` (the default) for any stranger, as D-4.3
+    /// Option 1 built them, or only these long-term signing keys.
+    ///
+    /// A host that meets new people some other way than an open search — Fernlet's tap rendezvous,
+    /// which hands a key over only after both people said yes (``ProximityTapRendezvous``) — sets
+    /// this to the keys it already has a reason to admit: its kept friends and the people a
+    /// rendezvous just matched. Every other stranger is then refused at the channel introduction, so
+    /// it is never sent the identity introduction, a ranging token or a capability. Read on every
+    /// introduction through ``roster``, so a change takes effect on the next tunnel; never persisted.
+    @ObservationIgnored public var admissibleStrangerSigningKeys: Set<Data>?
+
     public var meshError: String?
 
     /// A radio start-up failure (advertising or browsing failed to begin) during discovery, kept
@@ -14494,7 +14505,8 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
         }
         return derived.introductionRoster(
             additionalBarred: MeshIntroductionChaos.additionalBarredKeys,
-            admitsStrangersProvisionally: mayAdmitStrangerProvisionally
+            admitsStrangersProvisionally: mayAdmitStrangerProvisionally,
+            admissibleStrangers: admissibleStrangerSigningKeys
         )
     }
 
@@ -14534,6 +14546,7 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
         return true
     }
 
+
     /// The pre-records answer: the gossiped descriptor's members, with nobody nameably barred.
     /// Logged once per manager, because a roster derived from gossip rather than from signed
     /// records is a fact a reader of the log needs (plan §20.1).
@@ -14548,7 +14561,8 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
         return MeshIntroductionRoster(
             members: currentMesh?.members.map(\.signingPublicKey) ?? [],
             barred: MeshIntroductionChaos.additionalBarredKeys,
-            admitsStrangersProvisionally: mayAdmitStrangerProvisionally
+            admitsStrangersProvisionally: mayAdmitStrangerProvisionally,
+            admissibleStrangers: admissibleStrangerSigningKeys
         )
     }
 
