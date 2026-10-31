@@ -280,9 +280,18 @@ jobs:
     # 1003 tests. The iOS simulator's test leg was not run for this raise. swift test and the macOS
     # bundle passed at these floors and each refused MIN_TESTS 1004; swift test and the Walls step's
     # declared floor refused MIN_SUITES 140. ARITHMETIC CHECK: 999 + 4 = 1003 and 138 + 1 = 139.
+    # RAISED 1003 -> 1015 and 139 -> 143 at the tap rendezvous (0.1.2, proximitykit#8) on a Mac,
+    # 2026-10-31, for its four NEW suites and their 12 cells (TapRendezvousLinkTests 6,
+    # TapRendezvousRotationTests 3, MeshStrangerDoorTests 2, TapRendezvousWaitingTests 1); #8 raised the
+    # inventory and the hygiene suite's counts but not these literals, so its run and main's failed at
+    # the Walls step's declared floor. Over this repository's tree with them: the Walls step's scripts
+    # passed, and swift test "Test run with 1015 tests in 143 suites passed", its floor passed; the
+    # inventory 143 rows declaring 1015 tests. The xcodebuild lanes were not run for this note. swift
+    # test's floor refused MIN_TESTS 1016, and the Walls step's declared floor refused MIN_SUITES 144.
+    # ARITHMETIC CHECK: 1003 + 12 = 1015 and 139 + 4 = 143.
     env:
-      MIN_TESTS: 1003
-      MIN_SUITES: 139
+      MIN_TESTS: 1015
+      MIN_SUITES: 143
     steps:
       - uses: actions/checkout@v4
 

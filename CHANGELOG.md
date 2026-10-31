@@ -16,9 +16,17 @@ not held.
 
 ## Unreleased
 
-Additions and a privacy fix, so z moves (0.1.2 when tagged). No public API, wire format, on-disk format
-or frozen token is changed or removed; the new wire format below is new, so it writes no format a
-fixture folder holds.
+### Fixed
+
+- CI's test-count floor literals (`MIN_TESTS`, `MIN_SUITES` in `.github/workflows/ci.yml`) move to the
+  inventory 0.1.2 declares, 1015 tests in 143 suites; proximitykit#8 raised the inventory and the hygiene
+  counts but not them, so its run and `main`'s failed at the Walls step. No code changes.
+
+## 0.1.2 — 2026-10-31
+
+Tag `0.1.2`, commit `c0a3ffab` (the merge of proximitykit#8). Additions and a privacy fix, so z moves. No
+public API, wire format, on-disk format or frozen token is changed or removed; the new wire format below is
+new, so it writes no format a fixture folder holds, and it adds no fixture folder.
 
 ### Added
 
