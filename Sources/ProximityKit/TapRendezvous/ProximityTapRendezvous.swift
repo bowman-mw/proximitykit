@@ -74,7 +74,7 @@ public final class ProximityTapRendezvous {
     static let idleLinkTimeout: TimeInterval = 30
     /// A peer given up on, or declined, is not dialed or accepted again for this long.
     static let coolingSeconds: TimeInterval = 45
-    /// An unanswered question counts as Not now after this long.
+    /// An unanswered question counts as Not now, and a yes the other never answered ends, after this long.
     static let questionTimeout: TimeInterval = 120
     /// Cap on browsed advertisements and cooling entries (Power of 10 rule 3).
     static let maxTracked = 32
@@ -161,6 +161,14 @@ public final class ProximityTapRendezvous {
         apply(active.link.answer(yes, identity: identity), to: active)
     }
 
+    /// Takes back a yes while waiting for the other person (Not now on the waiting sheet): the link ends
+    /// and the other phone sees it drop. Nothing long-term was sent — a card goes only after both said
+    /// yes, and then the match has already happened. A no-op with no conversation up.
+    public func withdraw() {
+        guard let active, active.link.isInConversation else { return }
+        end(active, reason: .declinedHere)
+    }
+
     /// Drops this rotation's posture, secrets and peers and comes back up as a stranger.
     func rotate() {
         guard isRunning else { return }
@@ -231,8 +239,9 @@ public final class ProximityTapRendezvous {
         let date = now()
         cooling = cooling.filter { $0.value > date }
         if let active {
-            if let tappedAt = active.tappedAt, question != nil, date.timeIntervalSince(tappedAt) >= Self.questionTimeout {
-                answer(false)
+            if let tappedAt = active.tappedAt, date.timeIntervalSince(tappedAt) >= Self.questionTimeout {
+                // An unanswered question is Not now; a yes the other never answered ends the link.
+                if question != nil { answer(false) } else { end(active, reason: .lost) }
             } else if !active.link.hasTapped, date.timeIntervalSince(active.lastCloseAt) >= Self.idleLinkTimeout {
                 end(active, reason: nil)
             }

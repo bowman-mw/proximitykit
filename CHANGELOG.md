@@ -31,7 +31,8 @@ fixture folder holds.
   15 cm dwell, the name and companion look, then the answer, and only once both people said yes the
   long-term keys, signed over the rendezvous transcript (`ProximityTapRendezvousMatch`). Rings show
   within 3 m (`closeness`). The host supplies the profile and both labels
-  (`ProximityTapRendezvousProfile`).
+  (`ProximityTapRendezvousProfile`). `withdraw()` takes back a yes the other person has not answered,
+  and a yes left unanswered for two minutes ends the link.
 - `MeshNetworkManager.admissibleStrangerSigningKeys`: a host may narrow the open join doors to the keys
   it names (its friends and the people a rendezvous matched); every other stranger is refused at the
   channel introduction. `nil`, the default, keeps D-4.3 Option 1's doors.

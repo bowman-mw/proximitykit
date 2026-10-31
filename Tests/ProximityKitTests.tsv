@@ -151,4 +151,5 @@ RoutedShareRefusalCopyTests	RoutedShareRefusalCopyTests.swift	1
 SessionMessageTests	SessionMessageTests.swift	1
 TapRendezvousLinkTests	TapRendezvousTests.swift	6
 TapRendezvousRotationTests	TapRendezvousTests.swift	3
+TapRendezvousWaitingTests	TapRendezvousTests.swift	1
 TransportNeutralityBoundaryTests	TransportNeutralityBoundaryTests.swift	3

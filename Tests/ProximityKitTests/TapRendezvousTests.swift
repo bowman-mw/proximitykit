@@ -352,3 +352,21 @@ struct MeshStrangerDoorTests {
         #expect(capped.admissibleStrangers?.count == MeshIntroductionRoster.maxAdmissibleStrangers)
     }
 }
+
+/// A yes can be taken back while the other person has not answered, and a yes nobody answers ends.
+@MainActor
+struct TapRendezvousWaitingTests {
+
+    @Test func withdrawingWithNothingUpIsANoOpAndTheWaitIsBounded() {
+        let host = PackageTestHost()
+        let engine = ProximityTapRendezvous(
+            host: host, profile: tapProfile, makeRadio: { RecordingPairRadio() }, makeRanging: { MockRangingProvider() },
+            now: Date.init)
+        engine.start()
+        engine.withdraw()
+        engine.sweep()
+        #expect(engine.isRunning && engine.question == nil && !engine.isWaitingForPeer)
+        #expect(ProximityTapRendezvous.questionTimeout <= 120)
+        engine.stop()
+    }
+}
