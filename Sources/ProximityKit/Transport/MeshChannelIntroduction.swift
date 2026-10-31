@@ -323,16 +323,40 @@ nonisolated struct MeshIntroductionRoster: Equatable, Sendable {
     /// are open must refuse, which is the same fail-closed direction the whole seam runs in.
     let admitsStrangersProvisionally: Bool
 
+    /// Which strangers the open doors admit: `nil`, every one (D-4.3 Option 1, the default), or only
+    /// these long-term signing keys (World Friends P1, 2026-10-31).
+    ///
+    /// The host narrows the doors to the keys it already holds for a reason — its kept friends and the
+    /// people a tap rendezvous matched after both said yes — so a bystander whose phone happens to be
+    /// searching at the same moment is refused at the introduction and is sent nothing above it.
+    /// Bounded like the roster: at most ``maxAdmissibleStrangers`` keys are kept.
+    let admissibleStrangers: Set<Data>?
+
+    /// The cap on ``admissibleStrangers`` (Power of 10 rule 3): a hangout's sixteen people, twice.
+    static let maxAdmissibleStrangers = 32
+
     /// A roster with nobody in it, and the doors shut. Every introduction against it is
     /// ``MeshRosterVerdict/stranger`` and every stranger is refused, which is the correct answer for
     /// a transport that has not been told who the members are.
     static let empty = MeshIntroductionRoster(members: [], barred: [])
 
     /// Builds a roster, dropping anything past the caps rather than growing without bound.
-    init(members: [Data], barred: [Data] = [], admitsStrangersProvisionally: Bool = false) {
+    init(
+        members: [Data], barred: [Data] = [], admitsStrangersProvisionally: Bool = false,
+        admissibleStrangers: Set<Data>? = nil
+    ) {
         self.members = Set(members.prefix(Self.maxMembers))
         self.barred = Set(barred.prefix(Self.maxBarred))
         self.admitsStrangersProvisionally = admitsStrangersProvisionally
+        self.admissibleStrangers = admissibleStrangers.map { Set($0.sorted { $0.lexicographicallyPrecedes($1) }
+            .prefix(Self.maxAdmissibleStrangers)) }
+    }
+
+    /// Whether the doors are open AND, when the host narrowed them, `signingPublicKey` is one of the
+    /// keys they admit.
+    func admitsStrangerProvisionally(_ signingPublicKey: Data) -> Bool {
+        guard admitsStrangersProvisionally else { return false }
+        return admissibleStrangers?.contains(signingPublicKey) ?? true
     }
 
     /// What this roster says about one signing key.
@@ -540,7 +564,7 @@ nonisolated struct MeshChannelIntroductionExchange {
         // it records nothing, so reading it early leaves a refused hello exactly as empty-handed as
         // it was before (`derivedTranscript` stays nil either way).
         let verdict = roster.verdict(for: hello.signingPublicKey)
-        let isProvisionalStranger = verdict == .stranger && roster.admitsStrangersProvisionally
+        let isProvisionalStranger = verdict == .stranger && roster.admitsStrangerProvisionally(hello.signingPublicKey)
         guard hello.meshID == localHello.meshID || isProvisionalStranger else { return .foreignMesh }
         switch MeshEpochAcceptance.introductionVerdict(local: localHello.epochRef, peer: hello.epochRef) {
         case .converge: break
@@ -567,6 +591,8 @@ nonisolated struct MeshChannelIntroductionExchange {
             // never here — `MeshNetworkManager.maySeatVerifiedPeer(signingPublicKey:)` at the
             // identity introduction, the dwell or QR commit, then the admission grant.
             guard roster.admitsStrangersProvisionally else { return .unknownIdentity }
+            // World Friends P1: doors a host narrowed admit only the keys it named.
+            guard isProvisionalStranger else { return .unknownIdentity }
         case .member:
             break
         }

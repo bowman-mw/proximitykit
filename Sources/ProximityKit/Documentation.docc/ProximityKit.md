@@ -3610,6 +3610,20 @@ bundle the signed identity introduction carries is this module's wire type.
 - ``ProtectedSidecar``
 - ``SidecarSeal``
 
+### Tap rendezvous
+
+Meeting someone new by tapping phones, with nothing identifying sent before both people say yes:
+ephemeral hellos, then sealed messages in a fixed order (ranging token, the reveal after this phone's
+own 15 cm dwell, the answer, and the long-term keys only after both said yes). It rotates at every start
+and at least every 900 s. A host that meets people this way narrows the mesh's join doors with
+``MeshNetworkManager/admissibleStrangerSigningKeys``.
+
+- ``ProximityTapRendezvous``
+- ``ProximityTapRendezvousProfile``
+- ``ProximityTapRendezvousQuestion``
+- ``ProximityTapRendezvousMatch``
+- ``ProximityTapRendezvousEnd``
+
 ### Pair sessions
 
 A ``ProximityPairSession`` is a one-to-one connection between two devices, driven by a
