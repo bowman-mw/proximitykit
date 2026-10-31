@@ -66,6 +66,9 @@ public final class ProximityTapRendezvous {
     @ObservationIgnored public var onEnded: ((ProximityTapRendezvousEnd) -> Void)?
     /// This person's companion look, read at the tap. Empty by default.
     @ObservationIgnored public var companionLook: () -> Data = { Data() }
+    /// The name this person appears as, read at the tap; `nil` reads the host's
+    /// ``ProximityHost/proximityDisplayName``.
+    @ObservationIgnored public var revealedName: (() -> String)?
 
     /// A link with no reading within 3 m for this long gives up.
     static let idleLinkTimeout: TimeInterval = 30
@@ -344,7 +347,7 @@ public final class ProximityTapRendezvous {
         let date = now()
         if meters <= TapRendezvousFormat.closeDistanceMeters { entry.lastCloseAt = date }
         let look = companionLook()
-        let name = host?.proximityDisplayName ?? ""
+        let name = revealedName?() ?? host?.proximityDisplayName ?? ""
         apply(entry.link.distance(meters, at: date) { (name, look) }, to: entry)
     }
 
