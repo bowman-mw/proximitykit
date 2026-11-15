@@ -492,6 +492,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         rotationDebounceTask?.cancel()
         beaconTimer?.cancel()
         rotationSyncTask?.cancel()
+        sessionIDRotationTask?.cancel()
     }
 
     // MARK: - Routed addressability (plan step A0.5.1, S6)
