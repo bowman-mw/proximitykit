@@ -310,6 +310,17 @@ public final class ProximityPairSession {
     /// Called once per ``Event``, synchronously, in the order the session acts. Set it once, before
     /// ``start()``, capturing the owner weakly: the owner holds the session.
     @ObservationIgnored public var onEvent: ((Event) -> Void)?
+    /// Whether this radio publishes the device's display name to everyone nearby. `false` by default
+    /// (SEC-L29); set through ``setNameDisclosure(toEveryone:friendTags:)``.
+    public private(set) var advertisesNameToEveryone = false
+    /// The friend tags this radio advertises, as the host last set them.
+    @ObservationIgnored private var advertisedFriendTags: Set<String> = []
+    /// Names a browsed peer from the friend tags its record carries: the host answers the kept
+    /// friend's name when one of `tags` is a tag it derived for that friend this epoch (or the one
+    /// beside it), else nil. Set it once, before ``start()``, capturing the owner weakly. A row it
+    /// names outranks any name the record advertised: a kept friend's name comes from this device's own
+    /// records, not from the air.
+    @ObservationIgnored public var resolveFriendName: ((Set<String>) -> String?)?
     /// Receives the verified payloads the session's pairings deliver: every pairing's coordinator is
     /// built with it. Held weakly; set it once, before ``start()``.
     @ObservationIgnored public weak var payloadHandler: (any ProximityPayloadHandling)?
@@ -791,14 +802,39 @@ public final class ProximityPairSession {
     /// instance name and TLS identity at every `start()` and every resume, and joins it to these
     /// fields in ``ProximityPairAdvertisement/publishedFields(from:sessionID:)``. A copy kept here
     /// would go stale at the first resume.
+    ///
+    /// **SEC-L29 (0.2.0): the name is published only to everyone who asked for it.** Unless the host
+    /// set ``advertisesNameToEveryone``, the record carries no `name` at all, only the host's friend
+    /// tags, so a kept friend names the row from its own records (``resolveFriendName``) and a stranger
+    /// sees the peer-name floor.
     private func discoveryInfo() -> [String: String] {
-        var fields = [
-            ProximityPairAdvertisement.versionKey: ProximityPairAdvertisement.version,
-            ProximityPairAdvertisement.modeKey: profile.advertisementMode
-        ]
-        let name = ProximityPairAdvertisedName.publishable(displayName, in: namespace)
-        if !name.isEmpty { fields[ProximityPairAdvertisement.nameKey] = name }
-        return fields
+        let name = advertisesNameToEveryone
+            ? ProximityPairAdvertisedName.publishable(displayName, in: namespace)
+            : ""
+        return ProximityPairAdvertisement.ownerFields(
+            mode: profile.advertisementMode, name: name, friendTags: advertisedFriendTags)
+    }
+
+    /// Sets who this radio shows the device's name to, and the friend tags it advertises (SEC-L29).
+    ///
+    /// - Parameters:
+    ///   - toEveryone: `true` publishes the display name in the record for anyone nearby, the
+    ///     pre-0.2.0 behaviour, which a host offers only as an opt-in. `false`, the default, publishes
+    ///     no name.
+    ///   - friendTags: The host's rotating pairwise tags for its kept friends this epoch, opaque
+    ///     tokens only the two members of a pair can derive, at most 24 of them (the rest are
+    ///     dropped, in sorted order). The
+    ///     host derives them under a purpose of its own, so they never equal its presence tags, and
+    ///     calls this again when its epoch rotates.
+    ///
+    /// A running radio re-registers under a fresh posture when the record changes; before
+    /// ``start()`` the values are simply kept for it.
+    public func setNameDisclosure(toEveryone: Bool, friendTags: Set<String>) {
+        guard toEveryone != advertisesNameToEveryone || friendTags != advertisedFriendTags else { return }
+        advertisesNameToEveryone = toEveryone
+        advertisedFriendTags = friendTags
+        guard isRunning else { return }
+        session.republish(advertisement: discoveryInfo())
     }
 
     /// The advertised local display name (shared coercion; see `PeerDisplayNames.swift`).
@@ -848,7 +884,10 @@ public final class ProximityPairSession {
             // QUIC radio publishes NO transport hint (see `NetworkPairSession.handle(for:)`),
             // so an absent or empty `name` falls through to the placeholder rather than to a random
             // Bonjour instance name — see `displayName(for peer:)`.
-            displayName: displayName(for: peer),
+            // A re-announced record (its TXT arrived late, or its friend tags rotated) is read
+            // afresh; only a row whose identity already verified keeps the name it was given then.
+            displayName: nearbyPeers.first { $0.id == peer.id && $0.fingerprint != nil }?.displayName
+                ?? advertisedName(of: peer),
             fingerprint: nil
         )
         nearbyPeers.removeAll { $0.id == recipient.id }
@@ -1176,6 +1215,17 @@ public final class ProximityPairSession {
     /// session's namespace, which is what every other pre-handshake surface in this subsystem renders.
     private func displayName(for peer: PeerHandle) -> String {
         if let row = nearbyPeers.first(where: { $0.id == peer.id }) { return row.displayName }
+        return advertisedName(of: peer)
+    }
+
+    /// The name a browsed peer's record gives it: a kept friend's own name when its friend tags match
+    /// (``resolveFriendName``), else the name it advertised, else the host's peer-name floor.
+    private func advertisedName(of peer: PeerHandle) -> String {
+        let tags = ProximityPairAdvertisement.friendTags(
+            from: peer.discoveryInfo, mode: profile.advertisementMode)
+        if !tags.isEmpty, let friend = resolveFriendName?(tags), !friend.isEmpty {
+            return ProximityDisplayName.peerDisplayName(friend, in: namespace)
+        }
         return ProximityDisplayName.peerDisplayName(
             ProximityPairAdvertisedName.received(
                 peer.discoveryInfo?[ProximityPairAdvertisement.nameKey], hint: ""

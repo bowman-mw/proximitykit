@@ -49,6 +49,10 @@ protocol ProximityPairRadioSession: AnyObject {
     /// Brings the radio up, advertising the owner's `advertisement` fields beside this radio's own
     /// session id.
     func start(advertisement: [String: String]) throws
+    /// Replaces the owner's fields on a running radio. An unpaused radio re-registers under a wholly
+    /// new posture (instance name, TLS identity and `sid`), so the old record and the new one cannot be
+    /// linked by name; a paused one keeps the fields for its resume. A stood-down radio ignores it.
+    func republish(advertisement: [String: String])
     /// Tears the radio down and drops everything it held.
     func stop()
     /// Opens a tunnel to a browsed peer, claiming `helloSID`.
@@ -129,7 +133,7 @@ nonisolated struct ProximityPairPosture {
 // MARK: - PairTunnelInterface
 
 /// The kind of network interface a pair tunnel's connection runs over, as the `interface` key of
-/// `recipe.quic.connected` names it: a frozen diagnostic token, never localized and never on the wire.
+/// `pair.quic.connected` names it: a frozen diagnostic token, never localized and never on the wire.
 ///
 /// Read once, at activation, off the connection's current path: its first available interface, the
 /// one the path prefers, in Network.framework's own classification. It names the interface's kind
@@ -213,12 +217,12 @@ nonisolated enum PairTunnelInterface: String, CaseIterable, Sendable {
 /// ``ProximityPairDialHello`` for why that frame discloses nothing the air did not.
 ///
 /// Until its hello is read, an inbound connection is only *pending*: booked at its arrival
-/// (`recipe.quic.pendingBooked`), it holds one of ``maxPendingInbound`` places and no place in the
+/// (`pair.quic.pendingBooked`), it holds one of ``maxPendingInbound`` places and no place in the
 /// connecting window, which counts it only once it has delivered a readable hello
 /// (``hasConnectingPeers(besides:)``). It stops being pending when its hello is admitted or refused,
 /// when its connection ends, when it goes ``helloDeadlineSeconds`` without a readable hello, or when
-/// the radio stops, and each of those writes one `recipe.quic.pendingEnded` line naming which. A
-/// refusal writes `recipe.quic.helloRefused` first, with its ``HelloRefusal`` and how many
+/// the radio stops, and each of those writes one `pair.quic.pendingEnded` line naming which. A
+/// refusal writes `pair.quic.helloRefused` first, with its ``HelloRefusal`` and how many
 /// connections were pending.
 ///
 /// ## Glare
@@ -421,7 +425,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     }
 
     /// How far a pending inbound connection has got toward the dial hello that resolves it: the
-    /// `stage` of `recipe.quic.pendingEnded`, a frozen diagnostic token, never on the wire.
+    /// `stage` of `pair.quic.pendingEnded`, a frozen diagnostic token, never on the wire.
     nonisolated enum InboundStage: String, Sendable {
         /// Booked at its arrival; the dialer has opened no stream yet.
         case awaitingStream
@@ -432,7 +436,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
         case helloDelivered
     }
 
-    /// Why an inbound hello was refused: the `reason` of `recipe.quic.helloRefused`, a frozen
+    /// Why an inbound hello was refused: the `reason` of `pair.quic.helloRefused`, a frozen
     /// diagnostic token, never on the wire and never localized.
     nonisolated enum HelloRefusal: String, CaseIterable, Error, Sendable {
         /// No readable dial hello came off the control stream: a first frame that was not one, or a
@@ -452,11 +456,11 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     }
 
     /// Why a pending inbound connection stopped being pending: the `reason` of
-    /// `recipe.quic.pendingEnded`, a frozen diagnostic token.
+    /// `pair.quic.pendingEnded`, a frozen diagnostic token.
     nonisolated enum PendingEnd: String, Sendable {
         /// Its hello was admitted, and the connection is the peer's tunnel now.
         case admitted
-        /// Its hello was refused; `recipe.quic.helloRefused` names why.
+        /// Its hello was refused; `pair.quic.helloRefused` names why.
         case refused
         /// Its connection ended before a hello was ruled on.
         case connectionEnded
@@ -600,7 +604,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
         instanceNamePrefix = namespace.family.radios.meshInstanceNamePrefix
         tlsCommonName = namespace.family.radios.tlsCommonName
         namespaceSoundness = namespace.soundness
-        logger = Logger(subsystem: namespace.installation.logSubsystem, category: "proximity.recipe.quic")
+        logger = Logger(subsystem: namespace.installation.logSubsystem, category: "proximity.pair.quic")
     }
 
     /// Cancels every task this radio owns (memory-lifecycle rule ML1). ``stop()`` already does it;
@@ -622,11 +626,11 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     /// fixed.
     ///
     /// Refuses first, under an unsound namespace (``namespaceSoundness``): it throws
-    /// ``ProximityNamespaceError`` and audits `recipe.quic.namespaceUnsound` (at `start`) before it
+    /// ``ProximityNamespaceError`` and audits `pair.quic.namespaceUnsound` (at `start`) before it
     /// mints a posture, listens or advertises anything.
     func start(advertisement: [String: String]) throws {
         try ProximityNamespaceGate.refuseUnsound(
-            namespaceSoundness, event: "recipe.quic.namespaceUnsound", at: .start)
+            namespaceSoundness, event: "pair.quic.namespaceUnsound", at: .start)
         guard !isRunning else { return }
         ownerFields = advertisement
         posture = try ProximityPairPosture.minted(
@@ -642,9 +646,22 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
         }
     }
 
+    /// Replaces the owner's fields (SEC-L29: the friend tags rotate every presence epoch, and the
+    /// name comes and goes with the host's setting). ``ProximityPairRadioSession`` requirement.
+    ///
+    /// An unchanged record is not re-registered: re-registering mints a posture, and a posture minted
+    /// for nothing is a registration flap a scanner can see. A paused radio only keeps the fields:
+    /// ``resumeDiscovery()`` publishes them under its own fresh posture.
+    func republish(advertisement: [String: String]) {
+        guard isRunning, advertisement != ownerFields else { return }
+        ownerFields = advertisement
+        guard !isDiscoveryPaused else { return }
+        republishListener()
+    }
+
     /// Tears the radio down and drops everything it was holding — including the posture and the
     /// pause flag, so a stood-down radio keeps no name, no identity and no hold to come back up
-    /// under. Each pending inbound connection it drops writes its `recipe.quic.pendingEnded` line.
+    /// under. Each pending inbound connection it drops writes its `pair.quic.pendingEnded` line.
     func stop() {
         let stopped = isRunning
         for tunnel in tunnels.values { tunnel.cancelTasks() }
@@ -661,7 +678,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
         isRunning = false
         isDiscoveryPaused = false
         guard stopped else { return }
-        ProximityAudit.log("recipe.quic.stopped", context: [:])
+        ProximityAudit.log("pair.quic.stopped", context: [:])
     }
 
     /// Stands the listener AND the browser down while keeping every live tunnel — the whole of
@@ -679,7 +696,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
         isDiscoveryPaused = true
         cancelBrowser()
         cancelListener()
-        ProximityAudit.log("recipe.quic.paused", context: ["tunnels": String(tunnels.count)])
+        ProximityAudit.log("pair.quic.paused", context: ["tunnels": String(tunnels.count)])
     }
 
     /// Reopens a paused radio under a **wholly new posture**: a fresh instance name, a fresh TLS
@@ -709,7 +726,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
             isDiscoveryPaused = false
             owedSightings = Set(browsedRecords.keys)
             try startListener()
-            ProximityAudit.log("recipe.quic.resumed", context: auditContext(for: fresh))
+            ProximityAudit.log("pair.quic.resumed", context: auditContext(for: fresh))
         } catch {
             report("The recipe-share listener could not be resumed: \(error)")
         }
@@ -734,7 +751,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
             // and the tap. The only branch of this audit that cannot name its peer: there is no
             // key left to take a label from.
             ProximityAudit.log(
-                "recipe.quic.dialRefused",
+                "pair.quic.dialRefused",
                 context: ["peer": Self.unlabelledPeer, "reason": "identityAgedOut"]
             )
             return
@@ -891,6 +908,12 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
         )
     }
 
+    /// Fails `key`'s outbound dial exactly as a connection error before (or after) its channel
+    /// opened does in ``runInitiator(_:key:helloSID:)``.
+    func failDialForTesting(_ key: MeshLinkKey) {
+        endDial(key, reason: "The outbound recipe-share connection ended: test")
+    }
+
     /// How many tunnels are live.
     var tunnelCountForTesting: Int { tunnels.count }
 
@@ -930,7 +953,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
     }
 
     /// Drives one whole SIGHTING exactly as a browse result drives it — the record, the
-    /// `recipe.quic.sighted` audit line and the owner's discovery callback — minus the framework
+    /// `pair.quic.sighted` audit line and the owner's discovery callback — minus the framework
     /// endpoint a unit test cannot build.
     func noteBrowsedForTesting(
         _ key: MeshLinkKey,
@@ -975,7 +998,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
 
     /// Books a pending inbound connection at `stage`, booked at `now`, exactly as ``acceptInbound(_:)``
     /// books an arrival — the hello deadline applied at `now` first, then the cap, then the
-    /// `recipe.quic.pendingBooked` line — minus the framework connection a unit test cannot build: a
+    /// `pair.quic.pendingBooked` line — minus the framework connection a unit test cannot build: a
     /// stub task stands in for the connection's, and a drop cancels it as it would a real one.
     ///
     /// - Returns: Whether it was booked: false when the key is already pending or the pending places
@@ -997,7 +1020,7 @@ final class NetworkPairSession: ProximityPairRadioSession, NetworkChannelHost {
 
     /// Runs the whole synchronous ruling ``serveInbound(stream:pendingKey:connection:)`` runs on what
     /// it read off a control stream — `hello`, or nil for no readable one — at `now`: the stage mark,
-    /// the hello deadline, the adjudication, and then the refusal's `recipe.quic.helloRefused` line and
+    /// the hello deadline, the adjudication, and then the refusal's `pair.quic.helloRefused` line and
     /// drop, or the admission out of the pending map. Answers the key it admitted, or nil. The tunnel an
     /// admission then builds is the live path's, which needs a framework stream.
     func ruleOnHelloForTesting(
@@ -1074,7 +1097,7 @@ private extension NetworkPairSession {
     func startListener() throws {
         guard let posture else { throw MeshTransportError.tlsIdentityUnavailable }
         guard !radiosSuppressed else {
-            ProximityAudit.log("recipe.quic.advertised", context: auditContext(for: posture))
+            ProximityAudit.log("pair.quic.advertised", context: auditContext(for: posture))
             return
         }
         let fields = ProximityPairAdvertisement.publishedFields(
@@ -1113,7 +1136,7 @@ private extension NetworkPairSession {
                 self?.report("The recipe-share listener stopped: \(error)")
             }
         }
-        ProximityAudit.log("recipe.quic.advertised", context: auditContext(for: posture))
+        ProximityAudit.log("pair.quic.advertised", context: auditContext(for: posture))
     }
 
     /// Stands the listener down and forgets it, keeping every tunnel.
@@ -1202,12 +1225,12 @@ private extension NetworkPairSession {
     ///
     /// Coming back under a FRESH posture rather than re-publishing the withdrawn name is the same
     /// decision ``resumeDiscovery()`` makes, for the same reason: a name that went away and came
-    /// back is a link. ``startListener()`` writes the `recipe.quic.advertised` line that says the
+    /// back is a link. ``startListener()`` writes the `pair.quic.advertised` line that says the
     /// radio is back, and a republish that cannot mint or cannot listen reaches ``report(_:)``, so
     /// the failure is an honest stand-down and never a silently dark radio. There is no flap loop
     /// in it: a `.remove` follows an `.add`, and a republish that never registers never gets one.
     func republishListener() {
-        ProximityAudit.log("recipe.quic.registrationWithdrawn", context: [:])
+        ProximityAudit.log("pair.quic.registrationWithdrawn", context: [:])
         cancelListener()
         do {
             let fresh = try ProximityPairPosture.minted(
@@ -1283,7 +1306,7 @@ private extension NetworkPairSession {
     func reportBrowserFailure(_ message: String) {
         cancelBrowser()
         let busy = !tunnels.isEmpty || hasConnectingPeers(besides: nil)
-        ProximityAudit.log("recipe.quic.browserFailed", context: ["busy": String(busy)])
+        ProximityAudit.log("pair.quic.browserFailed", context: ["busy": String(busy)])
         report(message)
     }
 
@@ -1291,7 +1314,7 @@ private extension NetworkPairSession {
     /// never reaches ``report(_:)`` and never stands the radio down.
     func auditDialRefused(_ key: MeshLinkKey, reason: String) {
         ProximityAudit.log(
-            "recipe.quic.dialRefused",
+            "pair.quic.dialRefused",
             context: ["peer": peerLabel(for: key), "reason": reason]
         )
     }
@@ -1335,7 +1358,7 @@ private extension NetworkPairSession {
         recordBrowsed(
             key: key,
             instanceName: endpoint.name,
-            advertisement: MeshLinkAdvertisement.advertisement(from: endpoint.txtRecord.dictionary),
+            advertisement: ProximityPairAdvertisement.advertisement(from: endpoint.txtRecord.dictionary),
             at: now
         )
     }
@@ -1362,7 +1385,7 @@ private extension NetworkPairSession {
         // a recipe advertisement at all. Neither the peer's chosen name nor its session id is a
         // value a log is a good place to accumulate.
         ProximityAudit.log(
-            "recipe.quic.sighted",
+            "pair.quic.sighted",
             context: [
                 "peer": peerLabel(for: key),
                 "recipe": String(ProximityPairAdvertisement.isAdvertisement(advertisement, mode: advertisementMode))
@@ -1438,8 +1461,29 @@ private extension NetworkPairSession {
             try await receiveFrames(for: key, from: stream)
         } catch {
             guard !Task.isCancelled else { return }
-            endTunnel(key, reason: "The outbound recipe-share connection ended: \(error.localizedDescription)")
+            endDial(key, reason: "The outbound recipe-share connection ended: \(error.localizedDescription)")
         }
+    }
+
+    /// Ends an outbound tunnel whose connection failed, and, when it failed **before its channel
+    /// opened**, announces the peer's browsed record to the owner once more (0.2.0).
+    ///
+    /// The owner forgets a peer at every disconnect, and a resume is what files an owed sighting so the
+    /// forgotten peer is listed again (F1). A dial that fails before its channel opens never paired, so
+    /// the radio never paused and never resumes: the peer's unchanged record was never announced again
+    /// and the picker lost a row that is still on the air, until a refresh. Re-announcing it here, from
+    /// the record the radio still holds for an endpoint still browsed, puts the row back.
+    func endDial(_ key: MeshLinkKey, reason: String) {
+        let openedChannel = tunnels[key]?.controlStream != nil
+        endTunnel(key, reason: reason)
+        // Still on the air means still in the browse results. A radio whose framework objects are
+        // suppressed holds no endpoint at all, so there the record it keeps is the whole answer.
+        guard !openedChannel, isRunning, browsedEndpoints[key] != nil || radiosSuppressed,
+              let record = browsedRecords[key] else { return }
+        owedSightings.insert(key)
+        recordBrowsed(
+            key: key, instanceName: record.instanceName, advertisement: record.advertisement,
+            at: record.lastSeenAt)
     }
 
     /// Takes an inbound QUIC connection as *pending*: nothing is admitted, no channel exists and no
@@ -1458,7 +1502,7 @@ private extension NetworkPairSession {
     /// Books one arrival as pending at `stage`, at `now`, starting the task that owns its connection
     /// only once a place is free: the hello deadline is applied at `now` first, so a place a stalled
     /// connection held is free again for this one, then the ``maxPendingInbound`` cap, then the
-    /// `recipe.quic.pendingBooked` line, which names the connection and how many are pending with it.
+    /// `pair.quic.pendingBooked` line, which names the connection and how many are pending with it.
     ///
     /// A connection refused here was never pending: its owning task is never started, so the framework
     /// closes it, and only the debug log names it.
@@ -1480,7 +1524,7 @@ private extension NetworkPairSession {
         }
         pendingInbound[pendingKey] = PendingInbound(bookedAt: now, stage: stage, task: start())
         ProximityAudit.log(
-            "recipe.quic.pendingBooked",
+            "pair.quic.pendingBooked",
             context: ["connection": peerLabel(for: pendingKey), "pending": String(pendingInbound.count)]
         )
         return true
@@ -1492,7 +1536,7 @@ private extension NetworkPairSession {
     /// before anything else — so the id alone names it, and any other stream is a per-transfer
     /// stream carrying a picture recipe. Its arrival moves the pending connection to
     /// ``InboundStage/readingHello``; a connection that ends before a hello is ruled on writes its
-    /// `recipe.quic.pendingEnded` line here.
+    /// `pair.quic.pendingEnded` line here.
     func runResponder(_ connection: NetworkConnection<QUIC>, pendingKey: MeshLinkKey) async {
         do {
             try await connection.inboundStreams { stream in
@@ -1540,7 +1584,7 @@ private extension NetworkPairSession {
 
     /// The ruling on what a pending connection's control stream yielded — `hello`, or nil when no
     /// readable hello came off it — at `now`, writing its outcome: the admission hands back the key
-    /// and the task owning the connection; a refusal writes one `recipe.quic.helloRefused` line naming
+    /// and the task owning the connection; a refusal writes one `pair.quic.helloRefused` line naming
     /// its ``HelloRefusal`` and drops the connection.
     ///
     /// A connection no longer pending (reaped, or the radio stopped, while its hello was being read)
@@ -1674,12 +1718,12 @@ private extension NetworkPairSession {
     /// which half survived.
     func auditRedundantTunnelClosed(_ key: MeshLinkKey, kept: String) {
         ProximityAudit.log(
-            "recipe.quic.redundantTunnelClosed",
+            "pair.quic.redundantTunnelClosed",
             context: ["peer": peerLabel(for: key), "kept": kept]
         )
     }
 
-    /// Refuses a pending connection's hello: its `recipe.quic.helloRefused` line, then the drop. A
+    /// Refuses a pending connection's hello: its `pair.quic.helloRefused` line, then the drop. A
     /// connection no longer pending was already ended, and logged, by whatever dropped it.
     func refuseHello(_ pendingKey: MeshLinkKey, reason: HelloRefusal) {
         guard pendingInbound[pendingKey] != nil else { return }
@@ -1696,7 +1740,7 @@ private extension NetworkPairSession {
     /// pending connection reads `pending=2`, and that connection's own lines say what it was.
     func auditHelloRefused(_ pendingKey: MeshLinkKey, reason: HelloRefusal) {
         ProximityAudit.log(
-            "recipe.quic.helloRefused",
+            "pair.quic.helloRefused",
             context: [
                 "connection": peerLabel(for: pendingKey),
                 "reason": reason.rawValue,
@@ -1724,14 +1768,14 @@ private extension NetworkPairSession {
         }
     }
 
-    /// Takes a connection out of the pending map with its one `recipe.quic.pendingEnded` line — the
+    /// Takes a connection out of the pending map with its one `pair.quic.pendingEnded` line — the
     /// connection, why (``PendingEnd``), the stage it had reached (``InboundStage``) and how many stay
     /// pending — and hands back the task that owns it, or nil when it was not pending, writing nothing.
     @discardableResult
     func releasePendingInbound(_ key: MeshLinkKey, _ end: PendingEnd) -> Task<Void, Never>? {
         guard let pending = pendingInbound.removeValue(forKey: key) else { return nil }
         ProximityAudit.log(
-            "recipe.quic.pendingEnded",
+            "pair.quic.pendingEnded",
             context: [
                 "connection": peerLabel(for: key),
                 "reason": end.rawValue,
@@ -1742,7 +1786,7 @@ private extension NetworkPairSession {
         return pending.task
     }
 
-    /// Drops a pending inbound connection with its `recipe.quic.pendingEnded` line, cancelling the
+    /// Drops a pending inbound connection with its `pair.quic.pendingEnded` line, cancelling the
     /// task that owns it. Idempotent and silent for a connection no longer pending, and safe to call
     /// from inside that task — cancelling itself is how the connection is closed.
     func endPendingInbound(_ key: MeshLinkKey, _ end: PendingEnd) {
@@ -1782,7 +1826,7 @@ private extension NetworkPairSession {
     /// arriving on an unadmitted connection resolves to no tunnel in
     /// ``serveTransferStream(_:on:)`` and is refused before a byte is read.
     ///
-    /// Its `recipe.quic.connected` line names how many tunnels are live and the kind of interface the
+    /// Its `pair.quic.connected` line names how many tunnels are live and the kind of interface the
     /// connection runs over (``PairTunnelInterface``), read off the connection's current path.
     func activate(
         _ key: MeshLinkKey,
@@ -1795,7 +1839,7 @@ private extension NetworkPairSession {
         tunnels[key] = tunnel
         let interface = PairTunnelInterface(connection.currentPath?.availableInterfaces.first?.type)
         ProximityAudit.log(
-            "recipe.quic.connected",
+            "pair.quic.connected",
             context: ["tunnels": String(tunnels.count), "interface": interface.rawValue]
         )
         onPeerChannelReady?(tunnel.channel)
@@ -1943,7 +1987,7 @@ private extension NetworkPairSession {
         on connection: NetworkConnection<QUIC>
     ) async {
         guard let key = tunnelKey(for: connection), let id = claimInboundTransfer(key) else {
-            ProximityAudit.log("recipe.quic.transferStreamRefused", context: [:])
+            ProximityAudit.log("pair.quic.transferStreamRefused", context: [:])
             return
         }
         defer { tunnels[key]?.transfers.closeInbound(id) }
@@ -1955,7 +1999,7 @@ private extension NetworkPairSession {
             noteTransfer("received", bytes: length, key: key)
             try await stream.send(MeshTransferStreamTable.ack, endOfStream: true)
         } catch {
-            ProximityAudit.log("recipe.quic.transferStreamFailed", context: [:])
+            ProximityAudit.log("pair.quic.transferStreamFailed", context: [:])
         }
     }
 
@@ -1980,7 +2024,7 @@ private extension NetworkPairSession {
     /// counts only — no payload, no recipe title, no peer name.
     func noteTransfer(_ verb: String, bytes: Int, key: MeshLinkKey) {
         ProximityAudit.log(
-            "recipe.quic.transferStream",
+            "pair.quic.transferStream",
             context: ["verb": verb, "bytes": String(bytes), "peer": peerLabel(for: key)]
         )
     }

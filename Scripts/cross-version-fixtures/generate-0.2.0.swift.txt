@@ -1,0 +1,121 @@
+// generate-0.2.0.swift.txt: the generator of Tests/ProximityKitTests/Fixtures/0.2.0/. No target
+// compiles it; it ran once as a test file in a throwaway tree whose Sources/ was 0.2.0's (the release
+// branch at the commit the tag points to, before the tag was cut, since the folder ships in the tag).
+//
+// 0.2.0 writes three formats, or versions of one, that Fixtures/0.1.0/ does not hold:
+//   - the channel introduction at protocolVersion 2 (the hellos and the signed introduction);
+//   - the mesh dial proof that precedes the hellos (its frame and its accept);
+//   - the pair radio's TXT record with friend tags and no name (SEC-L29).
+// The cast is 0.1.0's: the test seeds its keychain-rows.json first, as 0.1.0's generateVerification()
+// did, so Alice, Bob, Carol and Dave are the same four identities and CrossVersionFixtureTests reads both
+// folders with one cast. Signatures and the frame's padding are random, so those files are held in the
+// read direction only; the accept and the TXT record are deterministic and held in both.
+//
+// How it ran, from this repository's root, with <scratch> a folder outside it:
+//   mkdir -p <scratch>/tree && git archive HEAD Package.swift Sources Tests/ProximityKitTests/TestSupport \
+//     Tests/ProximityKitTests/ProximityNamespaceMeshMessagesSpelling.swift | tar -x -C <scratch>/tree
+//   cp Scripts/cross-version-fixtures/generate-0.2.0.swift.txt <scratch>/tree/Tests/ProximityKitTests/FixtureGenerator.swift
+//   cd <scratch>/tree && FIXTURE_OUT=<scratch>/out/0.2.0 \
+//     FIXTURE_ROWS=<this repository>/Tests/ProximityKitTests/Fixtures/0.1.0/keychain-rows.json \
+//     swift test --filter 'FixtureGenerator/generate\(\)$'
+// Then the files were copied into the folder, and each one's SHA-256 pinned in CrossVersionFixtureTests'
+// `digests` beside the others, raising its `fixtureFloor`.
+
+import CryptoKit
+import Foundation
+@testable import ProximityKit
+import Security
+import Testing
+
+@MainActor
+@Suite struct FixtureGenerator {
+
+    let keychain = PackageTestEnvironment.keychain
+
+    static let outRoot = ProcessInfo.processInfo.environment["FIXTURE_OUT"] ?? ""
+    static let rowsPath = ProcessInfo.processInfo.environment["FIXTURE_ROWS"] ?? ""
+    static let meshID = UUID(uuidString: "C0FFEE00-0000-4000-8000-000000000001")!
+    static let channelBinding = Data(repeating: 0x5C, count: 32)
+    static func identityService(_ name: String) -> String { "org.example.pktest.identity.fixture.\(name)" }
+
+    struct RowFile: Decodable {
+        let service: String
+        let account: String
+        let accessibility: String
+        let synchronizable: Bool
+        let data: Data
+    }
+
+    func identity(_ name: String) throws -> IdentityService {
+        let identity = IdentityService(namespace: .packageTest, keychainService: Self.identityService(name))
+        try identity.ensureProvisioned()
+        return identity
+    }
+
+    func write(_ data: Data, _ name: String) throws {
+        let url = URL(fileURLWithPath: Self.outRoot).appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url)
+    }
+
+    func pretty(_ value: some Encodable) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(value) + Data("\n".utf8)
+    }
+
+    func framed(_ value: some Encodable) throws -> Data {
+        let payload = try JSONEncoder().encode(value)
+        return NetworkMeshWire.header(for: payload.count) + payload
+    }
+
+    @Test func generate() throws {
+        try #require(!Self.outRoot.isEmpty && !Self.rowsPath.isEmpty, "set FIXTURE_OUT and FIXTURE_ROWS")
+        let rows = try JSONDecoder().decode([RowFile].self, from: Data(contentsOf: URL(fileURLWithPath: Self.rowsPath)))
+        for row in rows {
+            let status = ProximityKeychainItem.store(
+                row.data, account: row.account, service: row.service,
+                accessibility: row.accessibility as CFString, synchronizable: row.synchronizable)
+            #expect(status == errSecSuccess)
+        }
+        let alice = try identity("alice")
+        let bob = try identity("bob")
+        let alicePrint = alice.localFingerprint
+
+        // The channel introduction at protocolVersion 2.
+        let epoch = try #require(MeshEpochRef.minted(counter: 1, coordinatorFingerprint: alicePrint, meshID: Self.meshID, in: .packageTest))
+        let aliceHello = MeshChannelHello(
+            protocolVersion: MeshChannelIntroductionFormat.protocolVersion, meshID: Self.meshID,
+            epochRef: epoch.canonicalString, signingPublicKey: alice.localSigningPublicKey,
+            nonce: Data(repeating: 0x11, count: 16), sessionID: "alice-sid")
+        let bobHello = MeshChannelHello(
+            protocolVersion: MeshChannelIntroductionFormat.protocolVersion, meshID: Self.meshID,
+            epochRef: epoch.canonicalString, signingPublicKey: bob.localSigningPublicKey,
+            nonce: Data(repeating: 0x22, count: 16), sessionID: "bob-sid")
+        var exchange = MeshChannelIntroductionExchange(role: .initiator, localHello: aliceHello, purposes: .packageTest)
+        var nonces = MeshIntroductionNonceCache()
+        #expect(exchange.receive(bobHello, roster: MeshIntroductionRoster(members: [bob.localSigningPublicKey]),
+                                 nonces: &nonces) == nil)
+        let transcript = try #require(exchange.bind(channelBindingHash: Self.channelBinding))
+        let signature = try alice.sign(transcript, purpose: ProximityNamespace.Purposes.packageTest.signature.meshChannelIntroductionV1)
+        try write(try framed(aliceHello), "channel-hello-initiator.bin")
+        try write(try framed(bobHello), "channel-hello-responder.bin")
+        try write(try framed(MeshChannelIntroduction(channelBindingHash: Self.channelBinding, signature: signature)),
+                  "channel-introduction.bin")
+
+        // The dial proof: Alice dials with Bob as her one candidate; Bob accepts.
+        let aliceKey = try alice.meshDialProofKey(with: bob.localKeyAgreementPublicKey)
+        let bobKey = try bob.meshDialProofKey(with: alice.localKeyAgreementPublicKey)
+        let frame = MeshDialProof.frame(keys: [aliceKey], binding: Self.channelBinding)
+        try write(try framed(frame), "dial-proof-frame.bin")
+        let accept = MeshDialProof.Accept(
+            version: MeshDialProof.version, proof: MeshDialProof.accept(key: bobKey, binding: Self.channelBinding))
+        try write(try framed(accept), "dial-proof-accept.bin")
+
+        // The pair radio's record: friend tags, no name.
+        let pair = ProximityPairAdvertisement.publishedFields(
+            from: ProximityPairAdvertisement.ownerFields(mode: "pair", name: "", friendTags: ["tag0002", "tag0001"]),
+            sessionID: "alice-sid")
+        try write(try pretty(["pair": pair]), "txt-records.json")
+    }
+}

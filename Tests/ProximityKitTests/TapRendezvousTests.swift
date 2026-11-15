@@ -254,6 +254,7 @@ private final class RecordingPairRadio: ProximityPairRadioSession {
         advertisedSessionID = UUID().uuidString
         sessionIDs.append(advertisedSessionID)
     }
+    func republish(advertisement: [String: String]) {}
     func stop() {
         stops += 1
         advertisedSessionID = ""

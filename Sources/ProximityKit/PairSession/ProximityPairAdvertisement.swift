@@ -8,8 +8,18 @@ import Foundation
 ///
 /// The counterpart of ``MeshLinkAdvertisement`` and ``PresenceAdvertisement`` for the third radio,
 /// and a separate type for the same reason they are separate from each other: the three publish
-/// disjoint vocabularies. This one carries `v`, `sid`, `mode` and an optional `name`, and there is
-/// deliberately no room in it for anything else.
+/// disjoint vocabularies. This one carries `v`, `sid`, `mode`, the optional friend tags (`t`, `t1`) and
+/// the optional `name`, and there is deliberately no room in it for anything else.
+///
+/// ## Who sees the name (SEC-L29, 0.2.0)
+///
+/// The `name` is published only when the host opts in to showing it to everyone
+/// (``ProximityPairSession/setNameDisclosure(toEveryone:friendTags:)``, off by default). Otherwise the
+/// record carries the host's rotating pairwise friend tags instead: opaque per-pair, per-epoch values
+/// that only the two members of a pair can derive, so a kept friend's phone matches one and names the
+/// row from its own records, and a stranger sees a record with no name at all. The tags are chunked
+/// exactly as ``PresenceAdvertisement`` chunks its own (at most two 240-byte values), and the host
+/// derives them under a purpose of its own so they never equal the tags its presence radio publishes.
 ///
 /// ## The split of ownership, which is the point of this type
 ///
@@ -50,6 +60,10 @@ nonisolated enum ProximityPairAdvertisement {
     /// The key carrying the sender's chosen display name, absent when it cannot be published.
     static let nameKey = "name"
 
+    /// Friend tags this record may carry: the same cap the presence radio puts on its own roster, so a
+    /// record never needs more than ``PresenceAdvertisement/maxChunks`` chunks.
+    static let maxFriendTags = 24
+
     /// The key naming which kind of pair session this registration belongs to: its value is the pair
     /// profile's `advertisementMode` (Fernlet's recipe profile: `recipe`).
     static let modeKey = "mode"
@@ -63,10 +77,56 @@ nonisolated enum ProximityPairAdvertisement {
     /// The `sid` is written last and unconditionally: it is the radio's, not the owner's, and an
     /// owner that one day advertised its own would be silently overruled here rather than putting
     /// a stale token on the air.
+    ///
+    /// The friend-tag chunks are the one exception to the 64-byte value bound: they are joined after it,
+    /// as ``PresenceAdvertisement/publishedFields(tags:)`` built them (each value at most
+    /// ``PresenceAdvertisement/maxChunkValueBytes``), so they still fit one TXT entry each.
     static func publishedFields(from ownerFields: [String: String], sessionID: String) -> [String: String] {
         var fields = ownerFields
         fields[sessionIDKey] = sessionID
-        return MeshLinkAdvertisement.publishedFields(from: fields)
+        return bounded(fields)
+    }
+
+    /// A browsed record read back into the `discoveryInfo` shape a ``PeerHandle`` carries: the same
+    /// rule as ``publishedFields(from:sessionID:)`` (one body, ``bounded(_:)``), so a peer cannot put
+    /// into a handle what this build would never publish, and the friend-tag chunks survive the read.
+    static func advertisement(from txtFields: [String: String]) -> [String: String] {
+        bounded(txtFields)
+    }
+
+    /// The shared rule both directions obey: the friend-tag chunks set aside (each kept only when it
+    /// fits ``PresenceAdvertisement/maxChunkValueBytes``), everything else through
+    /// ``MeshLinkAdvertisement/publishedFields(from:)``, then the chunks joined back.
+    private static func bounded(_ input: [String: String]) -> [String: String] {
+        var fields = input
+        var chunks: [String: String] = [:]
+        for index in 0..<PresenceAdvertisement.maxChunks {
+            let key = PresenceAdvertisement.tagsKey(chunk: index)
+            guard let value = fields.removeValue(forKey: key) else { continue }
+            if !value.isEmpty, value.utf8.count <= PresenceAdvertisement.maxChunkValueBytes { chunks[key] = value }
+        }
+        return MeshLinkAdvertisement.publishedFields(from: fields).merging(chunks) { kept, _ in kept }
+    }
+
+    /// The owner's half of the record: `v`, `mode`, the friend-tag chunks for `friendTags` (sorted,
+    /// capped at ``maxFriendTags``), and `name` only when it is non-empty. The one builder, so the
+    /// session and every cell spell the record the same way.
+    static func ownerFields(mode: String, name: String, friendTags: Set<String>) -> [String: String] {
+        var fields = [versionKey: version, modeKey: mode]
+        let tags = Array(friendTags.sorted().prefix(maxFriendTags))
+        for (key, value) in PresenceAdvertisement.publishedFields(tags: tags) where key != versionKey {
+            fields[key] = value
+        }
+        if !name.isEmpty { fields[nameKey] = name }
+        return fields
+    }
+
+    /// The friend tags a browsed record carries, or none when it is not an advertisement of this
+    /// version under `mode`. Bounded by ``PresenceAdvertisement/maxInboundTags`` however many a peer
+    /// crams in.
+    static func friendTags(from fields: [String: String]?, mode: String) -> Set<String> {
+        guard isAdvertisement(fields, mode: mode) else { return [] }
+        return PresenceAdvertisement.tags(from: fields)
     }
 
     /// Whether a browsed record is an advertisement of this version under `mode`, the pair profile's

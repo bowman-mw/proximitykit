@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // MARK: - MeshChannelRole
@@ -27,7 +28,11 @@ nonisolated enum MeshChannelIntroductionFormat {
 
     /// The protocol version carried in the hello and bound into the transcript. Both sides must
     /// present the same one; there is no negotiation and no fallback.
-    static let protocolVersion = 1
+    ///
+    /// **2 since 0.2.0**: a ``MeshDialProof`` exchange now runs before either hello, so a 0.1.x
+    /// phone (version 1, hello first) and a 0.2.0 phone never meet on the mesh. The owner accepted
+    /// that break, 2026-11-15.
+    static let protocolVersion = 2
 
     /// Bytes of fresh randomness each side contributes. Sixteen matches the DEBUG probe and the QR
     /// ceremony's challenge nonce — well past what a birthday bound over one session needs.
@@ -107,7 +112,7 @@ nonisolated struct MeshChannelHello: Codable, Equatable, Sendable {
     /// Fresh randomness for this introduction, bound into the transcript.
     let nonce: Data
 
-    /// The per-launch random `sid` this side also publishes in its Bonjour TXT record.
+    /// The random `sid` this side also publishes in its Bonjour TXT record: per posture since 0.2.0, re-minted at each radio start and each 900 s presence epoch.
     ///
     /// **Not covered by the introduction signature** (plan §7.2 fixes the transcript's fields and
     /// this is not one of them). It is a dial-preference hint only: it lets an inbound tunnel be
@@ -751,4 +756,14 @@ protocol MeshIntroductionAuthority: AnyObject {
     /// A0.2.7; A0.2.5 handed the radio those labels through this protocol, before it held a
     /// namespace of its own).
     func signChannelIntroduction(_ transcript: Data) throws -> Data
+
+    /// The X25519 keys of the peers this device would accept on a tunnel, most wanted first: the
+    /// candidates of the dial proof (``MeshDialProof``, 0.2.0). A dialer proves at most
+    /// ``MeshDialProof/slotCount`` of them; a responder tries up to
+    /// ``MeshDialProof/maxResponderCandidates``.
+    var dialProofKeyAgreementKeys: [Data] { get }
+
+    /// The dial proof's pair key with the peer holding `keyAgreementPublicKey`
+    /// (``IdentityService/meshDialProofKey(with:)``).
+    func dialProofKey(with keyAgreementPublicKey: Data) throws -> SymmetricKey
 }

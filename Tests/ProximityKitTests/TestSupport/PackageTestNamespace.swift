@@ -117,7 +117,8 @@ private enum PackageTestLiterals {
         meshTLSExporterV1: "pktest.mesh.tls-exporter.v1",
         meshRoutedContentKeyWrapV1: "pktest.mesh.routed.content-key.v1",
         meshSessionContextV1: "pktest.mesh.session-context.v1",
-        meshRoutedStoreV1: "pktest.mesh.routed-store.v1"
+        meshRoutedStoreV1: "pktest.mesh.routed-store.v1",
+        meshDialProofV1: "pktest.mesh.dial-proof.v1"
     )
 
     /// The five AEAD labels.

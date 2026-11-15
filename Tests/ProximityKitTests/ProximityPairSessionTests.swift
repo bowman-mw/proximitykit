@@ -147,11 +147,11 @@ import Testing
                 ProximityPairDialHello(sessionID: "blair-sid"), pendingKey: dial, now: booked.addingTimeInterval(0.2))
         }
         #expect(admitted == blair.key, "Blair's hello was refused beside a connection that never sent one")
-        #expect(capture.lines(named: "recipe.quic.helloRefused").isEmpty,
-                "a hello was refused: \(capture.lines(named: "recipe.quic.helloRefused"))")
-        #expect(capture.lines(named: "recipe.quic.pendingEnded").map(\.context) == [[
+        #expect(capture.lines(named: "pair.quic.helloRefused").isEmpty,
+                "a hello was refused: \(capture.lines(named: "pair.quic.helloRefused"))")
+        #expect(capture.lines(named: "pair.quic.pendingEnded").map(\.context) == [[
             "connection": radio.peerLabel(for: dial), "reason": "admitted", "stage": "helloDelivered", "pending": "1"
-        ]], "the admission's line: \(capture.lines(named: "recipe.quic.pendingEnded"))")
+        ]], "the admission's line: \(capture.lines(named: "pair.quic.pendingEnded"))")
         #expect(radio.pendingInboundStageForTesting(twin) == .awaitingStream,
                 "the silent twin was dropped by the admission rather than left to its deadline")
         session.stop()
@@ -190,15 +190,15 @@ import Testing
         #expect(NetworkPairSession.helloDeadlineSeconds == 5, "the deadline is \(NetworkPairSession.helloDeadlineSeconds) s")
         #expect(radio.pendingInboundCountForTesting == 1 && radio.pendingInboundStageForTesting(delivered) == .helloDelivered,
                 "a connection whose hello was read was reaped, or a silent one survived")
-        let ended = capture.lines(named: "recipe.quic.pendingEnded").map(\.context)
+        let ended = capture.lines(named: "pair.quic.pendingEnded").map(\.context)
         #expect(ended == [
             ["connection": radio.peerLabel(for: silent), "reason": "helloDeadline", "stage": "awaitingStream", "pending": "1"],
             ["connection": radio.peerLabel(for: slow), "reason": "helloDeadline", "stage": "readingHello", "pending": "1"],
             ["connection": radio.peerLabel(for: late), "reason": "helloDeadline", "stage": "awaitingStream", "pending": "1"]
         ], "the deadline's lines: \(ended)")
-        #expect(capture.lines(named: "recipe.quic.pendingBooked").map { $0.context["pending"] } == ["1", "2", "2", "2"],
-                "the bookings' lines: \(capture.lines(named: "recipe.quic.pendingBooked"))")
-        #expect(capture.lines(named: "recipe.quic.helloRefused").isEmpty, "the deadline is not a refusal")
+        #expect(capture.lines(named: "pair.quic.pendingBooked").map { $0.context["pending"] } == ["1", "2", "2", "2"],
+                "the bookings' lines: \(capture.lines(named: "pair.quic.pendingBooked"))")
+        #expect(capture.lines(named: "pair.quic.helloRefused").isEmpty, "the deadline is not a refusal")
         radio.stop()
     }
 
@@ -227,13 +227,13 @@ import Testing
                 ProximityPairDialHello(sessionID: "blair-sid"), pendingKey: dial, now: booked.addingTimeInterval(6))
         }
         #expect(admitted == blair.key, "Blair's hello, ruled on six seconds after her connection arrived, was not admitted")
-        let ended = capture.lines(named: "recipe.quic.pendingEnded").map(\.context)
+        let ended = capture.lines(named: "pair.quic.pendingEnded").map(\.context)
         #expect(ended == [
             ["connection": radio.peerLabel(for: silent), "reason": "helloDeadline", "stage": "awaitingStream", "pending": "1"],
             ["connection": radio.peerLabel(for: dial), "reason": "admitted", "stage": "helloDelivered", "pending": "0"]
         ], "the ruling's lines: \(ended)")
-        #expect(capture.lines(named: "recipe.quic.helloRefused").isEmpty,
-                "a hello was refused: \(capture.lines(named: "recipe.quic.helloRefused"))")
+        #expect(capture.lines(named: "pair.quic.helloRefused").isEmpty,
+                "a hello was refused: \(capture.lines(named: "pair.quic.helloRefused"))")
         #expect(radio.pendingInboundCountForTesting == 0, "a connection is still pending after the ruling")
         session.stop()
         try host.tearDown()
@@ -263,10 +263,10 @@ import Testing
             radio.ruleOnHelloForTesting(nil, pendingKey: unreadable, now: booked.addingTimeInterval(6))
         }
         #expect(admitted == nil, "a ruling on no readable hello admitted \(String(describing: admitted))")
-        #expect(capture.lines(named: "recipe.quic.helloRefused").map(\.context) == [[
+        #expect(capture.lines(named: "pair.quic.helloRefused").map(\.context) == [[
             "connection": radio.peerLabel(for: unreadable), "reason": "unreadable", "pending": "1"
-        ]], "the refusal's line: \(capture.lines(named: "recipe.quic.helloRefused"))")
-        let ended = capture.lines(named: "recipe.quic.pendingEnded").map(\.context)
+        ]], "the refusal's line: \(capture.lines(named: "pair.quic.helloRefused"))")
+        let ended = capture.lines(named: "pair.quic.pendingEnded").map(\.context)
         #expect(ended == [
             ["connection": radio.peerLabel(for: twin), "reason": "helloDeadline", "stage": "awaitingStream", "pending": "1"],
             ["connection": radio.peerLabel(for: unreadable), "reason": "refused", "stage": "readingHello", "pending": "0"]
@@ -311,12 +311,12 @@ import Testing
             radio.ruleOnHelloForTesting(hello, pendingKey: fromBlair, now: Date(timeIntervalSinceReferenceDate: 812_000_000))
         }
         #expect(admitted == nil, "a second device's hello was admitted while a first one's was being ruled on")
-        #expect(capture.lines(named: "recipe.quic.helloRefused").map(\.context) == [[
+        #expect(capture.lines(named: "pair.quic.helloRefused").map(\.context) == [[
             "connection": radio.peerLabel(for: fromBlair), "reason": "ownerRefused", "pending": "2"
-        ]], "the refusal's line: \(capture.lines(named: "recipe.quic.helloRefused"))")
-        #expect(capture.lines(named: "recipe.quic.pendingEnded").map(\.context) == [[
+        ]], "the refusal's line: \(capture.lines(named: "pair.quic.helloRefused"))")
+        #expect(capture.lines(named: "pair.quic.pendingEnded").map(\.context) == [[
             "connection": radio.peerLabel(for: fromBlair), "reason": "refused", "stage": "helloDelivered", "pending": "1"
-        ]], "the refused connection's line: \(capture.lines(named: "recipe.quic.pendingEnded"))")
+        ]], "the refused connection's line: \(capture.lines(named: "pair.quic.pendingEnded"))")
         #expect(radio.pendingInboundStageForTesting(fromCasey) == .helloDelivered, "the refusal dropped Casey's connection")
         session.stop()
         try host.tearDown()
@@ -362,17 +362,17 @@ import Testing
         radio.endTunnel(radio.handleForTesting(caseyKey))
         #expect(rule("blair-sid") == blairKey, "the hello with nothing in its way was refused")
 
-        let refused = capture.lines(named: "recipe.quic.helloRefused")
+        let refused = capture.lines(named: "pair.quic.helloRefused")
         #expect(refused.map { $0.context["reason"] } == [
             "unreadable", "unresolved", "unresolved", "ownerRefused", "keptEstablished", "tunnelHeld"
         ], "the refusals' reasons: \(refused)")
         #expect(Set(refused.compactMap { $0.context["reason"] }) == Set(NetworkPairSession.HelloRefusal.allCases.map(\.rawValue)),
                 "a refusal reason no cell reaches: \(NetworkPairSession.HelloRefusal.allCases)")
         #expect(refused.allSatisfy { $0.context["pending"] == "1" }, "a lone connection's refusal counts \(refused)")
-        #expect(capture.lines(named: "recipe.quic.pendingEnded").map { $0.context["reason"] }
+        #expect(capture.lines(named: "pair.quic.pendingEnded").map { $0.context["reason"] }
                     == Array(repeating: "refused", count: 6) + ["admitted"],
                 "each refused connection was not dropped once, with its line")
-        #expect(capture.lines(named: "recipe.quic.redundantTunnelClosed").map { $0.context["kept"] } == ["established"],
+        #expect(capture.lines(named: "pair.quic.redundantTunnelClosed").map { $0.context["kept"] } == ["established"],
                 "the glare refusal did not keep the established tunnel")
         radio.stop()
     }
@@ -382,7 +382,7 @@ import Testing
     /// **The radio's `connected` line names the kind of interface its connection runs over.**
     ///
     /// The tokens are frozen, and the line is written at activation, which needs a live QUIC stream a
-    /// unit test cannot build, so its spelling is held in source: one `recipe.quic.connected` line in
+    /// unit test cannot build, so its spelling is held in source: one `pair.quic.connected` line in
     /// the activation, whose context carries the tunnel count and the interface read off the
     /// connection's current path.
     @Test func theConnectedLineNamesTheKindOfInterfaceItsConnectionRunsOver() throws {
@@ -393,7 +393,7 @@ import Testing
             try PackageRoot.source("Sources/ProximityKit/Transport/NetworkPairSession.swift"))
         let activation = try #require(MeshRoutedSourceScan.bracedBody(after: "func activate(", in: code),
                                       "the radio's activation is gone")
-        #expect(activation.components(separatedBy: #""recipe.quic.connected""#).count - 1 == 1,
+        #expect(activation.components(separatedBy: #""pair.quic.connected""#).count - 1 == 1,
                 "the activation writes no single `connected` line")
         #expect(activation.contains("PairTunnelInterface(connection.currentPath?.availableInterfaces.first?.type)"),
                 "the activation no longer reads the interface off the connection's path")

@@ -244,7 +244,7 @@ nonisolated extension ProximityNamespace {
 
     /// The labels that key derivations, column seals and the TLS exporter take whole.
     ///
-    /// Roles, fixed here: three HKDF salts (`.keyDerivationSalt`), the QUIC channel binding's exporter
+    /// Roles, fixed here: four HKDF salts (`.keyDerivationSalt`), the QUIC channel binding's exporter
     /// label (`.tlsExporterLabel`) and the two sealed mesh stores' column seals (`.columnSeal`). The
     /// stored properties follow the initializer's order, which is also the order of
     /// ``ProximityNamespace/labelRows``.
@@ -261,6 +261,9 @@ nonisolated extension ProximityNamespace {
         public let meshSessionContextV1: ProximityCryptographicPurpose
         /// Column seal of the routed store's sealed index and chunks.
         public let meshRoutedStoreV1: ProximityCryptographicPurpose
+        /// HKDF salt of the mesh dial proof's pairwise key (0.2.0): the friend proof a dialer and a
+        /// responder exchange before either sends the hello that carries its long-term key.
+        public let meshDialProofV1: ProximityCryptographicPurpose
 
         /// Mints every key-derivation label from the host's literals, each with the role its field fixes.
         ///
@@ -271,10 +274,12 @@ nonisolated extension ProximityNamespace {
         ///   - meshRoutedContentKeyWrapV1: The routed content-key wrap's HKDF salt.
         ///   - meshSessionContextV1: The mesh-session context file's column seal.
         ///   - meshRoutedStoreV1: The routed store's column seal.
+        ///   - meshDialProofV1: The mesh dial proof's HKDF salt.
         public init(
             proximityTransportV1: StaticString, meshGroupKeyWrapV1: StaticString,
             meshTLSExporterV1: StaticString, meshRoutedContentKeyWrapV1: StaticString,
-            meshSessionContextV1: StaticString, meshRoutedStoreV1: StaticString
+            meshSessionContextV1: StaticString, meshRoutedStoreV1: StaticString,
+            meshDialProofV1: StaticString
         ) {
             let salt = ProximityCryptographicPurpose.Role.keyDerivationSalt
             let seal = ProximityCryptographicPurpose.Role.columnSeal
@@ -284,6 +289,7 @@ nonisolated extension ProximityNamespace {
             self.meshRoutedContentKeyWrapV1 = ProximityCryptographicPurpose(meshRoutedContentKeyWrapV1, role: salt)
             self.meshSessionContextV1 = ProximityCryptographicPurpose(meshSessionContextV1, role: seal)
             self.meshRoutedStoreV1 = ProximityCryptographicPurpose(meshRoutedStoreV1, role: seal)
+            self.meshDialProofV1 = ProximityCryptographicPurpose(meshDialProofV1, role: salt)
         }
     }
 
@@ -626,7 +632,7 @@ nonisolated extension ProximityNamespace.LegacyV1 {
 
 nonisolated extension ProximityNamespace.KeyDerivation {
 
-    /// The six key-derivation labels under `path`.
+    /// The seven key-derivation labels under `path`.
     func labelRows(under path: String) -> [ProximityNamespace.LabelRow] {
         ProximityNamespace.LabelRow.rows([
             ("proximityTransportV1", proximityTransportV1),
@@ -634,7 +640,8 @@ nonisolated extension ProximityNamespace.KeyDerivation {
             ("meshTLSExporterV1", meshTLSExporterV1),
             ("meshRoutedContentKeyWrapV1", meshRoutedContentKeyWrapV1),
             ("meshSessionContextV1", meshSessionContextV1),
-            ("meshRoutedStoreV1", meshRoutedStoreV1)
+            ("meshRoutedStoreV1", meshRoutedStoreV1),
+            ("meshDialProofV1", meshDialProofV1)
         ], under: path)
     }
 }

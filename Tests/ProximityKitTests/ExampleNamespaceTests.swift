@@ -41,7 +41,7 @@ import Testing
         #expect(other.familyCollisions(with: example).isEmpty, "\(other.familyCollisions(with: example))")
         #expect(example.installationCollisions(with: other).isEmpty)
         #expect(other.installationCollisions(with: example).isEmpty)
-        #expect(example.labelRows.count == 37, "the 39 protocol labels less the legacy pair the example refuses")
+        #expect(example.labelRows.count == 38, "the 40 protocol labels less the legacy pair the example refuses")
     }
 
     /// A ping envelope an example identity signs and seals verifies at another example identity and is

@@ -61,7 +61,7 @@ import Foundation
 /// key, derives nothing under an unsound family either), and each radio's `start` throws it before it
 /// advertises, each with a named audit event
 /// (`identity.namespace.unsound`, `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound`,
-/// `recipe.quic.namespaceUnsound`) whose context names the door, the violation count and the first
+/// `pair.quic.namespaceUnsound`) whose context names the door, the violation count and the first
 /// violation's case, never a value. Nothing else reads the verdict. A manager whose identity is of
 /// another namespace, handed to it or built by its host's ``ProximityHost/makeProximityIdentity()``,
 /// refuses every start of its radio, and the mesh manager every founding of a mesh, before it signs,

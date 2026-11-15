@@ -362,11 +362,13 @@ import Testing
         #expect(frame.dropFirst(NetworkMeshWire.headerByteCount) == (try fixture("0.1.0/identity-envelope-v2.json")))
     }
 
-    /// **The channel introduction reviews as accepted.** Bob, the responder, reads Alice's and his own
-    /// hello frames and her signed introduction under the handshake's ceiling, admits her hello, binds the
-    /// transcript to the channel binding both ends derived, and accepts her: today's transcript bytes are
-    /// the ones she signed.
-    @Test func theChannelIntroductionReviewsAsAccepted() throws {
+    /// **The 0.1.0 channel introduction still decodes, and is refused by its version** (0.2.0's
+    /// break, accepted by the owner 2026-11-15). Bob, the responder, reads Alice's and his own hello
+    /// frames and her signed introduction under the handshake's ceiling, and today's exchange refuses
+    /// her version-1 hello as `unsupportedProtocolVersion` before anything else: a 0.1.x phone and a
+    /// 0.2.0 phone do not meet on the mesh. The transcript her signature covers still binds, so the
+    /// bytes themselves are read as they were written.
+    @Test func theChannelIntroductionOf010DecodesAndIsRefusedByItsVersion() throws {
         let cast = try provisionedCast()
         let aliceHello = try framedJSON(MeshChannelHello.self, "0.1.0/channel-hello-initiator.bin")
         let bobHello = try framedJSON(MeshChannelHello.self, "0.1.0/channel-hello-responder.bin")
@@ -376,15 +378,13 @@ import Testing
             protocolVersion: 1, meshID: meshID, epochRef: epoch.canonicalString, signingPublicKey: cast.alice.localSigningPublicKey,
             nonce: Data(repeating: 0x11, count: 16), sessionID: "alice-sid"))
         #expect(bobHello.signingPublicKey == cast.bob.localSigningPublicKey && bobHello.sessionID == "bob-sid")
+        #expect(introduction.channelBindingHash == Data(repeating: 0x5C, count: 32))
         var exchange = MeshChannelIntroductionExchange(role: .responder, localHello: bobHello, purposes: .packageTest)
         var nonces = MeshIntroductionNonceCache()
         let refusal = exchange.receive(aliceHello, roster: MeshIntroductionRoster(members: [cast.alice.localSigningPublicKey]),
                                        nonces: &nonces)
-        #expect(refusal == nil, "Bob refused Alice's hello: \(String(describing: refusal))")
-        let transcript = exchange.bind(channelBindingHash: Data(repeating: 0x5C, count: 32))
-        #expect(transcript != nil && introduction.channelBindingHash == Data(repeating: 0x5C, count: 32))
-        #expect(exchange.review(introduction) == .accepted(MeshVerifiedPeer(
-            signingPublicKey: cast.alice.localSigningPublicKey, fingerprint: alice, sessionID: "alice-sid")))
+        #expect(refusal == .unsupportedProtocolVersion, "a 0.1.0 hello was not refused by its version: \(String(describing: refusal))")
+        #expect(MeshChannelIntroductionFormat.protocolVersion == 2)
     }
 
     /// **The dial hellos decode.** The pair radio's hello reads its session id and re-encodes byte for
