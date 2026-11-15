@@ -81,7 +81,8 @@ private nonisolated enum ProximityPingLiterals {
             meshTLSExporterV1: "proximityping.mesh.tls-exporter.v1",
             meshRoutedContentKeyWrapV1: "proximityping.mesh.routed.content-key.v1",
             meshSessionContextV1: "proximityping.mesh.session-context.v1",
-            meshRoutedStoreV1: "proximityping.mesh.routed-store.v1"
+            meshRoutedStoreV1: "proximityping.mesh.routed-store.v1",
+            meshDialProofV1: "proximityping.mesh.dial-proof.v1"
         ),
         aead: ProximityNamespace.AEAD(
             proximityTransportV2: "proximityping.proximity.transport.aead.v2",

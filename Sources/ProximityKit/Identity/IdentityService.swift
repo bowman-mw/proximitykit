@@ -428,6 +428,29 @@ public final class IdentityService {
         return try myKey.sharedSecretFromKeyAgreement(with: ephemeralKey)
     }
 
+    // MARK: - Mesh dial proof (0.2.0)
+
+    /// The pairwise key of the mesh dial proof between this device and the peer holding
+    /// `peerKeyAgreementPublicKey`: static-static X25519, HKDF-SHA256 under this identity's
+    /// `purposes.keyDerivation.meshDialProofV1`, empty info. Symmetric, so the two members of a pair
+    /// derive the same key; only someone holding one of the two private keys can.
+    ///
+    /// - Parameter peerKeyAgreementPublicKey: The peer's raw X25519 public key.
+    /// - Returns: The 32-byte key ``MeshDialProof`` tags and accepts are HMACs under.
+    /// - Throws: ``IdentityError/notProvisioned`` with no key-agreement key, then
+    ///   ``IdentityError/invalidKeyData`` for a key that is not a raw X25519 public key.
+    public func meshDialProofKey(with peerKeyAgreementPublicKey: Data) throws -> SymmetricKey {
+        guard let myKey = keyAgreementKey else { throw IdentityError.notProvisioned }
+        guard let peer = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerKeyAgreementPublicKey) else {
+            throw IdentityError.invalidKeyData
+        }
+        let shared = try myKey.sharedSecretFromKeyAgreement(with: peer)
+        return shared.hkdfDerivedSymmetricKey(
+            using: SHA256.self, salt: purposes.keyDerivation.meshDialProofV1.data, sharedInfo: Data(),
+            outputByteCount: 32
+        )
+    }
+
     // MARK: - Presence epoch clock
     //
     // The wall-clock epoch the presence radio's posture (`PresenceEpochPosture`) is minted and

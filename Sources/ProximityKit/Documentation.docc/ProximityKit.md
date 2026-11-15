@@ -197,7 +197,8 @@ copy that uses a first name goes through `PeerNameDisplay.firstName(_:fingerprin
 delegates to, so a sentence composed over this package cannot interpolate a fingerprint either. No
 wire shape moved: an empty name is a value.
 **The mesh has a door of its own** and the invariant holds there too: every mesh frame is signed in
-`MeshNetworkManager.sendEnvelopeCore`, six broadcasts reach slots this device has not committed and
+`MeshNetworkManager.sendEnvelopeCore` (since 0.2.0 with an expiry, the coordinator's five minutes,
+`MeshNetworkManager.meshEnvelopeLifetime`), six broadcasts reach slots this device has not committed and
 seated (the coordinator beacon, the admission request, rotation sync, key rotation and ack, the
 removal votes, departure and termination frames) and the QR ceremony is pre-commit by design — so
 that door sends an empty envelope name to an uncommitted slot and strips a
@@ -623,7 +624,7 @@ key-agreement key to sign, seal to a peer or open with, and ``IdentityService/en
 which needs no provisioned key, throws it before it wraps anything, each auditing
 `identity.namespace.unsound`; each radio's `start` throws it before it mints, listens or advertises,
 auditing `mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound` or
-`recipe.quic.namespaceUnsound`. Each line's context names the door (`at`: `provision`,
+`pair.quic.namespaceUnsound`. Each line's context names the door (`at`: `provision`,
 `groupKeyWrap` or `start`), the violation count and the first violation's case name, never a field
 or a value. The pair-secret door needs the provisioned key-agreement key, so under an unsound
 namespace it derives nothing either, and provisioning calls no participant: none is told of an
@@ -890,7 +891,7 @@ dependencies to none (plan step A1.0). What still ties this module to Fernlet le
   widens to it, and the radio's inbound resolution and dial hello change for its admission), roles
   and admission after the identity handshake, a confirmation timeout long enough for pairing, a
   sealed send before confirmation that fails closed, an introduction bound to the channel, and the
-  radio's `recipe.quic.*` labels, pinned in a golden before they are parameterized. The coordinator's
+  radio's `pair.quic.*` labels, pinned in a golden before they are parameterized. The coordinator's
   `Mode`, ``ProximitySessionMode`` (a session profile, not a token; its raw values are frozen),
   generalizes then into the session policy that profile brings, the first other than friend.
 
@@ -1927,7 +1928,20 @@ actually lives: `NetworkMeshSession`, `NetworkPresenceSession` with its seam `Pr
 `MeshChannelIntroductionFormat`, `MeshChannelHello`, `MeshChannelIntroduction`,
 `MeshChannelIntroductionTranscript`, `MeshChannelIntroductionExchange`,
 `MeshChannelIntroductionOutcome`, `MeshIntroductionRejection`, `MeshIntroductionRoster`,
-`MeshRosterVerdict`, `MeshIntroductionNonceCache`, `MeshVerifiedPeer`, `MeshIntroductionAuthority`.
+`MeshRosterVerdict`, `MeshIntroductionNonceCache`, `MeshVerifiedPeer`, `MeshIntroductionAuthority`,
+`MeshDialProof`.
+
+**Before the hello, a dial proof** (0.2.0, introduction `protocolVersion` 2). The hello carries the
+sender's long-term signing key, and through 0.1.x the dialer sent it to whatever advertisement it
+dialed. Now `MeshDialProof` runs first on the control stream: the dialer sends exactly 24 tags bound to
+the tunnel's TLS exporter, one per peer it would accept (``MeshNetworkManager/dialProofPeerKeyAgreementKeys``
+and the gossiped mesh's members), padded and shuffled; the responder answers an accept only when one tag
+is a candidate of its own, and otherwise closes the tunnel having sent nothing; the dialer sends its
+hello only after the accept checks. The pair key is
+``IdentityService/meshDialProofKey(with:)``, under the namespace's `keyDerivation.meshDialProofV1`. A
+0.1.x phone's hello is refused by its version, so the two releases do not meet on the mesh. The mesh
+`sid` also became part of the posture: ``MeshNetworkManager`` re-mints it at every radio start and every
+900 s presence epoch, and the radio re-mints its Bonjour name and TLS identity with it.
 
 The pair session's radio, the recipe-share radio, is on QUIC (P9 item 3 pass 2:
 `NetworkPairSession`, behind the `ProximityPairRadioSession` seam, on its pair profile's row:
@@ -1952,13 +1966,21 @@ is a search that finds nothing.
 
 **What the QUIC radio adds, and what it deliberately does not.** It wears a `ProximityPairPosture`
 minted fresh at every `start()` and every resume — a random instance name, a new TLS identity and a
-new `sid`, with **no rotation timer**, because the radio's lifetime is a Food-tab visit. That is an
-improvement on what it replaces rather than a reproduction: the retired radio advertised the
-persistent, device-name-derived peer identity, so a passive Bonjour scanner could read the device's
-name and link a person's sightings across days. **The residual, stated rather than hidden:** an
-ephemeral name does not make a recipe advertiser unlinkable, because the TXT record still carries the
-user's chosen display name on purpose — the picker on the other phone shows it. What the posture
-removes is the identifier the user never chose. It also adds the one thing the presence radio has
+new `sid`, and a fresh one again whenever its owner's record changes
+(``ProximityPairSession/setNameDisclosure(toEveryone:friendTags:)``, which a host calls at every
+presence epoch, so in practice at least every 900 s). That is an improvement on what it replaces rather
+than a reproduction: the retired radio advertised the persistent, device-name-derived peer identity, so
+a passive Bonjour scanner could read the device's name and link a person's sightings across days.
+**Who sees the name (SEC-L29, 0.2.0).** Through 0.1.2 the TXT record carried the user's chosen display
+name for anyone nearby. It now carries none unless the host opts in with `toEveryone: true`, which
+Fernlet offers as an off-by-default setting. In its place the record carries the host's rotating
+pairwise friend tags (`t`, `t1`, chunked like presence's, at most
+24): a kept friend's phone matches one through ``ProximityPairSession/resolveFriendName`` and names the
+row from its own records, ahead of any name the record advertises, and a stranger's phone shows the
+host's peer-name floor. The host derives these tags under a purpose of its own, so they never equal
+its presence tags and a scanner cannot join the two radios' records by a shared token. The residual:
+a stranger can still see that a phone is advertising the recipe radio, and how many friend tags it
+carries (at most 24). It also adds the one thing the presence radio has
 none of: a **per-transfer-stream acceptor**. A recipe crosses as ONE sealed frame, but a recipe
 carrying a picture clears ``MeshTransferStreamTable/bulkFloorBytes`` and takes a stream of its own,
 exactly as a friend photo does on the mesh, so it cannot park the pairing's control stream behind
@@ -1969,7 +1991,10 @@ whose disconnect it hears, and a peer whose failure was one-sided (it refused th
 paired and never re-minted) comes back to the resumed browser under an unchanged record, so the first
 sighting of each record after a resume is announced whether or not it changed. Announcing on change
 alone left such a peer out of the picker, and refused its dial, until a refresh
-(`ProximityPairSessionTests`).
+(`ProximityPairSessionTests`). A dial that fails **before its channel opens** never paired, so it
+never pauses or resumes the radio; since 0.2.0 the radio re-announces that peer's record at once,
+while its endpoint is still browsed, which is the same debt paid without the resume
+(`PairDialAndEnvelopeFixesTests`).
 
 **An inbound connection is pending until its dial hello is read, and only a read hello counts as
 connecting** (0.1.1). The connecting window used to count every pending connection but the one being
@@ -1986,10 +2011,10 @@ hello. A hello-bearing pending connection exists only inside its own ruling, so 
 other reads of the window narrow too: a silent connection no longer fails the user's sends as
 connecting to another device, and no longer keeps a browser or listener failure at runtime from
 standing the radio down to retry, which then also cancels an inbound dial whose hello is still being
-read. Every booking and every end of a pending connection writes a line (`recipe.quic.pendingBooked`;
-`recipe.quic.pendingEnded`, with why and how far it got), `recipe.quic.helloRefused` names its reason
+read. Every booking and every end of a pending connection writes a line (`pair.quic.pendingBooked`;
+`pair.quic.pendingEnded`, with why and how far it got), `pair.quic.helloRefused` names its reason
 (`unreadable`, `unresolved`, `ownerRefused`,
-`keptEstablished` or `tunnelHeld`) and how many connections were pending, and `recipe.quic.connected`
+`keptEstablished` or `tunnelHeld`) and how many connections were pending, and `pair.quic.connected`
 names the kind of interface its connection runs over (`interface`: `wifi`, `wiredEthernet`, `loopback`,
 `cellular`, `other` or `unknown`).
 
@@ -3665,6 +3690,13 @@ There is no application receipt and no queued or routed path, so an owner's conf
 "sent" and never "delivered", and there is no "will arrive later" to report. `sendIncomplete` is the
 one cause where the other person may still have it; every other cause means nothing left this device.
 The causes are tokens: the app maps them to localized copy.
+
+**Who sees the name (0.2.0).** The session's record carries no display name unless its host calls
+``ProximityPairSession/setNameDisclosure(toEveryone:friendTags:)`` with `toEveryone: true`
+(``ProximityPairSession/advertisesNameToEveryone``). The friend tags it hands in are what a kept
+friend's phone recognizes the device by, and ``ProximityPairSession/resolveFriendName`` is how this
+device names a browsed row from those tags. Fernlet derives the tags from its presence pair secrets
+under its own recipe label and re-derives them every presence epoch.
 
 - ``ProximityPairSession``
 - ``ProximityPairProfile``

@@ -105,6 +105,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// it is never sent the identity introduction, a ranging token or a capability. Read on every
     /// introduction through ``roster``, so a change takes effect on the next tunnel; never persisted.
     @ObservationIgnored public var admissibleStrangerSigningKeys: Set<Data>?
+    /// The X25519 public keys of the peers this device may meet on the mesh, most wanted first: the
+    /// host's kept friends and the people a tap matched (0.2.0). The mesh's dial proof (run before
+    /// either side sends the hello that carries its long-term key) is
+    /// built over these and the gossiped mesh's members; a peer on neither list never completes a
+    /// tunnel and is sent no key. Empty by default, which leaves only the mesh's own members.
+    @ObservationIgnored public var dialProofPeerKeyAgreementKeys: [Data] = []
 
     public var meshError: String?
 
@@ -261,7 +267,15 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// that restarts mid-vote has simply missed it, and only the COMPLETED removal — an ordinary
     /// `member-removal.v1` record — is durable and mergeable.
     @ObservationIgnored private(set) var removalQuorum = MeshRemovalQuorum()
+    /// The `sid` this device advertises and names in its hello. Since 0.2.0 it is part of the radio's
+    /// posture rather than of the launch: re-minted at every radio start and every 900 s presence
+    /// epoch (``rotateSessionIDIfNeeded(at:)``), so a scanner cannot link this phone's sightings for as
+    /// long as the app runs.
     @ObservationIgnored private var sessionID = UUID().uuidString
+    /// The presence epoch ``sessionID`` was minted in.
+    @ObservationIgnored private var sessionIDEpoch = IdentityService.presenceEpoch(at: Date())
+    /// The loop that rotates ``sessionID`` at each epoch boundary while the radios are up.
+    @ObservationIgnored private var sessionIDRotationTask: Task<Void, Never>?
     private static let maxPeerRetries = 3
     private static let maxLocallyKickedPeers = 32
 
@@ -478,6 +492,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         rotationDebounceTask?.cancel()
         beaconTimer?.cancel()
         rotationSyncTask?.cancel()
+        sessionIDRotationTask?.cancel()
     }
 
     // MARK: - Routed addressability (plan step A0.5.1, S6)
@@ -10657,7 +10672,10 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // (or a fresh attempt after a transient failure) drops the banner instead of pinning it up
         // over a search that is now healthy.
         discoveryError = nil
+        // 0.2.0: a radio start is a new posture, so it wears a new `sid`.
+        mintSessionID(at: Date())
         transport.startRadios(discoveryInfo: currentDiscoveryInfo())
+        startSessionIDRotation()
         startObserving()
         // Door 3's clock paused with the radios (`armSessionGiveUpClock(now:)` refuses while the
         // doors are shut), so the way OUT of a hold is where it starts counting again — and only
@@ -10684,6 +10702,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         // Fernlet's observer clears the clothing shop's per-slot send tracking here.
         sessionObserver?.meshSearchDidStop()
         transport.stop()
+        stopSessionIDRotation()
         // Door 3's clock has nothing left to count once the radios are down — and door 1/2 have
         // already said the session is over by the time this funnel runs.
         cancelSessionGiveUpClock()
@@ -10704,12 +10723,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         endSessionIfEnded()
     }
 
-    /// The advertised TXT payload: version + the per-launch session id, plus the mesh identifiers
+    /// The advertised TXT payload: version + the per-posture session id (0.2.0: re-minted at each radio start and each 900 s epoch), plus the mesh identifiers
     /// when an OPEN mesh is up.
     ///
     /// Deliberately NO display name. Nothing on this radio ever read `discoveryInfo["name"]` — the
     /// recipe radio's recipient picker is the only reader anywhere, and it runs on
-    /// `fernlet-recipe` — and unlike `sid`, a per-launch random UUID, a proximity display name is
+    /// `fernlet-recipe` — and unlike `sid`, a per-posture random UUID, a proximity display name is
     /// stable across launches and locations, so a passive Bonjour scanner could link sightings of
     /// one person. A peer learns our name only inside the signed identity introduction, after a
     /// connection. Same hygiene rule as the presence record, which carries the version and its host's
@@ -10735,6 +10754,53 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
         transport.updateDiscoveryInfo(currentDiscoveryInfo())
     }
 
+    /// Mints a fresh ``sessionID`` for the epoch containing `now`.
+    private func mintSessionID(at now: Date) {
+        sessionID = UUID().uuidString
+        sessionIDEpoch = IdentityService.presenceEpoch(at: now)
+    }
+
+    /// Rotates ``sessionID`` when `now` is past the epoch it was minted in, and republishes the record
+    /// (which re-mints the radio's instance name and TLS identity with it). Answers whether it rotated.
+    @discardableResult
+    func rotateSessionIDIfNeeded(at now: Date) -> Bool {
+        guard IdentityService.presenceEpoch(at: now) != sessionIDEpoch else { return false }
+        mintSessionID(at: now)
+        updateDiscoveryInfo()
+        ProximityAudit.log("mesh.quic.sessionIDRotated", context: [:])
+        return true
+    }
+
+    /// Arms the rotation loop: each pass sleeps to the next epoch boundary, in steps of at most 30 s
+    /// (a coalesced timer is then late by one step, not a whole epoch), and rotates. Cancelled by
+    /// ``stopSessionIDRotation()``.
+    private func startSessionIDRotation() {
+        sessionIDRotationTask?.cancel()
+        // host-pin: timer — stored handle, synchronous main-actor body (`rotateSessionIDIfNeeded(at:)`) (HP2)
+        sessionIDRotationTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                let now = Date().timeIntervalSince1970
+                let into = now.truncatingRemainder(dividingBy: IdentityService.presenceEpochSeconds)
+                let step = min(30, max(1, IdentityService.presenceEpochSeconds - into + 0.5))
+                do { try await Task.sleep(for: .seconds(step)) } catch { return }
+                guard let self else { return }
+                self.rotateSessionIDIfNeeded(at: Date())
+            }
+        }
+    }
+
+    /// Stands the rotation loop down with the radios.
+    private func stopSessionIDRotation() {
+        sessionIDRotationTask?.cancel()
+        sessionIDRotationTask = nil
+    }
+
+    /// The `sid` this device advertises right now.
+    var sessionIDForTesting: String { sessionID }
+
+    /// This device's own X25519 public key, which the dial proof's candidates never hold.
+    var identityKeyAgreementPublicKeyForTesting: Data { identity.localKeyAgreementPublicKey }
+
     /// Decides which half of a mutually-discovered pair dials the other (the MC invitation, once).
     ///
     /// Both peers browse AND advertise, so both discover each other; without a tie-break both
@@ -10756,7 +10822,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     ///     always less than "i". `localFingerprint > "iPhone"` was therefore false on BOTH sides,
     ///     every time, and the transport's `invite` was unreachable from either call site.
     ///
-    /// `sid` is the correct discriminator: a per-launch random UUID that both sides already
+    /// `sid` is the correct discriminator: a per-posture random UUID that both sides already
     /// broadcast in `currentDiscoveryInfo()`. It needs no new field on the wire, and — unlike a
     /// fingerprint — it is not linkable across sessions, so publishing it costs no privacy.
     /// Internal rather than private so the symmetry property can be asserted directly — the bug
@@ -10772,12 +10838,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
     /// The tie-break itself, over the two values it actually compares.
     ///
     /// Split out from ``shouldInitiateInvite(to:)`` for one reason: the instance method can only
-    /// ever be evaluated with THIS manager's random per-launch `sid` on the left, so a test can
+    /// ever be evaluated with THIS manager's random `sid` on the left, so a test can
     /// pin one side of a pair but never enumerate both sides across a chosen ordering — and
     /// "exactly one of the two sides dials" is the whole property. Nothing about the decision
     /// changed; the instance method reads the peer's advertisement and delegates here.
     ///
-    /// Equal session ids deliberately return false on BOTH sides. `sid` is per-launch and random,
+    /// Equal session ids deliberately return false on BOTH sides. `sid` is per-posture and random,
     /// so two advertisements carrying the same one are our own echo (a stale Bonjour cache of this
     /// process — the ghost `PresenceManager` excludes by hand), and dialling ourselves is never
     /// right. The cost is that a peer which replays our `sid` back at us can suppress our invite;
@@ -12609,6 +12675,7 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             finalPayload = payloadData
             encryption = .none
         }
+        let signedAt = Date()
         guard let envelope = try? ProximityIdentityEnvelope.signed(
             identityService: identity,
             senderDisplayName: committed ? displayName : "",
@@ -12620,7 +12687,12 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             // this token to a `String(localized:)` label without the sender's locale entering the
             // signed bytes. DO NOT "improve" this into a friendly sentence, and never localize it.
             payloadSummary: PayloadSummary(title: token),
-            payload: finalPayload
+            payload: finalPayload,
+            // 0.2.0: every mesh envelope carries an expiry, the pair coordinator's five minutes, so a
+            // captured frame cannot be replayed into a later tunnel once the replay cache that saw it
+            // is gone (a relaunch). One hop only: a routed item's own frame keeps its own expiry.
+            createdAt: signedAt,
+            expiresAt: signedAt.addingTimeInterval(Self.meshEnvelopeLifetime)
         ) else {
             logSendFailure(token, stage: "sign")
             return false
@@ -12639,6 +12711,11 @@ public final class MeshNetworkManager: ProximityPayloadHandling {
             return false
         }
     }
+
+    /// How long a mesh envelope ``sendEnvelopeCore(_:encodable:sealTo:fingerprint:via:auditSendFailure:)``
+    /// signs stays valid: the pair coordinator's five minutes, past any honest hop and inside any clock
+    /// skew two phones on one room's Wi-Fi share.
+    nonisolated static let meshEnvelopeLifetime: TimeInterval = 5 * 60
 
     /// One audit line per non-transport send failure, naming the stage that failed. Carries only
     /// the payload token — never payload content or peer identity.
@@ -14568,6 +14645,25 @@ extension MeshNetworkManager: MeshIntroductionAuthority {
 
     func signChannelIntroduction(_ transcript: Data) throws -> Data {
         try identity.sign(transcript, purpose: namespace.family.purposes.signature.meshChannelIntroductionV1)
+    }
+
+    /// The dial proof's candidates (0.2.0): the host's list first (``dialProofPeerKeyAgreementKeys``,
+    /// its kept friends and the people a tap matched, most recently seen first), then the gossiped
+    /// mesh's other members, without this device's own key or a repeat.
+    var dialProofKeyAgreementKeys: [Data] {
+        let own = identity.localKeyAgreementPublicKey
+        var seen: Set<Data> = [own]
+        var keys: [Data] = []
+        let members = currentMesh?.members.map(\.keyAgreementPublicKey) ?? []
+        for key in (dialProofPeerKeyAgreementKeys + members).prefix(MeshDialProof.maxResponderCandidates * 2)
+        where !key.isEmpty && seen.insert(key).inserted {
+            keys.append(key)
+        }
+        return Array(keys.prefix(MeshDialProof.maxResponderCandidates))
+    }
+
+    func dialProofKey(with keyAgreementPublicKey: Data) throws -> SymmetricKey {
+        try identity.meshDialProofKey(with: keyAgreementPublicKey)
     }
 }
 

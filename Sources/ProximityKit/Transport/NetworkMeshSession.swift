@@ -564,6 +564,9 @@ final class NetworkMeshSession: NetworkChannelHost {
     private var browserTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var instanceName: String
+    /// The instance name worn before the last `sid` rotation, excluded from the browse results as this
+    /// device's own until the stale registration ages out.
+    private var previousInstanceName: String?
 
     /// The random salt every peer label in this session's diagnostics is taken under.
     ///
@@ -665,8 +668,19 @@ final class NetworkMeshSession: NetworkChannelHost {
     /// The fields are stored before either guard on purpose: ``resumeDiscovery()`` re-mints the
     /// listener from `advertisedFields`, so what a held radio is told here is what it advertises
     /// when it comes back (review findings F-3/F-5).
+    ///
+    /// **A new `sid` is a new posture** (0.2.0): when the record's `sid` changed, which the manager
+    /// does at every radio start and every 900 s presence epoch, the instance name and the TLS
+    /// identity are re-minted with it, so nothing on the air links the old advertisement to the new
+    /// one. Live tunnels keep the connections, and the `sid`s, their introductions verified.
     func updateDiscoveryInfo(_ discoveryInfo: [String: String]) {
+        let previousSessionID = advertisedFields[MeshLinkAdvertisement.sessionIDKey]
         advertisedFields = MeshLinkAdvertisement.publishedFields(from: discoveryInfo)
+        if isRunning, advertisedFields[MeshLinkAdvertisement.sessionIDKey] != previousSessionID {
+            previousInstanceName = instanceName
+            instanceName = MeshLinkAdvertisement.randomInstanceName(prefix: instanceNamePrefix)
+            if let fresh = try? EphemeralMeshTLSIdentity.mint(commonName: tlsCommonName) { tlsIdentity = fresh }
+        }
         // Re-minting here would put the Bonjour registration and the accept path back up behind
         // shut doors — the silent un-pause the retired `MeshMultipeerSession` always guarded, and
         // the reason a republish during a hold must only be remembered.
@@ -1405,7 +1419,7 @@ private extension NetworkMeshSession {
         let now = Date()
         let bounded = endpoints.prefix(MeshSessionIdentityMap.maxTrackedEndpoints)
         var seen: Set<MeshLinkKey> = []
-        for endpoint in bounded where endpoint.name != instanceName {
+        for endpoint in bounded where endpoint.name != instanceName && endpoint.name != previousInstanceName {
             let key = MeshLinkKey(endpoint.id)
             seen.insert(key)
             noteBrowsed(endpoint, key: key, at: now)
@@ -2379,6 +2393,13 @@ private extension NetworkMeshSession {
             purposes: purposes
         )
         do {
+            // 0.2.0: no hello, and so no long-term key, crosses until the dial proof says the other
+            // end holds a pair key with one of this device's candidates.
+            guard try await proveDial(role: role, binding: binding, authority: authority, over: stream) else {
+                MeshTransportConsoleLog.echo("refused noDialProof as \(role)")
+                report("A QUIC tunnel was refused: noDialProof")
+                return nil
+            }
             let peerHello = try await openHellos(role: role, local: exchange.localHello, over: stream)
             if let rejection = exchange.receive(
                 peerHello, roster: authority.roster, nonces: &introductionNonces,
@@ -2404,6 +2425,33 @@ private extension NetworkMeshSession {
             report("A QUIC channel introduction did not complete: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    /// Runs the ``MeshDialProof`` exchange that precedes the hellos, in the order the role fixes: the
+    /// dialer sends its frame, the responder answers an accept only on a match, and the dialer checks
+    /// it. Answers whether both hellos may now be sent; a responder that found no match sends nothing.
+    ///
+    /// A candidate whose pair key cannot be derived (a malformed key) is skipped, never fatal.
+    func proveDial(
+        role: MeshChannelRole,
+        binding: Data,
+        authority: any MeshIntroductionAuthority,
+        over stream: Network.QUIC.Stream<QUICStream>
+    ) async throws -> Bool {
+        let candidates = authority.dialProofKeyAgreementKeys
+        let limit = role == .initiator ? MeshDialProof.slotCount : MeshDialProof.maxResponderCandidates
+        let keys = candidates.prefix(limit).compactMap { try? authority.dialProofKey(with: $0) }
+        guard role == .responder else {
+            try await sendIntroductionFrame(MeshDialProof.frame(keys: keys, binding: binding), over: stream)
+            let accept = try await receiveIntroductionFrame(MeshDialProof.Accept.self, from: stream)
+            return MeshDialProof.verify(accept, keys: keys, binding: binding) != nil
+        }
+        let frame = try await receiveIntroductionFrame(MeshDialProof.Frame.self, from: stream)
+        guard let index = MeshDialProof.match(frame, keys: keys, binding: binding) else { return false }
+        let accept = MeshDialProof.Accept(
+            version: MeshDialProof.version, proof: MeshDialProof.accept(key: keys[index], binding: binding))
+        try await sendIntroductionFrame(accept, over: stream)
+        return true
     }
 
     /// This device's half of the hello. The `sid` is the one it advertises, so a peer can match this

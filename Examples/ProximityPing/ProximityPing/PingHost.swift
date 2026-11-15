@@ -116,7 +116,7 @@ nonisolated final class PingAuditSink: ProximityAuditSink {
 
     /// One audit line: its event token and its context.
     struct Line: Sendable {
-        /// The event token, such as `recipe.quic.connected`.
+        /// The event token, such as `pair.quic.connected`.
         let event: String
         /// The line's context, by key.
         let context: [String: String]

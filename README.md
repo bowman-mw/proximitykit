@@ -119,7 +119,7 @@ Its one screen shows:
 
 The numbers have limits. The app times a round trip itself, from the tap to the pong, so the first
 ping also counts discovery, the QUIC handshake and the identity exchange. The byte counts are
-payloads before sealing, not bytes on the wire. The log's `recipe.quic.connected` line names the
+payloads before sealing, not bytes on the wire. The log's `pair.quic.connected` line names the
 kind of interface the connection runs over (`interface=wifi`, `loopback` and so on). The
 heartbeat's own round trip and each envelope's encoded size reach a host that binds a
 `ProximityPairSession.inspector` (`init(host:profile:inspector:)`), which every pairing's coordinator

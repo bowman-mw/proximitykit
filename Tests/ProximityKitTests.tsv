@@ -10,7 +10,7 @@
 # parameterized test is one). Rows sorted by suite. A suite added, moved, renamed or deleted edits its row, and the
 # suite's measured row count and declared-test sum, in the same commit.
 suite	file	cells
-CrossVersionFixtureTests	CrossVersionFixtureTests.swift	29
+CrossVersionFixtureTests	CrossVersionFixtureTests.swift	32
 EphemeralMeshTLSIdentityTests	NetworkMeshTransportTests.swift	5
 ExampleNamespaceTests	ExampleNamespaceTests.swift	5
 FakePeerTransportTests	PeerTransportNeutralityTests.swift	10
@@ -31,6 +31,7 @@ MeshCustodyReceiptVerifierTests	MeshCustodyReceiptTests.swift	5
 MeshDerivedRosterTests	MeshMembershipRecordsTests.swift	9
 MeshDialPolicyManagerTests	MeshDialPolicyTests.swift	6
 MeshDialPreferenceTests	NetworkMeshTransportTests.swift	3
+MeshDialProofTests	MeshDialProofTests.swift	6
 MeshEpochAcceptanceTests	MeshEpochModelTests.swift	4
 MeshEpochGraceTests	MeshRotationTriggerTests.swift	1
 MeshEpochKeyringTests	MeshEpochModelTests.swift	5
@@ -129,6 +130,8 @@ PackageTestHostTests	PackageTestHostTests.swift	4
 PackageTestHygieneTests	PackageTestHygieneTests.swift	6
 PackageTestSupportTests	PackageTestSupportTests.swift	4
 PackageTestTreeWallTests	PackageTestTreeWallTests.swift	6
+PairDialAndEnvelopeFixesTests	PairDialAndEnvelopeFixesTests.swift	3
+PairNameDisclosureTests	PairNameDisclosureTests.swift	4
 PeerHandleIdentityTests	PeerTransportNeutralityTests.swift	5
 PresenceEpochPostureTests	PresenceEpochPostureTests.swift	9
 PresenceOverQUICTests	PresenceOverQUICTests.swift	2

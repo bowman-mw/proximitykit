@@ -2426,7 +2426,7 @@ struct MeshChannelIntroductionTranscriptTests {
     @Test func everyTranscriptFieldReachesTheSignedBytes() {
         let base = canonicalBytes(for: Self.transcript())
         let variants: [String: MeshChannelIntroductionTranscript] = [
-            "protocolVersion": Self.transcript(protocolVersion: 2),
+            "protocolVersion": Self.transcript(protocolVersion: MeshChannelIntroductionFormat.protocolVersion + 1),
             "meshID": Self.transcript(meshID: UUID()),
             "epochRef": Self.transcript(epochRef: "8"),
             "initiatorSigningPublicKey": Self.transcript(initiatorSigningPublicKey: Data(repeating: 9, count: 32)),

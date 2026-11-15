@@ -139,12 +139,18 @@ import Testing
         "0.1.0/verify-qr-transcript.bin": "7a78a366715c24d8513d0fe7caa04902f1cb073001c7f3a204b5d68cd97b0983",
         "0.1.0/verify-qr-url.txt": "cd9aca283b680775833321c4bec5077a2b203884e5beebaf0e161d8799a2f171",
         "0.1.0/verify-response-transcript.bin": "465b6e1b538843c99e4e2287905e09bb37afb6421a16f4140f4328195b8f6b11",
-        "0.1.0/verify-response.json": "780261a1651600d0b7d008f5d036f4a74e7f2f9d18dc464e60372753bf851d9b"
+        "0.1.0/verify-response.json": "780261a1651600d0b7d008f5d036f4a74e7f2f9d18dc464e60372753bf851d9b",
+        "0.2.0/channel-hello-initiator.bin": "c73cc3b39c07f2cef6e9c4e33fcf8ddfc52a8fbe970c8f0071fff62fcad5ba17",
+        "0.2.0/channel-hello-responder.bin": "27d71592626aa4f46d3d198831b9a32401476cb697b0a17ae403944dfe295585",
+        "0.2.0/channel-introduction.bin": "6513c9f3888599b6a97a5ee70ba84a6b5ee5865225def5ba16c6b6f3d4de7f21",
+        "0.2.0/dial-proof-accept.bin": "6984f2cb29a092e6f2f858fa18cb582ce81f5bcbc7108f67e0ba5b879e7f9d9f",
+        "0.2.0/dial-proof-frame.bin": "900c68afb69075266c9d03f734045e559d5f4b201c2a8480ab20b7256278afd3",
+        "0.2.0/txt-records.json": "a07ce95c92b97b02fc6639c7e58ce79e332d3659b196ef49264a2054481e9a7f"
     ]
 
-    /// The fewest fixture files the folder walk may read: the 58 of 0.1.0. A walk that reads fewer is a
+    /// The fewest fixture files the folder walk may read: the 58 of 0.1.0 and the 6 of 0.2.0. A walk that reads fewer is a
     /// bundle that lost its resources, not a smaller format list.
-    let fixtureFloor = 58
+    let fixtureFloor = 64
 
     // MARK: - 0.1.0's world
 
@@ -362,11 +368,13 @@ import Testing
         #expect(frame.dropFirst(NetworkMeshWire.headerByteCount) == (try fixture("0.1.0/identity-envelope-v2.json")))
     }
 
-    /// **The channel introduction reviews as accepted.** Bob, the responder, reads Alice's and his own
-    /// hello frames and her signed introduction under the handshake's ceiling, admits her hello, binds the
-    /// transcript to the channel binding both ends derived, and accepts her: today's transcript bytes are
-    /// the ones she signed.
-    @Test func theChannelIntroductionReviewsAsAccepted() throws {
+    /// **The 0.1.0 channel introduction still decodes, and is refused by its version** (0.2.0's
+    /// break, accepted by the owner 2026-11-15). Bob, the responder, reads Alice's and his own hello
+    /// frames and her signed introduction under the handshake's ceiling, and today's exchange refuses
+    /// her version-1 hello as `unsupportedProtocolVersion` before anything else: a 0.1.x phone and a
+    /// 0.2.0 phone do not meet on the mesh. The transcript her signature covers still binds, so the
+    /// bytes themselves are read as they were written.
+    @Test func theChannelIntroductionOf010DecodesAndIsRefusedByItsVersion() throws {
         let cast = try provisionedCast()
         let aliceHello = try framedJSON(MeshChannelHello.self, "0.1.0/channel-hello-initiator.bin")
         let bobHello = try framedJSON(MeshChannelHello.self, "0.1.0/channel-hello-responder.bin")
@@ -376,15 +384,13 @@ import Testing
             protocolVersion: 1, meshID: meshID, epochRef: epoch.canonicalString, signingPublicKey: cast.alice.localSigningPublicKey,
             nonce: Data(repeating: 0x11, count: 16), sessionID: "alice-sid"))
         #expect(bobHello.signingPublicKey == cast.bob.localSigningPublicKey && bobHello.sessionID == "bob-sid")
+        #expect(introduction.channelBindingHash == Data(repeating: 0x5C, count: 32))
         var exchange = MeshChannelIntroductionExchange(role: .responder, localHello: bobHello, purposes: .packageTest)
         var nonces = MeshIntroductionNonceCache()
         let refusal = exchange.receive(aliceHello, roster: MeshIntroductionRoster(members: [cast.alice.localSigningPublicKey]),
                                        nonces: &nonces)
-        #expect(refusal == nil, "Bob refused Alice's hello: \(String(describing: refusal))")
-        let transcript = exchange.bind(channelBindingHash: Data(repeating: 0x5C, count: 32))
-        #expect(transcript != nil && introduction.channelBindingHash == Data(repeating: 0x5C, count: 32))
-        #expect(exchange.review(introduction) == .accepted(MeshVerifiedPeer(
-            signingPublicKey: cast.alice.localSigningPublicKey, fingerprint: alice, sessionID: "alice-sid")))
+        #expect(refusal == .unsupportedProtocolVersion, "a 0.1.0 hello was not refused by its version: \(String(describing: refusal))")
+        #expect(MeshChannelIntroductionFormat.protocolVersion == 2)
     }
 
     /// **The dial hellos decode.** The pair radio's hello reads its session id and re-encodes byte for
@@ -415,6 +421,60 @@ import Testing
         #expect(MeshLinkAdvertisement.advertisement(from: mesh) == mesh && mesh["fp"] == nil && mesh["sid"] == "alice-sid")
         #expect(MeshLinkAdvertisement.publishedFields(
             from: ["sid": "alice-sid", "fp": "withheld-fingerprint", "name": "Alice", "mode": "mesh"]) == mesh)
+    }
+
+    // MARK: - 0.2.0
+
+    /// **0.2.0's channel introduction reviews as accepted.** Bob, the responder, reads Alice's and his own
+    /// protocol-version-2 hellos and her signed introduction, admits her hello, binds the transcript, and
+    /// accepts her: today's transcript bytes are the ones she signed.
+    @Test func theChannelIntroductionOf020ReviewsAsAccepted() throws {
+        let cast = try provisionedCast()
+        let aliceHello = try framedJSON(MeshChannelHello.self, "0.2.0/channel-hello-initiator.bin")
+        let bobHello = try framedJSON(MeshChannelHello.self, "0.2.0/channel-hello-responder.bin")
+        let introduction = try framedJSON(MeshChannelIntroduction.self, "0.2.0/channel-introduction.bin")
+        #expect(aliceHello.protocolVersion == 2 && bobHello.protocolVersion == 2)
+        #expect(aliceHello.signingPublicKey == cast.alice.localSigningPublicKey && bobHello.sessionID == "bob-sid")
+        var exchange = MeshChannelIntroductionExchange(role: .responder, localHello: bobHello, purposes: .packageTest)
+        var nonces = MeshIntroductionNonceCache()
+        let refusal = exchange.receive(aliceHello, roster: MeshIntroductionRoster(members: [cast.alice.localSigningPublicKey]),
+                                       nonces: &nonces)
+        #expect(refusal == nil, "Bob refused Alice's 0.2.0 hello: \(String(describing: refusal))")
+        let transcript = exchange.bind(channelBindingHash: Data(repeating: 0x5C, count: 32))
+        #expect(transcript != nil && introduction.channelBindingHash == Data(repeating: 0x5C, count: 32))
+        #expect(exchange.review(introduction) == .accepted(MeshVerifiedPeer(
+            signingPublicKey: cast.alice.localSigningPublicKey, fingerprint: alice, sessionID: "alice-sid")))
+    }
+
+    /// **0.2.0's dial proof reads, and its accept re-encodes.** Bob matches Alice's frame with the pair key
+    /// he derives for her today, and a stranger's key matches nothing; Alice believes Bob's accept; and
+    /// today's accept for that key on that binding is the fixture's bytes, so the key derivation itself
+    /// has not moved.
+    @Test func theDialProofOf020ReadsAndItsAcceptReEncodes() throws {
+        let cast = try provisionedCast()
+        let binding = Data(repeating: 0x5C, count: 32)
+        let frame = try framedJSON(MeshDialProof.Frame.self, "0.2.0/dial-proof-frame.bin")
+        let accept = try framedJSON(MeshDialProof.Accept.self, "0.2.0/dial-proof-accept.bin")
+        let bobKey = try cast.bob.meshDialProofKey(with: cast.alice.localKeyAgreementPublicKey)
+        let aliceKey = try cast.alice.meshDialProofKey(with: cast.bob.localKeyAgreementPublicKey)
+        let strangerKey = try cast.carol.meshDialProofKey(with: cast.dave.localKeyAgreementPublicKey)
+        #expect(frame.isWellFormed && MeshDialProof.match(frame, keys: [strangerKey, bobKey], binding: binding) == 1)
+        #expect(MeshDialProof.match(frame, keys: [strangerKey], binding: binding) == nil)
+        #expect(MeshDialProof.verify(accept, keys: [aliceKey], binding: binding) == 0)
+        #expect(accept.proof == MeshDialProof.accept(key: bobKey, binding: binding), "the accept no longer re-encodes")
+    }
+
+    /// **0.2.0's pair record reads as it was published.** It carries friend tags and no name, and today's
+    /// publisher writes the same record from the same input.
+    @Test func thePairRecordOf020ReadsAsItWasPublished() throws {
+        let records = try decode([String: [String: String]].self, "0.2.0/txt-records.json")
+        let pair = try #require(records["pair"])
+        #expect(pair["name"] == nil && ProximityPairAdvertisement.sessionID(from: pair, mode: "pair") == "alice-sid")
+        #expect(ProximityPairAdvertisement.friendTags(from: ProximityPairAdvertisement.advertisement(from: pair), mode: "pair")
+                == ["tag0001", "tag0002"])
+        #expect(ProximityPairAdvertisement.publishedFields(
+            from: ProximityPairAdvertisement.ownerFields(mode: "pair", name: "", friendTags: ["tag0002", "tag0001"]),
+            sessionID: "alice-sid") == pair)
     }
 
     // MARK: - The mesh payloads

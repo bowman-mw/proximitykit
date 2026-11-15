@@ -79,6 +79,7 @@ import Testing
             (keyDerivation + "meshRoutedContentKeyWrapV1", .keyDerivationSalt),
             (keyDerivation + "meshSessionContextV1", .columnSeal),
             (keyDerivation + "meshRoutedStoreV1", .columnSeal),
+            (keyDerivation + "meshDialProofV1", .keyDerivationSalt),
             (aead + "proximityTransportV2", .aeadAssociatedData),
             (aead + "meshGroupKeyWrapV2", .aeadAssociatedData),
             (aead + "meshEncryptedMetadataV2", .aeadAssociatedData),
@@ -93,7 +94,7 @@ import Testing
             (hash + "meshEpochIDV1", .hashDomain(.rawPrefix))
         ]
         let rows = AlphaApp.namespace().labelRows
-        #expect(rows.count == 39, "17 canonical + 2 QR + the legacy pair + 6 + 5 + 7")
+        #expect(rows.count == 40, "17 canonical + 2 QR + the legacy pair + 7 + 5 + 7")
         #expect(rows.map { $0.field } == expected.map { $0.0 })
         #expect(rows.map { $0.purpose.role } == expected.map { $0.1 })
     }
@@ -120,7 +121,7 @@ import Testing
             pending.append(contentsOf: children.reversed())
         }
         #expect(pending.isEmpty, "the walk finished inside its bound")
-        #expect(reflected.count == 39)
+        #expect(reflected.count == 40)
         #expect(reflected.map { $0.field } == namespace.labelRows.map { $0.field })
         #expect(reflected.map { $0.purpose } == namespace.labelRows.map { $0.purpose })
     }
@@ -135,11 +136,11 @@ import Testing
             installation: AlphaApp.installation()
         )
         #expect(refused.soundness == .sound)
-        #expect(refused.labelRows.count == 37)
+        #expect(refused.labelRows.count == 38)
         #expect(!refused.labelRows.contains { $0.field.contains(".legacyV1.") })
 
         let accepted = AlphaApp.namespace().labelRows
-        try #require(accepted.count == 39)
+        try #require(accepted.count == 40)
         #expect(accepted[18].field == "family.purposes.signature.proximityQRResponseV1")
         #expect(accepted[19].field == "family.purposes.signature.legacyV1.identityEnvelopeV1")
         #expect(accepted[20].field == "family.purposes.signature.legacyV1.meshAdmissionTokenV1")
@@ -263,7 +264,7 @@ import Testing
             if case .labelIsPrefix(shorter: field, longer: _) = violation { return true }
             return false
         }
-        #expect(violations.count == 39 && prefixes.count == 38, "malformed, then a prefix of each of the other 38")
+        #expect(violations.count == 40 && prefixes.count == 39, "malformed, then a prefix of each of the other 39")
     }
 
     /// Two labels with the same bytes, wherever they sit: across groups, and in the verify-only pair.
@@ -329,11 +330,11 @@ import Testing
         )
         #expect(declared.soundness == .sound)
         let rows = declared.labelRows
-        try #require(rows.count == 40)
-        #expect(rows[38].field == "family.purposes.hash.meshEpochIDV1", "the feature row follows the hash rows")
-        #expect(rows[39].field == "family.purposes.feature.pairV1")
-        #expect(rows[39].purpose.role == .keyDerivationSalt)
-        #expect(rows[39].purpose.data == Data("alpha.feature.pair.v1".utf8))
+        try #require(rows.count == 41)
+        #expect(rows[39].field == "family.purposes.hash.meshEpochIDV1", "the feature row follows the hash rows")
+        #expect(rows[40].field == "family.purposes.feature.pairV1")
+        #expect(rows[40].purpose.role == .keyDerivationSalt)
+        #expect(rows[40].purpose.data == Data("alpha.feature.pair.v1".utf8))
     }
 
     /// A declared feature salt that begins a protocol label, or that a protocol label begins, is a
@@ -921,7 +922,7 @@ import Testing
         #expect(companion.soundness == .sound)
         #expect(companion.installationCollisions(with: alpha).isEmpty)
         let shared = companion.familyCollisions(with: alpha)
-        #expect(shared.count == 39 + 3 + 3 + 1 + 1, "every label, service type and ALPN, the heartbeat and the scheme")
+        #expect(shared.count == 40 + 3 + 3 + 1 + 1, "every label, service type and ALPN, the heartbeat and the scheme")
         #expect(shared.allSatisfy { $0.kind == .equal && $0.field == $0.otherField })
     }
 
@@ -1121,7 +1122,8 @@ private enum AlphaApp {
             meshTLSExporterV1: "alpha.mesh.tls-exporter.v1",
             meshRoutedContentKeyWrapV1: "alpha.mesh.routed.content-key.v1",
             meshSessionContextV1: "alpha.mesh.session-context.v1",
-            meshRoutedStoreV1: meshRoutedStoreV1
+            meshRoutedStoreV1: meshRoutedStoreV1,
+            meshDialProofV1: "alpha.mesh.dial-proof.v1"
         )
     }
 
@@ -1308,7 +1310,8 @@ private enum BravoApp {
             meshTLSExporterV1: "bravo.mesh.tls-exporter.v1",
             meshRoutedContentKeyWrapV1: "bravo.mesh.routed.content-key.v1",
             meshSessionContextV1: "bravo.mesh.session-context.v1",
-            meshRoutedStoreV1: "bravo.mesh.routed-store.v1"
+            meshRoutedStoreV1: "bravo.mesh.routed-store.v1",
+            meshDialProofV1: "bravo.mesh.dial-proof.v1"
         )
         return ProximityNamespace.Family(
             purposes: ProximityNamespace.Purposes(

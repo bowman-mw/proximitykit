@@ -19,7 +19,7 @@
 /// key-agreement key, without which it signs nothing, seals nothing to a peer and opens nothing a
 /// peer sealed; ``IdentityService/encryptGroupKey(_:for:)`` first thing (the same event, at
 /// `groupKeyWrap`), because the wrap needs no provisioned key; and each radio's `start`
-/// (`mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound`, `recipe.quic.namespaceUnsound`, at
+/// (`mesh.quic.namespaceUnsound`, `presence.quic.namespaceUnsound`, `pair.quic.namespaceUnsound`, at
 /// `start`), before it mints a name or a certificate or brings a listener up, so nothing reaches a peer.
 /// Each door throws ``ProximityNamespaceError`` carrying every violation, exactly as
 /// ``ProximityNamespace/soundness`` records them, and writes nothing else.

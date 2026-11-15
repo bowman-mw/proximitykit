@@ -418,6 +418,15 @@ import Testing
             file: "ProximityPairSessionTests.swift", kind: .suite,
             invariant: packageKeychainSuiteInvariant),
         PackageKeychainFile(
+            file: "PairNameDisclosureTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "PairDialAndEnvelopeFixesTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
+            file: "MeshDialProofTests.swift", kind: .suite,
+            invariant: packageKeychainSuiteInvariant),
+        PackageKeychainFile(
             file: "CrossVersionFixtureTests.swift", kind: .suite,
             invariant: packageKeychainSuiteInvariant),
         PackageKeychainFile(
@@ -2074,9 +2083,11 @@ import Testing
     /// `TapRendezvousRotationTests` and `MeshStrangerDoorTests`, which hold the rendezvous's two privacy
     /// requirements (nothing identifying before both say yes; a pre-tap signal that rotates) and the
     /// mesh's narrowed stranger door; and 142 → 143 for `TapRendezvousWaitingTests` (a yes taken back, and
-    /// a wait that ends). A suite added, moved out or deleted changes it in the same commit,
+    /// a wait that ends). RAISED at G5's mesh privacy (0.2.0, 2026-11-15): 143 → 146 for
+    /// `PairNameDisclosureTests` (SEC-L29), `PairDialAndEnvelopeFixesTests` (the 0.1.x leftovers) and
+    /// `MeshDialProofTests` (the dial proof and the rotating mesh `sid`). A suite added, moved out or deleted changes it in the same commit,
     /// argued and measured; a deletion lowers it only with the retirement argued.
-    static let measuredInventoryRows = 143
+    static let measuredInventoryRows = 146
 
     /// The MEASURED sum of the rows' declared tests (rule I7). MEASURED at ProximityKit plan step A1.1.13
     /// (2026-10-14): 173 at A1.1.10 + this suite's 6. RAISED at A1.1.14 (2026-10-14): 179 → 185, for
@@ -2119,8 +2130,10 @@ import Testing
     /// `CrossVersionFixtureTests` gains (today's QR writer, today's scanner and today's displayer against
     /// 0.1.0's ceremony) and `MeshRoutedCustodyCommitGuardTests`' 1. RAISED at the tap rendezvous
     /// (2026-10-31): 1003 → 1014, for its three new suites' 6 + 3 + 2 cells; 1014 → 1015 for the waiting cell.
+    /// RAISED at G5's mesh privacy (0.2.0, 2026-11-15): 1015 → 1031 for `PairNameDisclosureTests`' 4, `PairDialAndEnvelopeFixesTests`' 3, `MeshDialProofTests`' 6 and
+    /// `CrossVersionFixtureTests`' three 0.2.0 cells.
     /// A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 1015
+    static let measuredDeclaredTests = 1031
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three
