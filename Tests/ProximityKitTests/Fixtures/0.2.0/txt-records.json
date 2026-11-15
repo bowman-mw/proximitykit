@@ -1,0 +1,8 @@
+{
+  "pair" : {
+    "mode" : "pair",
+    "sid" : "alice-sid",
+    "t" : "tag0001,tag0002",
+    "v" : "1"
+  }
+}

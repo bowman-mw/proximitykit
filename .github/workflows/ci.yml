@@ -289,9 +289,15 @@ jobs:
     # inventory 143 rows declaring 1015 tests. The xcodebuild lanes were not run for this note. swift
     # test's floor refused MIN_TESTS 1016, and the Walls step's declared floor refused MIN_SUITES 144.
     # ARITHMETIC CHECK: 1003 + 12 = 1015 and 139 + 4 = 143.
+    # RAISED 1015 -> 1031 and 143 -> 146 at 0.2.0's mesh privacy round on a Mac, 2026-11-15, for its
+    # three NEW suites (PairNameDisclosureTests 4, PairDialAndEnvelopeFixesTests 3, MeshDialProofTests 6)
+    # and CrossVersionFixtureTests' three 0.2.0 cells. Over this repository's tree with them: swift test
+    # "Test run with 1031 tests in 146 suites passed"; the inventory 146 rows declaring 1031 tests. The
+    # xcodebuild lanes were not run for this note. ARITHMETIC CHECK: 1015 + 4 + 3 + 6 + 3 = 1031 and
+    # 143 + 3 = 146.
     env:
-      MIN_TESTS: 1015
-      MIN_SUITES: 143
+      MIN_TESTS: 1031
+      MIN_SUITES: 146
     steps:
       - uses: actions/checkout@v4
 

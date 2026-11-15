@@ -2130,9 +2130,10 @@ import Testing
     /// `CrossVersionFixtureTests` gains (today's QR writer, today's scanner and today's displayer against
     /// 0.1.0's ceremony) and `MeshRoutedCustodyCommitGuardTests`' 1. RAISED at the tap rendezvous
     /// (2026-10-31): 1003 → 1014, for its three new suites' 6 + 3 + 2 cells; 1014 → 1015 for the waiting cell.
-    /// RAISED at G5's mesh privacy (0.2.0, 2026-11-15): 1015 → 1028 for `PairNameDisclosureTests`' 4, `PairDialAndEnvelopeFixesTests`' 3 and `MeshDialProofTests`' 6.
+    /// RAISED at G5's mesh privacy (0.2.0, 2026-11-15): 1015 → 1031 for `PairNameDisclosureTests`' 4, `PairDialAndEnvelopeFixesTests`' 3, `MeshDialProofTests`' 6 and
+    /// `CrossVersionFixtureTests`' three 0.2.0 cells.
     /// A test added or removed changes it in the same commit.
-    static let measuredDeclaredTests = 1028
+    static let measuredDeclaredTests = 1031
 
     /// Reads the inventory's text into its rows and its format problems by line (rule I1): `#` lines are
     /// comments; the first other line is exactly ``inventoryHeader``; every data line has three

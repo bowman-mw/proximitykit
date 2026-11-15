@@ -17,7 +17,7 @@
 //   cp Scripts/cross-version-fixtures/generate-0.2.0.swift.txt <scratch>/tree/Tests/ProximityKitTests/FixtureGenerator.swift
 //   cd <scratch>/tree && FIXTURE_OUT=<scratch>/out/0.2.0 \
 //     FIXTURE_ROWS=<this repository>/Tests/ProximityKitTests/Fixtures/0.1.0/keychain-rows.json \
-//     swift test --filter 'FixtureGenerator/generate\(\)$'
+//     swift test --filter 'FixtureGenerator'
 // Then the files were copied into the folder, and each one's SHA-256 pinned in CrossVersionFixtureTests'
 // `digests` beside the others, raising its `fixtureFloor`.
 
@@ -96,7 +96,8 @@ import Testing
         var nonces = MeshIntroductionNonceCache()
         #expect(exchange.receive(bobHello, roster: MeshIntroductionRoster(members: [bob.localSigningPublicKey]),
                                  nonces: &nonces) == nil)
-        let transcript = try #require(exchange.bind(channelBindingHash: Self.channelBinding))
+        let bound = exchange.bind(channelBindingHash: Self.channelBinding)
+        let transcript = try #require(bound)
         let signature = try alice.sign(transcript, purpose: ProximityNamespace.Purposes.packageTest.signature.meshChannelIntroductionV1)
         try write(try framed(aliceHello), "channel-hello-initiator.bin")
         try write(try framed(bobHello), "channel-hello-responder.bin")
