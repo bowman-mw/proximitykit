@@ -16,7 +16,12 @@ not held.
 
 ## Unreleased
 
-Planned as 0.2.0: breaks of a wire format, a namespace initializer and frozen tokens, so y moves.
+Nothing yet.
+
+## 0.2.0 — 2026-11-15
+
+Tag `0.2.0`, commit `11d4458e` (the merge of proximitykit#10). Breaks of a wire format, a namespace
+initializer and frozen tokens, so y moves.
 
 **0.1.x phones and 0.2.0 phones do not meet on the mesh.** The channel introduction's
 `protocolVersion` moves from 1 to 2 and a dial proof now runs before either hello (below); a 0.1.x
